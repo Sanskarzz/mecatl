@@ -129,11 +129,14 @@ jobs:
             ./cmd/mecated
           # The digest ref is the same image regardless of tag; take the first.
           digest="$(head -n1 image-refs.txt)"
-          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          # Write the three step outputs in ONE redirect group (shellcheck SC2129).
           # attest-build-provenance wants the repo name and the sha256 digest
           # split apart, so derive both from the immutable ref ko just pushed.
-          echo "image_name=${digest%@*}" >> "$GITHUB_OUTPUT"
-          echo "image_digest=${digest##*@}" >> "$GITHUB_OUTPUT"
+          {
+            echo "digest=${digest}"
+            echo "image_name=${digest%@*}"
+            echo "image_digest=${digest##*@}"
+          } >> "$GITHUB_OUTPUT"
           echo "Built ${digest}"
 
       # Keyless sign the image BY DIGEST. --yes skips the confirmation prompt;
