@@ -70,12 +70,29 @@ summary_field() {
   fi
 }
 
+# Translate the raw exit class into a plain-language cause + next action. The bare class
+# string ("setup-failure") is jargon the issue author cannot act on; this maps each class
+# to what likely happened and what to do, keeping the run link for the detail.
+exit_class_explanation() {
+  case "${1}" in
+    setup-failure)
+      echo "The run could not start — usually a bad/uncatalogued model id or a missing/invalid provider key (e.g. \`OPENROUTER_API_KEY\` / \`OPENAI_API_KEY\`). Check the FIRST error in the run log."
+      ;;
+    run-failure)
+      echo "The run started but ended in failure — a model/provider error, a cancelled run, the no-approver cancel-on-ask (posture \`strict\` + headless), or a \`timeout\`. The \`stop_reason\` in the summary below distinguishes error from cancelled."
+      ;;
+    *)
+      echo "The run ended in an unexpected state (\`${1}\`). Check the run log."
+      ;;
+  esac
+}
+
 # ── Non-clean run: post an honest failure comment, open NO PR ────────────────────────────
 if [ "${EXIT_CLASS}" != "clean" ]; then
   {
     echo "## mecatequi run did not complete cleanly"
     echo
-    echo "Exit class: \`${EXIT_CLASS}\` — no pull request was opened."
+    echo "$(exit_class_explanation "${EXIT_CLASS}") No pull request was opened."
     echo
     summary_block
     echo
@@ -107,10 +124,25 @@ if [ "${non_empty}" != "true" ] || [ -z "${PATCH_PATH}" ] || [ ! -s "${PATCH_PAT
           printf '%s\n' "${final_text}" | sed 's/^/> /'
         fi
         ;;
-      no_progress | budget | max_turns | max_tool_calls | max_consecutive_failures | structured_output)
+      budget | max_turns | max_tool_calls | max_consecutive_failures)
         echo "## mecatequi run stopped before finishing — no file changes"
         echo
-        echo "The run ran out of its turn/token budget before finishing (\`stop_reason: ${stop_reason}\`), so it produced no diff. Raise \`max-run-tokens\`/\`timeout\` or narrow the task, then re-run."
+        echo "The run hit a budget/limit before finishing (\`stop_reason: ${stop_reason}\`), so it produced no diff. Raise \`max-run-tokens\`/\`timeout\` or the turn/tool-call limits, or narrow the task, then re-run."
+        ;;
+      no_progress)
+        # NOT budget exhaustion — the model ended a turn with no tool call and no meaningful
+        # text (an empty/reasoning-only loop). More budget will NOT help; the prompt/task is
+        # the lever.
+        echo "## mecatequi run stalled — no file changes"
+        echo
+        echo "The run stopped making progress (\`stop_reason: no_progress\`): the model produced empty / reasoning-only turns and never acted. Raising the budget will NOT help — re-state the task more concretely (a clear, actionable instruction), then re-run."
+        ;;
+      structured_output)
+        # NOT budget exhaustion — the model could not produce output matching the requested
+        # schema within the retry budget. A schema/prompt problem, not a token problem.
+        echo "## mecatequi run failed schema validation — no file changes"
+        echo
+        echo "The run could not produce output matching the requested schema (\`stop_reason: structured_output\`) within its validation-retry budget. Raising the token budget will NOT help — check the output schema and the prompt, then re-run."
         ;;
       *)
         echo "## mecatequi run completed — no file changes"
@@ -171,6 +203,20 @@ if [ -z "${base}" ]; then
 fi
 [ -z "${base}" ] && base="${GITHUB_REF_NAME:-main}"
 
+# Post an honest "could not open the PR" comment and exit non-zero. Called from the
+# privileged tail (push / PR-create) so a failure THERE is never silent — the run decided
+# to open a PR, then could not, and the author must hear about it. $1 is the cause line.
+push_failure_comment() {
+  {
+    echo "## mecatequi could not open the pull request"
+    echo
+    echo "The run produced a diff that applied cleanly, but the publish step failed: ${1}. No pull request was opened — re-run, or open one from the branch \`${branch}\` manually."
+    echo
+    echo "[View the workflow run](${run_url})."
+  } > "${RUNNER_TEMP}/mecatequi-comment.md"
+  gh issue comment "${ISSUE_NUMBER}" --repo "${REPO}" --body-file "${RUNNER_TEMP}/mecatequi-comment.md" || true
+}
+
 git config user.name "mecatequi[bot]"
 git config user.email "mecatequi@users.noreply.github.com"
 git checkout -b "${branch}"
@@ -195,10 +241,26 @@ fi
 existing_pr="$(gh pr list --repo "${REPO}" --head "${branch}" --state open --json number --jq '.[0].number' 2>/dev/null || true)"
 
 git commit -m "$(printf 'mecatequi: changes for issue #%s\n\nAutomated change produced by a mecatequi single-shot run.\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>' "${ISSUE_NUMBER}")"
-git push --force-with-lease --set-upstream origin "${branch}"
 
-# The PR body is the summary block as TEXT — never executed.
+# From here on a failure must COMMENT before aborting (never silent after deciding to open
+# a PR). `set -e` would abort the script on a failed push/PR-create, so guard each with an
+# explicit comment-then-exit. The push uses --force-with-lease so a re-run updates the same
+# branch safely.
+if ! git push --force-with-lease --set-upstream origin "${branch}"; then
+  push_failure_comment "the git push failed (the bot may lack contents:write, or the branch moved)"
+  echo "::error::publish: git push to ${branch} failed"
+  exit 1
+fi
+
+# The PR body is the summary block as TEXT — never executed. The trust caveat is
+# PROMINENT (top line): this diff was authored by an agent from untrusted issue text, so a
+# human must scrutinise it before merging — merging IS the approval gate. We keep
+# `Closes #N` (auto-closing the issue on merge is correct, since the merge is that human
+# gate); a deployment that prefers NOT to auto-close on merge can swap `Closes #N` for
+# `Refs #N` below (it links the issue without closing it).
 {
+  echo "⚠️ **Agent-authored from the issue text — review carefully before merging.**"
+  echo
   echo "Automated change produced by a mecatequi single-shot run for issue #${ISSUE_NUMBER}."
   echo
   summary_block
@@ -211,15 +273,20 @@ git push --force-with-lease --set-upstream origin "${branch}"
 if [ -n "${existing_pr}" ]; then
   echo "publish: updated existing PR #${existing_pr} on ${branch}"
   gh issue comment "${ISSUE_NUMBER}" --repo "${REPO}" \
-    --body "Updated the existing pull request #${existing_pr} with a fresh mecatequi run. [View the workflow run](${run_url})."
+    --body "Updated the existing pull request #${existing_pr} with a fresh mecatequi run. ⚠️ Agent-authored — review carefully before merging. [View the workflow run](${run_url})."
   exit 0
 fi
 
-gh pr create \
+# A failed PR-create after a successful push must COMMENT, never abort silently.
+if ! gh pr create \
   --repo "${REPO}" \
   --base "${base}" \
   --head "${branch}" \
   --title "mecatequi: changes for issue #${ISSUE_NUMBER}" \
-  --body-file "${RUNNER_TEMP}/mecatequi-pr-body.md"
+  --body-file "${RUNNER_TEMP}/mecatequi-pr-body.md"; then
+  push_failure_comment "the branch was pushed but \`gh pr create\` failed (the bot may lack pull-requests:write)"
+  echo "::error::publish: gh pr create failed for ${branch} -> ${base}"
+  exit 1
+fi
 
 echo "publish: opened PR from ${branch} -> ${base}"

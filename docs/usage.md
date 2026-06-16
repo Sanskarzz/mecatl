@@ -2276,6 +2276,10 @@ steps; job `env:` does).
 | `model` | `--model` | `""` |
 | `default-provider` | `--default-provider` | `""` |
 | `default-model` | `--default-model` | `""` |
+
+Prefer `model` for newer/passthrough models; `default-model` is catalog-validated and
+rejects ids not in the embedded snapshot. `model` is the per-session passthrough path — it
+accepts any model the provider serves.
 | `openai` | `--openai` (when `true`) | `""` |
 | `openai-base-url` | `--openai-base-url` | `""` |
 | `guardrails-model` | `--guardrails-model` | `""` |
@@ -2294,19 +2298,30 @@ steps; job `env:` does).
 ### The example workflow (`.github/workflows/mecatequi-example.yml`)
 
 The template is the canonical **split-privilege** pattern — *the step that can write to
-GitHub never runs agent code; the step that runs agent code never holds a write token*:
+GitHub never runs agent code; the step that runs agent code never holds a write token* —
+plus an `acknowledge` job that guarantees the issue always carries a trace:
 
-- **`implement`** (`contents: read`, no write, no id-token): checkout →
-  `author-gate.sh` (re-asserts `author_association ∈ {OWNER, MEMBER, COLLABORATOR}`) →
+- **`acknowledge`** (`issues: write` only, no agent code, no LLM key): runs **first**,
+  gated on the same trigger as `implement`, and posts an early *"🤖 mecatequi is working on
+  this — see the run: …"* comment with the run URL. This guarantees a durable issue-side
+  signal **even if everything downstream fails** — the failure mode where a skipped or
+  failed publish left the issue author staring at silence.
+- **`implement`** (`needs: acknowledge`; `contents: read`, no write, no id-token):
+  checkout → `author-gate.sh` (defense-in-depth permission check, see the gate note below) →
   `extract-prompt.sh` writes the **untrusted** issue/comment text into a file via `jq`
   over `$GITHUB_EVENT_PATH` (never an inline `${{ }}`) → `uses: ./.github/actions/mecatequi`
   with `OPENAI_API_KEY` as the **only** secret, delivered at **job** level (step `env:` on a
   `uses:` step would not reach the composite's internal steps) → upload-artifact the
   patch/summary/events.
-- **`publish`** (`needs: implement`; `contents: write` + `pull-requests: write` +
-  `issues: write`): download-artifact → `publish.sh` applies the patch as **data**
-  (`git apply`) → branch → commit → PR, or posts an honest failure comment on a non-clean
-  run. It runs no agent output as code.
+- **`publish`** (`needs: [acknowledge, implement]`; `contents: write` +
+  `pull-requests: write` + `issues: write`): download-artifact (**non-fatal** — a missing
+  artifact must not abort before `publish.sh` runs) → `publish.sh` applies the patch as
+  **data** (`git apply`) → branch → commit → PR, or posts an honest failure comment.
+  Its `if:` fires on implement **success or failure** (`!cancelled() &&
+  needs.acknowledge.result == 'success'`) so a failed run still gets a terminal comment;
+  `publish.sh` reads a missing/empty `EXIT_CLASS` as setup-failure, and a failed push /
+  `gh pr create` comments before exiting non-zero (never a silent abort after deciding to
+  open a PR). It runs no agent output as code.
 
 Trigger: `issues` `labeled` with the `mecatequi` label, OR `issue_comment` `created`
 mentioning `@mecatequi` on an issue (PR comments are excluded). Every external action is
@@ -2315,13 +2330,33 @@ read`, both job checkouts pin the immutable `github.sha` (so the patch applies o
 tree it was diffed against), and a `concurrency` group keyed on the issue number prevents
 overlapping runs.
 
+**The author gate (read this — `author_association` is a trap).** The gate that keeps an
+unauthorised author out is **trigger-based**, not `author_association`-based. GitHub's
+webhook `author_association` is **unreliable for membership** — it reports an org MEMBER as
+`CONTRIBUTOR`, so a gate that asserts `author_association ∈ {OWNER, MEMBER, COLLABORATOR}`
+silently **skips legitimate runs**. The **live** workflow for this repo
+(`.github/workflows/mecatequi.yml`) therefore removed that assertion entirely:
+
+- For a **private repo**, the trigger **is** the gate: applying a label needs triage/write
+  access and commenting is team-only, so GitHub's own permission model decides who can
+  start a run. No `author_association` check is needed.
+- For a **public repo**, do **not** trust `author_association`. Add a dedicated
+  permission-check gate **job** that calls the `collaborators/{user}/permission` API and
+  gates `implement`/`publish` on its result.
+
+`author-gate.sh` (which asserts `author_association`) ships in the **example template
+only** as a defense-in-depth illustration; it is deliberately absent from the live
+workflow. See `docs/design/MECATEQUI.md`.
+
 The action and its scripts are meant to be **vendored** — copied into your repo and
 reviewed, not referenced by tag — so you control exactly what runs. To enable it:
 
 1. Copy `.github/workflows/mecatequi-example.yml` and the whole
    `.github/actions/mecatequi/` directory into your repo.
 2. Add the `OPENAI_API_KEY` repository secret (the agent job's only secret).
-3. Create the `mecatequi` issue label.
+3. **Create the `mecatequi` label FIRST.** You cannot apply a label that does not exist,
+   and the `labeled` trigger **silently never fires** without it — so the label must exist
+   before anyone tries to apply it, or the workflow simply does nothing with no error.
 4. Review the posture (`auto` is the documented CI default) and decide whether to keep the
    broad `GITHUB_TOKEN` in the `publish` job or upgrade to a JIT GitHub App token (the
    stronger option — see `docs/design/MECATEQUI.md`).

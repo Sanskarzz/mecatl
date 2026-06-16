@@ -39,17 +39,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  implement:
-    name: Run mecatequi (agent, no write token)
+  # ── acknowledge: post an EARLY issue-side trace, FIRST, before any agent runs ──────────
+  # Runs first, gated on the SAME trigger as `implement`, holds ONLY issues:write (no LLM
+  # key, no agent code), and posts a durable "working on it" comment with the run URL. This
+  # guarantees the issue author always gets an issue-side trace + a link to the run, even if
+  # everything downstream (the agent, publish) fails silently.
+  acknowledge:
+    name: Acknowledge (early issue comment, no agent code)
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    # Gate on the trigger AND the author association. The label path requires the
-    # 'mecatequi' label; the comment path requires a '@mecatequi' mention AND that the
-    # comment is on an ISSUE, not a PR (issue_comment fires on PR comments too, where the
-    # "issue" is the PR — running the agent against PR text with a nonsensical
-    # `Closes #<PR>` is wrong). Either way the actor must be OWNER/MEMBER/COLLABORATOR — a
-    # drive-by issue from a random account never starts the job. author-gate.sh re-asserts
-    # the association inside the job.
+    timeout-minutes: 5
+    # Same gate as `implement` (kept in lockstep — both must match for a run to start).
     if: >-
       (
         github.event_name == 'issues' &&
@@ -60,6 +59,53 @@ jobs:
         github.event.issue.pull_request == null &&
         contains(github.event.comment.body, '@mecatequi') &&
         contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+      )
+    # Only issues:write. No contents write, no id-token, no LLM key — runs no agent code.
+    permissions:
+      issues: write
+    steps:
+      - name: Post acknowledgement comment
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        # The body is a fixed string + the run URL (a github-context value, not event text),
+        # passed via env and --body — never an inline interpolation of untrusted issue text.
+        run: |
+          gh issue comment "${ISSUE_NUMBER}" --repo "${REPO}" \
+            --body "🤖 mecatequi is working on this — see the run: ${RUN_URL}"
+
+  implement:
+    name: Run mecatequi (agent, no write token)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # Run after `acknowledge` so the issue always carries an early trace before the agent
+    # starts. `needs: acknowledge` skips implement whenever the gate did not match; the
+    # `needs.acknowledge.result == 'success'` clause keeps it from running if acknowledge
+    # itself failed. The trigger + author-association conditions are RESTATED here as
+    # defense-in-depth. author-gate.sh re-asserts the association inside the job.
+    #
+    # Gate on the trigger AND the author association. The label path requires the
+    # 'mecatequi' label; the comment path requires a '@mecatequi' mention AND that the
+    # comment is on an ISSUE, not a PR (issue_comment fires on PR comments too, where the
+    # "issue" is the PR — running the agent against PR text with a nonsensical
+    # `Closes #<PR>` is wrong). Either way the actor must be OWNER/MEMBER/COLLABORATOR — a
+    # drive-by issue from a random account never starts the job.
+    needs: acknowledge
+    if: >-
+      needs.acknowledge.result == 'success' && (
+        (
+          github.event_name == 'issues' &&
+          github.event.label.name == 'mecatequi' &&
+          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association)
+        ) || (
+          github.event_name == 'issue_comment' &&
+          github.event.issue.pull_request == null &&
+          contains(github.event.comment.body, '@mecatequi') &&
+          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+        )
       )
     # NO write, NO id-token. The only secret is the LLM key, injected at JOB level below.
     permissions:
@@ -126,13 +172,15 @@ jobs:
 
   publish:
     name: Publish result (write token, no agent code)
-    needs: implement
+    needs: [acknowledge, implement]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    # Run on success AND on an implement FAILURE so the operator always gets a result (an
-    # honest failure comment, never silence). Skip only when implement was itself skipped
-    # (the gate did not match) or the run was cancelled.
-    if: ${{ !cancelled() && needs.implement.result != 'skipped' }}
+    # Run whenever the gate matched (acknowledge succeeded) and the run was not cancelled —
+    # on implement SUCCESS *and* on implement FAILURE — so the operator always gets a
+    # terminal result (an honest failure comment, never silence). A non-matching trigger
+    # (acknowledge skipped) skips publish too; an implement failure still lands here and
+    # publish.sh reads the empty/failed EXIT_CLASS as setup-failure and comments.
+    if: ${{ !cancelled() && needs.acknowledge.result == 'success' }}
     # The privileged job. It applies the patch as DATA and posts text — it never runs
     # agent output as code.
     #
@@ -156,16 +204,23 @@ jobs:
           persist-credentials: false
           ref: ${{ github.sha }}
 
+      # NON-FATAL on purpose: when `implement` failed before its upload-artifact step, the
+      # 'mecatequi-run' artifact does not exist and download-artifact would otherwise HARD-
+      # ABORT this job — the silent-failure case. continue-on-error lets publish.sh run
+      # regardless: a missing artifact leaves PATCH_PATH/SUMMARY_PATH absent and EXIT_CLASS
+      # empty, which the script reads as setup-failure and comments.
       - name: Download run artifacts
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        continue-on-error: true
         with:
           name: mecatequi-run
           path: ${{ runner.temp }}/mecatequi-run
 
       # All values cross via env: — never an inline interpolation that the shell would
       # splice. publish.sh applies the patch as DATA (git apply) and never executes agent
-      # output. An empty EXIT_CLASS (e.g. implement died before setting its output) is
-      # treated as a setup-failure by the script, so a failure still posts a comment.
+      # output. An empty EXIT_CLASS (e.g. implement died before setting its output, or the
+      # artifact was missing) is treated as a setup-failure by the script, so a failure
+      # still posts a comment.
       - name: Publish
         shell: bash
         env:

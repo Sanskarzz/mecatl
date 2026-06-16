@@ -110,9 +110,9 @@ func parseFlags(argv []string) (flags, error) {
 	fs.DurationVar(&f.timeout, "timeout", 0, "wall-clock bound on the whole run (e.g. 5m); a run that exceeds it is cancelled and exits 1 with a \"timed out\" message. 0 (default) = no timeout. Defense-in-depth for CI — orthogonal to --max-run-tokens")
 
 	fs.StringVar(&f.workspace, "workspace", cwd, "session workspace root (must be a git repository so the diff can be computed)")
-	fs.StringVar(&f.model, "model", "", "model identifier sent to the provider (empty: provider-appropriate default)")
+	fs.StringVar(&f.model, "model", "", "model identifier sent to the provider (empty: provider-appropriate default). PER-SESSION PASSTHROUGH: accepts any model the provider serves, including ids newer than the embedded catalog. Prefer this over --default-model for a newer/uncatalogued model")
 	fs.StringVar(&f.defaultProvider, "default-provider", "", "deployment default provider id (e.g. openai, openrouter, anthropic); validated at startup")
-	fs.StringVar(&f.defaultModel, "default-model", "", "deployment default model id for the default provider; validated at startup")
+	fs.StringVar(&f.defaultModel, "default-model", "", "deployment default model id for the default provider; validated against the embedded model catalog at startup and REJECTED if not in the snapshot — for a newer/uncatalogued model use --model instead, which passes through")
 	fs.BoolVar(&f.useOpenAI, "openai", false, "use the OpenAI Responses provider (key from OPENAI_API_KEY)")
 	// Shared provider base-URL flags + credential reads (cliconfig). Registers
 	// --openai-base-url / --openrouter-base-url / --anthropic-base-url and reads

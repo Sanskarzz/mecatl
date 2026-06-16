@@ -26,19 +26,35 @@ mecatequi emits is an *artifact* (uploaded for forensics), not a rehydration sou
 
 ## 2. The split-privilege model
 
-The template (`.github/workflows/mecatequi-example.yml`) is two jobs with a hard token
+The template (`.github/workflows/mecatequi-example.yml`) is three jobs with a hard token
 boundary:
 
-- **`implement`** runs the agent. It holds `permissions: contents: read`, **no** id-token,
-  **no** write scope. Its only secret is the LLM key. If a prompt-injection in untrusted
-  issue text hijacks the agent, the blast radius is the **rotatable LLM key** — the agent
-  cannot push code, open a PR, or comment, because the job has no token that can.
-- **`publish`** holds the write token (`contents: write`, `pull-requests: write`,
-  `issues: write`) but **runs no agent code**. It downloads the `implement` job's artifacts
-  and applies the patch as **data** (`git apply`), then posts the summary as text.
+- **`acknowledge`** runs **first**, gated on the same trigger as `implement`, holding
+  `permissions: issues: write` only — **no** LLM key, **no** agent code, **no** contents
+  write. It posts one early comment to the issue (*"🤖 mecatequi is working on this — see
+  the run: …"* with the run URL). This guarantees a **durable issue-side signal for every
+  triggered run**, even if everything downstream fails silently — the failure mode field
+  data surfaced, where a skipped or failed `publish` left the issue author with no trace at
+  all. Its only capability (commenting) is the minimum needed for that trace.
+- **`implement`** (`needs: acknowledge`) runs the agent. It holds `permissions: contents:
+  read`, **no** id-token, **no** write scope. Its only secret is the LLM key. If a
+  prompt-injection in untrusted issue text hijacks the agent, the blast radius is the
+  **rotatable LLM key** — the agent cannot push code, open a PR, or comment, because the
+  job has no token that can.
+- **`publish`** (`needs: [acknowledge, implement]`) holds the write token (`contents:
+  write`, `pull-requests: write`, `issues: write`) but **runs no agent code**. It downloads
+  the `implement` job's artifacts (**non-fatally** — a missing artifact must not abort the
+  job before `publish.sh` runs) and applies the patch as **data** (`git apply`), then posts
+  the summary as text. Its `if:` (`!cancelled() && needs.acknowledge.result == 'success'`)
+  fires on implement **success and failure**, so a failed run still lands an honest
+  terminal comment instead of silence; `publish.sh` reads a missing/empty `EXIT_CLASS` as
+  setup-failure, and a failed `git push` / `gh pr create` comments *before* exiting
+  non-zero (never a silent abort after deciding to open a PR).
 
 > **The token boundary invariant:** the step that can write to GitHub never runs agent
-> code; the step that runs agent code never holds a write token.
+> code; the step that runs agent code never holds a write token. Only `acknowledge` and
+> `publish` hold a write scope (and `acknowledge` holds only `issues: write`); `implement`
+> never gains issues/pull-requests/contents write.
 
 A stronger variant, noted in the template, replaces the broad job `GITHUB_TOKEN` in
 `publish` with a just-in-time GitHub App installation token scoped to exactly this repo's
@@ -52,10 +68,22 @@ the `GITHUB_TOKEN` form for zero-config copyability and documents the App-token 
 | Issue/comment text | **Untrusted** (attacker-controllable) | Extracted by jq from `$GITHUB_EVENT_PATH` into a file (`extract-prompt.sh`), passed via `--prompt-file`, fenced by the binary's `--untrusted-prompt`. |
 | Operator workflow config (posture, flags, model) | **Trusted** | Set by a maintainer in the workflow; passed as action inputs. |
 
-Two gates keep an unauthorised author out: the job `if:` requires
-`author_association ∈ {OWNER, MEMBER, COLLABORATOR}` (and the label/mention), and
-`author-gate.sh` re-asserts it inside the job as defense-in-depth behind a possibly-edited
-`if:`.
+**The author gate is trigger-based, NOT `author_association`-based.** GitHub's webhook
+`author_association` is **unreliable for membership** — it reports an org MEMBER as
+`CONTRIBUTOR` — so a gate that asserts `author_association ∈ {OWNER, MEMBER, COLLABORATOR}`
+silently **skips legitimate runs**. The two deployments differ:
+
+- **Private repo** (the live `.github/workflows/mecatequi.yml`): the **trigger is the
+  gate**. Applying a label needs triage/write access and commenting is team-only, so
+  GitHub's own permission model decides who can start a run; no `author_association` check
+  is wired, and `author-gate.sh` is absent.
+- **Public repo**: do **not** trust `author_association`. Add a dedicated permission-check
+  gate **job** that calls the `collaborators/{user}/permission` API and gates
+  `implement`/`publish` on its result.
+
+`author-gate.sh` (which asserts `author_association`) ships in the **example template
+only**, as a defense-in-depth illustration behind a possibly-edited `if:`; it is
+deliberately not part of the live workflow's gate.
 
 **Public-vs-internal posture.** On a public repo, treat the issue text as hostile: keep
 `untrusted: "true"` and prefer `posture: "auto"` (allow-all with child injection-defence
@@ -94,6 +122,9 @@ The Action codes against three frozen surfaces in `cmd/mecatequi`:
 | `model` | `--model` | `""` |
 | `default-provider` | `--default-provider` | `""` |
 | `default-model` | `--default-model` | `""` |
+
+Prefer `model` for newer/passthrough models; `default-model` is catalog-validated and
+rejects ids not in the embedded snapshot. `model` is the per-session passthrough path.
 | `openai` | `--openai` (when `true`) | `""` |
 | `openai-base-url` | `--openai-base-url` | `""` |
 | `guardrails-model` | `--guardrails-model` | `""` |

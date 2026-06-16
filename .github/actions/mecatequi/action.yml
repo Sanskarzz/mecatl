@@ -82,7 +82,11 @@ inputs:
     required: false
     default: ""
   model:
-    description: Model identifier sent to the provider (empty -> provider-appropriate default).
+    description: >-
+      Model identifier sent to the provider (empty -> provider-appropriate default). This
+      is the PER-SESSION PASSTHROUGH path: it accepts ANY model the provider serves,
+      including ids newer than the embedded catalog. Prefer this over `default-model` for a
+      newer/uncatalogued model.
     required: false
     default: ""
   default-provider:
@@ -93,7 +97,10 @@ inputs:
     required: false
     default: ""
   default-model:
-    description: Deployment default model id for the default provider.
+    description: >-
+      Deployment default model id for the default provider. VALIDATED against the embedded
+      model catalog at startup and REJECTED if the id is not in the snapshot — for a
+      newer/uncatalogued model use the `model` input instead, which passes through.
     required: false
     default: ""
   openai:
