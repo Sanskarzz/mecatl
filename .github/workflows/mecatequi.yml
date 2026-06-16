@@ -116,7 +116,7 @@ jobs:
           untrusted: "true"
           posture: "auto"
           default-provider: "openrouter"
-          default-model: "anthropic/claude-3.5-haiku"
+          default-model: "anthropic/claude-sonnet-4.6"
           max-run-tokens: "150000"
           timeout: "15m"
 
