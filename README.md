@@ -44,6 +44,7 @@ ships as a client of the same API.
 
 **Interfaces & operations**
 - **Three API surfaces, one event model** — a bidi gRPC `Converse` stream, an HTTP/SSE mirror, and ACP over stdio for editors (`--acp`), all over the same domain `Event`.
+- **Single-shot CI runner & a GitHub Action that implements issues** — `mecatequi` is a headless, forge-agnostic binary: one prompt against the same engine → a git-diff patch + a machine-readable summary + an exit code. A reusable composite action + a **split-privilege** workflow wrap it to turn an issue (label `mecatequi` / comment `@mecatequi`) into a pull request — the agent job holds only the rotatable LLM key and **no** write token; a separate, agent-code-free job applies the patch as data and opens the PR. See [`docs/design/MECATEQUI.md`](./docs/design/MECATEQUI.md).
 - **Auth & limits** — bearer token + optional TLS/mTLS, per-client + global rate limiting, `/healthz`+`/readyz` + gRPC health, graceful shutdown, session auto-resume from a store.
 - **Observability** — Prometheus metrics (`/metrics`), OpenTelemetry spans with an OTLP exporter, per-tool-call logging, and an append-only JSONL replay store.
 - **Deployment** — `ko`-built static distroless image, PSS-restricted manifests, and a signed release (cosign + SBOM + SLSA provenance).
@@ -56,7 +57,7 @@ Requires **Go 1.26.3** (the `go` directive in `go.mod` auto-fetches it) and
 [buf](https://buf.build) only to regenerate the proto.
 
 ```sh
-task build          # compile → bin/mecated, bin/mecatui, and bin/mecademo
+task build          # compile → bin/mecated, bin/mecatui, bin/mecademo, and bin/mecatequi
 task install        # install mecated + mecatui into GOBIN/GOPATH/bin
 task test           # full suite, with -race
 task lint           # golangci-lint (parallel-safe) + go vet
@@ -157,7 +158,7 @@ the composition layer (`internal/app`, called from the `cmd/` mains).
 - **[Usage & operator guide](./docs/usage.md)** — build/run, the demo, `mecated` flags, the gRPC + HTTP/SSE APIs with examples, permissions, hooks, troubleshooting.
 - **[`docs/design/PRODUCTION-READINESS.md`](./docs/design/PRODUCTION-READINESS.md)** — the live status tracker (what's done, what's deferred).
 - **[mecatui terminal-UI guide](./docs/tui.md)** — the optional `mecatui` terminal client.
-- **[`docs/design/`](./docs/design/)** — design rationale per feature: `MULTI-PROVIDER.md`, `AGENT-TEAMS-SPIKE.md`, `DIAGNOSTICS.md`, `DRIVERS.md`, `BACKGROUND-SUBAGENTS.md`, plus the dense per-subsystem `IMPLEMENTATION-NOTES.md` and the historical spikes.
+- **[`docs/design/`](./docs/design/)** — design rationale per feature: `MULTI-PROVIDER.md`, `AGENT-TEAMS-SPIKE.md`, `DIAGNOSTICS.md`, `DRIVERS.md`, `BACKGROUND-SUBAGENTS.md`, `MECATEQUI.md` (the single-shot GitHub Action), plus the dense per-subsystem `IMPLEMENTATION-NOTES.md` and the historical spikes.
 - **[`CLAUDE.md`](./CLAUDE.md)** — orientation for agents working in this codebase.
 
 ## Project layout
@@ -176,7 +177,8 @@ the composition layer.
 | `internal/adapter/*` | heavy adapters: `openai`, `anthropic`, `openrouter`, `llmresilience`, `osfs`, `acp`, `skills`, `agents`, `workspacetrust`, `grpcdriver`, `store/jsonlstore`, `server`, and more — see the directory |
 | `internal/app` | the composition layer (`app.Build`): provider registry, catalog assembly, per-session routing |
 | `contracts/proto`, `contracts/gen` | gRPC contract + the driver protocol (source of truth) and generated Go |
-| `cmd/mecated`, `cmd/mecatui`, `cmd/mecademo` | the server (composition root), the optional TUI client, and the demo |
+| `cmd/mecated`, `cmd/mecatui`, `cmd/mecademo`, `cmd/mecatequi` | the server (composition root), the optional TUI client, the demo, and the single-shot headless CI/batch runner |
+| `.github/actions/mecatequi`, `.github/workflows/mecatequi*.yml` | the forge glue: the reusable composite action + the split-privilege workflow that runs `mecatequi` against an issue and opens a PR |
 
 ## Status
 

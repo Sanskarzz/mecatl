@@ -54,8 +54,10 @@ flowchart LR
     mecated["cmd/mecated/main.go (flags, serve, TLS/auth)"]
     demo["cmd/mecademo"]
     tui["cmd/mecatui (gRPC client TUI; embeds app.Build when no --server)"]
+    mq["cmd/mecatequi (single-shot headless; one prompt → patch + summary + exit code)"]
     mecated --> app
     tui --> app
+    mq --> app
   end
 
   subgraph DRIVING["driving adapters — internal/adapter/server"]
@@ -96,6 +98,7 @@ flowchart LR
 
   mecated --> svc --> engine
   demo --> engine
+  mq --> svc
   tui -. "gRPC Converse (client)" .-> grpc
   grpc --> svc
   http --> svc
@@ -144,6 +147,26 @@ from proto `Event`s** and are bound by the inward-only layering rule. The
 `cmd/mecatui/embed`, and the `cmd/mecatui` main; the `ui` (Bubble Tea
 model/update/view) and `theme` (pure styling) packages import no `engine/...` or `internal/...`
 package and no proto directly. Usage and theming are documented in `docs/tui.md`.
+
+**mecatequi — the single-shot headless runner (`cmd/mecatequi`).** A fourth composition
+root and a *peer of `mecademo`* over the same `app.Build`: it runs **one** prompt against
+an in-process `server.Service`, drives it to a terminal state, and emits three
+artifacts — a working-tree git diff (modified, **added**, and deleted files: `git diff
+HEAD` plus a `git diff --no-index` new-file hunk per untracked file, so a downstream `git
+apply` reproduces new files too), a machine-readable run-summary JSON (`Summary`,
+additive-only contract), and an optional durable JSONL event log — then maps the terminal
+`StopReason` to a process exit code (`0` clean incl. the honest non-completions, `1` run
+failure/cancel/timeout, `2` setup failure). Unlike `mecated` it owns no listeners, TLS,
+auth, or telemetry pipeline; unlike `mecatui` it has no UI. It defaults `--headless`
+(inverted from `mecated`): a CI run has no approver, so a child ask auto-denies or routes
+to the opt-in ask-reviewer, and a *main-engine* ask under `posture strict` cancels the run
+with an actionable message (the intended CI posture is `--posture auto`). It is **forge-
+agnostic** — the GitHub-Actions glue that turns an issue into a pull request (a composite
+action + a split-privilege workflow) lives entirely under `.github/` and changes no Go.
+See `docs/design/MECATEQUI.md`. The three real-provider mains (`mecated`, `mecatui`,
+`mecatequi`) share provider credential + base-URL wiring through `internal/cliconfig`, so
+all three read the same `OPENAI_API_KEY` / `OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY`
+environment keys and register the same base-URL flags.
 
 Two deliberate cycle-breaks worth noting, documented in code:
 - `port` imports `tool` and `prompt` (because `LLMRequest` carries

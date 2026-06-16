@@ -92,8 +92,16 @@ is the trust decision, not the posture.
 
 ## 4. The binary's stable contract
 
-The Action codes against three frozen surfaces in `cmd/mecatequi`:
+The Action codes against these frozen surfaces in `cmd/mecatequi`:
 
+- **The patch** — `cmd/mecatequi/run.go` (`gitDiffPatch`). A `git diff HEAD` shows only
+  tracked edits + deletions and would silently **lose the agent's new files**; mecatequi
+  therefore appends a `git diff --no-index -- /dev/null <file>` new-file hunk for every
+  untracked, non-ignored file (`git ls-files --others --exclude-standard`) so the patch
+  `publish.sh` applies with `git apply` reproduces **modified, added, and deleted** files.
+  `non_empty_diff` and `diff_bytes` therefore agree: a single new file makes the patch
+  non-empty. The git env is scrubbed (`gitenv.Scrub`) and every git call carries
+  `--no-ext-diff`, so no inherited `GIT_*` or repo-named external diff driver can run.
 - **Summary JSON** — `cmd/mecatequi/run.go` (`Summary`). Additive-only; the action reads
   `.stop_reason`, `.non_empty_diff`, `.diff_bytes`, and `.usage.total_tokens` from it. The
   summary is written to a **file** (`--out-summary <path>`), never `-`, so it never
@@ -105,9 +113,15 @@ The Action codes against three frozen surfaces in `cmd/mecatequi`:
   `exit-class` output (`clean`/`run-failure`/`setup-failure`) and **never fails its own
   step on a non-zero code** — the caller branches on `exit-class`.
 - **Flags** — `cmd/mecatequi/flags.go` (`flags`). The action's inputs map onto the flags
-  one-for-one; secrets are read from the environment (`appConfig` in
-  `cmd/mecatequi/flags.go` pulls the key from `OPENAI_API_KEY`), so the LLM key is never an
-  action input.
+  one-for-one; secrets are read from the environment, never a flag or an action input.
+  `appConfig` (`cmd/mecatequi/flags.go`) applies the shared `internal/cliconfig`
+  `ProviderFlags` — the SAME credential/base-URL helper `mecated` and `mecatui` use — so
+  mecatequi reads all three provider keys (`OPENAI_API_KEY` / `OPENROUTER_API_KEY` /
+  `ANTHROPIC_API_KEY`) and registers all three `--*-base-url` flags. A present
+  `OPENAI_API_KEY` flips the OpenAI provider on automatically (the same flip `mecated`
+  does); for OpenRouter or Anthropic set the respective key plus `--default-provider`. This
+  is why the live `.github/workflows/mecatequi.yml` delivers `OPENROUTER_API_KEY` at the
+  job's `env:` and never needs an OpenAI-specific input.
 
 ### Action input → flag map
 

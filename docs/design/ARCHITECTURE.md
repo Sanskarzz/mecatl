@@ -109,6 +109,8 @@ github.com/stacklok/mecatl
 │   └── gen/go/                          # generated Go (grpc-go + protobuf, buf)
 ├── cmd/
 │   ├── mecated/                           # the server binary (gRPC + HTTP/SSE)
+│   ├── mecatui/                          # the optional gRPC client TUI (embeds app.Build w/o --server)
+│   ├── mecatequi/                        # single-shot headless runner (one prompt -> patch + summary + exit code)
 │   └── mecademo/                        # the demo driver (fake provider default)
 ├── engine/                             # the importable core: domain + ports + agent loop + reference adapters
 │   ├── session/                        # DOMAIN: Session aggregate + value objects

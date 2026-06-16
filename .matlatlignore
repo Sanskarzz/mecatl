@@ -23,3 +23,13 @@
 # skill definitions, workspace READMEs) consumed by the e2e harness, not docs.
 # e2e/README.md (the suite's own documentation) deliberately stays in the corpus.
 e2e/fixtures/
+
+# mecatequi PR-body templates. These are NOT documentation — they are
+# {{placeholder}}-token templates rendered by publish.sh into a PR description
+# (pr-body.md is the dogfooded live template; pr-body.md.example is the copyable
+# sample). They carry no doc links — a token like `[Workflow run]({{run_url}})`
+# only LOOKS like a markdown link, and the files are navigationally isolated — so
+# leaving them in the corpus only adds a spurious broken-link + orphan that block
+# `check --strict`. The operator-facing prose lives in docs/usage.md +
+# docs/design/MECATEQUI.md, which DO stay in the corpus.
+.github/mecatequi/
