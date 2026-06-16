@@ -60,12 +60,17 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     # Same gate as `implement` (kept in lockstep — both must match for a run to start).
+    # CONFIGURABLE TRIGGER: the label + mention default to 'mecatequi' / '@mecatequi' but
+    # are overridable via repo Actions variables (Settings → Secrets and variables →
+    # Actions → Variables): set MECATEQUI_LABEL / MECATEQUI_MENTION. Both job gates read the
+    # same vars so they can't drift. (GitHub can't filter `on: issues: labeled` by name, so
+    # the filtering is here in the `if:`; an unmatched label just skips instantly.)
     if: >-
-      ( github.event_name == 'issues' && github.event.label.name == 'mecatequi' ) ||
+      ( github.event_name == 'issues' && github.event.label.name == (vars.MECATEQUI_LABEL || 'mecatequi') ) ||
       (
         github.event_name == 'issue_comment' &&
         github.event.issue.pull_request == null &&
-        contains(github.event.comment.body, '@mecatequi')
+        contains(github.event.comment.body, (vars.MECATEQUI_MENTION || '@mecatequi'))
       )
     # Only issues:write. No contents write, no id-token, no LLM key — this job runs no agent
     # code and touches no repository contents; it posts ONE comment as text.
@@ -109,11 +114,11 @@ jobs:
     needs: acknowledge
     if: >-
       needs.acknowledge.result == 'success' && (
-        ( github.event_name == 'issues' && github.event.label.name == 'mecatequi' ) ||
+        ( github.event_name == 'issues' && github.event.label.name == (vars.MECATEQUI_LABEL || 'mecatequi') ) ||
         (
           github.event_name == 'issue_comment' &&
           github.event.issue.pull_request == null &&
-          contains(github.event.comment.body, '@mecatequi')
+          contains(github.event.comment.body, (vars.MECATEQUI_MENTION || '@mecatequi'))
         )
       )
     # NO write, NO id-token. The only secret is the LLM key.
