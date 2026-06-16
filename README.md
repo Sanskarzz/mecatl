@@ -44,7 +44,7 @@ ships as a client of the same API.
 
 **Interfaces & operations**
 - **Three API surfaces, one event model** — a bidi gRPC `Converse` stream, an HTTP/SSE mirror, and ACP over stdio for editors (`--acp`), all over the same domain `Event`.
-- **Single-shot CI runner & a GitHub Action that implements issues** — `mecatequi` is a headless, forge-agnostic binary: one prompt against the same engine → a git-diff patch + a machine-readable summary + an exit code. A reusable composite action + a **split-privilege** workflow wrap it to turn an issue (label `mecatequi` / comment `@mecatequi`) into a pull request — the agent job holds only the rotatable LLM key and **no** write token; a separate, agent-code-free job applies the patch as data and opens the PR. See [`docs/design/MECATEQUI.md`](./docs/design/MECATEQUI.md).
+- **Single-shot CI runner & a GitHub Action that implements issues** — `mecatequi` is a headless, forge-agnostic binary: one prompt against the same engine → a git-diff patch + a machine-readable summary + an exit code. A reusable `workflow_call` workflow (a ~15-line caller) — backed by composite actions, with a hand-rolled split-privilege workflow as the escape hatch — turns an issue (label `mecatequi` / comment `@mecatequi`) into a pull request; the agent job holds only the rotatable LLM key and **no** write token, while a separate, agent-code-free job applies the patch as data and opens the PR. See [`docs/design/MECATEQUI.md`](./docs/design/MECATEQUI.md).
 - **Auth & limits** — bearer token + optional TLS/mTLS, per-client + global rate limiting, `/healthz`+`/readyz` + gRPC health, graceful shutdown, session auto-resume from a store.
 - **Observability** — Prometheus metrics (`/metrics`), OpenTelemetry spans with an OTLP exporter, per-tool-call logging, and an append-only JSONL replay store.
 - **Deployment** — `ko`-built static distroless image, PSS-restricted manifests, and a signed release (cosign + SBOM + SLSA provenance).
@@ -178,7 +178,7 @@ the composition layer.
 | `internal/app` | the composition layer (`app.Build`): provider registry, catalog assembly, per-session routing |
 | `contracts/proto`, `contracts/gen` | gRPC contract + the driver protocol (source of truth) and generated Go |
 | `cmd/mecated`, `cmd/mecatui`, `cmd/mecademo`, `cmd/mecatequi` | the server (composition root), the optional TUI client, the demo, and the single-shot headless CI/batch runner |
-| `.github/actions/mecatequi`, `.github/workflows/mecatequi*.yml` | the forge glue: the reusable composite action + the split-privilege workflow that runs `mecatequi` against an issue and opens a PR |
+| `.github/actions/mecatequi*`, `.github/workflows/mecatequi*.yml` | the forge glue: three composite actions (build+run, extract-prompt, publish) + the reusable `workflow_call` workflow (the recommended adoption path) + the split-privilege example workflow that runs `mecatequi` against an issue and opens a PR |
 
 ## Status
 

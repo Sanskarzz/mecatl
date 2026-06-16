@@ -21,7 +21,7 @@ superseded runs cancelled via `concurrency`):
 |-----|--------------|
 | `build` | `go build ./...` |
 | `test` | `go test -race ./...` |
-| `lint` | `golangci-lint` (v2) + `go vet ./...` + `actionlint` (workflow lint, pinned via `go run`) + the reusable-workflow pin check + the mecatequi composite-action shell tests |
+| `lint` | `golangci-lint` (v2) + `go vet ./...` + `actionlint` (workflow lint, pinned via `go run`) + the reusable-workflow pin check + the empty-expression (action-templates) check + the mecatequi composite-action shell tests |
 | `fuzz-smoke` | `task fuzz FUZZTIME=20s` — short coverage-guided pass over the security-critical parsers (not the nightly deep fuzz) |
 
 Go is provisioned by `actions/setup-go` from `go.mod` with the module cache

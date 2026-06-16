@@ -270,7 +270,7 @@ and no PAT** — the same zero-credential posture as matlatl. The action lives a
 **Cross-repo reference.** A consumer references the subdir action and pins a tag (or a SHA):
 
 ```yaml
-- uses: stacklok/mecatl/.github/actions/mecatequi@v0.0.1   # SHA-pin in real workflows
+- uses: stacklok/mecatl/.github/actions/mecatequi@v0.0.3   # pin the latest released tag
   with:
     prompt-file: ${{ runner.temp }}/prompt.txt
     posture: auto
@@ -350,6 +350,20 @@ pins in the same tagged commit**, or the tag ships pins pointing at the previous
 mechanical — it asserts every `stacklok/mecatl/.github/actions/*@<tag>` pin equals the current
 release tag, and it runs in CI. (Third-party actions — `checkout`, `upload`/`download-artifact`,
 `create-github-app-token` — stay SHA-pinned with a `# vX.Y.Z` comment per the house set.)
+
+**The empty-expression load break + the regression guard (issue #70).** `v0.0.2` shipped with
+an empty `${{ }}` placeholder buried in the `mecatequi-extract-prompt` action's `description:`
+prose. GitHub evaluates expression placeholders in the **parsed** scalars of an `action.yml`
+(name, description, input defaults, output values) — but **not** inside YAML `#` comments — and
+an *empty* `${{ }}` is a syntax error there ("An expression was expected"). The action therefore
+failed to **load**, and because a `uses:` action that won't parse aborts the step, **every
+consumer run died before the agent even started**. The fix is a fail-closed regression guard:
+`check-action-templates.sh` (`task lint:action-templates`, run in CI under `lint:actions`) scans
+every parsed YAML scalar in the workflows and composite actions and **rejects a live empty
+`${{ }}`** placeholder. It exists because `actionlint` does **not** load composite action
+manifests at all, so it never caught the original break. (Relatedly, `publish.sh` now guards each
+early `gh issue comment` — a failed acknowledgement post emits a `::error::` annotation instead
+of aborting the publish job before its terminal exit.)
 
 **The publish-token interface (the one real interface decision).** App-token minting is
 consumer-specific (the consumer's own GitHub App id/key), so it cannot be hidden behind a

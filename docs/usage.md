@@ -2303,11 +2303,17 @@ accepts any model the provider serves.
 | `openai` | `--openai` (when `true`) | `""` |
 | `openai-base-url` | `--openai-base-url` | `""` |
 | `guardrails-model` | `--guardrails-model` | `""` |
+| `subagent-ask-reviewer` | `--subagent-ask-reviewer` (omitted when empty) | `""` |
+| `subagent-ask-reviewer-max-denies` | `--subagent-ask-reviewer-max-denies` (omitted when empty) | `""` |
 | `pr-body-template` | `publish.sh` PR-body template (via `MQ_PR_BODY_TEMPLATE`) | `""` |
 | `pr-title-template` | `publish.sh` PR-title template (via `MQ_PR_TITLE_TEMPLATE`) | `""` |
 | `out-diff` | `--out-diff` | `$RUNNER_TEMP/mecatequi.patch` |
 | `out-summary` | `--out-summary` | `$RUNNER_TEMP/mecatequi.summary.json` |
 | `out-events` | `--out-events` | `$RUNNER_TEMP/mecatequi.events.jsonl` |
+
+The `subagent-ask-reviewer` / `subagent-ask-reviewer-max-denies` pair is **escape-hatch-only**
+— it is exposed by the composite action but **not** surfaced by the reusable workflow, so reach
+for it only when you hand-roll a workflow against the action directly.
 
 **Outputs** (kebab-case): `patch-path`, `summary-path`, `events-path`, `summary-json`
 (compacted JSON — best-effort and size-bounded by the `$GITHUB_OUTPUT` cap; read
@@ -2536,7 +2542,7 @@ there is **no token and no `GOPRIVATE`** to manage:
 ```yaml
 - name: mecatequi
   id: mecatequi
-  uses: stacklok/mecatl/.github/actions/mecatequi@v0.0.1   # SHA-pin in real workflows
+  uses: stacklok/mecatl/.github/actions/mecatequi@v0.0.3   # pin the latest released tag
   with:
     prompt-file: ${{ runner.temp }}/prompt.txt
     posture: auto
