@@ -178,4 +178,37 @@ func TestAppConfigMapping(t *testing.T) {
 			t.Error("PostureFlagSet not mapped")
 		}
 	})
+
+	t.Run("all three provider creds + base-urls (the gained behavior)", func(t *testing.T) {
+		// FIX B: mecatequi previously read ONLY OPENAI_API_KEY and only
+		// --openai-base-url. Via the shared cliconfig helper it now reads all three
+		// keys and registers all three base-URL flags.
+		t.Setenv("OPENAI_API_KEY", "sk-oai")
+		t.Setenv("OPENROUTER_API_KEY", "sk-or")
+		t.Setenv("ANTHROPIC_API_KEY", "sk-ant")
+		f, err := parseFlags([]string{
+			"--prompt", "x",
+			"--default-provider", "anthropic",
+			"--openai-base-url", "https://oai.example",
+			"--openrouter-base-url", "https://or.example",
+			"--anthropic-base-url", "https://ant.example",
+		})
+		if err != nil {
+			t.Fatalf("parseFlags: %v", err)
+		}
+		cfg := appConfig(f, newDiagnostics())
+		if cfg.OpenAIKey != "sk-oai" || cfg.OpenRouterKey != "sk-or" || cfg.AnthropicKey != "sk-ant" {
+			t.Errorf("all three keys must be read: %q / %q / %q", cfg.OpenAIKey, cfg.OpenRouterKey, cfg.AnthropicKey)
+		}
+		if cfg.OpenAIBaseURL != "https://oai.example" || cfg.OpenRouterBaseURL != "https://or.example" || cfg.AnthropicBaseURL != "https://ant.example" {
+			t.Errorf("all three base-urls must map: %q / %q / %q", cfg.OpenAIBaseURL, cfg.OpenRouterBaseURL, cfg.AnthropicBaseURL)
+		}
+		if cfg.DefaultProvider != "anthropic" {
+			t.Errorf("DefaultProvider = %q, want anthropic (mecatequi can now run Anthropic explicitly)", cfg.DefaultProvider)
+		}
+		// An OPENAI_API_KEY present flips UseOpenAI on (matching mecated).
+		if !cfg.UseOpenAI {
+			t.Error("a present OPENAI_API_KEY should flip UseOpenAI on (mecated parity)")
+		}
+	})
 }

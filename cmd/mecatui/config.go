@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"github.com/stacklok/mecatl/internal/app"
+	"github.com/stacklok/mecatl/internal/cliconfig"
 )
 
 // config is the resolved CLI/env configuration for mecatui.
@@ -71,14 +72,15 @@ type config struct {
 	subagentAskReviewerMaxDenies  int
 	subagentAskReviewerPolicyFile string
 	subagentAskReviewerPolicy     string
-	openAIBaseURL                 string
-	openAIKey                     string
-	openRouterBaseURL             string
-	openRouterKey                 string
-	anthropicBaseURL              string
-	anthropicKey                  string
-	mock                          bool
-	noBash                        bool
+	// providerFlags holds the shared provider base-URL flags (cliconfig), applied onto
+	// app.Config when the embedded server is built. The resolved credential keys below
+	// are read via cliconfig too (one definition of the env-var names across the mains).
+	providerFlags *cliconfig.ProviderFlags
+	openAIKey     string
+	openRouterKey string
+	anthropicKey  string
+	mock          bool
+	noBash        bool
 
 	// trustProject controls whether a discovered PROJECT's permission ALLOW rules
 	// and its project-scoped soul (.mecatl/soul.md) are honoured for the EMBEDDED
@@ -222,9 +224,12 @@ func parseFlags(args []string) (config, error) {
 	fs.StringVar(&cfg.subagentAskReviewer, "subagent-ask-reviewer", "", "embedded server only: OPT-IN headless ask reviewer (issue #31), accepted for symmetry with mecated but INERT under mecatui — mecatui runs INTERACTIVE (a human sits at the approval modal), so a subagent/member/branch permission ask SURFACES to that modal, never reaching the reviewer (which only fires on a headless server with no human). Model id of a tool-less ONE-TURN reviewer; empty (default) disables it; an unusable model id FAILS STARTUP. To actually use the reviewer, run a headless `mecated --headless --subagent-ask-reviewer ...` and point mecatui at it with --server")
 	fs.IntVar(&cfg.subagentAskReviewerMaxDenies, "subagent-ask-reviewer-max-denies", 3, "embedded server only: circuit breaker for --subagent-ask-reviewer (INERT under mecatui — see that flag). <=0 uses the default (3)")
 	fs.StringVar(&cfg.subagentAskReviewerPolicyFile, "subagent-ask-reviewer-policy", "", "embedded server only: path to a TRUSTED policy rubric file for --subagent-ask-reviewer (INERT under mecatui — see that flag). Empty keeps the built-in rubric. Read once at startup; an unreadable file FAILS STARTUP")
-	fs.StringVar(&cfg.openAIBaseURL, "openai-base-url", "", "override the OpenAI API base URL for the embedded server (compatible endpoints)")
-	fs.StringVar(&cfg.openRouterBaseURL, "openrouter-base-url", "", "embedded server only: override the OpenRouter API base URL (default https://openrouter.ai/api/v1; key from OPENROUTER_API_KEY)")
-	fs.StringVar(&cfg.anthropicBaseURL, "anthropic-base-url", "", "embedded server only: override the native Anthropic API base URL (compatible/proxy endpoints; key from ANTHROPIC_API_KEY)")
+	// Shared provider base-URL flags (cliconfig); mecatui keeps its own help wording.
+	cfg.providerFlags = cliconfig.RegisterProviderFlags(fs, cliconfig.ProviderFlagHelp{
+		OpenAIBaseURL:     "override the OpenAI API base URL for the embedded server (compatible endpoints)",
+		OpenRouterBaseURL: "embedded server only: override the OpenRouter API base URL (default https://openrouter.ai/api/v1; key from OPENROUTER_API_KEY)",
+		AnthropicBaseURL:  "embedded server only: override the native Anthropic API base URL (compatible/proxy endpoints; key from ANTHROPIC_API_KEY)",
+	})
 	fs.BoolVar(&cfg.mock, "mock", false, "embedded server only: use the canned offline mock provider instead of OpenAI (no network)")
 	fs.BoolVar(&cfg.noBash, "no-bash", false, "embedded server only: disable the Bash tool (shell-less mode)")
 	fs.BoolVar(&cfg.trustProject, "trust-project", false, "embedded server only: honour a discovered PROJECT's ALLOW rules AND its project-scoped soul (.mecatl/soul.md) (its deny/ask rules are always honoured regardless). Default OFF (the safe stance, unified with mecated): an untrusted repo's permission grants and project soul are ignored. TRUST BOUNDARY: enabling this lets a checked-in .mecatl/settings.yaml auto-approve tool calls and a checked-in project soul steer the model — only pass it for a repo you trust")
@@ -280,9 +285,14 @@ func parseFlags(args []string) (config, error) {
 			cfg.noMouse = true
 		}
 	}
-	cfg.openAIKey = os.Getenv("OPENAI_API_KEY")
-	cfg.openRouterKey = os.Getenv("OPENROUTER_API_KEY")
-	cfg.anthropicKey = os.Getenv("ANTHROPIC_API_KEY")
+	// Provider credentials from the environment, via the shared cliconfig reader (one
+	// definition of the env-var names across the mains). Used by the no-provider guard
+	// below and wired onto app.Config (with the base URLs) by providerFlags.Apply in
+	// main.go.
+	keys := cliconfig.ReadProviderKeys()
+	cfg.openAIKey = keys.OpenAI
+	cfg.openRouterKey = keys.OpenRouter
+	cfg.anthropicKey = keys.Anthropic
 
 	if !cfg.listThemes {
 		ws, err := resolveWorkspace(cfg.workspace)

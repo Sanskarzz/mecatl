@@ -52,6 +52,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/slogdiag"
 	"github.com/stacklok/mecatl/internal/adapter/telemetry"
 	"github.com/stacklok/mecatl/internal/app"
+	"github.com/stacklok/mecatl/internal/cliconfig"
 )
 
 // TRUST MODEL (security): the mecated API exposes command and file execution
@@ -77,23 +78,21 @@ const defaultMetricsAddr = "127.0.0.1:9090"
 // addresses, TLS, auth, rate limiting, metrics, tracing) is serve-time state
 // owned by this binary.
 type config struct {
-	grpcAddr          string
-	httpAddr          string
-	workspace         string
-	model             string
-	defaultProvider   string
-	defaultModel      string
-	useOpenAI         bool
-	openAIBaseURL     string
-	openAIKey         string
-	openRouterBaseURL string
-	openRouterKey     string
-	anthropicBaseURL  string
-	anthropicKey      string
-	useMock           bool
-	storeDir          string
-	shell             string
-	noBash            bool
+	grpcAddr        string
+	httpAddr        string
+	workspace       string
+	model           string
+	defaultProvider string
+	defaultModel    string
+	useOpenAI       bool
+	// providerFlags holds the shared provider base-URL flags + credential reads
+	// (cliconfig), applied onto app.Config in appConfig so the three mains cannot
+	// drift on which keys/base-urls they wire.
+	providerFlags *cliconfig.ProviderFlags
+	useMock       bool
+	storeDir      string
+	shell         string
+	noBash        bool
 
 	// Context management: the compaction strategy and the token counter. Both
 	// default to the current behaviour exactly (heuristic compactor + heuristic
@@ -740,18 +739,12 @@ func run() error {
 // #47), and the general-purpose operational logging sink (Diagnostics) into the
 // engine/composition.
 func appConfig(cfg config, sink port.EventSink, recorder port.ToolCallRecorder, roleScoper func(string) (port.EventSink, port.ToolCallRecorder), diag port.Diagnostics) app.Config {
-	return app.Config{
+	out := app.Config{
 		Workspace:                    cfg.workspace,
 		Model:                        cfg.model,
 		DefaultProvider:              cfg.defaultProvider,
 		DefaultModel:                 cfg.defaultModel,
 		UseOpenAI:                    cfg.useOpenAI,
-		OpenAIBaseURL:                cfg.openAIBaseURL,
-		OpenAIKey:                    cfg.openAIKey,
-		OpenRouterBaseURL:            cfg.openRouterBaseURL,
-		OpenRouterKey:                cfg.openRouterKey,
-		AnthropicBaseURL:             cfg.anthropicBaseURL,
-		AnthropicKey:                 cfg.anthropicKey,
 		UseMock:                      cfg.useMock,
 		StoreDir:                     cfg.storeDir,
 		Shell:                        cfg.shell,
@@ -854,6 +847,14 @@ func appConfig(cfg config, sink port.EventSink, recorder port.ToolCallRecorder, 
 		MetricsRoleScoper: roleScoper,
 		Diagnostics:       diag,
 	}
+	// Apply the shared provider credentials + base URLs (env reads happen here, once).
+	// An OPENAI_API_KEY in the environment implies the user wants the real provider —
+	// the same flip the previous inline read did, now keyed off the resolved keys.
+	keys := cfg.providerFlags.Apply(&out)
+	if keys.OpenAI != "" {
+		out.UseOpenAI = true
+	}
+	return out
 }
 
 // applyPostureCLI resolves the AUTHORITATIVE posture tier (the --posture flag +
@@ -956,9 +957,13 @@ func parseFlags(argv []string) (config, error) {
 	fs.StringVar(&cfg.defaultProvider, "default-provider", "", "server-configured deployment-wide default provider id shared by every client (e.g. openai, openrouter, anthropic); overrides the built-in provider preference for zero-selector sessions while a client-side selector still wins. Validated FAIL-FAST at startup: an unknown or unavailable provider refuses to start")
 	fs.StringVar(&cfg.defaultModel, "default-model", "", "server-configured deployment-wide default model id for the default provider, shared by every client; sits BELOW client-side defaults and ABOVE the per-provider built-in default. Validated FAIL-FAST at startup: a model not catalogued for the default provider refuses to start (stricter than per-session selectors, which allow passthrough)")
 	fs.BoolVar(&cfg.useOpenAI, "openai", false, "use the OpenAI Responses provider (key from OPENAI_API_KEY)")
-	fs.StringVar(&cfg.openAIBaseURL, "openai-base-url", "", "override the OpenAI API base URL (compatible endpoints)")
-	fs.StringVar(&cfg.openRouterBaseURL, "openrouter-base-url", "", "override the OpenRouter API base URL (default https://openrouter.ai/api/v1; key from OPENROUTER_API_KEY)")
-	fs.StringVar(&cfg.anthropicBaseURL, "anthropic-base-url", "", "override the native Anthropic API base URL (compatible/proxy endpoints; key from ANTHROPIC_API_KEY)")
+	// Shared provider base-URL flags + credential reads (cliconfig): registered here,
+	// applied onto app.Config in appConfig. mecated keeps its own help wording.
+	cfg.providerFlags = cliconfig.RegisterProviderFlags(fs, cliconfig.ProviderFlagHelp{
+		OpenAIBaseURL:     "override the OpenAI API base URL (compatible endpoints)",
+		OpenRouterBaseURL: "override the OpenRouter API base URL (default https://openrouter.ai/api/v1; key from OPENROUTER_API_KEY)",
+		AnthropicBaseURL:  "override the native Anthropic API base URL (compatible/proxy endpoints; key from ANTHROPIC_API_KEY)",
+	})
 	fs.BoolVar(&cfg.useMock, "mock", false, "use a canned offline mock provider (no network; for smoke tests only)")
 	fs.StringVar(&cfg.storeDir, "store-dir", "", "directory for the JSONL session store (empty -> in-memory store)")
 	fs.StringVar(&cfg.sessionStoreURL, "session-store-url", "", "host:port of a remote session-store gRPC driver (mecatl.driver.v1.SessionStoreService); replaces the local store, so it is mutually exclusive with --store-dir. Loopback may ride plaintext; pair a non-loopback target with --driver-tls (and --driver-auth-token as needed)")
@@ -1102,19 +1107,13 @@ func parseFlags(argv []string) (config, error) {
 		return config{}, fmt.Errorf("--perf-mcp refuses a non-loopback --metrics-addr=%s: it exposes unauthenticated runtime data; bind loopback or add auth (future work)", cfg.metricsAddr)
 	}
 
-	cfg.openAIKey = os.Getenv("OPENAI_API_KEY")
-	// An API key in the environment implies the user wants the real provider.
-	if cfg.openAIKey != "" {
-		cfg.useOpenAI = true
-	}
-	// OpenRouter (multi-provider S1): the provider registry auto-detects it from
-	// OPENROUTER_API_KEY too, but reading it here makes the credential custody
-	// explicit and lets the registry prefer the dedicated key over a fallback.
-	cfg.openRouterKey = os.Getenv("OPENROUTER_API_KEY")
-	// Anthropic (multi-provider P1): the native Messages-API provider; the registry
-	// also auto-detects ANTHROPIC_API_KEY, but reading it here makes the credential
-	// custody explicit (extended thinking is ON, model-aware).
-	cfg.anthropicKey = os.Getenv("ANTHROPIC_API_KEY")
+	// The three provider credentials (OPENAI/OPENROUTER/ANTHROPIC_API_KEY) are read by
+	// cliconfig.ProviderFlags.Apply (called from appConfig), keeping the env reads +
+	// the six Config fields wired in ONE shared place across all three mains. The
+	// "OpenAI key implies the real provider" flip moved there too (off the resolved
+	// key). The registry still auto-detects the keys via its envDetector; reading them
+	// in the cmd layer makes credential custody explicit.
+	//
 	// WebSearch (issue #26): the search backend's API key is a SECRET, read from the
 	// environment (never a flag value), mirroring the provider keys' custody rule.
 	cfg.websearchAPIKey = os.Getenv("WEBSEARCH_API_KEY")

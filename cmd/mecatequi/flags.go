@@ -11,6 +11,7 @@ import (
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/internal/adapter/slogdiag"
 	"github.com/stacklok/mecatl/internal/app"
+	"github.com/stacklok/mecatl/internal/cliconfig"
 )
 
 // flags is the parsed command-line configuration for mecatequi. It is a small,
@@ -49,14 +50,17 @@ type flags struct {
 	defaultProvider string
 	defaultModel    string
 	useOpenAI       bool
-	openAIBaseURL   string
-	openAIKey       string
-	useMock         bool
-	storeDir        string
-	shell           string
-	noBash          bool
-	maxRunTokens    int
-	maxTeamTokens   int
+	// providerFlags holds the shared provider base-URL flags + credential reads
+	// (cliconfig) — the SAME helper mecated/mecatui use, so mecatequi reads ALL three
+	// keys (OPENAI/OPENROUTER/ANTHROPIC_API_KEY) and registers all three base-URL flags
+	// rather than the OpenAI-only subset it had. Applied onto app.Config in appConfig.
+	providerFlags *cliconfig.ProviderFlags
+	useMock       bool
+	storeDir      string
+	shell         string
+	noBash        bool
+	maxRunTokens  int
+	maxTeamTokens int
 
 	// headless declares NO human approver is attached. DEFAULT true (inverted from
 	// mecated ON PURPOSE): a single-shot CI tool has nobody to answer a permission
@@ -110,7 +114,12 @@ func parseFlags(argv []string) (flags, error) {
 	fs.StringVar(&f.defaultProvider, "default-provider", "", "deployment default provider id (e.g. openai, openrouter, anthropic); validated at startup")
 	fs.StringVar(&f.defaultModel, "default-model", "", "deployment default model id for the default provider; validated at startup")
 	fs.BoolVar(&f.useOpenAI, "openai", false, "use the OpenAI Responses provider (key from OPENAI_API_KEY)")
-	fs.StringVar(&f.openAIBaseURL, "openai-base-url", "", "override the OpenAI API base URL (compatible endpoints)")
+	// Shared provider base-URL flags + credential reads (cliconfig). Registers
+	// --openai-base-url / --openrouter-base-url / --anthropic-base-url and reads
+	// OPENAI/OPENROUTER/ANTHROPIC_API_KEY — so mecatequi can run Anthropic
+	// (ANTHROPIC_API_KEY + --default-provider anthropic) and OpenRouter explicitly,
+	// like its siblings. Default (mecated) help wording.
+	f.providerFlags = cliconfig.RegisterProviderFlags(fs, cliconfig.ProviderFlagHelp{})
 	fs.BoolVar(&f.useMock, "mock", false, "use a canned offline mock provider (no network; smoke tests only)")
 	fs.StringVar(&f.storeDir, "store-dir", "", "directory for the JSONL session store (empty -> in-memory store)")
 	fs.StringVar(&f.shell, "shell", "/bin/sh", "shell used to execute Bash-tool commands; empty disables Bash")
@@ -143,8 +152,9 @@ func parseFlags(argv []string) (flags, error) {
 		}
 	})
 
-	// Secrets from the environment, never flag values (matches mecated).
-	f.openAIKey = os.Getenv("OPENAI_API_KEY")
+	// Provider credentials are read from the environment by providerFlags.Apply
+	// (called in appConfig), the shared cliconfig seam — never flag values, mirroring
+	// mecated/mecatui.
 
 	// Validate the prompt inputs: at least one source is required.
 	if f.prompt == "" && f.promptFile == "" {
@@ -254,14 +264,12 @@ Exit codes (read stop_reason in the summary — the code alone is coarse):
 // pipeline. The Interactive inversion is the deliberate headless default: a CI run
 // has no approver, so Interactive = !headless.
 func appConfig(f flags, diag port.Diagnostics) app.Config {
-	return app.Config{
+	out := app.Config{
 		Workspace:       f.workspace,
 		Model:           f.model,
 		DefaultProvider: f.defaultProvider,
 		DefaultModel:    f.defaultModel,
 		UseOpenAI:       f.useOpenAI,
-		OpenAIBaseURL:   f.openAIBaseURL,
-		OpenAIKey:       f.openAIKey,
 		UseMock:         f.useMock,
 		StoreDir:        f.storeDir,
 		Shell:           f.shell,
@@ -289,6 +297,14 @@ func appConfig(f flags, diag port.Diagnostics) app.Config {
 		// Sink / ToolCallRecorder / MetricsRoleScoper deliberately nil: a single-shot
 		// run carries no metrics pipeline.
 	}
+	// Apply the shared provider credentials + base URLs (env reads happen here, once).
+	// An OPENAI_API_KEY in the environment implies the real provider — the same flip
+	// mecated does — keyed off the resolved key.
+	keys := f.providerFlags.Apply(&out)
+	if keys.OpenAI != "" {
+		out.UseOpenAI = true
+	}
+	return out
 }
 
 // privilegedProcess mirrors cmd/mecated/main.go's privilegedProcess: it reports

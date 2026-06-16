@@ -320,7 +320,7 @@ func applyTrustPrompt(cfg config, diag port.Diagnostics) config {
 func embeddedConfig(cfg config, diag port.Diagnostics) app.Config {
 	cmdDir, enableCmds := resolveCommands(cfg)
 	skillDirs, skillsConv := resolveSkills(cfg)
-	return app.Config{
+	out := app.Config{
 		Workspace:       cfg.workspace,
 		Model:           cfg.model,
 		DefaultProvider: cfg.defaultProvider,
@@ -331,13 +331,6 @@ func embeddedConfig(cfg config, diag port.Diagnostics) app.Config {
 		SubagentAskReviewerModel:     cfg.subagentAskReviewer,
 		SubagentAskReviewerMaxDenies: cfg.subagentAskReviewerMaxDenies,
 		SubagentAskReviewerPolicy:    cfg.subagentAskReviewerPolicy,
-		UseOpenAI:                    cfg.openAIKey != "",
-		OpenAIKey:                    cfg.openAIKey,
-		OpenAIBaseURL:                cfg.openAIBaseURL,
-		OpenRouterKey:                cfg.openRouterKey,
-		OpenRouterBaseURL:            cfg.openRouterBaseURL,
-		AnthropicKey:                 cfg.anthropicKey,
-		AnthropicBaseURL:             cfg.anthropicBaseURL,
 		UseMock:                      cfg.mock,
 		Shell:                        "/bin/sh",
 		NoBash:                       cfg.noBash,
@@ -441,6 +434,12 @@ func embeddedConfig(cfg config, diag port.Diagnostics) app.Config {
 		// NopDiagnostics.
 		Diagnostics: diag,
 	}
+	// Apply the shared provider credentials + base URLs (cliconfig). mecatui's
+	// UseOpenAI is "an OpenAI key is present" (it has no --openai flag), preserved here
+	// off the resolved key.
+	keys := cfg.providerFlags.Apply(&out)
+	out.UseOpenAI = keys.OpenAI != ""
+	return out
 }
 
 // perfConfig maps the TUI config onto the embedded server's perf-observability
