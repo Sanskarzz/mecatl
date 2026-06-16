@@ -25,13 +25,26 @@
 # routed through an action input would be eligible to leak into logs; the env path keeps
 # it out of the inputs surface entirely.
 #
-# DISTRIBUTION (v1: build-from-source). There is no published mecatequi release asset
-# today (release.yml ships only the mecated container image), so this action provisions
-# Go from go.mod via a SHA-pinned actions/setup-go step and BUILDS the binary from the
-# checked-out source. Both the toolchain provision ("Set up Go") and the build ("Acquire
-# mecatequi binary") are isolated steps so a future swap to a signed, checksum-verified
-# release-asset download is a contained change (drop both, add a download+verify). The
-# signed-asset follow-up is documented in docs/design/MECATEQUI.md.
+# DISTRIBUTION (matlatl pattern: build from the action's OWN checkout — single path, no auth).
+# The binary is built from the action's own source tree, located via $GITHUB_ACTION_PATH.
+# This is exactly how stacklok/matlatl's composite works, and it is UNIFORM across both ways
+# the action is referenced:
+#
+#   • SELF (this repo): `uses: ./.github/actions/mecatequi` → $GITHUB_ACTION_PATH is the
+#     local workspace's action directory, so it builds the checked-out tree (HEAD).
+#   • CROSS-REPO: `uses: stacklok/mecatl/.github/actions/mecatequi@<tag>` → GitHub checks the
+#     WHOLE mecatl repo out at that tag into $GITHUB_ACTION_PATH; the build then uses that
+#     tagged source. NO mecatl checkout is needed in the consuming repo, and — because the
+#     action source itself is the build input — there is NO token, NO GOPRIVATE, and NO PAT.
+#     The only requirement is the ORG setting that lets Actions use a private/internal repo's
+#     actions (Settings → Actions → General → Access for stacklok/mecatl).
+#
+# The action lives at .github/actions/mecatequi/, so the repo root is $GITHUB_ACTION_PATH/
+# ../../.. (where go.mod + cmd/mecatequi live). The "Set up Go" + "Acquire mecatequi binary"
+# steps are isolated so a future swap to a signed, checksum-verified release-asset download
+# is a contained change (drop both, add a download+verify). The signed-asset follow-up is
+# documented in docs/design/MECATEQUI.md §5. The `uses: …@<ref>` tag IS the version — there
+# is no version input (matlatl has none either).
 #
 # OMITTED INPUT — the ask-reviewer policy file. --subagent-ask-reviewer is surfaced (see
 # the input) so a posture:auto run can adjudicate a child's read-only substitution instead
@@ -174,20 +187,6 @@ inputs:
     description: Where the durable event log (JSONL) is written.
     required: false
     default: ${{ runner.temp }}/mecatequi.events.jsonl
-  ref:
-    description: >-
-      Alias for mecatequi-version. The source ref the binary is built from (informational
-      in v1 build-from-source; recorded for the future signed-asset path). Empty = the
-      already-checked-out tree.
-    required: false
-    default: ""
-  mecatequi-version:
-    description: >-
-      The mecatequi source ref / version to build from (informational in v1 build-from-
-      source). Empty = the already-checked-out tree. When set, takes precedence over `ref`.
-    required: false
-    default: ""
-
 outputs:
   patch-path:
     description: Path to the working-tree git patch the run produced.
@@ -218,37 +217,38 @@ outputs:
 runs:
   using: composite
   steps:
-    # ── Toolchain provision (Finding A: build-from-source v1) ─────────────────────
-    # Provision Go FROM go.mod so the runner's preinstalled Go (which can lag the module's
-    # required version) never decides the build. This is part of binary acquisition: the
-    # action ships its own setup-go so EVERY consumer gets a satisfying toolchain without
-    # remembering to add one. SHA-pinned to the house set (matches ci.yml / release.yml).
+    # ── Toolchain provision ───────────────────────────────────────────────────────
+    # Provision Go from the ACTION's own go.mod (the single source of truth for the required
+    # toolchain), so the runner's preinstalled Go never decides the build. $GITHUB_ACTION_PATH
+    # is .github/actions/mecatequi/, so the repo-root go.mod is at ../../../go.mod. Mirrors
+    # matlatl's `go-version-file: ${{ github.action_path }}/go.mod`, adjusted for the subdir.
+    # SHA-pinned to the house set (matches ci.yml / release.yml).
     - name: Set up Go
       uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
       with:
-        go-version-file: go.mod
+        go-version-file: ${{ github.action_path }}/../../../go.mod
         cache: true
+        cache-dependency-path: ${{ github.action_path }}/../../../go.sum
 
-    # ── Binary acquisition (Finding A: build-from-source v1) ──────────────────────
+    # ── Binary acquisition (build from the action's OWN checkout) ──────────────────
     # ISOLATED on purpose. To swap to a signed/checksum-verified release asset later, drop
     # this step plus the setup-go step above and replace them with a download+cosign-verify;
-    # the run step below reads "$RUNNER_TEMP/mecatequi" regardless. With setup-go having
-    # provisioned the go.mod toolchain, GOTOOLCHAIN=local is satisfied (no surprise
-    # download); GOFLAGS=-mod=readonly forbids module-graph edits. The build runs in the
-    # SAME low-priv job that already checked out, so no extra credential is introduced here.
+    # the run step below reads "$RUNNER_TEMP/mecatequi" regardless.
+    #
+    # `go build -C "$GITHUB_ACTION_PATH/../../.."` compiles the action's own source tree —
+    # the local checkout for self-use, or the tag GitHub checked out for `uses: …@<tag>`.
+    # GOTOOLCHAIN=local is satisfied by the provisioned toolchain; GOFLAGS=-mod=readonly
+    # forbids module-graph edits. NO token, NO GOPRIVATE — the action source IS the input.
     - name: Acquire mecatequi binary
       shell: bash
       env:
-        BUILD_REF: ${{ inputs.mecatequi-version != '' && inputs.mecatequi-version || inputs.ref }}
+        REPO_ROOT: ${{ github.action_path }}/../../..
       run: |
         set -euo pipefail
-        if [ -n "${BUILD_REF}" ]; then
-          echo "::notice::mecatequi-version/ref='${BUILD_REF}' requested; v1 builds from the checked-out tree. Check out that ref before this action to honour it."
-        fi
         export GOTOOLCHAIN=local
         export GOFLAGS=-mod=readonly
-        go build -o "${RUNNER_TEMP}/mecatequi" ./cmd/mecatequi
-        echo "Built mecatequi at ${RUNNER_TEMP}/mecatequi"
+        go build -C "${REPO_ROOT}" -o "${RUNNER_TEMP}/mecatequi" ./cmd/mecatequi
+        echo "Built mecatequi from the action checkout at ${RUNNER_TEMP}/mecatequi"
 
     # ── Run (Finding B mitigation lives in the WORKFLOW, not here): capture rc, never
     # fail the step ───────────────────────────────────────────────────────────────────

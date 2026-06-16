@@ -2267,13 +2267,18 @@ follow-up live in `docs/design/MECATEQUI.md`; this section is the operator walkt
 
 ### The composite action (`.github/actions/mecatequi`)
 
-The action acquires the binary (v1: builds it from the checked-out source with the pinned
-Go toolchain — there is no released asset yet), runs it with `--untrusted-prompt` by
-default, captures the exit code **without failing the step**, and exposes the result as
-outputs. The LLM key is **not** an input: the binary reads provider secrets from the
-environment, so the caller sets `OPENAI_API_KEY` in the calling **job**'s `env` (job-level,
-not step-level — step `env:` on a `uses:` step does not reach a composite action's internal
-steps; job `env:` does).
+The action builds the binary from the action's **own** checkout (`go build -C
+"$GITHUB_ACTION_PATH/../../.." ./cmd/mecatequi`, toolchain from the action's `go.mod`) — the
+matlatl pattern. This works uniformly for self-use (`uses: ./.github/actions/mecatequi`) and
+cross-repo (`uses: stacklok/mecatl/.github/actions/mecatequi@<tag>`, where GitHub checks the
+tagged mecatl repo into `$GITHUB_ACTION_PATH`); see "Adopting mecatequi in another repo"
+below. There is **no token and no `GOPRIVATE`** — the action source is the build input. It
+then runs the binary with `--untrusted-prompt` by default, captures the exit code **without
+failing the step**, and exposes the result as outputs. The LLM key is **not** an input: the
+binary reads provider secrets from the environment, so the caller sets `OPENAI_API_KEY` (or
+`OPENROUTER_API_KEY`, etc.) in the calling **job**'s `env` (job-level, not step-level — step
+`env:` on a `uses:` step does not reach a composite action's internal steps; job `env:`
+does).
 
 **Inputs → flags:**
 
@@ -2300,7 +2305,6 @@ accepts any model the provider serves.
 | `out-diff` | `--out-diff` | `$RUNNER_TEMP/mecatequi.patch` |
 | `out-summary` | `--out-summary` | `$RUNNER_TEMP/mecatequi.summary.json` |
 | `out-events` | `--out-events` | `$RUNNER_TEMP/mecatequi.events.jsonl` |
-| `ref` / `mecatequi-version` | source ref built from | `""` |
 
 **Outputs** (kebab-case): `patch-path`, `summary-path`, `events-path`, `summary-json`
 (compacted JSON — best-effort and size-bounded by the `$GITHUB_OUTPUT` cap; read
@@ -2375,6 +2379,50 @@ reviewed, not referenced by tag — so you control exactly what runs. To enable 
    broad `GITHUB_TOKEN` in the `publish` job or upgrade to a JIT GitHub App token (the
    stronger option — see `docs/design/MECATEQUI.md`).
 5. Apply the `mecatequi` label to a test issue and watch the run.
+
+**Configurable trigger label / mention.** The trigger label and comment mention default to
+`mecatequi` and `@mecatequi`, but both are overridable via **repo Actions variables** so you
+can rename them without editing the workflow: set `MECATEQUI_LABEL` and `MECATEQUI_MENTION`
+under **Settings → Secrets and variables → Actions → Variables**. Both job gates
+(`acknowledge` and `implement`) read the same variables, so they cannot drift. If you change
+`MECATEQUI_LABEL`, create the new label first (step 3 above — the `labeled` trigger silently
+never fires for a label that does not exist).
+
+### Adopting mecatequi in another repo
+
+The example workflow vendors the action (copies `.github/actions/mecatequi/` into your
+repo). To instead **reference mecatl's published action by tag** — no vendored copy — point
+`uses:` at the subdirectory action and pin a tag. GitHub checks the mecatl repo out at that
+tag into the action path and the action builds the binary from it (the matlatl pattern), so
+there is **no token and no `GOPRIVATE`** to manage:
+
+```yaml
+- name: mecatequi
+  id: mecatequi
+  uses: stacklok/mecatl/.github/actions/mecatequi@v0.0.1   # SHA-pin in real workflows
+  with:
+    prompt-file: ${{ runner.temp }}/prompt.txt
+    posture: auto
+```
+
+`owner/repo/path@ref` is the GitHub syntax for an action that lives in a repository
+subdirectory; pin it to an alpha `v0.0.x` tag (the first published tag is `v0.0.1`) or a
+full commit SHA — the `@<ref>` is the version (there is no version input). What a consumer
+needs:
+
+- **Org access to mecatl's actions.** Because `stacklok/mecatl` is private, the org must
+  allow Actions to use its actions: **Settings → Actions → General → Access** on
+  `stacklok/mecatl` (or `gh api -X PUT
+  repos/stacklok/mecatl/actions/permissions/access -f access_level=organization`). No token
+  or PAT is configured in the consuming repo — the org setting is the only requirement.
+- **`OPENROUTER_API_KEY`** (or `OPENAI_API_KEY`, etc.) — the LLM key, set as a repository
+  secret and injected at the **agent job's** `env` level (not on the `uses:` step).
+- **Create the trigger label first** (and, if you renamed it, set `MECATEQUI_LABEL` /
+  `MECATEQUI_MENTION`) — see the enable steps above.
+
+Honest cost: the action builds the binary from source on each run (no cached release asset
+yet). A signed, checksummed binary / container is the later speed optimization — see
+`docs/design/MECATEQUI.md` §5.
 
 ### Customising the PR description (templates)
 

@@ -145,7 +145,6 @@ rejects ids not in the embedded snapshot. `model` is the per-session passthrough
 | `out-diff` | `--out-diff` | `$RUNNER_TEMP/mecatequi.patch` |
 | `out-summary` | `--out-summary` | `$RUNNER_TEMP/mecatequi.summary.json` |
 | `out-events` | `--out-events` | `$RUNNER_TEMP/mecatequi.events.jsonl` |
-| `ref` / `mecatequi-version` | source ref built from | `""` |
 
 Outputs (kebab-case, GitHub Actions house style): `patch-path`, `summary-path`,
 `events-path`, `summary-json` (compacted; best-effort and `$GITHUB_OUTPUT`-size-bounded —
@@ -235,22 +234,54 @@ built-in default.
 
 ## 5. Distribution decision
 
-**v1: build-from-source.** There is no published mecatequi release asset — `release.yml`
-ships only the `mecated` container image. So the composite action builds the binary from
-the checked-out source in the low-priv `implement` job that already has the tree. The
-action ships its **own** `actions/setup-go` step (SHA-pinned, `go-version-file: go.mod`,
-`cache: true`) so every consumer provisions the go.mod-required toolchain regardless of the
-runner's preinstalled Go; the build step then runs `go build` with `GOTOOLCHAIN=local`
-(satisfied by the provisioned toolchain) and `GOFLAGS=-mod=readonly`. Acquisition is two
-isolated composite steps — "Set up Go" + "Acquire mecatequi binary".
+**The matlatl pattern: build from the action's own checkout — single path, no auth.** The
+composite action (`.github/actions/mecatequi/action.yml`) builds the binary from the
+action's **own** source tree (`go build -C "$GITHUB_ACTION_PATH/../../.." ./cmd/mecatequi`,
+with the toolchain provisioned from `${{ github.action_path }}/../../../go.mod`,
+`GOTOOLCHAIN=local`, `GOFLAGS=-mod=readonly`). This is exactly how `stacklok/matlatl`'s
+composite works, and it is **uniform** across both ways the action is referenced:
 
-**Follow-up: signed release asset.** A future release job can publish a checksummed,
-cosign-signed `mecatequi` binary (mirroring the `mecated` image's keyless-signing flow in
-`.github/workflows/release.yml`). Swapping the Action to consume it is then a *one-step*
-change: drop the two acquisition steps ("Set up Go" + "Acquire mecatequi binary") and add
-a download + `cosign verify` + checksum-check step; the run step is unchanged because it
-already reads `$RUNNER_TEMP/mecatequi` regardless of how it got there. This pipeline
-deliberately does **not** add that release job.
+- **Self (this repo).** `uses: ./.github/actions/mecatequi` → `$GITHUB_ACTION_PATH` is the
+  local workspace's action directory, so it builds the checked-out tree (HEAD). mecatl's own
+  live workflow uses this — it dogfoods HEAD with no tag dependency.
+- **Cross-repo.** `uses: stacklok/mecatl/.github/actions/mecatequi@<tag>` → GitHub checks
+  the **whole mecatl repo out at that tag** into `$GITHUB_ACTION_PATH`, and the build uses
+  that tagged source. **No mecatl checkout** is required in the consuming repo.
+
+Because the action source itself is the build input, there is **no token, no `GOPRIVATE`,
+and no PAT** — the same zero-credential posture as matlatl. The action lives at
+`.github/actions/mecatequi/`, so the repo root (where `go.mod` + `cmd/mecatequi` live) is
+`$GITHUB_ACTION_PATH/../../..`. Acquisition stays two isolated composite steps ("Set up Go" +
+"Acquire mecatequi binary") so the signed-asset swap below remains a contained change.
+
+**Cross-repo reference.** A consumer references the subdir action and pins a tag (or a SHA):
+
+```yaml
+- uses: stacklok/mecatl/.github/actions/mecatequi@v0.0.1   # SHA-pin in real workflows
+  with:
+    prompt-file: ${{ runner.temp }}/prompt.txt
+    posture: auto
+```
+
+`owner/repo/path@ref` is the GitHub syntax for an action that lives in a repository
+subdirectory; the `@<ref>` IS the version (there is no version input — matlatl has none
+either). The **only** requirement is the org setting that lets GitHub Actions use actions
+from the org's internal/private repositories (Settings → Actions → General → Access for
+`stacklok/mecatl`, or `gh api -X PUT
+repos/stacklok/mecatl/actions/permissions/access -f access_level=organization`). mecatl's own
+workflow keeps `uses: ./.github/actions/mecatequi` (local build, always HEAD).
+
+**Versioning: ALPHA, `v0.0.x`.** The first published tag is `v0.0.1`. Tags are cut by a
+release process separate from this design (the orchestrator), not by editing the action.
+
+**Residual / honest cost.** Each run builds the binary from source (no cached release
+artifact). A future release job can publish a checksummed, cosign-signed `mecatequi` binary
+or a container (mirroring the `mecated` image's keyless-signing flow in
+`.github/workflows/release.yml`); swapping the action to consume it is then a one-step change
+— drop the two acquisition steps and add a download + `cosign verify` + checksum-check, since
+the run step already reads `$RUNNER_TEMP/mecatequi` regardless of how it got there. That
+signed-binary / container path is the later speed optimization; this pipeline deliberately
+does **not** add it yet.
 
 ## 6. The `/proc`-exfiltration gap — FIXED (the secret-scrubbed agent shell)
 
