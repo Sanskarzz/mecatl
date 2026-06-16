@@ -2259,8 +2259,8 @@ before suspecting the harness.
 an in-process engine and emits a working-tree git diff, a machine-readable summary JSON,
 and an optional durable event log, then exits with a code derived from the run's terminal
 state. A reusable **composite action** and an **example workflow** wire it into GitHub
-Actions safely. The design rationale, the trust model, and the `/proc`-exfiltration
-follow-up live in `docs/design/MECATEQUI.md`; this section is the operator walkthrough.
+Actions safely. The design rationale, the trust model, and the (now fixed) secret-scrubbed
+agent shell live in `docs/design/MECATEQUI.md`; this section is the operator walkthrough.
 
 > The example workflow is a **template** — copy it into your own repo and review it. This
 > repo does not run it against real issues (no `mecatequi` label, no configured secret).
@@ -2458,10 +2458,12 @@ Untrusted issue text never appears in a `${{ }}` interpolation inside a `run:` b
 an argv token. Extraction is `jq` over the event JSON file into a file; the file reaches
 the binary via `--prompt-file`; the binary fences it. Every event-derived value
 (author association, issue number, paths) is passed via `env:`. The produced patch is
-applied as data, never executed. **Honest caveat:** under posture `auto` a hijacked agent
-with shell access can still read process-environment secrets via Bash; v1 bounds the blast
-radius by holding only the rotatable LLM key (no write token) in the agent's job. The
-engine-side scrub is a named follow-up in `docs/design/MECATEQUI.md`.
+applied as data, never executed. **Defense in depth:** every agent-facing Bash shell runs
+with a secret-scrubbed environment (`internal/adapter/envscrub` — the harness's
+provider/auth/forge credentials are dropped before the shell sees them), so a hijacked
+agent cannot `echo $OPENROUTER_API_KEY` / `cat /proc/self/environ` to exfiltrate them; and
+the workflow still bounds the blast radius by holding only the rotatable LLM key (no write
+token) in the agent's job. See `docs/design/MECATEQUI.md` §6.
 
 ---
 
