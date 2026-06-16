@@ -49,38 +49,26 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  debug-context:
-    runs-on: ubuntu-24.04
-    steps:
-      - name: dump event fields
-        run: |
-          echo "event_name=${{ github.event_name }}"
-          echo "action=${{ github.event.action }}"
-          echo "label_name=${{ github.event.label.name }}"
-          echo "issue_assoc=${{ github.event.issue.author_association }}"
-          echo "left_clause=${{ github.event_name == 'issues' && github.event.label.name == 'mecatequi' && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association) }}"
-
   implement:
     name: Run mecatequi (agent, no write token)
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    # Gate on the trigger AND the author association. The label path requires the
-    # 'mecatequi' label; the comment path requires a '@mecatequi' mention AND that the
-    # comment is on an ISSUE, not a PR (issue_comment fires on PR comments too, where the
-    # "issue" is the PR — running the agent against PR text with a nonsensical
-    # `Closes #<PR>` is wrong). Either way the actor must be OWNER/MEMBER/COLLABORATOR.
-    # This is a PRIVATE, owner-internal repo, but the gate stays as defense in depth.
-    # author-gate.sh re-asserts the association inside the job.
+    # Gate on the TRIGGER. The label path requires the 'mecatequi' label — applying a
+    # label already requires triage/write access on this PRIVATE repo, so GitHub's own
+    # permission model IS the gate. The comment path requires a '@mecatequi' mention on
+    # an ISSUE, not a PR (issue_comment fires for PR comments too, where the "issue" is
+    # the PR — running the agent against PR text with a nonsensical `Closes #<PR>` is
+    # wrong). We deliberately do NOT gate on author_association: GitHub's webhook
+    # author_association is unreliable for membership (it reports an org MEMBER as
+    # CONTRIBUTOR), so basing a gate on it wrongly SKIPS legitimate runs. For a PUBLIC
+    # repo, add a dedicated permission-check gate job (see docs/design/MECATEQUI.md)
+    # rather than trusting author_association.
     if: >-
+      ( github.event_name == 'issues' && github.event.label.name == 'mecatequi' ) ||
       (
-        github.event_name == 'issues' &&
-        github.event.label.name == 'mecatequi' &&
-        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association)
-      ) || (
         github.event_name == 'issue_comment' &&
         github.event.issue.pull_request == null &&
-        contains(github.event.comment.body, '@mecatequi') &&
-        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+        contains(github.event.comment.body, '@mecatequi')
       )
     # NO write, NO id-token. The only secret is the LLM key.
     permissions:
@@ -103,12 +91,10 @@ jobs:
           persist-credentials: false
           ref: ${{ github.sha }}
 
-      # Defense-in-depth behind the job `if:`. The association crosses via env, never argv.
-      - name: Author gate
-        shell: bash
-        env:
-          ASSOC: ${{ github.event_name == 'issue_comment' && github.event.comment.author_association || github.event.issue.author_association }}
-        run: ./.github/actions/mecatequi/author-gate.sh
+      # NOTE: no author-gate.sh step here (unlike the example template). On this PRIVATE
+      # repo the trigger IS the gate (label application needs triage/write; comment access
+      # is team-only), and author-gate.sh keys off the unreliable author_association. A
+      # public deployment should add a dedicated permission-check gate JOB instead.
 
       # Extract the UNTRUSTED prompt from the event JSON into a file via jq — never an
       # inline ${{ }} of the body. The file path is the script's $1.
