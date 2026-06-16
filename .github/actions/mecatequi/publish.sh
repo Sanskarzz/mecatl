@@ -246,6 +246,14 @@ git commit -m "$(printf 'mecatequi: changes for issue #%s\n\nAutomated change pr
 # a PR). `set -e` would abort the script on a failed push/PR-create, so guard each with an
 # explicit comment-then-exit. The push uses --force-with-lease so a re-run updates the same
 # branch safely.
+#
+# --force-with-lease needs a remote-tracking ref for the branch to lease against. This
+# checkout fetched only the run SHA (actions/checkout's refspec), so on a RE-RUN the
+# existing remote branch has no tracking ref and the push is rejected with "stale info".
+# Fetch the branch into its tracking ref first (a no-op when the branch doesn't exist yet,
+# i.e. the first run), so the lease is valid and the force-update overwrites the prior
+# attempt as intended.
+git fetch origin "+refs/heads/${branch}:refs/remotes/origin/${branch}" 2>/dev/null || true
 if ! git push --force-with-lease --set-upstream origin "${branch}"; then
   push_failure_comment "the git push failed (the bot may lack contents:write, or the branch moved)"
   echo "::error::publish: git push to ${branch} failed"
