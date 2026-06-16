@@ -20,6 +20,24 @@
 #   REPO            owner/repo (defaults to $GITHUB_REPOSITORY)
 #   BASE_BRANCH     base branch for the PR (defaults to the repo default branch, then
 #                   $GITHUB_REF_NAME)
+#   MQ_PR_BODY_TEMPLATE   OPTIONAL path (relative to the checkout) to a PR-body template
+#                   with {{placeholder}} tokens. When empty, the convention path
+#                   .github/mecatequi/pr-body.md is used if present, else the built-in body.
+#   MQ_PR_TITLE_TEMPLATE  OPTIONAL one-line PR-title template (same placeholders). When empty,
+#                   the built-in title "mecatequi: changes for issue #<n>" is used.
+#
+# PR-BODY / PR-TITLE TEMPLATING (untrusted-value safe). A repo may supply its own PR
+# description style via a template file with {{placeholder}} tokens. The substituted VALUES
+# include the model's own final_text — AGENT-AUTHORED from UNTRUSTED issue text — so the
+# substitution is LITERAL (a value containing `& \ /`, backticks, `$(...)`, or `{{...}}` is
+# inserted verbatim, never interpreted), SINGLE-PASS (a value that itself contains a token is
+# NOT re-expanded), and DISPLAY-ONLY (written to a --body-file, never executed). The render is
+# a small python3 pass (`render_template`) that reads the template + a values JSON file (NOT
+# argv, NOT the process env) and does ONE regex replacement keyed off a fixed dict, leaving
+# unknown {{tokens}} intact. The trust caveat is ALWAYS force-prepended regardless of template,
+# so a custom template can never drop the safety warning. Templating applies to the PR-create
+# body + the re-run body refresh ONLY — the failure / no-change / de-dup comment paths are
+# unchanged.
 set -euo pipefail
 
 : "${GH_TOKEN:?publish: GH_TOKEN is required}"
@@ -31,6 +49,13 @@ EXIT_CLASS="${EXIT_CLASS:-setup-failure}"
 PATCH_PATH="${PATCH_PATH:-}"
 SUMMARY_PATH="${SUMMARY_PATH:-}"
 REPO="${REPO:-${GITHUB_REPOSITORY:-}}"
+MQ_PR_BODY_TEMPLATE="${MQ_PR_BODY_TEMPLATE:-}"
+MQ_PR_TITLE_TEMPLATE="${MQ_PR_TITLE_TEMPLATE:-}"
+
+# Root the convention-path lookup at the checkout. publish.sh runs from the checked-out repo
+# root (the workflow invokes ./.github/actions/mecatequi/publish.sh), so $GITHUB_WORKSPACE is
+# the checkout; fall back to the cwd when the var is absent (e.g. a local dry-run).
+MQ_WORKSPACE="${GITHUB_WORKSPACE:-$(pwd)}"
 
 export GH_TOKEN
 
@@ -85,6 +110,85 @@ exit_class_explanation() {
       echo "The run ended in an unexpected state (\`${1}\`). Check the run log."
       ;;
   esac
+}
+
+# Render a PR-body/title template with LITERAL, SINGLE-PASS {{token}} substitution.
+#   $1 = path to the template file
+#   $2 = path to a JSON file mapping token name -> replacement value
+# Tokens absent from the dict are left INTACT (the operator may use literal {{...}}). Values
+# are inserted VERBATIM — sed/regex metacharacters, backticks, $(...) and {{...}} inside a
+# value are never interpreted, and a value containing a token is NOT re-expanded (single pass
+# over the template, each match resolved once against the dict). The values arrive via a FILE,
+# never argv and never the process env, so no attacker-controlled value reaches a shell or
+# envsubst. The result is display-only text (a --body-file), never executed.
+render_template() {
+  python3 - "${1}" "${2}" <<'PY'
+import json
+import re
+import sys
+
+tmpl_path, values_path = sys.argv[1], sys.argv[2]
+with open(tmpl_path, "r", encoding="utf-8") as f:
+    template = f.read()
+with open(values_path, "r", encoding="utf-8") as f:
+    values = json.load(f)
+
+# ONE pass: scan the template for {{name}} occurrences; replace each from the dict if the
+# name is known, otherwise leave the literal {{name}} untouched. Using a function replacement
+# means the replacement string is inserted VERBATIM — re.sub does NOT interpret backrefs/
+# metacharacters in a callable's return — and a value that itself contains "{{run_url}}" is
+# NOT rescanned (re.sub advances past the inserted text; this is the single-pass guarantee).
+pattern = re.compile(r"\{\{\s*([A-Za-z0-9_]+)\s*\}\}")
+
+def repl(m):
+    name = m.group(1)
+    if name in values:
+        return str(values[name])
+    return m.group(0)  # unknown token: leave the literal {{...}} intact
+
+sys.stdout.write(pattern.sub(repl, template))
+PY
+}
+
+# Confine an operator-supplied template path to the checkout (defense-in-depth, CWE-22). The
+# template path is OPERATOR-set (not attacker-reachable), but a `../` traversal or a symlink
+# pointing outside the checkout would otherwise splice an out-of-tree file into the PR body;
+# resolve to an absolute realpath and assert it is inside ${MQ_WORKSPACE} before reading it.
+#   $1 = a candidate path (already joined to ${MQ_WORKSPACE})
+# Prints the resolved absolute path on success; prints nothing + returns non-zero on escape
+# or a missing file (the caller logs the warning + falls back).
+confine_to_workspace() {
+  local candidate="${1}" ws_real resolved
+  ws_real="$(realpath -- "${MQ_WORKSPACE}" 2>/dev/null || true)"
+  # -e: the file must exist; resolves symlinks + `..` to a canonical path.
+  resolved="$(realpath -e -- "${candidate}" 2>/dev/null || true)"
+  [ -z "${ws_real}" ] && return 1
+  [ -z "${resolved}" ] && return 1
+  # Containment: the resolved path must be ws_real itself or sit under ws_real/.
+  case "${resolved}" in
+    "${ws_real}" | "${ws_real}"/*) printf '%s\n' "${resolved}"; return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Resolve the PR-body template path per the documented order:
+#   1. MQ_PR_BODY_TEMPLATE (explicit, relative to the checkout) if set + present + confined;
+#   2. .github/mecatequi/pr-body.md in the checkout (zero-config convention) if present;
+#   3. empty -> the caller falls back to the built-in body.
+# Prints the resolved absolute path, or nothing when no template applies.
+resolve_body_template() {
+  local p=""
+  if [ -n "${MQ_PR_BODY_TEMPLATE}" ]; then
+    if p="$(confine_to_workspace "${MQ_WORKSPACE}/${MQ_PR_BODY_TEMPLATE}")"; then
+      printf '%s\n' "${p}"
+    else
+      echo "::warning::publish: pr-body-template '${MQ_PR_BODY_TEMPLATE}' is missing or resolves outside the checkout; using the built-in PR body" >&2
+    fi
+    return 0
+  fi
+  p="${MQ_WORKSPACE}/.github/mecatequi/pr-body.md"
+  [ -f "${p}" ] && printf '%s\n' "${p}"
+  return 0
 }
 
 # ── Non-clean run: post an honest failure comment, open NO PR ────────────────────────────
@@ -261,23 +365,28 @@ if ! git push --force-with-lease --set-upstream origin "${branch}"; then
 fi
 
 # The PR body is built as TEXT — never executed. It is a DESCRIPTION a reviewer can act
-# on, not just harness metadata:
-#   1. the trust caveat (PROMINENT top line — agent-authored from untrusted issue text,
-#      so a human must scrutinise before merging; merging IS the approval gate);
-#   2. the model's OWN summary of what it did (`final_text`) — the natural PR description,
-#      previously thrown away (only used on the no-change comment path);
-#   3. the list of files the patch changed (added/modified/deleted), so the reviewer sees
+# on, not just harness metadata. The CAVEAT is ALWAYS force-prepended below; the rest of the
+# body is either the built-in layout or a repo-provided template.
+#
+# Built-in body (the default when no template applies — preserved byte-for-byte):
+#   1. the model's OWN summary of what it did (`final_text`) — the natural PR description;
+#   2. the list of files the patch changed (added/modified/deleted), so the reviewer sees
 #      the scope at a glance;
-#   4. the run metadata table + run link;
-#   5. `Closes #N` (auto-closing on merge is correct — the merge is the human gate; a
+#   3. the run metadata table + run link;
+#   4. `Closes #N` (auto-closing on merge is correct — the merge is the human gate; a
 #      deployment that prefers NOT to auto-close can swap it for `Refs #N`).
 # final_text is the agent's report — it rides in as --body-file DISPLAY text (never argv,
 # never executed); the caveat frames it as agent-authored.
 final_text="$(summary_field '.final_text')"
 changed_files="$(git diff-tree --no-commit-id --name-status -r HEAD 2>/dev/null || true)"
-{
-  echo "⚠️ **Agent-authored from the issue text — review carefully before merging.**"
-  echo
+
+# The trust caveat — NON-NEGOTIABLE, force-prepended to EVERY PR body (built-in or templated)
+# so a custom template can never accidentally drop the safety warning. It is NOT a placeholder.
+PR_CAVEAT="⚠️ **Agent-authored from the issue text — review carefully before merging.**"
+
+# Emit the built-in default body (everything BELOW the caveat). Factored so the no-template
+# path and a future test share one source of truth.
+builtin_pr_body() {
   if [ -n "${final_text}" ]; then
     echo "## What the agent did"
     echo
@@ -299,13 +408,86 @@ changed_files="$(git diff-tree --no-commit-id --name-status -r HEAD 2>/dev/null 
   echo "[View the workflow run](${run_url})."
   echo
   echo "Closes #${ISSUE_NUMBER}"
-} > "${RUNNER_TEMP}/mecatequi-pr-body.md"
+}
+
+# The formatted placeholder values (the SAME formatting the built-in body uses), built once
+# and reused for both the body and the title render. When there are no changed files, the
+# value is a sentinel (parity with summary_table's "(no run summary…)" fallback) so a
+# template author's "## Files changed" header is never left dangling over nothing — the
+# built-in body guards its own header, but a template author cannot.
+files_changed_fmt="_(no files changed)_"
+if [ -n "${changed_files}" ]; then
+  files_changed_fmt="$(printf '%s\n' "${changed_files}" | sed 's/\t/  /; s/^/- `/; s/$/`/')"
+fi
+summary_table_fmt="$(summary_block)"
+stop_reason_val="$(summary_field '.stop_reason')"
+non_empty_val="$(summary_field '.non_empty_diff')"
+diff_bytes_val="$(summary_field '.diff_bytes')"
+total_tokens_val="$(summary_field '.usage.total_tokens')"
+
+# Assemble the values dict as JSON via jq (--arg keeps every value LITERAL — no shell/argv
+# splicing of the value content). This file, not argv or the env, feeds render_template.
+values_json="${RUNNER_TEMP}/mecatequi-pr-values.json"
+jq -n \
+  --arg what_agent_did "${final_text}" \
+  --arg files_changed "${files_changed_fmt}" \
+  --arg summary_table "${summary_table_fmt}" \
+  --arg run_url "${run_url}" \
+  --arg issue "${ISSUE_NUMBER}" \
+  --arg issue_ref "#${ISSUE_NUMBER}" \
+  --arg stop_reason "${stop_reason_val}" \
+  --arg non_empty_diff "${non_empty_val}" \
+  --arg diff_bytes "${diff_bytes_val}" \
+  --arg total_tokens "${total_tokens_val}" \
+  --arg branch "${branch}" \
+  --arg base "${base}" \
+  '{
+    what_agent_did: $what_agent_did,
+    files_changed: $files_changed,
+    summary_table: $summary_table,
+    run_url: $run_url,
+    issue: $issue,
+    issue_ref: $issue_ref,
+    stop_reason: $stop_reason,
+    non_empty_diff: $non_empty_diff,
+    diff_bytes: $diff_bytes,
+    total_tokens: $total_tokens,
+    branch: $branch,
+    base: $base
+  }' > "${values_json}"
+
+# Resolve the body template (explicit input -> convention path -> none).
+body_template="$(resolve_body_template)"
+
+pr_body_file="${RUNNER_TEMP}/mecatequi-pr-body.md"
+{
+  # The caveat is ALWAYS first, and is never run through the template engine.
+  printf '%s\n\n' "${PR_CAVEAT}"
+  if [ -n "${body_template}" ]; then
+    echo "publish: rendering PR body from template ${body_template}" >&2
+    render_template "${body_template}" "${values_json}"
+  else
+    builtin_pr_body
+  fi
+} > "${pr_body_file}"
+
+# Resolve the PR title: a template (same placeholders) or the built-in default. The default
+# is byte-for-byte the prior title. A title template is rendered, then flattened to one line
+# (a PR title is single-line) and the caveat is NOT prepended to the title.
+pr_title="mecatequi: changes for issue #${ISSUE_NUMBER}"
+if [ -n "${MQ_PR_TITLE_TEMPLATE}" ]; then
+  if title_template="$(confine_to_workspace "${MQ_WORKSPACE}/${MQ_PR_TITLE_TEMPLATE}")"; then
+    pr_title="$(render_template "${title_template}" "${values_json}" | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+  else
+    echo "::warning::publish: pr-title-template '${MQ_PR_TITLE_TEMPLATE}' is missing or resolves outside the checkout; using the built-in PR title" >&2
+  fi
+fi
 
 if [ -n "${existing_pr}" ]; then
   echo "publish: updated existing PR #${existing_pr} on ${branch}"
   # Refresh the PR description too, so a re-run's PR reflects the LATEST run's summary +
   # changed files (not the stale body from the first attempt).
-  gh pr edit "${existing_pr}" --repo "${REPO}" --body-file "${RUNNER_TEMP}/mecatequi-pr-body.md" || true
+  gh pr edit "${existing_pr}" --repo "${REPO}" --body-file "${pr_body_file}" || true
   gh issue comment "${ISSUE_NUMBER}" --repo "${REPO}" \
     --body "Updated the existing pull request #${existing_pr} with a fresh mecatequi run. ⚠️ Agent-authored — review carefully before merging. [View the workflow run](${run_url})."
   exit 0
@@ -316,8 +498,8 @@ if ! gh pr create \
   --repo "${REPO}" \
   --base "${base}" \
   --head "${branch}" \
-  --title "mecatequi: changes for issue #${ISSUE_NUMBER}" \
-  --body-file "${RUNNER_TEMP}/mecatequi-pr-body.md"; then
+  --title "${pr_title}" \
+  --body-file "${pr_body_file}"; then
   push_failure_comment "the branch was pushed but \`gh pr create\` failed (the bot may lack pull-requests:write)"
   echo "::error::publish: gh pr create failed for ${branch} -> ${base}"
   exit 1

@@ -1,0 +1,48 @@
+<!--
+  Example mecatequi PR-body template.
+
+  ACTIVATE: rename this file to `.github/mecatequi/pr-body.md` (drop the `.example`) and
+  publish.sh will use it automatically — no workflow change needed. Or point the
+  `MQ_PR_BODY_TEMPLATE` env var (see the Publish step) at any path relative to the checkout.
+
+  The harness ALWAYS force-prepends the trust caveat
+  ("⚠️ Agent-authored from the issue text — review carefully before merging.")
+  above whatever this template renders, so you cannot accidentally drop the safety warning.
+  Do NOT include your own ⚠️ caveat line in the template — it is prepended automatically;
+  adding one yields a duplicate.
+
+  Substitution is LITERAL and SINGLE-PASS: a {{placeholder}} below is replaced once with its
+  value, the value is inserted verbatim (no shell/markdown interpretation), and an unknown
+  {{token}} is left intact. Issue linkage is YOURS to control here — use {{issue_ref}} with
+  `Closes`/`Refs` (the built-in default uses `Closes`).
+
+  Available placeholders:
+    {{what_agent_did}}  the model's own account of the change (final_text)
+    {{files_changed}}   the name-status bullet list of changed files
+    {{summary_table}}   the run-metadata markdown table
+    {{run_url}}         link to the workflow run
+    {{issue}}           the issue number, bare (e.g. 123)
+    {{issue_ref}}       the issue reference (e.g. #123)
+    {{stop_reason}}     the terminal stop reason
+    {{non_empty_diff}}  whether the run left a diff (true/false)
+    {{diff_bytes}}      size of the diff in bytes
+    {{total_tokens}}    cumulative tokens for the run
+    {{branch}}          the head branch the PR is opened from
+    {{base}}            the base branch the PR targets
+-->
+## Summary
+
+{{what_agent_did}}
+
+## Changed files
+
+{{files_changed}}
+
+## Run details
+
+{{summary_table}}
+
+[View the workflow run]({{run_url}})
+
+---
+Closes {{issue_ref}}

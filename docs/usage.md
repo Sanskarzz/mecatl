@@ -2283,6 +2283,8 @@ accepts any model the provider serves.
 | `openai` | `--openai` (when `true`) | `""` |
 | `openai-base-url` | `--openai-base-url` | `""` |
 | `guardrails-model` | `--guardrails-model` | `""` |
+| `pr-body-template` | `publish.sh` PR-body template (via `MQ_PR_BODY_TEMPLATE`) | `""` |
+| `pr-title-template` | `publish.sh` PR-title template (via `MQ_PR_TITLE_TEMPLATE`) | `""` |
 | `out-diff` | `--out-diff` | `$RUNNER_TEMP/mecatequi.patch` |
 | `out-summary` | `--out-summary` | `$RUNNER_TEMP/mecatequi.summary.json` |
 | `out-events` | `--out-events` | `$RUNNER_TEMP/mecatequi.events.jsonl` |
@@ -2361,6 +2363,34 @@ reviewed, not referenced by tag — so you control exactly what runs. To enable 
    broad `GITHUB_TOKEN` in the `publish` job or upgrade to a JIT GitHub App token (the
    stronger option — see `docs/design/MECATEQUI.md`).
 5. Apply the `mecatequi` label to a test issue and watch the run.
+
+### Customising the PR description (templates)
+
+By default `publish.sh` writes a rich built-in PR body (caveat + "What the agent did" +
+"Files changed" + "Run" table + run link + `Closes #<n>`). To use your own style, supply a
+template file of `{{placeholder}}` tokens. Resolution, in order:
+
+1. The `MQ_PR_BODY_TEMPLATE` env on the `Publish` step (a path relative to the checkout).
+2. Else `.github/mecatequi/pr-body.md` in the checkout — **the zero-config convention**.
+3. Else the built-in body (absent template = today's behaviour, unchanged).
+
+Easiest activation: copy the shipped `.github/mecatequi/pr-body.md.example`, edit it, and
+**rename it to `.github/mecatequi/pr-body.md`** — no workflow change needed. An optional
+`MQ_PR_TITLE_TEMPLATE` overrides the PR title (same placeholders; default `mecatequi:
+changes for issue #<n>`). In a title, use the **short** placeholders (`{{issue_ref}}`,
+`{{stop_reason}}`, `{{branch}}`) — prose ones like `{{what_agent_did}}` or
+`{{summary_table}}` flatten to one unwieldy line.
+
+Placeholders: `{{what_agent_did}}`, `{{files_changed}}`, `{{summary_table}}`, `{{run_url}}`,
+`{{issue}}`, `{{issue_ref}}`, `{{stop_reason}}`, `{{non_empty_diff}}`, `{{diff_bytes}}`,
+`{{total_tokens}}`, `{{branch}}`, `{{base}}`. An unknown `{{token}}` is left intact.
+
+Two things to know: the `⚠️ Agent-authored — review carefully before merging.` caveat is
+**always** force-prepended (a template cannot drop it — so do **not** add your own ⚠️ caveat
+line in the template, or you get a duplicate), and **issue linkage is yours** in a custom
+template — use `{{issue_ref}}` with `Closes`/`Refs` (the built-in default uses `Closes`).
+Substitution is literal and single-pass over agent-authored (untrusted) values — see
+`docs/design/MECATEQUI.md` for the mechanism and the full rationale.
 
 ### Injection safety (why it is built this way)
 

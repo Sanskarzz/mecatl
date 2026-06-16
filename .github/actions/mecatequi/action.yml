@@ -136,6 +136,30 @@ inputs:
       default (3).
     required: false
     default: ""
+  pr-body-template:
+    description: >-
+      OPTIONAL path (relative to the checkout) to a PR-body template with {{placeholder}}
+      tokens, consumed by publish.sh. When empty (default), publish.sh uses
+      .github/mecatequi/pr-body.md if present, else the built-in rich body. The trust caveat
+      is ALWAYS force-prepended regardless of the template — a custom template cannot drop it,
+      and you must NOT add your own caveat line in the template or you get a duplicate.
+      Substitution is literal + single-pass; unknown {{tokens}} are left intact. See
+      docs/design/MECATEQUI.md for the full placeholder list. NOTE: this action runs the AGENT
+      (no GitHub token); publish.sh runs in the separate privileged job, so a workflow that
+      calls publish.sh directly threads this via the MQ_PR_BODY_TEMPLATE env — this input is
+      the documented surface + the threading point when publish.sh is wrapped in a composite.
+    required: false
+    default: ""
+  pr-title-template:
+    description: >-
+      OPTIONAL path (relative to the checkout) to a one-line PR-title template (same
+      placeholders as pr-body-template), consumed by publish.sh via MQ_PR_TITLE_TEMPLATE.
+      When empty (default), the built-in title "mecatequi: changes for issue #<n>" is used.
+      Use the SHORT placeholders in a title ({{issue_ref}}, {{stop_reason}}, {{branch}});
+      prose placeholders like {{what_agent_did}} or {{summary_table}} flatten to one
+      unwieldy line.
+    required: false
+    default: ""
   out-diff:
     description: Where the working-tree git patch is written.
     required: false

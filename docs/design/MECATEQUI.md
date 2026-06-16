@@ -137,6 +137,88 @@ Outputs (kebab-case, GitHub Actions house style): `patch-path`, `summary-path`,
 `events-path`, `summary-json` (compacted; best-effort and `$GITHUB_OUTPUT`-size-bounded —
 read `summary-path` for anything large), `stop-reason`, `non-empty-diff`, `exit-class`.
 
+### Configurable PR-description formatting
+
+`publish.sh` builds the PR title + body. A repo can override the **body** layout (and,
+optionally, the **title**) with a template file of `{{placeholder}}` tokens, so different
+repos get their own PR-description style. This is `publish.sh` + `action.yml` glue — no Go.
+
+**Resolution order (in `publish.sh`):**
+
+1. The `pr-body-template` input / `MQ_PR_BODY_TEMPLATE` env — a path **relative to the
+   checkout** — if set and the file exists.
+2. Else `.github/mecatequi/pr-body.md` in the checkout (the zero-config convention) if it
+   exists.
+3. Else the **built-in rich body** (caveat + "What the agent did" + "Files changed" + "Run"
+   table + run link + `Closes #<n>`). **An absent template preserves today's behaviour
+   byte-for-byte** — a default-path render is byte-equivalent to the prior body.
+
+A missing **explicit** template path — or one that resolves **outside the checkout** (a
+`../` traversal or an escaping symlink; the path is confined to `${MQ_WORKSPACE}` as
+defense-in-depth, CWE-22) — logs a `::warning::` and falls back to the built-in body (it
+never aborts the publish, and never reads an out-of-checkout file into the PR). The optional
+`pr-title-template` / `MQ_PR_TITLE_TEMPLATE` controls the title the same way (same
+confinement); its default is the prior title `mecatequi: changes for issue #<n>`. A rendered
+title is flattened to one line — so use the **short** placeholders in a title
+(`{{issue_ref}}`, `{{stop_reason}}`, `{{branch}}`); prose placeholders like
+`{{what_agent_did}}` or `{{summary_table}}` flatten to one unwieldy line.
+
+**Placeholders (the documented allowlist):**
+
+| Token | Value |
+|---|---|
+| `{{what_agent_did}}` | the model's `final_text` (its own account of the change) |
+| `{{files_changed}}` | the name-status bullet list of changed files |
+| `{{summary_table}}` | the run-metadata markdown table |
+| `{{run_url}}` | link to the workflow run |
+| `{{issue}}` | the issue number, bare (e.g. `123`) |
+| `{{issue_ref}}` | the issue reference (e.g. `#123`) |
+| `{{stop_reason}}` | the terminal stop reason |
+| `{{non_empty_diff}}` | whether the run left a diff (`true`/`false`) |
+| `{{diff_bytes}}` | diff size in bytes |
+| `{{total_tokens}}` | cumulative tokens for the run |
+| `{{branch}}` | the head branch the PR is opened from |
+| `{{base}}` | the base branch the PR targets |
+
+An **unknown** `{{token}}` is left **intact** (the operator may want literal braces) — never
+stripped, never an error. When there are no changed files, `{{files_changed}}` renders a
+`_(no files changed)_` sentinel (parity with `{{summary_table}}`'s "no run summary"
+fallback), so a template author's `## Files changed` header is never left dangling over an
+empty value.
+
+**Why a careful substitution mechanism (the security point).** `{{what_agent_did}}` is the
+model's `final_text` — **agent-authored from untrusted issue text**. The substitution
+(`render_template` in `publish.sh`, a small `python3` pass) is therefore:
+
+- **Literal** — values are read from a JSON file (built with `jq --arg`, never argv, never
+  the process env) and inserted via a `re.sub` *callable*, so a value containing `& \ /`,
+  backticks, `$(...)`, or `{{...}}` is inserted **verbatim**, never interpreted. No naive
+  `sed s///` (breaks on `& / \`), no `eval`, no `envsubst` against the env (would expand any
+  `$VAR` an attacker put in `final_text`).
+- **Single-pass** — one scan of the template; each `{{token}}` is resolved once against a
+  fixed dict, and a value that itself contains `{{run_url}}` is **not** re-expanded.
+- **Display-only** — the result is written to a `gh ... --body-file` and posted as PR text;
+  it is never executed.
+
+**The trust caveat is non-negotiable.** `publish.sh` **always force-prepends** the
+`⚠️ Agent-authored from the issue text — review carefully before merging.` line above
+whatever the template renders, so a custom template can never drop the safety warning. It is
+not a placeholder — **do NOT include your own ⚠️ caveat line in the template, or you get a
+duplicate.**
+
+**Issue linkage.** The built-in default keeps `Closes #<n>`. A custom template controls its
+own linkage (use `{{issue_ref}}` with `Closes`/`Refs`); `publish.sh` does **not** force-append
+`Closes` when a template is used.
+
+**Scope.** Templating applies to the **PR-create body + the re-run body refresh only**. The
+failure / no-change / de-dup comment paths are unchanged.
+
+**Example template + activation.** `.github/mecatequi/pr-body.md.example` ships a copyable
+template (it is `.example` so this repo keeps the built-in default until someone opts in).
+**Rename it to `.github/mecatequi/pr-body.md`** to activate it (resolution step 2 — no
+workflow change), or point `MQ_PR_BODY_TEMPLATE` at any path. The live workflow keeps the
+built-in default.
+
 ## 5. Distribution decision
 
 **v1: build-from-source.** There is no published mecatequi release asset — `release.yml`

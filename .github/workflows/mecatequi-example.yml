@@ -232,4 +232,11 @@ jobs:
           REPO: ${{ github.repository }}
           # Optional: pin the PR base branch. Defaults to the repo default branch when unset.
           # BASE_BRANCH: main
+          # Optional: custom PR-description / PR-title templates (paths relative to the
+          # checkout) with {{placeholder}} tokens. Unset = the built-in rich body; publish.sh
+          # also auto-uses .github/mecatequi/pr-body.md if present (rename the shipped
+          # .github/mecatequi/pr-body.md.example to activate it). The trust caveat is ALWAYS
+          # force-prepended regardless of template. See docs/design/MECATEQUI.md.
+          # MQ_PR_BODY_TEMPLATE: .github/mecatequi/pr-body.md
+          # MQ_PR_TITLE_TEMPLATE: .github/mecatequi/pr-title.txt
         run: ./.github/actions/mecatequi/publish.sh
