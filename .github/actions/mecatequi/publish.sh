@@ -34,6 +34,12 @@ REPO="${REPO:-${GITHUB_REPOSITORY:-}}"
 
 export GH_TOKEN
 
+# Authenticate git over HTTPS via GH_TOKEN. The publish checkout uses
+# persist-credentials:false (the token is never written to .git/config), so a plain
+# `git push` has no credentials ("could not read Username for https://github.com").
+# gh's credential helper supplies the token from the environment for the push below.
+gh auth setup-git
+
 # A link back to this workflow run, for both comment paths.
 run_url="${GITHUB_SERVER_URL:-https://github.com}/${REPO}/actions/runs/${GITHUB_RUN_ID:-}"
 
