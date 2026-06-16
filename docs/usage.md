@@ -2338,7 +2338,7 @@ permissions:
   contents: read
 jobs:
   mecatequi:
-    uses: stacklok/mecatl/.github/workflows/mecatequi-reusable.yml@v0.0.2
+    uses: stacklok/mecatl/.github/workflows/mecatequi-reusable.yml@v0.0.3
     permissions:
       contents: write
       pull-requests: write
@@ -2366,7 +2366,7 @@ example above) is what actually fires the run; the workflow's `if:` gates then m
 `label` / `mention` inputs. **Omit or mis-set those triggers and you get total silence** —
 no run, no error — because nothing ever delivers an event to the reusable workflow.
 
-**Pin the latest released tag, not `@v0.0.2`.** The `@v0.0.2` in every example here is
+**Pin the latest released tag, not `@v0.0.3`.** The `@v0.0.3` in every example here is
 **illustrative**. Pin the **latest released tag** from the
 [Releases page](https://github.com/stacklok/mecatl/releases) — a `uses:` ref that points at a
 tag which does not exist (e.g. a reader landing between releases) fails with GitHub's generic

@@ -5,7 +5,7 @@
 #
 #   jobs:
 #     mecatequi:
-#       uses: stacklok/mecatl/.github/workflows/mecatequi-reusable.yml@v0.0.2
+#       uses: stacklok/mecatl/.github/workflows/mecatequi-reusable.yml@v0.0.3
 #       secrets:
 #         openrouter-key: ${{ secrets.OPENROUTER_CI_TOKEN }}
 #         publish-app-id: ${{ secrets.RELEASE_APP_ID }}
@@ -44,16 +44,16 @@
 # Inside a workflow called as `uses: owner/repo/.github/workflows/X.yml@ref`, a
 # `uses: ./.github/actions/Y` would resolve to the CALLER's checkout, NOT mecatl's — so the
 # three sibling actions below are referenced by FULL path
-# `stacklok/mecatl/.github/actions/<name>@v0.0.2`. GitHub AUTO-FETCHES a `uses:` action from
+# `stacklok/mecatl/.github/actions/<name>@v0.0.3`. GitHub AUTO-FETCHES a `uses:` action from
 # mecatl at that ref (no consumer vendoring, no mecatl checkout in the consumer). Expressions
 # are ILLEGAL in `uses:`, so the ref is a HARDCODED literal tag.
 #
 # PINNING RATIONALE — these are FIRST-PARTY same-repo actions, so they pin to the VERSION
-# TAG @v0.0.2, NOT a SHA. The supply-chain SHA-pin rule defends against a THIRD-PARTY action
+# TAG @v0.0.3, NOT a SHA. The supply-chain SHA-pin rule defends against a THIRD-PARTY action
 # whose tag a compromised maintainer could re-point; these actions live in THIS repo and are
 # released together, so a SHA would be (a) impossible to write before the release commit
 # exists (a chicken-and-egg bootstrap) and (b) no stronger than the tag (we control both).
-# THE RELEASE-PROCESS COST: every release tag MUST bump these three @v0.0.2 pins in the SAME
+# THE RELEASE-PROCESS COST: every release tag MUST bump these three @v0.0.3 pins in the SAME
 # tagged commit, or the tag ships pins pointing at the PREVIOUS version (version skew). The
 # `lint:reusable-pins` Taskfile target mechanically asserts all three equal the release tag.
 # Third-party actions (checkout, upload/download-artifact, create-github-app-token) stay
@@ -295,20 +295,20 @@ jobs:
 
       # Extract the UNTRUSTED prompt from the event JSON into a file via jq — never an inline
       # ${{ }} of the body. FULL-PATH sibling-action ref (see the header): `./` would resolve
-      # to the caller's checkout, not mecatl's, so this must be the @v0.0.2-pinned full path.
+      # to the caller's checkout, not mecatl's, so this must be the @v0.0.3-pinned full path.
       - name: Extract prompt
         id: prompt
-        uses: stacklok/mecatl/.github/actions/mecatequi-extract-prompt@v0.0.2
+        uses: stacklok/mecatl/.github/actions/mecatequi-extract-prompt@v0.0.3
         with:
           out-file: ${{ runner.temp }}/prompt.txt
 
       # The LLM keys reach the binary via the JOB-level env: block above, NOT a step env
       # here — step-level env on a `uses:` step does not propagate into the composite action's
       # internal steps, and the binary reads the key from the process environment. FULL-PATH
-      # sibling-action ref, @v0.0.2-pinned.
+      # sibling-action ref, @v0.0.3-pinned.
       - name: mecatequi
         id: mecatequi
-        uses: stacklok/mecatl/.github/actions/mecatequi@v0.0.2
+        uses: stacklok/mecatl/.github/actions/mecatequi@v0.0.3
         with:
           prompt-file: ${{ steps.prompt.outputs.prompt-file }}
           untrusted: "true"
@@ -436,9 +436,9 @@ jobs:
       # publish.sh applies the patch as DATA (git apply) and posts text — never agent output
       # as code. It reads GH_TOKEN from the process environment, resolved into $GITHUB_ENV by
       # the step above (a job-scoped write, the only delivery that reaches a composite's
-      # internal step). FULL-PATH sibling-action ref, @v0.0.2.
+      # internal step). FULL-PATH sibling-action ref, @v0.0.3.
       - name: Publish
-        uses: stacklok/mecatl/.github/actions/mecatequi-publish@v0.0.2
+        uses: stacklok/mecatl/.github/actions/mecatequi-publish@v0.0.3
         with:
           issue-number: ${{ github.event.issue.number }}
           patch-path: ${{ runner.temp }}/mecatequi-run/mecatequi.patch

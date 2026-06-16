@@ -307,11 +307,13 @@ tasks:
     desc: |
       Lint all GitHub Actions workflows with actionlint (pinned via `go run`, so no
       preinstalled binary is needed). Catches expression-context errors, bad `uses:`
-      refs, and shell issues in `run:` blocks. Runs the reusable-pins check too, so a
-      single `task lint:actions` covers the whole Actions surface.
+      refs, and shell issues in `run:` blocks. Runs the reusable-pins check AND the
+      empty-expression template guard too, so a single `task lint:actions` covers the
+      whole Actions surface.
     cmds:
       - go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
       - task: lint:reusable-pins
+      - task: lint:action-templates
 
   lint:reusable-pins:
     desc: |
@@ -321,6 +323,18 @@ tasks:
       a hardcoded literal the release process must bump in the same tagged commit).
     cmds:
       - bash .github/actions/check-reusable-pins.sh
+
+  lint:action-templates:
+    desc: |
+      Reject a LIVE empty GitHub-expression placeholder in a PARSED field of any
+      workflow/action manifest under .github/ — the self-inflicted-parse-error guard
+      (issue #70). GitHub EVALUATES expression placeholders inside parsed action.yml /
+      workflow scalars (name, description, input defaults, output values), and an EMPTY
+      one is a hard parse error ("An expression was expected") that makes the action fail
+      to LOAD and aborts every run referencing it. It excludes YAML comment lines (never
+      evaluated) and ignores valid non-empty expressions.
+    cmds:
+      - bash .github/actions/check-action-templates.sh
 
   fmt:
     desc: Format Go code (gofmt + goimports if available)

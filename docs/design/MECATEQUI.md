@@ -308,7 +308,7 @@ that will **drift** from mecatl. The reusable workflow
 ```yaml
 jobs:
   mecatequi:
-    uses: stacklok/mecatl/.github/workflows/mecatequi-reusable.yml@v0.0.2
+    uses: stacklok/mecatl/.github/workflows/mecatequi-reusable.yml@v0.0.3
     secrets:
       openrouter-key: ${{ secrets.OPENROUTER_CI_TOKEN }}
       publish-app-id: ${{ secrets.RELEASE_APP_ID }}
@@ -338,7 +338,7 @@ sibling actions by **full path** `stacklok/mecatl/.github/actions/<name>@<tag>`.
 vendoring and no mecatl checkout in the consumer.
 
 **Hardcoded-ref pinning + the release-process cost.** Expressions are **illegal** in `uses:`,
-so the sibling-action ref must be a **hardcoded literal tag** (`@v0.0.2`), not an expression.
+so the sibling-action ref must be a **hardcoded literal tag** (`@v0.0.3`), not an expression.
 These are **first-party same-repo** actions, so they pin to the **version tag**, not a SHA:
 the supply-chain SHA-pin rule defends against a *third-party* action whose tag a compromised
 maintainer could re-point, but these live in this repo and are released together — a SHA would
@@ -397,7 +397,7 @@ input). A consumer that needs those vendors the escape-hatch template. Note also
 `default-provider` only *selects* a provider; the matching provider key must be wired or the
 run fails *"no LLM provider available"* (documented in `docs/usage.md`).
 
-The `@v0.0.2` in the examples above is **illustrative** — a consumer pins the latest released
+The `@v0.0.3` in the examples above is **illustrative** — a consumer pins the latest released
 tag (an example tag that does not yet exist resolves to GitHub's generic *"workflow not
 found"*, the same surface as the missing org-Actions-access setting).
 

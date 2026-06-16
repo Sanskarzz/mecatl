@@ -322,6 +322,63 @@ test_empty_exit_class_is_setup_failure() {
   rm -rf "${work}"
 }
 
+# ── Test 6b (issue #70): a FAILED `gh issue comment` on the setup-failure path does NOT ───
+# abort the job silently — it emits a loud ::error:: and STILL exits 0.
+# This is the secondary observation from issue #70: on a downstream-consumer issue #416, implement failed
+# at action-LOAD (so EXIT_CLASS was empty -> setup-failure), publish.sh entered the failure
+# branch, but the resolved App-installation token could not resolve the issue and
+# `gh issue comment` threw "GraphQL: Could not resolve to an issue …". Under `set -euo
+# pipefail` the UNGUARDED comment aborted publish.sh mid-branch with NO terminal signal — the
+# very silent failure the branch exists to close. The guard (post_issue_comment) must turn
+# that into a ::error:: + a clean exit 0. We install a gh stub whose `issue comment` FAILS and
+# assert: the script exits 0 (not aborted by set -e), the comment WAS attempted, NO PR was
+# opened, and the ::error:: diagnostic was emitted. Removing the guard (reverting to a bare
+# `gh issue comment`) flips rc to non-zero and drops the ::error:: — failing this test.
+test_failed_comment_does_not_abort_silently() {
+  local work; work="$(make_sandbox)"
+  make_stubs "${work}"
+  # Override the gh stub so `issue comment` FAILS (mimicking the unresolvable-issue / missing
+  # issues:write case). Other subcommands behave as before so the branch logic is unchanged.
+  cat > "${work}/bin/gh" <<EOF
+#!/usr/bin/env bash
+echo "gh \$*" >> "${work}/calls.log"
+case "\$1 \$2" in
+  "issue comment") echo "GraphQL: Could not resolve to an issue or pull request" >&2; exit 1 ;;
+  "pr create") : > "${work}/PR_CREATED" ;;
+  "pr list") echo "" ;;
+  "repo view") echo "main" ;;
+  "auth setup-git") : ;;
+esac
+exit 0
+EOF
+  chmod +x "${work}/bin/gh"
+  # Capture stderr so we can assert the ::error:: diagnostic was emitted.
+  local rc=0
+  ( cd "${work}"
+    PATH="${work}/bin:${PATH}" \
+    GH_TOKEN="fake-token" \
+    GITHUB_WORKSPACE="${work}" \
+    RUNNER_TEMP="${work}" \
+    GITHUB_REPOSITORY="acme/widget" \
+    GITHUB_RUN_ID="123" \
+    GITHUB_SERVER_URL="https://github.com" \
+    env ISSUE_NUMBER=416 EXIT_CLASS="" \
+      bash "${SCRIPT}" >/dev/null 2>"${work}/stderr.log"
+  ) || rc=$?
+  if [ -e "${work}/PR_CREATED" ]; then
+    bad "failed-comment setup-failure path opened a PR (should only attempt a comment)"
+  elif [ "${rc}" -ne 0 ]; then
+    bad "a failed gh issue comment ABORTED publish.sh on the setup-failure path (rc=${rc}) — the silent-failure bug (issue #70) is back"
+  elif ! called "issue comment" "${work}/calls.log"; then
+    bad "the setup-failure path did not even attempt the issue comment"
+  elif ! grep -qF "::error::publish: could not post the issue comment" "${work}/stderr.log"; then
+    bad "a failed issue comment did not emit the loud ::error:: diagnostic"
+  else
+    pass "a failed issue comment emits ::error:: and still exits 0 (no silent abort)"
+  fi
+  rm -rf "${work}"
+}
+
 # ── Test 7 (SECURITY): the PR-body template render is LITERAL + SINGLE-PASS ───────────────
 # render_template substitutes {{token}} values that INCLUDE the model's own final_text —
 # AGENT-AUTHORED from untrusted issue text. The render must be (a) DISPLAY-ONLY: a value
@@ -382,6 +439,7 @@ test_template_traversal_confined
 test_no_change_comments
 test_failure_comments
 test_empty_exit_class_is_setup_failure
+test_failed_comment_does_not_abort_silently
 test_render_template_literal_single_pass
 
 if [ "${fail}" -ne 0 ]; then

@@ -70,6 +70,34 @@ gh auth setup-git
 # A link back to this workflow run, for both comment paths.
 run_url="${GITHUB_SERVER_URL:-https://github.com}/${REPO}/actions/runs/${GITHUB_RUN_ID:-}"
 
+# Post a comment on the triggering issue, NEVER letting a failed post abort the script.
+#   $1 = path to a --body-file
+# WHY THIS IS GUARDED (issue #70 secondary observation). The failure / no-change / de-dup
+# comment branches below are the LAST-RESORT honest feedback when a run did not produce a PR
+# — exactly the silent-failure case the acknowledge job + these branches exist to close. But
+# `gh issue comment` can itself FAIL: the resolved publish token (especially a minted App
+# installation token whose installation lacks issues:write, or a fine-grained PAT missing the
+# Issues scope) can be UNABLE to resolve/comment on the issue ("GraphQL: Could not resolve to
+# an issue or pull request with the number of N"), and a transient API error or a
+# deleted/transferred issue does the same. Under `set -euo pipefail` an UNGUARDED
+# `gh issue comment` then aborts publish.sh mid-branch with NO terminal signal — the very
+# silent failure these branches close (observed on a downstream-consumer issue #416: implement failed at
+# action-load, EXIT_CLASS was empty, publish.sh entered the setup-failure branch, and the
+# `gh issue comment` threw the GraphQL resolve error and `set -e` killed the job before the
+# comment landed and before `exit 0`). The privileged push / PR-create tail already guards
+# its comments with `|| true`; this helper extends the same discipline to the EARLY branches.
+# On a failed post it emits a LOUD `::error::` (so the operator at least sees WHY in the run
+# annotations) and returns 1, but the caller decides whether to abort — the setup/no-change
+# branches deliberately continue to their `exit 0` so the JOB still ends cleanly rather than
+# red-with-no-explanation.
+post_issue_comment() {
+  if gh issue comment "${ISSUE_NUMBER}" --repo "${REPO}" --body-file "${1}"; then
+    return 0
+  fi
+  echo "::error::publish: could not post the issue comment on ${REPO}#${ISSUE_NUMBER} — the publish token may lack issues:write for this repo, or the issue is unreachable. The run result could not be reported back to the issue; see this run log: ${run_url}" >&2
+  return 1
+}
+
 # A compact, human-readable summary block for the PR/comment body. Read as DATA (jq), never
 # executed. Falls back to a placeholder when no summary file exists. When the summary
 # carries a non-empty .error (a run-failure terminal), surface it — the binary serialized
@@ -204,7 +232,10 @@ if [ "${EXIT_CLASS}" != "clean" ]; then
     echo
     echo "[View the workflow run](${run_url}) for the per-event trace and the operator verdict line."
   } > "${RUNNER_TEMP}/mecatequi-comment.md"
-  gh issue comment "${ISSUE_NUMBER}" --repo "${REPO}" --body-file "${RUNNER_TEMP}/mecatequi-comment.md"
+  # GUARDED: a failed post emits a loud ::error:: but does NOT abort — the run already
+  # failed, and the job exiting 0 here means "publish reported what it could"; the operator
+  # sees the comment-failure ::error:: in the annotations when the token can't comment.
+  post_issue_comment "${RUNNER_TEMP}/mecatequi-comment.md" || true
   echo "publish: posted failure comment for exit_class=${EXIT_CLASS}"
   exit 0
 fi
@@ -261,7 +292,9 @@ if [ "${non_empty}" != "true" ] || [ -z "${PATCH_PATH}" ] || [ ! -s "${PATCH_PAT
     echo
     echo "[View the workflow run](${run_url})."
   } > "${RUNNER_TEMP}/mecatequi-comment.md"
-  gh issue comment "${ISSUE_NUMBER}" --repo "${REPO}" --body-file "${RUNNER_TEMP}/mecatequi-comment.md"
+  # GUARDED (see post_issue_comment): a failed post is reported as a loud ::error:: but does
+  # not abort — the clean-no-diff run is a success, so the job still exits 0.
+  post_issue_comment "${RUNNER_TEMP}/mecatequi-comment.md" || true
   echo "publish: clean run with empty diff (stop_reason=${stop_reason}) — posted informational comment"
   exit 0
 fi
@@ -333,7 +366,9 @@ if [ -n "${blocked}" ]; then
     echo
     echo "[View the workflow run](${run_url})."
   } > "${RUNNER_TEMP}/mecatequi-comment.md"
-  gh issue comment "${ISSUE_NUMBER}" --repo "${REPO}" --body-file "${RUNNER_TEMP}/mecatequi-comment.md"
+  # GUARDED (see post_issue_comment): this branch fails the job either way (exit 1); the guard
+  # only ensures a failed comment surfaces a ::error:: rather than aborting before the line below.
+  post_issue_comment "${RUNNER_TEMP}/mecatequi-comment.md" || true
   echo "::error::publish: patch touches protected paths; refusing to open a PR"
   exit 1
 fi
@@ -379,7 +414,9 @@ if ! git apply --3way --index --whitespace=nowarn "${PATCH_PATH}"; then
     echo
     echo "[View the workflow run](${run_url})."
   } > "${RUNNER_TEMP}/mecatequi-comment.md"
-  gh issue comment "${ISSUE_NUMBER}" --repo "${REPO}" --body-file "${RUNNER_TEMP}/mecatequi-comment.md"
+  # GUARDED (see post_issue_comment): fails the job either way; the guard only ensures a failed
+  # comment surfaces a ::error:: rather than aborting before the line below.
+  post_issue_comment "${RUNNER_TEMP}/mecatequi-comment.md" || true
   echo "::error::publish: the run patch did not apply (3-way) to ${base}"
   exit 1
 fi

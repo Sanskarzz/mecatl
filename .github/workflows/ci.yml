@@ -120,6 +120,14 @@ jobs:
       - name: Check reusable-workflow pins
         run: bash .github/actions/check-reusable-pins.sh
 
+      # Reject a LIVE empty ${{ }} expression in a PARSED field of any workflow/action manifest
+      # (issue #70). GitHub evaluates `${{ ... }}` inside parsed action.yml/workflow scalars, and
+      # an EMPTY `${{ }}` is a hard parse error ("An expression was expected") that makes the
+      # action fail to load and aborts every run that references it — exactly what bricked the
+      # v0.0.2 reusable workflow. The guard excludes YAML `#` comment lines (never evaluated).
+      - name: Check action templates for empty expressions
+        run: bash .github/actions/check-action-templates.sh
+
       # The mecatequi composite-action glue scripts (extract-prompt.sh, publish.sh) have
       # offline bash tests with fake gh/git stubs that assert their SECURITY logic (no
       # untrusted-body interpolation; protected-paths gate incl. the -z path-quoting bypass;

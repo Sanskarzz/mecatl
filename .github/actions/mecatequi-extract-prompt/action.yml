@@ -24,7 +24,8 @@
 name: mecatequi-extract-prompt
 description: >-
   Extract the UNTRUSTED triggering-issue prompt body from the GitHub event JSON into a
-  file (via jq over $GITHUB_EVENT_PATH) — never an inline ${{ }} of attacker text.
+  file (via jq over $GITHUB_EVENT_PATH) — never an inline expression interpolation of
+  attacker text.
 
 inputs:
   out-file:
