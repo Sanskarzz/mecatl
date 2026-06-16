@@ -1,0 +1,739 @@
+# yaml-language-server: $schema=https://modelith.sh/schema/domain-model/v1.json
+kind: DomainModel
+version: v1
+title: mecatl — Agentic Coding Harness
+description: >
+  The domain of mecatl: a headless agentic coding harness. A `Session` carries a
+  `Conversation` that a `Run` drives turn by turn against a `Provider`, invoking
+  `Tools` under a permission model, emitting a stream of `Events`, and optionally
+  delegating to `Subagents` and `Teams`. Pass 2 adds the invariants that must
+  always hold and scenarios that stress-test them.
+
+glossary:
+  Principal: >
+    The human or caller on whose behalf a `Session` runs — the source of the
+    trusted prompt and team goal.
+  Operator: >
+    Whoever deploys and configures the harness: sets `PermissionRules`, `Hooks`,
+    token budgets, provider credentials, and connects `MCPServers`.
+  Client: >
+    An API consumer driving a `Session` over gRPC, HTTP/SSE, or ACP — and the
+    party that answers a `PermissionAsk`.
+  Lead: >
+    The `TeamMember` that coordinates a `Team` and produces the consolidated
+    synthesis returned as the team's result.
+
+entities:
+  Session:
+    definition: >
+      The central aggregate and unit of work: a stateful conversation between a
+      principal and a model, with its own workspace, usage accounting, and
+      limits. A `Session` is a state machine (idle, running, awaiting, completed,
+      cancelled, failed) and is bound to exactly one `Provider` and `Model` for
+      its lifetime. It survives process restarts when backed by a store.
+    relationships:
+      - entity: Conversation
+        cardinality: "1:1"
+        ownership: owned
+        role: records
+      - entity: Workspace
+        cardinality: "1:1"
+        ownership: owned
+        role: scoped to
+      - entity: Provider
+        cardinality: "n:1"
+        ownership: referenced
+        role: bound to
+        note: A `Session`'s `Provider` is fixed for its lifetime
+      - entity: Model
+        cardinality: "n:1"
+        ownership: referenced
+        role: runs against
+      - entity: Memory
+        cardinality: "n:n"
+        ownership: referenced
+        role: remembers into
+      - entity: Skill
+        cardinality: "n:n"
+        ownership: referenced
+        role: activates
+      - entity: EventLog
+        cardinality: "1:1"
+        ownership: referenced
+        role: is logged to
+        note: >
+          The `Session` aggregate is also persisted as a point-in-time snapshot
+          (state, `Conversation`, usage, pending `PermissionAsk`); the snapshot
+          plus the `EventLog` together rehydrate it after a restart.
+    invariants:
+      - id: fixed-provider-per-session
+        statement: >
+          A `Session` is bound to one `Provider` and one `Model` for its entire
+          lifetime; they are re-derived together, never swapped individually.
+      - id: session-recover-before-reuse
+        statement: >
+          A `Session` in a terminal state (completed, cancelled, or failed) is
+          returned to idle before any new `Run` reuses it.
+      - id: session-usage-survives-restart
+        statement: >
+          Cumulative token usage is preserved across reopen, interrupt, recover,
+          and process restart.
+
+  Conversation:
+    definition: >
+      The ordered history of `Messages` belonging to one `Session`. It is the
+      replayed context sent to the `Provider` each turn, and the thing a
+      compactor rewrites when it grows too large. It cannot exist outside its
+      `Session`.
+    relationships:
+      - entity: Message
+        cardinality: "1:n"
+        ownership: owned
+        role: orders
+    invariants:
+      - id: conversation-no-orphan-tool-result
+        statement: >
+          Every tool `Message` pairs with a preceding `ToolCall`; the
+          `Conversation` never contains an orphaned `ToolResult`.
+      - id: compaction-keeps-recent-user-intent
+        statement: >
+          Compaction preserves the first and most-recent user `Messages`
+          verbatim and never produces unpaired history.
+      - id: compaction-archived-to-log
+        statement: >
+          Before compaction rewrites the `Conversation`, the replaced span is
+          archived to the `EventLog`, so compacted history remains reconstructible.
+
+  Message:
+    definition: >
+      One entry in a `Conversation`, attributed to a role (user, assistant, or
+      tool). An assistant `Message` may carry text, an opaque reasoning blob, and
+      one or more `ToolCalls`; a tool `Message` carries a `ToolResult`. `Messages`
+      are immutable once recorded.
+    relationships:
+      - entity: ToolCall
+        cardinality: "1:n"
+        ownership: owned
+        role: requests
+    invariants:
+      - id: message-immutable
+        statement: "A `Message` is immutable once recorded into a `Conversation`."
+
+  Run:
+    definition: >
+      A single drive of a `Session` from a starting state to a terminal one —
+      one invocation of the agent loop. A `Run` sequences `Turns`, emits a stream
+      of `Events`, and ends with a stop reason (end-of-turn, budget, no-progress,
+      cancelled, error). It is the execution, not the state: the `Session` it
+      drives outlives it.
+    relationships:
+      - entity: Session
+        cardinality: "n:1"
+        ownership: referenced
+        role: drives
+      - entity: Turn
+        cardinality: "1:n"
+        ownership: owned
+        role: sequences
+      - entity: Event
+        cardinality: "1:n"
+        ownership: owned
+        role: emits
+    invariants:
+      - id: run-one-terminal-stop
+        statement: >
+          A `Run` drives its `Session` to exactly one terminal state and reports
+          exactly one stop reason.
+      - id: run-no-replay-after-first-chunk
+        statement: >
+          Once a `Turn` has streamed its first chunk, the `Run` never retries or
+          replays that `Turn`.
+
+  Turn:
+    definition: >
+      One round-trip with the `Provider` inside a `Run`: the model is given the
+      replayed `Conversation`, streams back a response, and the loop dispatches
+      any `ToolCalls` it requested. A `Run` is a sequence of `Turns`, bounded by
+      a max-turns limit.
+    relationships:
+      - entity: Message
+        cardinality: "1:n"
+        ownership: referenced
+        role: produces
+    invariants:
+      - id: turn-count-bounded
+        statement: "The number of `Turns` in a `Run` is bounded by a configured maximum."
+      - id: empty-turn-nudged-not-looped
+        statement: >
+          A `Turn` that completes with no `ToolCall` and no meaningful text is
+          nudged a bounded number of times, then ends cleanly — never silently
+          and never in an infinite loop.
+      - id: snapshot-at-turn-boundary
+        statement: >
+          The `Session` snapshot is persisted at every `Turn` boundary; an
+          in-flight `Turn` cut by a `Process` death is replayed from the last
+          boundary, not resumed mid-stream.
+
+  Event:
+    definition: >
+      A typed, ordered item on a `Run`'s output stream — the single observable
+      currency shared by every interface (gRPC, HTTP/SSE, ACP). Each step of the
+      loop (turn start/end, tool call, tool result, permission ask, result) is an
+      `Event`. A transient `Event` is recorded into the durable `EventLog` for
+      later replay.
+    invariants:
+      - id: event-ordered-and-typed
+        statement: >
+          Every `Event` is emitted in order on its `Run`'s stream, and the same
+          typed `Event` model is shared by every interface.
+
+  Tool:
+    definition: >
+      A capability the model can invoke by name — Read, Edit, Write, Grep, Glob,
+      Bash, and opt-in tools like memory, skills, and delegation. A `Tool` is
+      either read-only (may run concurrently) or mutating (never concurrent). It
+      defines a name and an argument schema; a `ToolCall` is one invocation of it.
+    invariants:
+      - id: tool-readonly-or-mutating
+        statement: >
+          Every `Tool` is classified read-only or mutating, and that
+          classification governs how its `ToolCalls` are dispatched.
+
+  ToolCall:
+    definition: >
+      A single request by the model to invoke a `Tool` with concrete arguments,
+      issued within a `Turn`. It must be authorized by the permission model
+      before it executes, and it produces exactly one `ToolResult`.
+    relationships:
+      - entity: Tool
+        cardinality: "n:1"
+        ownership: referenced
+        role: invokes
+      - entity: ToolResult
+        cardinality: "1:1"
+        ownership: owned
+        role: produces
+    invariants:
+      - id: toolcall-authorized-before-execute
+        statement: "A `ToolCall` executes only after the permission model resolves it to allow."
+      - id: toolcall-exactly-one-result
+        statement: "A `ToolCall` produces exactly one `ToolResult`."
+      - id: mutating-toolcalls-serial
+        statement: >
+          Two mutating `ToolCalls` never execute concurrently; read-only
+          `ToolCalls` may run in parallel.
+
+  ToolResult:
+    definition: >
+      The outcome of executing a `ToolCall` — either a success payload or an
+      error — recorded back into the `Conversation` as a tool `Message`. Each
+      `ToolResult` belongs to exactly one `ToolCall`.
+    invariants:
+      - id: toolresult-one-call
+        statement: >
+          A `ToolResult` belongs to exactly one `ToolCall` and is recorded back
+          into the `Conversation`.
+
+  Workspace:
+    definition: >
+      The filesystem scope of a `Session`, rooted at a single directory and
+      contained so that file `Tools` cannot escape it via symlinks or parent
+      traversal. Read-only out-of-workspace roots (e.g. an activated `Skill`'s
+      assets) may be granted on top. One `Workspace` per `Session`.
+    invariants:
+      - id: workspace-contained
+        statement: >
+          File `Tools` cannot read or write outside the `Workspace` root, except
+          through explicitly granted read-only roots.
+      - id: workspace-shell-env-scrubbed
+        statement: >
+          Every agent-facing shell in a `Workspace` runs with provider
+          credentials and other secrets scrubbed from its environment.
+
+  Provider:
+    definition: >
+      An LLM backend behind a provider-agnostic port — OpenAI Responses, the
+      native Anthropic Messages API, or OpenRouter. A `Provider` offers a catalog
+      of `Models` and is selected per `Session`. Adapters are stateless: the full
+      `Conversation` is replayed each turn.
+    relationships:
+      - entity: Model
+        cardinality: "1:n"
+        ownership: referenced
+        role: offers
+    invariants:
+      - id: provider-stateless-replay
+        statement: >
+          A `Provider` adapter holds no server-side conversation state; the full
+          `Conversation` is replayed each `Turn` behind a byte-stable cache prefix.
+
+  Model:
+    definition: >
+      A specific model exposed by a `Provider`, with its own context window and
+      capabilities (text, image, reasoning). A `Session` runs against one `Model`;
+      a `Subagent` or `TeamMember` may override it within the same `Provider`.
+    invariants:
+      - id: model-override-stays-in-provider
+        statement: >
+          A `Subagent` or `TeamMember` may override the `Model` only within the
+          `Session`'s bound `Provider`.
+
+  PermissionRule:
+    definition: >
+      A governance rule that maps a `Tool` invocation to an effect — deny, ask,
+      or allow — within a scope (managed, CLI, project, user, built-in default)
+      and an audience (main session or delegated child). Rules resolve
+      deny-dominant: a deny in any scope is absolute.
+    relationships:
+      - entity: ToolCall
+        cardinality: "n:n"
+        ownership: referenced
+        role: authorizes
+    invariants:
+      - id: deny-dominant
+        statement: >
+          A deny in any scope is absolute; among ask and allow the higher
+          configured scope wins, and a configured ask is never suppressed by a
+          higher-scope allow.
+      - id: plan-mode-denies-mutations
+        statement: "In plan mode, every mutating `ToolCall` is denied."
+      - id: allow-always-learns-rule
+        statement: >
+          An allow-always verdict on a `PermissionAsk` learns a `PermissionRule`
+          matching the approved `Tool`, so the same `ToolCall` is not asked again.
+      - id: learned-rule-volatile-rehydrated-from-log
+        statement: >
+          A learned `PermissionRule` is held in memory and lost on restart; it is
+          reconstructed from the `EventLog` when the `Session` is rehydrated.
+
+  PermissionAsk:
+    definition: >
+      A suspension of a `Run` when a `ToolCall` resolves to "ask": the loop pauses
+      and surfaces the request to the `Client`, which approves or denies before
+      the loop continues. A child's ask may surface to an interactive parent or be
+      adjudicated by a bounded reviewer in a headless deployment.
+    relationships:
+      - entity: ToolCall
+        cardinality: "1:1"
+        ownership: referenced
+        role: suspends
+      - entity: Run
+        cardinality: "n:1"
+        ownership: referenced
+        role: pauses
+    invariants:
+      - id: ask-suspends-run-until-resolved
+        statement: >
+          A `PermissionAsk` suspends its `Run` and blocks the `ToolCall` from
+          executing until a `Client` or reviewer resolves it.
+      - id: child-ask-redacts-raw-args
+        statement: >
+          A child `PermissionAsk` surfaced to a parent or reviewer never carries
+          the child's raw `ToolCall` arguments.
+      - id: ask-resolves-to-verdict
+        statement: >
+          A `PermissionAsk` resolves to exactly one verdict — allow-once,
+          allow-always, or deny.
+
+  Hook:
+    definition: >
+      A deterministic, operator-configured program that fires at a lifecycle
+      point (session start, prompt submit, pre/post tool use, stop) and can allow
+      or block by exit code. Hooks are the deterministic counterpart to the
+      model-based permission and guardrail layers.
+    relationships:
+      - entity: ToolCall
+        cardinality: "n:n"
+        ownership: referenced
+        role: gates
+    invariants:
+      - id: hook-exit-code-decides
+        statement: >
+          A `Hook` allows the gated action on exit code 0 and blocks it on exit
+          code 2.
+
+  Subagent:
+    definition: >
+      A one-shot, isolated child agent spawned by a `Session` to explore or
+      delegate a task in its own read-only sandbox, returning a single result. It
+      runs the same agent loop in a less-privileged child context and may be
+      instantiated from an `AgentDef`. Subagents do not nest.
+    relationships:
+      - entity: Session
+        cardinality: "n:1"
+        ownership: referenced
+        role: spawned by
+      - entity: AgentDef
+        cardinality: "n:1"
+        ownership: referenced
+        role: instantiates
+    invariants:
+      - id: subagent-no-nesting
+        statement: "A `Subagent` cannot spawn further `Subagents`."
+      - id: subagent-read-only-sandbox
+        statement: "A `Subagent` runs in a strictly less-privileged, read-only child context."
+      - id: subagent-fanout-bounded
+        statement: "Concurrent child agents are bounded by a child-concurrency gate."
+
+  Team:
+    definition: >
+      A coordinated crew of `TeamMembers` spawned by a `Session`, working a shared
+      task list and findings ledger under a lead that synthesizes the consolidated
+      result. The team's goal is trusted by default; peer messages are not.
+    relationships:
+      - entity: Session
+        cardinality: "n:1"
+        ownership: referenced
+        role: spawned by
+      - entity: TeamMember
+        cardinality: "1:n"
+        ownership: owned
+        role: coordinates
+      - entity: Task
+        cardinality: "1:n"
+        ownership: owned
+        role: tracks
+      - entity: Finding
+        cardinality: "1:n"
+        ownership: owned
+        role: collects in its ledger
+    invariants:
+      - id: team-goal-trusted-peers-untrusted
+        statement: >
+          A `Team`'s goal is trusted as principal-authored; peer messages and
+          claimed-task descriptions are treated as untrusted input.
+      - id: team-returns-lead-synthesis
+        statement: >
+          A `Team` returns the `Lead`'s consolidated synthesis, not concatenated
+          `TeamMember` output.
+      - id: team-coordination-not-durable
+        statement: >
+          Mid-round `Team` coordination state — roster, `Task` assignments, the
+          `Finding` ledger, and the round number — is not durable; only member
+          sessions persist, so a mid-round `Team` does not survive a `Process`
+          restart and must be re-created.
+
+  TeamMember:
+    definition: >
+      One worker within a `Team`, running an isolated child loop and contributing
+      findings to the shared ledger. A member may be instantiated from an
+      `AgentDef` and has its own persisted child session. It cannot exist outside
+      its `Team`.
+    relationships:
+      - entity: AgentDef
+        cardinality: "n:1"
+        ownership: referenced
+        role: instantiates
+    invariants:
+      - id: member-isolated-loop
+        statement: >
+          Each `TeamMember` runs an isolated child loop and never shares a
+          `Conversation` with another member.
+
+  Skill:
+    definition: >
+      A logical bundle of instructions and named assets that the agent can
+      activate by name to extend its behavior for a task. A `Skill` crosses the
+      boundary as identity, body, and payloads — never as a path — and may expose
+      read-only assets to the `Workspace` when active.
+    invariants:
+      - id: skill-crosses-as-bundle-not-path
+        statement: >
+          A `Skill` crosses the boundary as identity, body, and named assets —
+          never as a filesystem path or directory.
+      - id: skill-assets-read-only
+        statement: "An active `Skill`'s out-of-workspace assets are exposed to the `Workspace` read-only."
+
+  AgentDef:
+    definition: >
+      A reusable definition of a specialist agent — its role prompt, tool grants,
+      model, and optional memory head — from which a `Subagent` or `TeamMember`
+      can be instantiated. It is a value object: where it came from is a tier
+      label (managed, project, user), not a location.
+    invariants:
+      - id: agentdef-origin-is-tier-not-location
+        statement: >
+          An `AgentDef`'s origin is a trust tier (managed, project, user), never
+          a filesystem location.
+
+  Memory:
+    definition: >
+      Durable, tiered knowledge a `Session` can write (Remember) and read back
+      (Recall, SearchMemory) across runs and sessions, with an optional
+      background consolidation pass. A user-scoped tier sits alongside the
+      session-scoped one. Memory is independent of any single `Session`.
+    invariants:
+      - id: memory-outlives-session
+        statement: >
+          `Memory` persists independently of any single `Session` and is readable
+          across runs and sessions.
+
+  MCPServer:
+    definition: >
+      An external Model Context Protocol server, connected over streaming-HTTP
+      transport only, whose tools are registered into the catalog as namespaced
+      `Tools`. It is a driven adapter, never spawned as a local stdio process.
+    relationships:
+      - entity: Tool
+        cardinality: "1:n"
+        ownership: referenced
+        role: provides
+    invariants:
+      - id: mcp-streaming-http-only
+        statement: >
+          An `MCPServer` connects only over streaming-HTTP transport; it is never
+          spawned as a local stdio process.
+      - id: mcp-tools-namespaced
+        statement: "An `MCPServer`'s `Tools` are registered into the catalog under a server-namespaced name."
+
+  EventLog:
+    definition: >
+      The durable, append-only record of a `Session`'s `Events`, distinct from
+      the transient stream the loop emits. It is the source of truth for
+      replaying state the `Session` snapshot does not carry — learned
+      `PermissionRules` and the pre-compaction `Conversation` archive — when a
+      `Session` is rehydrated after a restart.
+    relationships:
+      - entity: Event
+        cardinality: "1:n"
+        ownership: referenced
+        role: records
+    invariants:
+      - id: event-log-append-only
+        statement: >
+          The `EventLog` is append-only and records each `Event` at most once,
+          independently of whether a `Client` is still connected.
+      - id: event-log-records-terminal-tail
+        statement: >
+          The `EventLog` records every `Event` a `Run` emits, including the
+          terminal result emitted after a `Client` disconnects.
+
+  Process:
+    definition: >
+      A disposable harness instance — one running process — that loads `Sessions`
+      from the durable stores, holds their `SessionLeases`, and executes `Runs`.
+      Killing a `Process` and starting another over the same stores loses nothing
+      the user relies on: rehydration is a new `Process` reconstructing a
+      `Session` from its snapshot plus the `EventLog`.
+    relationships:
+      - entity: Run
+        cardinality: "1:n"
+        ownership: referenced
+        role: executes
+      - entity: SessionLease
+        cardinality: "1:n"
+        ownership: referenced
+        role: holds
+    invariants:
+      - id: process-disposable
+        statement: >
+          Killing a `Process` and starting another over the same durable stores
+          loses no state the user relies on; all load-bearing state is
+          externalized to the snapshot and the `EventLog`.
+
+  SessionLease:
+    definition: >
+      An exclusive, renewable, expiring claim on a `Session` held by a single
+      `Process`, so that at most one `Process` writes a `Session` at a time.
+      Sessions are routed to the `Process` holding their lease (session affinity);
+      when a holding `Process` dies, the lease expires and another `Process` may
+      acquire it and rehydrate the `Session`.
+    relationships:
+      - entity: Session
+        cardinality: "1:1"
+        ownership: referenced
+        role: grants exclusive write to
+        note: A `Session` has at most one live `SessionLease` at a time
+    invariants:
+      - id: single-writer-per-session
+        statement: >
+          At most one live `SessionLease` exists per `Session`; two `Process`
+          instances never write the same `Session` concurrently.
+      - id: session-affinity-routing
+        statement: >
+          A `Session` is routed to the `Process` that holds its `SessionLease`.
+
+  Task:
+    definition: >
+      A unit of work on a `Team`'s shared task list, assigned to a `TeamMember`
+      and tracked to completion. A `Task` has no meaning outside its `Team`.
+    relationships:
+      - entity: TeamMember
+        cardinality: "n:1"
+        ownership: referenced
+        role: assigned to
+    invariants:
+      - id: task-within-team
+        statement: >
+          A `Task` exists only within its `Team` and is assigned to at most one
+          `TeamMember` at a time.
+
+  Finding:
+    definition: >
+      An entry a `TeamMember` records to its `Team`'s shared findings ledger. The
+      `Lead` synthesizes the team's consolidated result from the `Findings`. A
+      `Finding` is part of its `Team` and does not outlive it.
+    relationships:
+      - entity: TeamMember
+        cardinality: "n:1"
+        ownership: referenced
+        role: recorded by
+    invariants:
+      - id: finding-fenced-untrusted
+        statement: >
+          A `Finding` read by another `TeamMember` or the `Lead` is treated as
+          untrusted input.
+
+scenarios:
+  - name: A tool call pauses for approval and resumes
+    actors: [Principal, Client]
+    steps:
+      - "`Principal` sends a prompt; the `Run` begins and the model issues a `ToolCall` a `PermissionRule` resolves to ask."
+      - "The `Run` suspends on a `PermissionAsk` and surfaces it to the `Client`."
+      - "`Client` approves; the `ToolCall` executes, producing one `ToolResult` recorded into the `Conversation`."
+    invariants_touched:
+      [toolcall-authorized-before-execute, deny-dominant, ask-suspends-run-until-resolved, toolcall-exactly-one-result]
+
+  - name: Read-parallel, mutate-serial dispatch
+    actors: [Principal]
+    steps:
+      - "A `Turn` returns several `ToolCalls` at once: three read-only and one mutating."
+      - "The read-only `ToolCalls` dispatch concurrently while the mutating one runs alone."
+      - "Each `ToolCall` yields exactly one `ToolResult`."
+    invariants_touched: [tool-readonly-or-mutating, mutating-toolcalls-serial, toolcall-exactly-one-result]
+
+  - name: The conversation is compacted without losing the task
+    actors: [Principal]
+    steps:
+      - "A long `Run` grows the `Conversation` past the context window."
+      - "A compactor rewrites the history, summarizing the middle while keeping the first and recent user `Messages` verbatim."
+      - "The rewritten `Conversation` contains no orphaned `ToolResult`."
+    invariants_touched: [compaction-keeps-recent-user-intent, conversation-no-orphan-tool-result, message-immutable]
+
+  - name: A subagent fans out to explore
+    actors: [Principal]
+    steps:
+      - "The model issues delegation `ToolCalls` that spawn several `Subagents` from an `AgentDef`, bounded by the concurrency gate."
+      - "Each `Subagent` runs a read-only child loop and cannot spawn its own `Subagents`."
+      - "A child `PermissionAsk` surfaces without raw arguments; the children's token spend draws down the inherited budget."
+    invariants_touched:
+      [subagent-no-nesting, subagent-read-only-sandbox, subagent-fanout-bounded, child-ask-redacts-raw-args, delegation-budget-inherited-tighten-only]
+
+  - name: A team works a shared task and the lead synthesizes
+    actors: [Principal, Lead]
+    steps:
+      - "A `Team` is spawned with a trusted goal; each `TeamMember` runs an isolated loop and records findings to the shared ledger."
+      - "Peer messages between members are treated as untrusted input."
+      - "`Lead` reads the ledger and returns one consolidated synthesis as the `Team`'s result."
+    invariants_touched:
+      [team-goal-trusted-peers-untrusted, member-isolated-loop, team-returns-lead-synthesis, delegation-budget-inherited-tighten-only]
+
+  - name: A run crosses the token budget
+    actors: [Operator]
+    steps:
+      - "`Operator` sets a run token budget; a `Run` streams a `Turn` that pushes cumulative usage past it."
+      - "The in-flight `Turn` completes without being replayed."
+      - "The budget stops the `Run` cleanly at the next `Turn` boundary."
+    invariants_touched: [budget-enforced-at-turn-boundary, run-no-replay-after-first-chunk, run-one-terminal-stop]
+
+  - name: A session resumes after a restart at a pending ask
+    actors: [Operator, Client]
+    steps:
+      - "A `Session` is parked on a `PermissionAsk` when the process dies; the `EventLog` holds every `Event` up to that point."
+      - "`Operator` restarts the harness; a new `Process` recovers the `Session` to idle before reuse, preserving cumulative usage."
+      - "`Client` approves the pending ask; the `Run` re-enters the loop at the ask and the pending `ToolCall` executes exactly once."
+    invariants_touched:
+      [session-recover-before-reuse, event-log-records-terminal-tail, ask-suspends-run-until-resolved, session-usage-survives-restart, rehydrate-tool-exactly-once]
+
+  - name: A rehydrated session does not re-ask a previously granted tool
+    actors: [Operator, Client]
+    steps:
+      - "In an earlier `Run`, `Client` resolves a `PermissionAsk` allow-always, learning a `PermissionRule`; the verdict is recorded in the `EventLog` as metadata only."
+      - "`Operator` restarts; rehydration loads the `Session` snapshot and replays the `EventLog`, reconstructing the learned `PermissionRule`."
+      - "The model re-issues the same `ToolCall` and it is allowed without a new `PermissionAsk`."
+    invariants_touched:
+      [ask-resolves-to-verdict, allow-always-learns-rule, learned-rule-volatile-rehydrated-from-log, rehydration-needs-snapshot-plus-log, event-log-append-only]
+
+  - name: An MCP server's tools join the catalog
+    actors: [Operator]
+    steps:
+      - "`Operator` connects an `MCPServer` over streaming-HTTP."
+      - "Its tools register into the catalog under server-namespaced names."
+      - "The model issues a `ToolCall` against one of them like any other `Tool`."
+    invariants_touched: [mcp-streaming-http-only, mcp-tools-namespaced]
+
+  - name: A hook blocks a tool use
+    actors: [Operator]
+    steps:
+      - "`Operator` configures a pre-tool-use `Hook`."
+      - "The model issues a `ToolCall`; the `Hook` runs and exits with code 2."
+      - "The `ToolCall` is blocked before it executes."
+    invariants_touched: [hook-exit-code-decides, toolcall-authorized-before-execute]
+
+  - name: A skill is activated
+    actors: [Principal]
+    steps:
+      - "The model activates a `Skill` by name; it crosses as identity, body, and assets, never as a path."
+      - "The `Skill`'s assets become readable to the `Workspace` read-only."
+      - "File `Tools` still cannot write outside the `Workspace` root."
+    invariants_touched: [skill-crosses-as-bundle-not-path, skill-assets-read-only, workspace-contained]
+
+  - name: A subagent overrides the model within the same provider
+    actors: [Principal]
+    steps:
+      - "A `Session` is bound to one `Provider` and `Model` for its lifetime."
+      - "A delegation `ToolCall` spawns a `Subagent` with a `Model` override on the same `Provider`."
+      - "The `Subagent` replays its own `Conversation` statelessly each `Turn`."
+    invariants_touched: [fixed-provider-per-session, model-override-stays-in-provider, provider-stateless-replay]
+
+  - name: The agent remembers a fact and recalls it later
+    actors: [Principal]
+    steps:
+      - "During a `Run`, the model writes a fact to `Memory`."
+      - "The `Session` ends, and `Memory` persists independently of it."
+      - "A later `Session` recalls the fact."
+    invariants_touched: [memory-outlives-session]
+
+  - name: Two replicas, one writer
+    actors: [Operator]
+    steps:
+      - "`Process` A acquires the `SessionLease` for a `Session` and runs it; `Process` B is routed away by session affinity."
+      - "A dies and its `SessionLease` expires."
+      - "B acquires the `SessionLease`, rehydrates the `Session` from its snapshot plus the `EventLog`, and continues — never writing concurrently with A."
+    invariants_touched:
+      [single-writer-per-session, session-affinity-routing, process-disposable, rehydration-needs-snapshot-plus-log]
+
+  - name: A mid-round team does not survive a restart
+    actors: [Principal, Operator]
+    steps:
+      - "A `Team` is mid-round: `Tasks` are assigned to `TeamMembers` and `Findings` are accumulating in the shared ledger."
+      - "The `Process` dies; the member sessions persist as loadable transcripts, but the roster, `Task` assignments, and `Finding` ledger are gone."
+      - "Recovery is to re-create the `Team` from scratch; a mid-round team is not resumable in v1."
+    invariants_touched: [team-coordination-not-durable, member-isolated-loop, process-disposable]
+
+# Model-level invariants: cross-entity rules with no single owner.
+invariants:
+  - id: budget-enforced-at-turn-boundary
+    statement: >
+      The token budget is checked at a `Turn` boundary: an in-flight `Turn`
+      always completes, and the budget then stops the next `Turn` cleanly.
+  - id: delegation-budget-inherited-tighten-only
+    statement: >
+      A shared token budget is inherited by every delegated `Subagent` and
+      `TeamMember`; a per-call override may only tighten it, never raise it.
+  - id: rehydration-needs-snapshot-plus-log
+    statement: >
+      Rehydrating a `Session` after a restart restores the aggregate from its
+      snapshot and re-derives volatile state — learned `PermissionRules` and the
+      pre-compaction `Conversation` archive — by replaying the `EventLog`; the
+      snapshot alone is insufficient.
+  - id: snapshot-is-primary-projection
+    statement: >
+      The `Session` snapshot is the primary replay projection and the source of
+      truth for rehydration; the `EventLog` is additive, replayed only for state
+      the snapshot does not carry.
+  - id: rehydrate-tool-exactly-once
+    statement: >
+      When a `Process` resumes a `Session` parked on a `PermissionAsk`, the
+      pending `ToolCall` executes exactly once and every other unanswered
+      `ToolCall` on the turn is closed out as an aborted result.

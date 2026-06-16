@@ -4,6 +4,11 @@
 > `engine/`, `internal/`, `cmd/`, and `contracts/`. Where the design notes in
 > `docs/design/` differ from the implementation, this document follows the
 > implementation.
+>
+> For the system's vocabulary — the canonical entities, their relationships, and
+> the invariants that must hold — see the [domain model](./mecatl.modelith.md)
+> (a [modelith](https://github.com/stacklok/modelith) model; edit the `.yaml`
+> source and re-render, never the generated `.md`).
 
 ## 1. What it is
 

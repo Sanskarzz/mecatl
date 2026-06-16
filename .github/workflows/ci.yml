@@ -204,3 +204,26 @@ jobs:
             echo "::error file=llms.txt::llms.txt is out of date — run 'task docs:llms' and commit the result."
             exit 1
           fi
+
+  domain-model:
+    name: Domain model
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      # modelith's composite action builds the linter from ITS OWN checkout, so
+      # there is no binary step and no extra credentials here — only org Actions
+      # access to stacklok/modelith, the same grant the matlatl docs gate above
+      # relies on. Pinned to a SHA (house rule); the # comment records the
+      # revision the committed .md was rendered with. `lint` validates the model
+      # (completeness gaps are errors — the model is currently clean), and
+      # check-rendered fails the build if docs/mecatl.modelith.md has drifted
+      # from its .yaml source.
+      - uses: stacklok/modelith@73429dd46a22b3c3491c4654edca391fc9bd63f2 # post-v0.3.0
+        with:
+          files: docs/mecatl.modelith.yaml
+          completeness: error
+          check-rendered: true
