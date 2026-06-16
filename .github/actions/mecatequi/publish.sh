@@ -260,16 +260,39 @@ if ! git push --force-with-lease --set-upstream origin "${branch}"; then
   exit 1
 fi
 
-# The PR body is the summary block as TEXT — never executed. The trust caveat is
-# PROMINENT (top line): this diff was authored by an agent from untrusted issue text, so a
-# human must scrutinise it before merging — merging IS the approval gate. We keep
-# `Closes #N` (auto-closing the issue on merge is correct, since the merge is that human
-# gate); a deployment that prefers NOT to auto-close on merge can swap `Closes #N` for
-# `Refs #N` below (it links the issue without closing it).
+# The PR body is built as TEXT — never executed. It is a DESCRIPTION a reviewer can act
+# on, not just harness metadata:
+#   1. the trust caveat (PROMINENT top line — agent-authored from untrusted issue text,
+#      so a human must scrutinise before merging; merging IS the approval gate);
+#   2. the model's OWN summary of what it did (`final_text`) — the natural PR description,
+#      previously thrown away (only used on the no-change comment path);
+#   3. the list of files the patch changed (added/modified/deleted), so the reviewer sees
+#      the scope at a glance;
+#   4. the run metadata table + run link;
+#   5. `Closes #N` (auto-closing on merge is correct — the merge is the human gate; a
+#      deployment that prefers NOT to auto-close can swap it for `Refs #N`).
+# final_text is the agent's report — it rides in as --body-file DISPLAY text (never argv,
+# never executed); the caveat frames it as agent-authored.
+final_text="$(summary_field '.final_text')"
+changed_files="$(git diff-tree --no-commit-id --name-status -r HEAD 2>/dev/null || true)"
 {
   echo "⚠️ **Agent-authored from the issue text — review carefully before merging.**"
   echo
-  echo "Automated change produced by a mecatequi single-shot run for issue #${ISSUE_NUMBER}."
+  if [ -n "${final_text}" ]; then
+    echo "## What the agent did"
+    echo
+    printf '%s\n' "${final_text}"
+  else
+    echo "Automated change produced by a mecatequi single-shot run for issue #${ISSUE_NUMBER}."
+  fi
+  echo
+  if [ -n "${changed_files}" ]; then
+    echo "## Files changed"
+    echo
+    printf '%s\n' "${changed_files}" | sed 's/\t/  /; s/^/- `/; s/$/`/'
+    echo
+  fi
+  echo "## Run"
   echo
   summary_block
   echo
@@ -280,6 +303,9 @@ fi
 
 if [ -n "${existing_pr}" ]; then
   echo "publish: updated existing PR #${existing_pr} on ${branch}"
+  # Refresh the PR description too, so a re-run's PR reflects the LATEST run's summary +
+  # changed files (not the stale body from the first attempt).
+  gh pr edit "${existing_pr}" --repo "${REPO}" --body-file "${RUNNER_TEMP}/mecatequi-pr-body.md" || true
   gh issue comment "${ISSUE_NUMBER}" --repo "${REPO}" \
     --body "Updated the existing pull request #${existing_pr} with a fresh mecatequi run. ⚠️ Agent-authored — review carefully before merging. [View the workflow run](${run_url})."
   exit 0
