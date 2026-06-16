@@ -73,6 +73,11 @@ When NOT to use:
 - NEVER store a negative capability claim about yourself or your tools ("X is
   broken", "can't do Y"); these are momentary, not durable facts about the operator.
 
+Phrasing (declarative facts, not directives):
+- State what is TRUE about the operator, not what you should do. "Prefers terse
+  answers" — not "Always answer tersely". The fact is durable and yours to act
+  on; the directive belongs to your soul/persona, not this store.
+
 Behavior:
 - This store is CROSS-PROJECT and scoped to the operator, not the project.
 - Keys are automatically namespaced under "user/". Use short, stable keys, e.g.

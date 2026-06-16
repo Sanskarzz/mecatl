@@ -61,6 +61,15 @@ When NOT to use (the over-eager-memory anti-pattern):
   "can't do Z"). Transient failures get frozen into durable refusals the agent
   later cites against itself. Record durable facts, not momentary failures.
 
+Phrasing (declarative facts, not instructions to yourself):
+- Record what is TRUE, not what to DO. "Project uses pytest with xdist" — not
+  "Run tests with pytest -n 4"; "user prefers conventional commits" — not
+  "Always use conventional commits". A fact lets each future session decide what
+  to do with it; an imperative note drifts out of date and over-steers.
+- Do NOT record point-in-time artifacts that go stale within days: PR or issue
+  numbers, commit SHAs, "fixed bug X", "shipped Y", "Phase N done", file counts.
+  Those live in git history and the issue tracker, not in durable memory.
+
 Behavior:
 - Memory is scoped to THIS project. Writing a key overwrites any prior value.
 - Use short, namespaced keys, e.g. "pref/test-runner", "project/deploy-gate".
