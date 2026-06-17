@@ -98,6 +98,16 @@ has "${MECATEQUI_YML}" '^[[:space:]]*MQ_INSTRUCTIONS:[[:space:]]+\$\{\{[[:space:
 has "${MECATEQUI_YML}" 'args\+=\([[:space:]]*--instructions[[:space:]]+"\$\{MQ_INSTRUCTIONS\}"[[:space:]]*\)' \
   "mecatequi wires MQ_INSTRUCTIONS to the binary via args+=( --instructions … )"
 
+# ── mecatequi (MAIN): the consumer setup-script hook must run BEFORE the binary, end-to-end ─
+# The feature is only LIVE if BOTH halves are present: (a) the input crosses via the
+# MQ_SETUP_SCRIPT env (never an inline interpolation of the run body), and (b) that env is run
+# by a shell. Drop either and the operator's project-toolchain hook silently never executes,
+# yet nothing else goes red. Pin both so that regression goes RED here.
+has "${MECATEQUI_YML}" '^[[:space:]]*MQ_SETUP_SCRIPT:[[:space:]]+\$\{\{[[:space:]]*inputs\.setup-script[[:space:]]*\}\}' \
+  "mecatequi maps setup-script -> MQ_SETUP_SCRIPT (env, not an inline run-body interpolation)"
+has "${MECATEQUI_YML}" 'bash[[:space:]]+-euo[[:space:]]+pipefail[[:space:]]+-c[[:space:]]+"\$\{MQ_SETUP_SCRIPT\}"' \
+  "mecatequi runs the setup-script from the env via a fail-fast shell"
+
 if [ "${fail}" -ne 0 ]; then
   note "action-wrappers: FAILURES"
   exit 1

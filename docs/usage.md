@@ -2293,6 +2293,7 @@ does).
 | `prompt-file` (required) | `--prompt-file` | — |
 | `untrusted` | `--untrusted-prompt` (when `true`) | `true` |
 | `instructions` | `--instructions` (omitted when empty) | baked-in PR-description + self-verify framing |
+| `setup-script` | composite pre-run step (not a binary flag) — runs before the binary | `""` (no hook) |
 | `workspace` | `--workspace` | `${{ github.workspace }}` |
 | `posture` | `--posture` | `auto` |
 | `timeout` | `--timeout` | `15m` |
@@ -2328,11 +2329,16 @@ for it only when you hand-roll a workflow against the action directly.
 
 The action bakes in a default `instructions` value (TRUSTED framing, emitted **outside** the
 prompt fence): write the final message as a PR description, and self-verify (run the repo's
-build/lint/test until green) before finishing. The **live** `.github/workflows/mecatequi.yml`
-installs `task` + golangci-lint before the run so that self-verification works; other-repo
-consumers must install their **own** build/lint/test toolchain before the mecatequi step (the
-example/reusable workflows note this but add no tools, since the stack is unknown). Override
-the `instructions` input to replace the framing wholesale; an empty value omits it.
+build/lint/test until green) before finishing. For that self-verification to run, the agent
+needs the repo's build/lint/test tools on PATH — so the action itself now **always provisions
+`task` (go-task) + golangci-lint** in the same job, before the binary (Go is provisioned for
+the binary build). That makes the **80% Go case work out of the box** on both adoption paths
+(the reusable workflow and a direct action reference). For a project toolchain beyond that
+(buf, protoc plugins, node, system packages), pass the **`setup-script`** input — operator
+shell the action runs in the same job, before the binary. `setup-script` is **trusted operator
+code** (a maintainer sets it), distinct from the untrusted prompt, and runs at `contents: read`
+with no write token, so it cannot push or open a PR. Override the `instructions` input to
+replace the framing wholesale; an empty value omits it.
 
 ### Adopting via the reusable workflow (recommended)
 
@@ -2438,8 +2444,10 @@ The minting itself happens inside the reusable workflow's `publish` job (via
 **Inputs (`with:`)** — all optional with sane defaults: `label` (default `mecatequi`),
 `mention` (default `@mecatequi`), `model`, `default-provider`, `posture` (default `auto`),
 `max-run-tokens`, `timeout` (default `15m`), `openai-base-url` (for an OpenAI-compatible
-endpoint), `guardrails-model` (issue #27 checker model; empty disables), `base-branch`,
-`pr-body-template`, `pr-title-template`. The escape-hatch-only knobs (`default-model`,
+endpoint), `guardrails-model` (issue #27 checker model; empty disables), `setup-script`
+(multi-line shell run before the binary to install a project toolchain beyond the always-on
+`task` + golangci-lint — see the toolchain note above), `base-branch`, `pr-body-template`,
+`pr-title-template`. The escape-hatch-only knobs (`default-model`,
 `openai`, `subagent-ask-reviewer`) are deliberately **not** exposed by the reusable workflow —
 a consumer that needs them vendors the example template instead.
 
