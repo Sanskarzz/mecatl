@@ -1,5 +1,8 @@
 # Memory enabled by default on the embedded mecatui server
 
+> **Design record.** Captured during the memory-defaults work; the rationale here is frozen.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+
 ## Summary
 
 `mecatui`'s embedded server never set `app.Config.MemoryDir`

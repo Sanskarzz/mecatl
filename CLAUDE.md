@@ -5,12 +5,16 @@ loop, ~7 tools, permissions, hooks, and subagents behind a provider-agnostic por
 Driven over gRPC + HTTP; an optional Bubble Tea TUI (`mecatui`) is a client.
 
 > `AGENTS.md` and `docs/harnesses/` are the **research corpus** this was built from, not
-> harness conventions. For the build itself read `docs/architecture.md` (how it works),
-> `docs/usage.md` (how to run it), and `docs/design/*` (rationale per feature — multi-provider,
-> workspace-trust, soul, memory, agent-teams, drivers each have a doc there).
-> `docs/design/IMPLEMENTATION-NOTES.md` holds the dense per-subsystem implementation/status
-> detail. **Prefer adding design detail to those docs, not here** — this file is a lean
-> correction file, not documentation.
+> harness conventions. **Documentation lifecycle (ADR 0002):** `docs/architecture.md` is
+> the LIVING "how it works" — update it when behaviour changes; `docs/usage.md` is how to
+> run it; `docs/design/*` are **frozen design records** (the *why*, captured once — do NOT
+> edit a design doc to track new code or carry a `Status:` line; a `docs/lint` gate fails
+> the build if one does); mutable shipped/deferred status lives ONLY in
+> `docs/design/PRODUCTION-READINESS.md`; **new** decisions are a new `docs/adr/` entry
+> (copy `docs/adr/template.md`), superseded by another ADR, never edited in place.
+> `docs/design/IMPLEMENTATION-NOTES.md` is the dense living per-subsystem companion to
+> architecture.md. **Prefer adding design detail to those docs, not here** — this file is a
+> lean correction file, not documentation.
 
 ## Commands
 

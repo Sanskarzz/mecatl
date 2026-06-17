@@ -1,6 +1,9 @@
 # Conversation compaction
 
-Status: **shipped**. This is the deep reference for how mecatl compresses a
+> **Design record.** Captured during the compaction work; the rationale here is frozen.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+
+This is the deep reference for how mecatl compresses a
 conversation that has grown past the context window. The terse per-subsystem status
 detail lives in `docs/design/IMPLEMENTATION-NOTES.md` ("Compaction never emits
 unpaired history"); the cloud-native non-destructive archive is owned by

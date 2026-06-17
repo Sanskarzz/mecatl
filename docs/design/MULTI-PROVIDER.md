@@ -1,5 +1,8 @@
 # Multi-provider / multi-model (Phase 0)
 
+> **Design record.** Captured during the multi-provider work; the rationale here is frozen.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+
 mecatl serves more than one LLM provider in a single process and binds a **provider +
 model per session**, speaking a provider-agnostic `port.LLMProvider` behind a
 server-side registry. All of the multi-provider wiring lives in the composition layer

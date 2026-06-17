@@ -1,9 +1,43 @@
 # Production Readiness — status & roadmap
 
-> Consolidated tracker for everything previously deferred. Goal: a complete,
-> production-ready harness with **no open deferrals** except items explicitly
-> marked *Optional feature* (not a production blocker) with a rationale.
+> The **single source of truth for mutable status** (per [ADR 0002](../adr/0002-documentation-lifecycle.md)).
+> Design docs record *why* and are frozen; current behaviour lives in
+> [`docs/architecture.md`](../architecture.md); shipped/deferred state lives here.
+> Goal: a complete, production-ready harness with **no open deferrals** except items
+> explicitly marked *Optional feature* (not a production blocker) with a rationale.
 > Status legend: ✅ Done · 🔨 In progress · ⛔ Open (to close) · 🟦 Optional feature.
+
+## Design records → status
+
+One row per [design record](./README.md). Status is here; the *why* is in the linked
+record; current behaviour is in [`docs/architecture.md`](../architecture.md) at the
+noted section. Per-area production checklists follow below.
+
+| Subsystem | Status | Design record | Arch § |
+|---|---|---|---|
+| Multi-provider / multi-model | ✅ P0+P1+live listing & metadata · ⛔ disk cache (P2) · ⛔ secrets/OAuth/per-client keys (P3) | [MULTI-PROVIDER.md](./MULTI-PROVIDER.md) | §18 |
+| OpenAI Responses adapter | ✅ shipped (research brief frozen) | [OPENAI-RESPONSES-API.md](./OPENAI-RESPONSES-API.md) | §9 |
+| Agent definitions (Tier-1 specialists) | ✅ shipped · ⛔ per-agent memory write path · ⛔ `local` tier | [AGENT-DEFINITIONS.md](./AGENT-DEFINITIONS.md) | §8 |
+| Agent teams (kernel, supervisor, coordination) | ✅ shipped (substrate) · ⛔ mutating-fork join strategies · ⛔ `TeamStore` restart durability | [AGENT-TEAMS-SPIKE.md](./AGENT-TEAMS-SPIKE.md) | §8 |
+| Background subagents + per-child cancel | ✅ shipped · ⛔ session-scoped detach (v2) | [BACKGROUND-SUBAGENTS.md](./BACKGROUND-SUBAGENTS.md) | §8 |
+| Parallelism — fork-join | ✅ shipped | — | §15 |
+| Memory defaults (on-by-default) | ✅ shipped | [MEMORY-DEFAULTS.md](./MEMORY-DEFAULTS.md) | §14 |
+| Tiered memory (tier-0 index + BM25) | ✅ tier-0 index + BM25 `SearchMemory` · ⛔ semantic / embedding recall | [MEMORY-TIERING.md](./MEMORY-TIERING.md) · [MEMORY-TIER2.md](./MEMORY-TIER2.md) | §14 |
+| Soul / persona + user-model | ✅ Phase 1 + 2a + 2b + Phase 3 items 1–3 | [SOUL-SPIKE.md](./SOUL-SPIKE.md) | — |
+| Compaction (heuristic + cascade) | ✅ shipped | [COMPACTION.md](./COMPACTION.md) | §13 |
+| System-prompt enhancement | ✅ §7a shipped (`agencyDelta`, tool-discipline hints, `<env>`) | [SYSTEM-PROMPT-RESEARCH.md](./SYSTEM-PROMPT-RESEARCH.md) | — |
+| Guardrails (LLM-backed tool-content inspection) | ✅ shipped | [GUARDRAILS.md](./GUARDRAILS.md) | §7 |
+| Allow-all / posture ladder | ✅ shipped · ⛔ managed-scope kill-switch · ⛔ `auto`+reviewer posture | [ALLOW-ALL-POSTURE.md](./ALLOW-ALL-POSTURE.md) | §17 |
+| Workspace trust | ✅ Phases 0/1/2a/2b/2c · ⛔ Phase 3 (descoped) | [WORKSPACE-TRUST-SPIKE.md](./WORKSPACE-TRUST-SPIKE.md) | §17 |
+| Driver seams (remote stores/sources) | ✅ Phases A–C2 · ⛔ workspace/FS driver (sketch only) | [DRIVERS.md](./DRIVERS.md) | §11 |
+| Cloud-native arc | ✅ Phases 0–3 · ⛔ Phase 4 (writer exclusion / leasing) | [CLOUD-NATIVE.md](./CLOUD-NATIVE.md) | §11 |
+| Diagnostics (injected `port.Diagnostics`) | ✅ shipped | [DIAGNOSTICS.md](./DIAGNOSTICS.md) | §11 |
+| Perf observability (live admin/MCP) | ✅ Phases 1+2 · 🟦 Phase 3 (fleet/Pyroscope, optional) | [perf-observability.md](./perf-observability.md) | §11 |
+| Perf tracking (offline regression gate) | ✅ Phases 0–4 · ⛔ Phases 5–6 (deferred-until-justified) | [perf-tracking.md](./perf-tracking.md) | §11 |
+| UX discoverability (mecatui) | ✅ shipped | [UX-DISCOVERABILITY.md](./UX-DISCOVERABILITY.md) | — |
+| Clipboard image paste (mecatui `ctrl+v`) | ✅ shipped | [CLIPBOARD-IMAGE-PASTE.md](./CLIPBOARD-IMAGE-PASTE.md) | — |
+| mecatequi (single-shot GitHub Action) | ✅ shipped (v1 forge glue) | [MECATEQUI.md](./MECATEQUI.md) | §1 |
+| _Historical / retired_ | — | [ARCHITECTURE.md](./ARCHITECTURE.md) · [STEP-CHAIN.md](./STEP-CHAIN.md) · [TWELVE-PATTERNS-AUDIT.md](./TWELVE-PATTERNS-AUDIT.md) · [REPOMAP-TREE-SITTER.md](./REPOMAP-TREE-SITTER.md) | — |
 
 ## Security
 
@@ -26,7 +60,7 @@
 | Stop conditions (turns/tool-calls/failures) | ✅ | enforced + default limits |
 | Provider retry/backoff + circuit breaker | ✅ | `llmresilience` |
 | Provider error surfaced to client | ✅ | `ResultPayload.Error` |
-| **Auto-resume persisted sessions after restart** | ✅ | `GetSession`/`Approve`/`Cancel` fall back to `SessionStore.Load`; persist at create, on entering `awaiting`, and at run end (engine `Store` + `Service.Persist`). With `--store-dir` (jsonlstore) a session survives restart and is loadable. Boundary: an in-flight *stream* is NOT resumed across restart (the `*agent.Run` is in-memory); an `Approve`/`Cancel` against a runless-but-stored session returns `ErrNoActiveRun` (HTTP 409 / gRPC FailedPrecondition) |
+| **Auto-resume persisted sessions after restart** | ✅ | `GetSession`/`Approve`/`Cancel` fall back to `SessionStore.Load`; persist at create, on entering `awaiting`, and at run end (engine `Store` + `Service.Persist`). With `--store-dir` (jsonlstore) a session survives restart and is loadable. Boundary: an in-flight *stream* is NOT resumed across restart (the `*agent.Run` is in-memory). Since cloud-native Phase 2, an `Approve` against a runless-but-stored session that died while `awaiting` **re-enters the loop at the ask** (`Service.resumeFromAwaiting`); `ErrNoActiveRun` (HTTP 409 / gRPC FailedPrecondition) is returned only for `Approve` against a non-awaiting state and for `Cancel` against any runless session. See `CLOUD-NATIVE.md` Phase 2 |
 | Graceful shutdown | ✅ | gRPC GracefulStop + HTTP Shutdown |
 
 ## Observability
@@ -81,12 +115,14 @@
 
 ## Close-out plan (waves)
 
-1. **Server hardening** — auth + rate limit + health endpoints + auto-resume.
-2. **OS sandbox** — Landlock(+seccomp) `CommandRunner` adapter.
-3. **Context** — tokenizer + compaction cascade.
-4. **Observability** — OTLP exporter wiring; **fuzz** the parsers.
-5. **Patterns** — fork-join (8); tiered memory (3) [+ optional dream (4)].
-6. **Panel review** each wave; final gauntlet + live e2e.
+All waves bar #2 are complete; #2 (OS sandbox) is the one deliberately-deferred item.
+
+1. ✅ **Server hardening** — auth + rate limit + health endpoints + auto-resume.
+2. ⏸️ **OS sandbox** — Landlock(+seccomp) `CommandRunner` adapter. *(deferred — the `CommandRunner` seam is in place; Bash is also fully optional.)*
+3. ✅ **Context** — tokenizer + compaction cascade.
+4. ✅ **Observability** — OTLP exporter wiring; **fuzz** the parsers.
+5. ✅ **Patterns** — fork-join (8); tiered memory (3) [+ optional dream (4)].
+6. ✅ **Panel review** each wave; final gauntlet + live e2e.
 
 Optional features (🟦) are left as documented seams unless requested.
 

@@ -1,74 +1,71 @@
 # Workspace Trust — implementation plan (Phases 0+1+2)
 
-> **STATUS: FEATURE COMPLETE — Phases 0, 1, 2a, 2b, 2c all SHIPPED. Phase 3 was
-> CUT (§11). The §11 follow-ups remain as later issues.**
->
-> **STATUS (history): Phases 0 + 1 SHIPPED; Phase 2a (project-tier authority gating)
-> SHIPPED; Phase 2b (trust.yaml registry + identity-anchor drift) SHIPPED; Phase
-> 2c (mecatui pre-TUI first-encounter prompt — the production caller of the
-> registry write API) SHIPPED.**
-> Phase 0 (unify the default — mecatui resolves `--trust-project`, default
-> false, no longer hardcoding trust ON) is wired and tested. Phase 1
-> (declarative `trustedWorkspaces:` list + the composition `TrustDecision`
-> resolver) is wired and tested (`internal/adapter/workspacetrust`,
-> `internal/app/trust.go`).
->
-> **Phase 2a SHIPPED** (R2.4 / R2.5 / R2.6 + MUST-FIX 3 reconciliation): when a
-> workspace is UNTRUSTED, the composition now withholds the **project tier** of
-> agent definitions, slash commands, and skills — in addition to the
-> already-gated project ALLOW rules and project soul. The user-tier config, the
-> built-in tools, the base prompt, every Deny/Ask, and the permission prompt
-> stay fully active ("ask the human" mode, not "do nothing"). The skills adapter
-> gained the additive `ResolveOptions.IncludeProjectTier` (mirrored on the agents
-> adapter); commands/agents/skills are gated in `internal/app` composition off the
-> folded `TrustDecision`. The remembered `trust.yaml` registry, the identity-anchor
-> drift hash, and the mecatui first-encounter prompt are **NOT** part of 2a — they
-> are Phase 2b/2c below.
->
-> **Phase 2b SHIPPED**: the machine-written `<xdg>/mecatl/trust.yaml` registry
-> (`internal/adapter/workspacetrust/registry.go` — `Remembered` read API +
-> `Remember` write API, `O_NOFOLLOW`/`0o600`/temp-rename, realpath-keyed,
-> fail-to-untrusted), the identity-anchor hash (`anchor.go` — soul ⊕ project agent
-> ⊕ command ⊕ skill defs, `settings.yaml` EXCLUDED), the shared
-> `internal/adapter/hashutil.SHA256Hex` primitive (soulguard's soul-only sidecar
-> anchor stays PARALLEL — MUST-FIX 4), and the `resolveTrust` fold extended to
-> `flag > declared > REMEMBERED > none` with drift failing safe to untrusted
-> (`internal/app/trust.go`). `mecated` consumes the registry declaratively (reads,
-> never prompts/writes). The write API's only production CALLER — the mecatui
-> first-encounter prompt — is **2c**.
->
-> **Phase 2c SHIPPED**: the mecatui pre-TUI first-encounter prompt. In the
-> cmd/mecatui composition root (`cmd/mecatui/trust.go`, invoked from `main.go`'s
-> `resolveTransport` in the pre-embedded-server window — before the Bubble Tea alt
-> screen), when the embedded server is about to host an UNTRUSTED workspace that
-> carries a project AUTHORITY SET (`app.HasProjectAuthority` → a project soul,
-> project-tier agents/commands/skills, or a project `settings.yaml` with ALLOW
-> rules) — OR a remembered entry whose identity anchor DRIFTED — the operator is
-> prompted **[t]rust / [o]nce / [n]o** (default no). `t` persists via
-> `app.RememberTrust` → `workspacetrust.Remember` (the registry write API's sole
-> production caller); `o` trusts the run without persisting; `n`/default/empty leaves
-> it untrusted. Drift is a RE-PROMPT ("this workspace CHANGED since you trusted
-> it"). The prompt outcome feeds `cfg.trustProject` so `app.Build` honours it WITHOUT
-> re-resolving or re-prompting (`app.ResolveTrust` is the shared fold both use). The
-> workspace path is terminal-escape-SANITIZED before echo (CWE-150,
-> `sanitizeTrustEcho`); a NON-TTY (piped/headless) NEVER prompts and NEVER
-> auto-trusts — it fails safe to UNTRUSTED (never blocks startup). `mecated` is
-> untouched (declarative, never prompts/writes). `ui/theme/client` are untouched (the
-> render-layer rule holds; no proto event added). Tests:
-> `internal/adapter/workspacetrust/authority_test.go` (authority detection: soul /
-> agent / command / skill / allow-rule present; deny-only + empty-allow NOT
-> authority), `internal/app/trust_test.go` (`TestResolveTrustExportedDelegates`,
-> `TestHasProjectAuthorityComposition`, `TestRememberTrustRoundTripFeedsResolve` —
-> the no-double-resolution proof, `TestRememberTrustThenDriftReResolvesDrifted`,
-> `TestRememberTrustEmptyWorkspaceNoop`), `cmd/mecatui/trust_test.go`
-> (already-trusted-no-prompt, no-authority-no-prompt, trust-persists,
-> trust-once-not-persisted, decline-untrusted, **drift-reprompts**,
-> **non-TTY-untrusted** + non-TTY-drift, **path-sanitization**, remember-failure
-> fail-soft). Phase 3 (in-TUI trust modal, per-scope trust, speculative schema
-> reservations) is **explicitly out of scope** — see §11.
->
-> File:line citations are to the tree as of this spike; verify before
-> implementing.
+> **Design record.** Captured during the workspace trust work; the rationale here is frozen.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+
+Phases 0, 1, 2a, 2b, 2c all shipped. Phase 3 was cut (§11); the §11 follow-ups
+remain as later issues. Phase 0 (unify the default — mecatui resolves
+`--trust-project`, default false, no longer hardcoding trust ON) is wired and
+tested. Phase 1 (declarative `trustedWorkspaces:` list + the composition
+`TrustDecision` resolver) is wired and tested (`internal/adapter/workspacetrust`,
+`internal/app/trust.go`).
+
+Phase 2a landed (R2.4 / R2.5 / R2.6 + MUST-FIX 3 reconciliation): when a
+workspace is UNTRUSTED, the composition now withholds the **project tier** of
+agent definitions, slash commands, and skills — in addition to the
+already-gated project ALLOW rules and project soul. The user-tier config, the
+built-in tools, the base prompt, every Deny/Ask, and the permission prompt
+stay fully active ("ask the human" mode, not "do nothing"). The skills adapter
+gained the additive `ResolveOptions.IncludeProjectTier` (mirrored on the agents
+adapter); commands/agents/skills are gated in `internal/app` composition off the
+folded `TrustDecision`. The remembered `trust.yaml` registry, the identity-anchor
+drift hash, and the mecatui first-encounter prompt are NOT part of 2a — they
+are Phase 2b/2c below.
+
+Phase 2b landed: the machine-written `<xdg>/mecatl/trust.yaml` registry
+(`internal/adapter/workspacetrust/registry.go` — `Remembered` read API +
+`Remember` write API, `O_NOFOLLOW`/`0o600`/temp-rename, realpath-keyed,
+fail-to-untrusted), the identity-anchor hash (`anchor.go` — soul ⊕ project agent
+⊕ command ⊕ skill defs, `settings.yaml` EXCLUDED), the shared
+`internal/adapter/hashutil.SHA256Hex` primitive (soulguard's soul-only sidecar
+anchor stays PARALLEL — MUST-FIX 4), and the `resolveTrust` fold extended to
+`flag > declared > REMEMBERED > none` with drift failing safe to untrusted
+(`internal/app/trust.go`). `mecated` consumes the registry declaratively (reads,
+never prompts/writes). The write API's only production CALLER — the mecatui
+first-encounter prompt — is 2c.
+
+Phase 2c landed: the mecatui pre-TUI first-encounter prompt. In the
+cmd/mecatui composition root (`cmd/mecatui/trust.go`, invoked from `main.go`'s
+`resolveTransport` in the pre-embedded-server window — before the Bubble Tea alt
+screen), when the embedded server is about to host an UNTRUSTED workspace that
+carries a project AUTHORITY SET (`app.HasProjectAuthority` → a project soul,
+project-tier agents/commands/skills, or a project `settings.yaml` with ALLOW
+rules) — OR a remembered entry whose identity anchor DRIFTED — the operator is
+prompted **[t]rust / [o]nce / [n]o** (default no). `t` persists via
+`app.RememberTrust` → `workspacetrust.Remember` (the registry write API's sole
+production caller); `o` trusts the run without persisting; `n`/default/empty leaves
+it untrusted. Drift is a RE-PROMPT ("this workspace CHANGED since you trusted
+it"). The prompt outcome feeds `cfg.trustProject` so `app.Build` honours it WITHOUT
+re-resolving or re-prompting (`app.ResolveTrust` is the shared fold both use). The
+workspace path is terminal-escape-SANITIZED before echo (CWE-150,
+`sanitizeTrustEcho`); a NON-TTY (piped/headless) NEVER prompts and NEVER
+auto-trusts — it fails safe to UNTRUSTED (never blocks startup). `mecated` is
+untouched (declarative, never prompts/writes). `ui/theme/client` are untouched (the
+render-layer rule holds; no proto event added). Tests:
+`internal/adapter/workspacetrust/authority_test.go` (authority detection: soul /
+agent / command / skill / allow-rule present; deny-only + empty-allow NOT
+authority), `internal/app/trust_test.go` (`TestResolveTrustExportedDelegates`,
+`TestHasProjectAuthorityComposition`, `TestRememberTrustRoundTripFeedsResolve` —
+the no-double-resolution proof, `TestRememberTrustThenDriftReResolvesDrifted`,
+`TestRememberTrustEmptyWorkspaceNoop`), `cmd/mecatui/trust_test.go`
+(already-trusted-no-prompt, no-authority-no-prompt, trust-persists,
+trust-once-not-persisted, decline-untrusted, drift-reprompts,
+non-TTY-untrusted + non-TTY-drift, path-sanitization, remember-failure
+fail-soft). Phase 3 (in-TUI trust modal, per-scope trust, speculative schema
+reservations) is explicitly out of scope — see §11.
+
+File:line citations are to the tree as of this spike; verify before
+implementing.
 
 ## 1. Problem (recap)
 
@@ -409,7 +406,7 @@ subsystem.
 **Goal:** remove mecatui's blanket-trust regression; both composition roots
 default to untrusted, honour `--trust-project`.
 
-**Status:** SHIPPED. mecatui gained a `--trust-project` flag (default false) in
+**State:** Shipped. mecatui gained a `--trust-project` flag (default false) in
 `cmd/mecatui/config.go`, mapped onto `app.Config.TrustProject` in
 `embeddedConfig` (replacing the hardcoded `true`). Tests:
 `TestParseFlagsTrustProject`, `TestEmbeddedConfigMapsTrustProject`,
@@ -440,7 +437,7 @@ flips it true; mecated unchanged.
 **Goal:** durable, no-prompt trust via `settings.yaml` `trustedWorkspaces:`,
 behind a real `TrustDecision`.
 
-**Status:** SHIPPED. The `internal/adapter/workspacetrust` leaf reads
+**State:** Shipped. The `internal/adapter/workspacetrust` leaf reads
 `trustedWorkspaces: []string` from `<xdg>/mecatl/settings.yaml` (realpath-keyed,
 fail-safe). `internal/app/trust.go` introduces `TrustSource`/`TrustDecision` and
 `resolveTrust(cfg)`, folding `--trust-project` (`TrustFlag`) > a declared match

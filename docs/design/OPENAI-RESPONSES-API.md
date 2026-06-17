@@ -1,5 +1,7 @@
 # OpenAI Responses API for a Go Agentic Coding Harness — 2026 Implementation Brief
 
+> **Research note.** Captured 2026-05-29. A point-in-time study, not a description of current code. Frozen.
+
 > Scope: building a Go harness that owns its own context window, compaction, and tool loop, talking to OpenAI and OpenAI-compatible `/v1/responses` endpoints via `github.com/openai/openai-go/v3`.
 > Captured 2026-05-29 by the `responses-researcher` agent. Treat SDK field/constructor names as "verify against pinned `api.md`".
 

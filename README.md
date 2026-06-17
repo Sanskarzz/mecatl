@@ -22,15 +22,15 @@ ships as a client of the same API.
 ## Features
 
 **The loop & tools**
-- **Streaming agent loop** (`iter.Seq2`) with pause, resume, and cancel — every step is a typed `Event`.
-- **Core tool kit** — Read (line-numbered), Edit (read-before-edit / exact-match / uniqueness invariants), Write, Grep, Glob, a WebFetch stub, and an **optional** Bash (behind a `CommandRunner` seam, so the harness runs shell-less in a locked-down pod). Plus opt-in tools: **memory** (Remember/Recall/SearchMemory, with a user-scoped trio alongside), **skills** (Skill + a writable SkillDraft quarantine), the **Parallel** delegation tool (N isolated branches), and **ToolSearch** for progressive disclosure.
+- **Streaming agent loop** with pause, resume, and cancel — every step is a typed `session.Event` (the loop yields events over a channel; the provider port streams `iter.Seq2`).
+- **Core tool kit** — Read (line-numbered), Edit (read-before-edit / exact-match / uniqueness invariants), Write, Grep, Glob, **WebSearch** (Exa / Brave / SearXNG backends, degrades gracefully), and a WebFetch stub; plus an **optional** Bash (behind a `CommandRunner` seam, so the harness runs shell-less in a locked-down pod). Plus opt-in tools: **memory** (Remember/Recall/SearchMemory, with a user-scoped trio alongside), **skills** (Skill + a writable SkillDraft quarantine), the **Parallel** delegation tool (N isolated branches), and **ToolSearch** for progressive disclosure.
 - **Read-parallel / mutate-serial dispatch** — read-only tools run concurrently; mutating tools never do (a correctness guarantee, not an optimization).
 - **Delegation — one-shot, parallel, or a crew.** Three tools share an isolated read-only child loop: **Subagent** runs one isolated child and returns its result (plus an agentId trailer); **Parallel** fans out N isolated branches in forked workspaces and joins them (all / first / judge), returning the winner or all results with the preserved fork-workspace paths; **Team** coordinates a crew over a shared task list, findings ledger, and mailbox. All three honour an opt-in shared token budget (`--max-run-tokens`, default unlimited), a child-concurrency cap, per-call limits/model overrides, and opt-in structured output; Team also has an opt-in team-wide token budget (`--max-team-tokens`, default unlimited).
 
 **Safety & governance**
 - **Permission model** — `deny → ask → allow` across merged scopes; a deny in any scope wins; compound-bash and command-substitution aware; plan mode hard-denies mutations. Optional **model-based layer-2 risk classifier** (monotonic, fail-safe). A **child-scoped axis** (`permissions.subagent.{allow,ask,deny}`) tunes delegated children separately from the main session — the operator's knob between "interactive ask" and "auto-deny".
 - **Permission pause/resume over the wire** — an `ask` suspends the loop and surfaces on the stream; the client approves and the loop continues. A child's ask surfaces to the interactive parent; in a **headless** deployment an optional bounded **LLM ask-reviewer** can adjudicate borderline child asks (fail-safe, allow-once, deny circuit-breaker) instead of blanket auto-deny.
-- **Deterministic hooks** — the full lifecycle (SessionStart, UserPromptSubmit, Pre/PostToolUse, Stop, SubagentStop), JSON event on stdin, exit-code `0` allow / `2` block.
+- **Deterministic hooks** — the full lifecycle (SessionStart, UserPromptSubmit, Pre/PostToolUse, Stop, SubagentStop, plus the team-coordination phases TeammateIdle, TaskCreated, TaskCompleted), JSON event on stdin, exit-code `0` allow / `2` block.
 - **Model-backed guardrails** — an optional quarantined checker model inspects tool I/O on configured (phase, tool) matchers: PostToolUse for prompt-injection in inbound web/MCP results, PreToolUse for secret/exfil in outbound args — block / sanitize / advisory, fail-safe, operator-tier-only config.
 - **Workspace containment** — file tools are scoped to the session root via `os.Root` (symlink/`..`-escape safe).
 
@@ -86,11 +86,12 @@ go run ./cmd/mecademo
 [009] turn=1 turn.end
 [010] turn=1 tool.call      tool=Write args={"path":"note.txt","content":"reviewed the greeting\n"}
 [011] turn=1 permission.ask ASK tool=Write reason="approval required by rule for Write (note.txt)"  -> client auto-approves
-[012] turn=1 tool.result    error=false result="wrote \"note.txt\" (22 bytes)"
-[013] turn=2 turn.start
-[014] turn=2 message.delta  text="Done: I read greeting.txt and saved note.txt."
-[015] turn=2 turn.end
-[016] turn=0 result         stop=end_turn text="Done: I read greeting.txt and saved note.txt."
+[012] turn=1 approval
+[013] turn=1 tool.result    error=false result="wrote \"note.txt\" (22 bytes)"
+[014] turn=2 turn.start
+[015] turn=2 message.delta  text="Done: I read greeting.txt and saved note.txt."
+[016] turn=2 turn.end
+[017] turn=0 result         stop=end_turn text="Done: I read greeting.txt and saved note.txt."
       usage: in=4100 out=125 cacheRead=3600 cacheWrite=0 cacheHitRate=0.88
 ```
 
@@ -158,8 +159,8 @@ the composition layer (`internal/app`, called from the `cmd/` mains).
 - **[Usage & operator guide](./docs/usage.md)** — build/run, the demo, `mecated` flags, the gRPC + HTTP/SSE APIs with examples, permissions, hooks, troubleshooting.
 - **[`docs/design/PRODUCTION-READINESS.md`](./docs/design/PRODUCTION-READINESS.md)** — the live status tracker (what's done, what's deferred).
 - **[mecatui terminal-UI guide](./docs/tui.md)** — the optional `mecatui` terminal client.
-- **[`docs/design/`](./docs/design/)** — design rationale per feature: `MULTI-PROVIDER.md`, `AGENT-TEAMS-SPIKE.md`, `DIAGNOSTICS.md`, `DRIVERS.md`, `BACKGROUND-SUBAGENTS.md`, `MECATEQUI.md` (the single-shot GitHub Action), plus the dense per-subsystem `IMPLEMENTATION-NOTES.md` and the historical spikes.
-- **[`CLAUDE.md`](./CLAUDE.md)** — orientation for agents working in this codebase.
+- **[`docs/design/README.md`](./docs/design/README.md)** — the indexed catalog of design rationale per feature (`MULTI-PROVIDER.md`, `AGENT-TEAMS-SPIKE.md`, `DIAGNOSTICS.md`, `DRIVERS.md`, `BACKGROUND-SUBAGENTS.md`, `MECATEQUI.md`, the dense per-subsystem `IMPLEMENTATION-NOTES.md`, and the historical spikes).
+- **[`CLAUDE.md`](./CLAUDE.md)** — the coding-agent contract for this repo (layering rules, per-package gotchas, workflow conventions). **If you're an AI agent working in this codebase, start here.**
 
 ## Project layout
 
@@ -173,11 +174,13 @@ the composition layer.
 | `engine/session`, `engine/governance`, `engine/tool`, `engine/prompt` | the domain (aggregate, permission/hook types, tool catalog + FS interfaces, prompt assembly) |
 | `engine/port` | the port interfaces the loop consumes |
 | `engine/agent`, `engine/team` | the agent loop, dispatch, permission pause/resume, compaction, the Subagent/Parallel/Team delegation tools |
-| `engine/adapter/*` | reference adapters (stdlib + engine only): `mockllm`, `memfs`, `memstore`, `sessnap`, `permpolicy`, `permstore`, `wallclock`, `nofs`, and the four conformance suites |
+| `engine/adapter/*` | reference adapters (stdlib + engine only): `mockllm`, `memfs`, `memstore`, `sessnap`, `permpolicy`, `permstore`, `wallclock`, `nofs`, `search` (a fake search backend), and the five conformance suites (`fsconformance`, `memconformance`, `storeconformance`, `sourceconformance`, `eventlogconformance`) |
 | `internal/adapter/*` | heavy adapters: `openai`, `anthropic`, `openrouter`, `llmresilience`, `osfs`, `acp`, `skills`, `agents`, `workspacetrust`, `grpcdriver`, `store/jsonlstore`, `server`, and more — see the directory |
 | `internal/app` | the composition layer (`app.Build`): provider registry, catalog assembly, per-session routing |
 | `contracts/proto`, `contracts/gen` | gRPC contract + the driver protocol (source of truth) and generated Go |
 | `cmd/mecated`, `cmd/mecatui`, `cmd/mecademo`, `cmd/mecatequi` | the server (composition root), the optional TUI client, the demo, and the single-shot headless CI/batch runner |
+| `perf/` | the offline scenario perf harness (`task perf:scenarios`), the `allocsgate` CI gate, and `perfconvert`; never imports `internal/` |
+| `e2e/` | the live BDD suite (Ginkgo) against real models via OpenRouter (`task e2e`; needs `OPENROUTER_API_KEY`) |
 | `.github/actions/mecatequi*`, `.github/workflows/mecatequi*.yml` | the forge glue: three composite actions (build+run, extract-prompt, publish) + the reusable `workflow_call` workflow (the recommended adoption path) + the split-privilege example workflow that runs `mecatequi` against an issue and opens a PR |
 
 ## Status
@@ -199,15 +202,20 @@ port is the seam; Bash is also fully optional, so shell-less deploys avoid the s
 
 ## Development
 
+New here? Start with [`CLAUDE.md`](./CLAUDE.md) (the layering rules, per-package gotchas,
+and workflow conventions) and the [architecture guide](./docs/architecture.md) (how the
+loop, ports, and adapters fit together). Then:
+
 ```sh
 task            # list tasks
 task ci         # tidy → fmt → lint → test → build
-task generate   # regenerate contracts/gen from contracts/proto (needs buf)
+task generate   # regenerate contracts/gen from contracts/proto (needs buf); also refreshes llms.txt
 go test ./engine/agent/ -run TestFullCycle   # a single test
 ```
 
 Tests are offline by design (a scripted mock provider + an in-memory filesystem); CI never
-needs a live model or network.
+needs a live model or network. Changed any Markdown? Run `task docs` before committing — the
+generated `llms.txt` and the doc-link gate will otherwise fail CI.
 
 ---
 

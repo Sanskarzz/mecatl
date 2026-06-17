@@ -1,7 +1,7 @@
 # Genuine tiered memory (closing the tier-0 gap)
 
-> DESIGN ONLY. Task 2 of the memory work. Builds on `docs/design/MEMORY-DEFAULTS.md`
-> (Task 1: memory is ON by default, per-project, layout opaque/store-owned).
+> **Design record.** Captured during the tiered memory work; the rationale here is frozen.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
 
 ## TL;DR / recommended increment
 

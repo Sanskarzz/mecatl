@@ -1,0 +1,169 @@
+# Extensibility — MCP, tools & progressive disclosure
+
+> Part of the [mecatl architecture guide](../architecture.md).
+
+The `tool.Catalog` is the single registration seam, so every tool — core, remote,
+or generated — is one uniform `tool.Tool`.
+
+**MCP client** (`internal/adapter/mcp`) — remote tools register here. The
+transport is **streaming-HTTP only** (the project's hard constraint): the
+stdio/command transport is never used, so no MCP server is ever `os/exec`-spawned.
+`mcp.Connect` / `mcp.NewManager` dial the configured servers, and the discovered
+tools are registered into the catalog **namespaced** `mcp__<server>__<tool>` so a
+remote tool can never collide with or shadow a built-in.
+
+**Progressive tool disclosure** (pattern 9) — a tool may optionally implement
+`tool.Disclosable`; the built-in `tool.Search` tool (catalog name `ToolSearch`,
+`tool.NewToolSearch`) hydrates hidden tools on demand by searching the catalog. A
+tool that does not implement `Disclosable` is always listed, so this is opt-in and
+backwards-compatible (gated by the `ProgressiveTools` flag on the Engine `Deps`).
+
+**Skills** (`internal/adapter/skills`) — pattern 9 applied to *instructions*
+instead of tool schemas. A skill is a progressive-disclosure instruction unit: a
+`SKILL.md` file with YAML frontmatter (`name` + `description`) and a markdown
+body, laid out as `<skills-dir>/<name>/SKILL.md` (matching the Agent Skills
+ecosystem; see the format references under `docs/examples/skills/`).
+`skills.Discover` scans the directory and parses each file into a pure
+`skills.Skill` value object; discovery is forgiving — a malformed or
+frontmatter-less file is **skipped and reported** (`skills.SkipError`), never
+fatal, and a kept skill whose **always-in-context description** exceeds a cap
+(`maxDescriptionBytes`) is rune-safe truncated with a warning (so one oversized
+description cannot bloat every request and break the byte-stable prompt prefix);
+an oversized body is flagged too (it is truncated on activation). A single
+read-only `Skill` tool (`skills.NewTool`, catalog name `Skill`,
+`ReadOnly()==true`) exposes them: its `Spec().Description` **enumerates every
+discovered skill's name + one-line description** — the cheap, always-in-context,
+cache-stable metadata layer — while `Execute({name})` returns that skill's full
+**body** only when the model activates it (the load-on-activation layer),
+prefixed by a small header carrying the skill's canonical **base directory** plus
+one line of bundled-files guidance. The header is the runtime-discoverability
+half of the out-of-workspace fix: a user-scope skill lives outside the workspace,
+and without the path in the result the model can only guess. The enforcement half
+is the **read-root allowlist**: composition computes the unique per-skill
+directories from the discovered set (`internal/app.skillReadRoots`, stashed once
+on `catalogAssets.skillReadRoots`) and constructs every production osfs
+`Workspace` — the per-session factory and all fork closures — with
+`osfs.WithReadRoots`, so `Read`/`Stat` (and only they) serve those absolute paths
+through a per-root `os.Root` with the same symlink containment as the workspace
+root; every other absolute path keeps the byte-identical escape error. Because
+the tool is read-only it is also available in plan mode. The tool is registered
+**only when at least one valid skill is discovered** — an empty inventory
+advertises nothing.
+
+The discovered set is *also* projected into a server-side inventory snapshot
+(`internal/app.skillSnapshot`, name-sorted, name+description only — no body),
+carried on `server.Config.Skills` and served read-only by the **`ListSkills`
+RPC** (`HarnessService.ListSkills` / `GET /v1/skills`). It mirrors `ListAgents`
+rather than `ListCommands`: skills are discovered once at build time and
+immutable for the process lifetime, so the snapshot is a pure read, never a live
+re-scan. The mecatui TUI consumes it for the `/skills` browser panel (gated on
+`caps.Skills` plus a wired `client.SkillLister`); activation stays the model's
+concern, so the panel is discovery only.
+
+*Where skills come from* is itself a seam: `skills.Source`
+(`Skills(ctx) ([]Skill, []SkipError, error)`) is the **pluggable extensibility
+point**. `skills.DirSource{Dir, Label}` is the default local-filesystem
+implementation (the `<dir>/<name>/SKILL.md` layout); `skills.MultiSource`
+composes an **ordered** list of sources with a defined precedence — **earlier
+source wins** on name collisions, the loser dropped with a "shadowed by a
+higher-precedence source" `SkipError`. A future embedded-defaults or remote
+registry source just implements `Source` and slots into the `MultiSource`; the
+consumer (`skills.RegisterSource`) is unchanged. Two seams now exist at
+different altitudes. **`tool.SkillSource`** (`engine/tool/skillsource.go`) is
+the DOMAIN port skills cross as **logical bundles** — identity/metadata
+(`SkillMeta`), body, and payloads addressed by logical name
+(`SkillAsset`, `ListSkillAssets`/`ReadSkillAsset`) — never a path/dir/root;
+both the FS adapter (`skills.FSSource`) and the remote driver
+(`SkillSourceService`, [observability & persistence](observability.md)) implement it, and the conformance suite holds them
+to the same semantics. `skills.Source` remains the **adapter-local**
+discovery/composition seam underneath it (where a skill's files live is the FS
+adapter's non-port business — `FSSource.AssetDirs` feeds the read-root
+allowlist above); nothing in the agent loop consumes skills directly (they are
+packaged into a `tool.Tool` at composition time).
+
+**The self-improving skill loop** (`skills.Drafter`, opt-in) closes the loop so
+durable skills can *come into being from the agent's own experience*. A single
+writable tool, **`SkillDraft`** (`skills.NewDraftTool`, catalog name `SkillDraft`,
+`ReadOnly()==false`), lets the model PROPOSE a skill; its `skills.Drafter` write
+seam (mirroring `Source`, in the adapter package — nothing in domain/agent consumes
+or produces skills) validates and sanitizes the untrusted candidate and writes it
+to a **quarantine directory that is NEVER registered as a catalog `Source`**. The
+default `DirDrafter` is fully offline: it reuses `parseSkill`/`validateName`, an
+exported injection scan (`ScanForInjection`, run on both the always-in-context
+description and the body), a name regex (lowercase Agent-Skills style, blocking
+traversal), the existing size caps, a path-containment assert, an atomic
+temp+rename write, and an offline **2-gram Jaccard** novelty check
+(`Jaccard2Gram`) that *warns* (never blocks) on near-duplicate descriptions. Every
+quarantined `SKILL.md` is provenance-stamped (`origin: model`, `drafted_at`) for the
+reviewer; `parseSkill` ignores those keys so they never reach context. **The trust
+boundary** (stated in `internal/adapter/skills/promote.go`): the model can author a candidate but can
+never activate its own proposal in any session. It rests on two invariants, both
+enforced in `cmd/mecated` (`validateSkillDraftConfig`, fatal on a misconfig):
+(1) the quarantine dir must live **outside the workspace root**, so the model's
+workspace-confined `Write`/`Edit` structurally cannot reach it — a candidate only
+ever enters quarantine via the `Drafter`; and (2) the dir must be **disjoint from
+every active skills dir**. Promotion from quarantine to an active `--skills-dir` is
+an **operator** action (`skills.Promote`, the `mecated skills promote` subcommand),
+which **shows the full candidate, requires confirmation** (`--yes` for scripted use),
+**verifies `origin: model` provenance**, and re-runs structural validation + the
+injection scan before moving it (refusing to overwrite an existing name). The
+convention is **author in session N → operator promotes → active in N+1**: drafts
+never enter the live catalog or perturb the byte-stable prompt prefix (it is built
+once at startup from operator-trusted sources only). `SkillDraft` is opt-in via
+`--skills-draft-dir` (empty ⇒ tool not registered, like `--memory-dir` gating
+Remember). **Residual** (documented, not hidden): absent the deferred OS sandbox the
+`Bash` tool can write to any path, so the structural boundary covers `Write`/`Edit`
+only — `mecated` warns when `SkillDraft` and `Bash` are enabled together; the fully
+structural deployment is shell-less or sandboxed. `SkillDraft` itself defaults to **ask** so a
+human reviews authorship, and being mutating it is filtered out of plan mode.
+
+It stays **opt-in**: `mecated` wires it via a repeatable `--skills-dir`
+(highest precedence) and an opt-in `--skills-conventional` that adds Claude-Code-
+style **known paths** (`skills.ResolveSources`): project-level
+`<workspace>/.mecatl/skills` and `<workspace>/.claude/skills`, then user-level
+`$XDG_CONFIG_HOME/mecatl/skills` (or `~/.config/mecatl/skills`) and `~/.claude/skills`,
+with precedence **explicit > project > user**. With neither flag set, the resolver
+yields no sources and nothing is read. Discovery (reading files, YAML parsing via
+`go.yaml.in/yaml/v3`) is an adapter concern; nothing in this package is imported
+by a domain package — it merely implements the domain `tool.Tool` interface.
+
+### Seam summary
+
+Every capability above is a default-on (or opt-in) interface; the core never
+changes when one is swapped:
+
+| Seam | Where | Default → swap-in |
+|---|---|---|
+| `port.LLMProvider` | `engine/port/llm.go` | `openai`/`mockllm`; decorated by `llmresilience`; other vendors slot in unchanged |
+| `port.PermissionPolicy` | `engine/port/permission.go` | `permpolicy` (layer-1 rules), optionally decorated by `permclassify` (layer-2 model classifier) |
+| `Compactor` | `engine/agent/compaction.go` | `HeuristicCompactor` → `CascadeCompactor` |
+| `TokenCounter` | `engine/agent/tokencount.go` | `HeuristicTokenCounter` → `tokenizer.Counter` |
+| `InstructionAssembler` | `engine/prompt/instructions.go` | `RootAssembler` (AGENTS.md/CLAUDE.md) → `MultiAssembler` composing `RootAssembler` → `SoulAssembler` (persona) → `MemoryIndexAssembler` (saved project facts) → `UserModelAssembler` (operator FACTS), all as turn-0 user messages |
+| `prompt.SoulSource` | `engine/prompt/soul.go` (impl `internal/adapter/soul`) | nil (off) → `*soul.Store`; agent-READ-ONLY (no write path), env-injected (not the WorkspaceReader — the file is outside any session root), injection-scanned + byte-capped, fail-soft; on by default, `--soul-file`/`--no-soul`. **Two provenances + trust gate (issue #14, Phase 3, Item 2):** a USER soul (`<xdg>/mecatl/soul.md` or `--soul-file PATH`) is always trusted; a PROJECT soul (a discovered `<workspace>/.mecatl/soul.md`, parallel to `.mecatl/settings.yaml`) is **untrusted by default** and honoured only with `--trust-project` (the SAME issue-#13 gesture — not a new flag, not routed through governance: the soul is fenced DATA). **USER-WINS precedence** (single identity anchor, not a merge): a present user soul is used and the project soul is ignored; an untrusted project soul is dropped + WARN-narrated (via the injected `port.Diagnostics`). The selection (provenance/trusted/drift metadata) lives in `internal/app/soulselect.go`; `engine/prompt` stays trust-unaware. **Drift baseline (Item 1):** `soul.LoadWithMeta` computes the sha256 of the clean body in the same read; `internal/app/soulguard` records it as a harness-owned sidecar `<soulPath>.sha256` trust-on-first-use (against WHICHEVER soul wins), WARNs on a later mismatch, and (with `--soul-strict`) drops a drifted soul. `--approve-soul` re-baselines. The WRITE lives ONLY in the composition layer — the adapter stays write-free. |
+| `prompt.UserModelSource` | `engine/prompt/usermodel.go` (impl `internal/adapter/memory`) | nil (off) → a SECOND, user-scoped, **cross-project** `*memory.Store` over `<xdg>/mecatl/usermodel`; durable operator FACTS exposed as RememberUser/RecallUser/SearchUserModel (enforced `user/` prefix; write-time injection scan) + the turn-0 `<user-model>` block; on by default, `--user-model-dir`/`--no-user-model`. Writable FACTS, not a governance scope. OPT-IN Stop-triggered reviewer via `--user-model-review` (never reopens the user session) |
+| `CommandExpander` | `engine/prompt/command.go` | `NoopExpander` → `DirCommandExpander` (slash commands) |
+| `tool.Disclosable` + `ToolSearch` | `engine/tool` | always-listed → progressive disclosure |
+| `Skill` tool (skills) | `internal/adapter/skills` (impl) | off → opt-in `--skills-dir`; progressive disclosure of *instructions* (metadata always in context, body on activation) |
+| `skills.Source` (adapter) / `tool.SkillSource` (domain port) | `internal/adapter/skills/source.go` / `engine/tool/skillsource.go` | `DirSource` (one dir) → `MultiSource` (ordered, earlier-wins); known-path resolver (`--skills-conventional`: project `.mecatl`/`.claude`, user XDG/`~/.claude`); the domain port carries skills as logical bundles (metadata/body/assets, no paths) — implemented by `skills.FSSource` and the remote `SkillSourceService` driver |
+| `skills.Drafter` (self-improving loop) | `internal/adapter/skills/drafter.go` | off → opt-in `--skills-draft-dir`; default `DirDrafter` (offline: validate/sanitize/2-gram-Jaccard novelty → out-of-workspace quarantine, NEVER a catalog Source). WRITE side is pluggable (a future LLM-vetting decorator slots in); promotion is filesystem-only in the MVP — operator `mecated skills promote` is the gate (shows content, confirms, verifies provenance; author N → promote → active N+1) |
+| `tool.CommandRunner` | `engine/tool/tool.go` (impl `osfs`) | the command-execution chokepoint; an OS sandbox wraps here |
+| `tool.MemoryStore` | `engine/tool/tool.go` (impl `memory`; conformance `engine/adapter/memconformance`) | cross-session memory + `dream` consolidation |
+| `tool.WorkspaceForker` | `engine/tool/isolation.go` (impl `forker`) | fork-join isolated branches |
+| `tool.Catalog` | `engine/tool/catalog.go` | core tools + MCP (streaming-HTTP) |
+| `mcpperf.Deps` (perf MCP server) | `internal/adapter/mcpperf` | opt-in `--perf-mcp`; a read-only MCP `http.Handler` mounted at `/mcp` on the loopback admin listener (both composition roots: `cmd/mecated` and `cmd/mecatui/embed`). Built by DI — `Snapshot`/`Gatherer`/`Profiler` from `telemetry`, a slow-turn ring buffer (`telemetry.SlowTurnBuffer`) bridged at the cmd boundary to the `mcpperf.SlowTurnSource` seam (telemetry never imports mcpperf — the dependency points inward). Fail-closed to loopback (unauthenticated) |
+| `SessionStore` + AGENTS.md/CLAUDE.md discovery | `port` + `engine/prompt/builder.go` | file-as-memory; AGENTS.md wins over CLAUDE.md, injected as a **user** message, never system |
+
+**Remaining non-goals / deliberate deferrals**: an **OS-level sandbox**
+(Landlock/seccomp/Seatbelt) is the one explicitly-deferred item — the
+`CommandRunner` seam is the place it wraps, and shell-less deploys avoid the
+surface entirely. **stdio MCP is never supported**. Embeddings remain unbuilt
+(multi-provider routing shipped — [multi-provider](providers.md)); **skills**
+exist as progressive-disclosure instruction units (see above), with bundled
+*packaging* shipped as logical assets on the `tool.SkillSource` port
+(`SkillAsset`, `ListSkillAssets`/`ReadSkillAsset` — never a path on the wire),
+served through the skill read-root allowlist. The guiding restraint still holds: build the shape, instrument it,
+and resist features before the loop, tools, permissions, hooks, and cache all work.
+
+---
+
+[← Architecture guide](../architecture.md)

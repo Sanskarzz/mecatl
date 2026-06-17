@@ -1,5 +1,8 @@
 # Guardrails — LLM-backed tool-content inspection (issue #27)
 
+> **Design record.** Captured during the guardrails work; the rationale here is frozen.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+
 Guardrails are an **operator-tier, LLM-backed content checker** that inspects the
 data crossing the agent's tool boundary in both directions and enforces a verdict on
 the call. It is the *dual-LLM quarantine* pattern (Willison's "CaMeL" framing, the

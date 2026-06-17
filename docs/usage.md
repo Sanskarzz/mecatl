@@ -35,11 +35,13 @@ Build the binaries into `bin/`:
 $ task build
 go build -o bin/mecated ./cmd/mecated
 go build -o bin/mecademo ./cmd/mecademo
+go build -o bin/mecatequi ./cmd/mecatequi
 go build -ldflags "-X main.version=..." -o bin/mecatui ./cmd/mecatui
 ```
 
-This produces `bin/mecated` (the server), `bin/mecatui` (the terminal UI), and
-`bin/mecademo` (the offline demo). To install the operator-facing binaries into
+This produces `bin/mecated` (the server), `bin/mecatui` (the terminal UI),
+`bin/mecademo` (the offline demo), and `bin/mecatequi` (the single-shot headless
+CI/batch runner — see §10). To install the operator-facing binaries into
 `GOBIN` / `GOPATH/bin`:
 
 ```console
@@ -53,7 +55,7 @@ Other handy targets (`task --list` for the full set):
 
 | Task | What it does |
 | --- | --- |
-| `task build` | compile `bin/mecated`, `bin/mecatui`, `bin/mecademo` |
+| `task build` | compile `bin/mecated`, `bin/mecademo`, `bin/mecatequi`, `bin/mecatui` |
 | `task install` | install `mecated` and `mecatui` into `GOBIN` / `GOPATH/bin` |
 | `task test` | `go test -race ./...` |
 | `task test:cover` | tests + `coverage/coverage.{out,html}` |
@@ -181,6 +183,7 @@ $ go run ./cmd/mecated --openai --workspace "$PWD"
 | `--memory-dir` | `""` | per-project **memory store** directory; setting it enables the `Remember`/`Recall`/`SearchMemory` tools (empty disables them). |
 | `--memory-consolidate-interval` | `0` | interval for background consolidation ("dream") of the per-project memory store; `0` disables. Only meaningful with `--memory-dir`. |
 | `--memory-store-url` | `""` | `host:port` of a remote **memory-store gRPC driver** (`mecatl.driver.v1.MemoryStoreService`); replaces the local flock store — mutually exclusive with `--memory-dir`, enables the memory tools like `--memory-dir` does. |
+| `--event-log-url` | `""` | `host:port` of a remote **event-log gRPC driver** (`mecatl.driver.v1.EventLogService`) for the durable per-session event timeline (reasoning, ask/verdict pairs, delegation lifecycle); **INDEPENDENT of the session store** (not mutually exclusive with `--store-dir`). Empty keeps the local default (the `--store-dir` JSONL log, or in-memory). Append happens at the relay (a fault WARNs, never aborts the run); Read is server-streaming. Same auth/TLS posture as `--session-store-url` (equal URLs share one connection). **See the store-driver note below.** |
 | `--child-retention` | `168h` | how long persisted **child** session snapshots (`subagent-*`/`parallel-*`/`team-*` ids — the `InspectSubagent`/`resume:` handles) are retained before the GC sweep deletes them. **Main sessions are never touched.** Durable-store-only in effect (`--store-dir` or a prunable `--session-store-url` driver; the in-memory default never accumulates across restarts). `0` disables the age pass. |
 | `--child-retention-max-per-family` | `500` | max persisted child snapshots kept **per delegation family** (subagent/parallel/team); the oldest beyond the cap are deleted, skipping in-flight runs. `0` disables the cap. |
 | `--child-gc-interval` | `1h` | how often the child-session retention GC re-sweeps after the startup sweep; `0` = sweep at startup only. Only meaningful when `--child-retention` or `--child-retention-max-per-family` is active. |
@@ -2511,7 +2514,7 @@ silently **skips legitimate runs**. The **live** workflow for this repo
 
 `author-gate.sh` (which asserts `author_association`) ships in the **example template
 only** as a defense-in-depth illustration; it is deliberately absent from the live
-workflow. See `docs/design/MECATEQUI.md`.
+workflow. See the [mecatequi design doc](design/MECATEQUI.md).
 
 The action and its scripts are meant to be **vendored** — copied into your repo and
 reviewed, not referenced by tag — so you control exactly what runs. To enable it:

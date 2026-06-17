@@ -1,15 +1,15 @@
 # Driver seams — ports, the gRPC driver protocol, and conformance
 
-Status: **shipped** (driver-seams arc, Phases A–C2: `8015f37` MemoryStore port +
-conformance, `f3a74c3` driver/v1 proto + store drivers, `d898834` skill + soul
-sources, `870e946` agent-def + command sources). This doc records the pattern,
-the seam inventory, the wire rules, and the deliberate deferrals. The
-operator-facing flags live in `docs/usage.md` ("Remote store drivers" /
-"Remote content-source drivers"); the mechanics and the full conformance run
-matrix live in `docs/architecture.md` ("Remote store + source drivers");
-per-phase implementation detail is in `docs/design/IMPLEMENTATION-NOTES.md`
-(the "Store drivers" / "Source drivers" subsections). Don't duplicate those —
-this is the rationale layer.
+> **Design record.** Captured during the driver seams work; the rationale here is frozen.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+
+This doc records the pattern, the seam inventory, the wire rules, and the
+deliberate deferrals. The operator-facing flags live in `docs/usage.md`
+("Remote store drivers" / "Remote content-source drivers"); the mechanics and
+the full conformance run matrix live in `docs/architecture.md` ("Remote store +
+source drivers"); per-phase implementation detail is in
+`docs/design/IMPLEMENTATION-NOTES.md` (the "Store drivers" / "Source drivers"
+subsections). Don't duplicate those — this is the rationale layer.
 
 ## The pattern
 

@@ -1,9 +1,8 @@
 # mecatui — UX discoverability design (Option C: wire capabilities)
 
-Status: IMPLEMENTED — Phases A+B shipped (the `ServerCapabilities` wire channel,
-the `?` help overlay, the honest empty-states, the zero-state/welcome splash);
-see the inline "Update —" notes for post-design evolution. Author:
-software-architect review.
+> **Design record.** Captured during the UX discoverability work; the rationale here is frozen.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+
 Decision: the availability seam is **Option C — a real `ServerCapabilities`
 wire channel** (authoritative for embedded AND external servers), structured as
 two separately-reviewable phases.

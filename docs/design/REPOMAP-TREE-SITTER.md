@@ -1,4 +1,10 @@
+---
+matlatl: orphan-intentional
+---
+
 # Repo-map tree-sitter: freeze root cause + binding evaluation
+
+> **Historical.** Retired 2026-06-06; feature removed. Preserved for rationale; not maintained.
 
 > ## RESOLUTION — RETIRED / REMOVED (2026-06-06)
 >
@@ -30,7 +36,7 @@
 
 ---
 
-**Status:** RETIRED (removed 2026-06-06). Investigation complete; original mechanism decision was pending when the feature was removed.
+**State:** RETIRED (removed 2026-06-06). Investigation complete; original mechanism decision was pending when the feature was removed.
 **Date:** 2026-06-02 (investigation); 2026-06-06 (retired).
 **Scope:** `internal/adapter/repomap/` — the (now removed) Aider-style repo-map tool.
 

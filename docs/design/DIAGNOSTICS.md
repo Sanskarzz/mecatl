@@ -1,8 +1,10 @@
 # Diagnostics, audit, and the global-slog ban
 
-Status: **shipped** (logging-architecture refactor, iterations 1–3). This is a
-correction/reference doc, not an essay — it records the seams, the sink-per-binary
-policy, the build-once rule, and the enforcement guard.
+> **Design record.** Captured during the diagnostics work; the rationale here is frozen.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+
+This is a correction/reference doc, not an essay — it records the seams, the
+sink-per-binary policy, the build-once rule, and the enforcement guard.
 
 ## Two seams, deliberately separate
 

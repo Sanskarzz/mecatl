@@ -1,7 +1,10 @@
 # Unattended / allow-all posture (the "YOLO mode" question)
 
-Status: **shipped** · supersedes the abandoned `ModeYolo` spike (see "What we
-rejected"). Decision-support for issue: *"add a yolo mode."*
+> **Design record.** Captured during the allow-all-posture work; the rationale here is frozen.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+
+Supersedes the abandoned `ModeYolo` spike (see "What we rejected"). Decision-support for
+issue: *"add a yolo mode."*
 
 ## The ask
 

@@ -1,5 +1,8 @@
 # Clipboard image paste (`ctrl+v`)
 
+> **Design record.** Captured during the clipboard image paste work; the rationale here is frozen.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+
 `ctrl+v` in the mecatui prompt reads the OS clipboard and, when it holds an image,
 stages it as an inline media attachment that rides the existing `Prompt.parts` send
 path. This note records the non-obvious decisions.

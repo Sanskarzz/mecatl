@@ -1,15 +1,6 @@
 # Twelve Agentic-Harness Patterns — Pluggability Audit
 
-> **Historical audit snapshot (2026-05-29) — superseded.** Every gap below has
-> since been closed: patterns 3 (tiered memory: `tool.MemoryStore` +
-> `internal/adapter/memory`), 4 (dream: `internal/adapter/dream`), 8 (fork-join:
-> `tool.WorkspaceForker` + `internal/adapter/forker` + `agent.NewParallelTool`),
-> 9 (disclosure: `tool.Disclosable` + ToolSearch), 10-layer-2
-> (`internal/adapter/permclassify`), 12 (all six hook phases fire —
-> `engine/agent/hooks.go`), and pattern 2 (`prompt.InstructionAssembler`).
-> `TaskTool` is now the `Subagent` tool; composition wiring moved from
-> `cmd/mecated` to `internal/app`. The body is retained as the rationale that
-> drove that work. Current status map: `docs/design/PRODUCTION-READINESS.md`.
+> **Historical.** Superseded audit snapshot (2026-05-29); all gaps closed. Preserved for rationale; not maintained.
 
 > Audits mecatl against the 12 patterns catalogued in
 > `docs/harnesses/02-twelve-patterns.md`. For each pattern: what it is, its
@@ -53,7 +44,7 @@ these.
 **What it is:** A known-path file (`CLAUDE.md`/`AGENTS.md`) loaded as ground
 truth at session start so conventions aren't relitigated each turn.
 
-**Status:** Implemented. `prompt.DiscoverInstructions`
+**State:** Implemented. `prompt.DiscoverInstructions`
 (`engine/prompt/builder.go:153`) reads `AGENTS.md` (winning) then `CLAUDE.md`
 (fallback) and returns them as **user-role** messages with a provenance marker.
 The loop calls it once on the first turn (`engine/agent/loop.go` `recordPrompt`,
@@ -77,7 +68,7 @@ discovery logic moves behind the assembler seam proposed there.
 **What it is:** Walk CWD→repo-root (plus user/managed scopes) collecting every
 instruction file, concatenate with a precedence order; subdir files load lazily.
 
-**Status:** Partial. `DiscoverInstructions` reads only **one** file at the
+**State:** Partial. `DiscoverInstructions` reads only **one** file at the
 **workspace root** — no parent-directory walk, no user (`~/.claude`) scope, no
 managed (`/etc`) scope, no per-subdir lazy load, no `@import`. Notably,
 `governance` already models the exact precedence ladder this pattern needs —
@@ -133,7 +124,7 @@ a hook phase that isn't fired yet (pattern 12).
 **What it is:** Cross-session knowledge split into a small always-loaded index
 (`MEMORY.md`), on-demand topic files, and searchable raw transcripts.
 
-**Status:** Missing. Documented v1 non-goal. The `memory`/`tier` grep hits in the
+**State:** Missing. Documented v1 non-goal. The `memory`/`tier` grep hits in the
 tree are `memstore`/`memfs` (in-memory *adapters*), unrelated. There is no
 cross-session knowledge store, no index, no consolidation.
 
@@ -166,7 +157,7 @@ Note it as the planned extension point and move on.
 **What it is:** A background idle-time process that dedupes/prunes/rewrites the
 memory store.
 
-**Status:** Missing. Documented v1 non-goal, and the source article rates this
+**State:** Missing. Documented v1 non-goal, and the source article rates this
 the least load-bearing of the twelve.
 
 **Pluggable?** No seam, correctly so — it presupposes pattern 3, which doesn't
@@ -184,7 +175,7 @@ scope.
 **What it is:** A cascade of compression stages of increasing aggressiveness so
 recent turns stay raw and old turns collapse.
 
-**Status:** Partial — single-stage, not a cascade. `HeuristicCompactor`
+**State:** Partial — single-stage, not a cascade. `HeuristicCompactor`
 (`agent/compaction.go:42`) does one pass: keep system + first user goal,
 synthesize a touched-paths summary, truncate oversized tool bodies, keep the last
 N turns verbatim. The loop triggers it at `CompactionRatio` of the context window
@@ -215,7 +206,7 @@ it inline. Do not abstract.
 **What it is:** Phased workflow with monotonically increasing tool permissions;
 "plan mode" reads/reasons but cannot mutate until approved.
 
-**Status:** Implemented. `session.PermissionMode` (`session/session.go:49`) with
+**State:** Implemented. `session.PermissionMode` (`session/session.go:49`) with
 `ModePlan`; the catalog hides non-read-only tools in plan mode
 (`Catalog.Available`/`Specs`, `tool/catalog.go:70`); and the governance evaluator
 *also* denies mutating actions in plan mode as defense-in-depth
@@ -240,7 +231,7 @@ is the right place for it. No seam to add.
 prompt, tool allowlist, and permission mode; only its final summary returns to
 the parent.
 
-**Status:** Implemented. `agent.TaskTool` (`agent/subagent.go:75`) is a
+**State:** Implemented. `agent.TaskTool` (`agent/subagent.go:75`) is a
 `tool.Tool` that runs a **child `*Engine`** with a fresh `session.New`, its own
 (tighter) `Limits`, a scoped read-only catalog, and an allow-all child policy.
 `drainChild` (`subagent.go:257`) consumes the child's *entire* event stream
@@ -266,7 +257,7 @@ the method (`subagent.go:181`). That is the correct place for it.
 **What it is:** Fork N subagents into isolated git worktrees, run them in parallel
 against the same task, then merge/select the best.
 
-**Status:** Missing. The read-only **substrate** exists — the dispatcher runs
+**State:** Missing. The read-only **substrate** exists — the dispatcher runs
 maximal batches of read-only tools concurrently (`agent/dispatch.go:84`
 `runReadBatch`), and `TaskTool.ReadOnly()==true` means **multiple `Task` calls in
 one turn already fan out concurrently**. But there is no first-class
@@ -321,7 +312,7 @@ existing read-parallel dispatch already half-supports.
 **What it is:** Start with <20 default tools; load extra capabilities (MCP,
 skills) on demand, surfacing only metadata until invoked, to protect attention.
 
-**Status:** Partial. The default kit is small and correct (Read/Edit/Write/Grep/
+**State:** Partial. The default kit is small and correct (Read/Edit/Write/Grep/
 Glob/WebFetch/Bash/Task). But **all** tools — including MCP tools — are
 **eager-registered** into one `Catalog` at startup (`cmd/mecated:buildCatalog`; MCP
 via `registerMCP`), and the **full** spec of every available tool is rendered
@@ -378,7 +369,7 @@ seam is cheap and additive, so it can wait without painting us into a corner.
 (2) an auto-mode *model* classifier for the residual cases (scope escalation,
 injection, untrusted infra).
 
-**Status:** Partial — layer 1 only, but layer 1 is strong. The governance
+**State:** Partial — layer 1 only, but layer 1 is strong. The governance
 `Evaluator` (`governance/evaluator.go`) does deny→ask→allow across `Scope`
 precedence, plan-mode gating, **compound-Bash splitting** (every sub-command must
 pass; substitution/grouping floors at Ask), and glob matching. The default
@@ -427,7 +418,7 @@ when classifying — a payload can survive compaction. The classifier reads the
 **What it is:** Narrow, typed, individually-permissioned tools instead of one
 generic shell; Bash as last resort.
 
-**Status:** Implemented. Each tool is a typed `tool.Tool` with its own `Spec`
+**State:** Implemented. Each tool is a typed `tool.Tool` with its own `Spec`
 (name, doc, JSON schema) and `ReadOnly` classification (`adapter/tools/*.go`):
 Read/Edit/Write/Grep/Glob/WebFetch, plus Bash gated on a configured shell
 (`buildCommandRunner`), and Task. Bash is explicitly optional
@@ -451,7 +442,7 @@ pattern 9 disclosure.
 **What it is:** Named lifecycle events fire at fixed loop points, passing JSON to
 user shell commands; exit 2 blocks (PreToolUse only).
 
-**Status:** Partial — the seam is complete, the *coverage* is not. The contract is
+**State:** Partial — the seam is complete, the *coverage* is not. The contract is
 fully modelled: `governance.HookEvent`/`HookOutcome`/`HookPhase`
 (`governance/hookevent.go`) with six phases declared (SessionStart,
 UserPromptSubmit, PreToolUse, PostToolUse, Stop, SubagentStop), the

@@ -5,6 +5,8 @@
 
 This folder contains a working reference on agentic coding harnesses in 2026 — the patterns, architectures, recreations, and design decisions that constitute the discipline. Each file is independently readable; the suggested narrative order is below.
 
+> **These docs describe the *field*, not mecatl's own conventions.** They are the research corpus mecatl was built *from* — survey material, not a description of this codebase. For mecatl's actual build conventions, architecture, and gotchas, see [`CLAUDE.md`](../../CLAUDE.md), [`docs/architecture.md`](../architecture.md), and [`docs/design/`](../design/README.md). (The one exception is [`09-agent-primitives-evaluation.md`](./09-agent-primitives-evaluation.md), which explicitly compares mecatl against the field.)
+
 > **Looking for something specific — or an agent navigating this corpus?**
 > Start with the **[INDEX — master router](./INDEX.md)**. It is the Tier-0 router: find your need
 > by **goal**, **question**, **concept**, or **source project**, and it sends you

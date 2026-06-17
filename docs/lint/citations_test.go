@@ -363,9 +363,12 @@ func TestRealDesignDocsCitations(t *testing.T) {
 	read := osRead(root)
 	rescue := osRescue(root)
 
-	// Scope: docs/design/*.md only. Widen by appending globs here.
+	// Scope: docs/design/*.md and the architecture guide (the living reference,
+	// citation-heavy). Widen by appending globs here.
 	patterns := []string{
 		filepath.Join(root, "docs", "design", "*.md"),
+		filepath.Join(root, "docs", "architecture.md"),
+		filepath.Join(root, "docs", "architecture", "*.md"),
 	}
 
 	var docs []string

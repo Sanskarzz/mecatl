@@ -1,22 +1,8 @@
 # Performance observability — problem, approaches, and the decided direction
 
-- Status: **Approach D — SHIPPED (2026-06-03). Phase 1 + Phase 2 complete.**
-  Phase 2's companion interpretation skill landed at
-  `.claude/skills/perf-mcp-interpretation/`, completing the effort.
-  Phase 1 (the stdlib + OTel foundations) is implemented and committed:
-  ctx-aware EventSink seam → OTel metrics migration → latency instruments
-  (turn/TTFT/inter-token/tool-queue exponential histograms) → mecated
-  runtime-introspection admin surface (pprof + knobs, runtime/metrics + expvar
-  snapshot, FlightRecorder, process-RSS gauge) → goleak gates + live goroutine
-  watchdog → mecatui `--perf` embedded admin surface. **Phase 2** — the opt-in
-  perf-over-MCP server (`internal/adapter/mcpperf`) reading those sources — is now
-  **wired into both composition roots** behind `--perf-mcp` (mecated) /
-  `--perf-mcp` with `--perf` (mecatui embed): the server mounts at `/mcp` on the
-  loopback admin listener, backed by a `telemetry.SlowTurnBuffer` slow-turn ring
-  fanned into the engine's EventSink and bridged to the adapter's
-  `SlowTurnSource` at the cmd boundary, plus the `mecated perf-mcp print-config`
-  helper. Sections 1–3 retain the research/rationale; §4–§5 record the
-  decisions.
+> **Design record.** Captured during the perf observability work; the rationale here is frozen.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+
 - Date: 2026-06-03.
 - Scope: how mecatl exposes its own runtime performance for measurement —
   by humans, by tooling, and (the new idea) by an **AI agent over MCP**.

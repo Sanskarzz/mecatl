@@ -6,8 +6,12 @@ when `CLAUDE.md` was trimmed back to a lean correction file (~1k words).
 
 **This is reference, not a contract.** It captures decisions, invariants, and the
 SHIPPED/DEFERRED state of each subsystem as of the trim. When a subsystem has a dedicated
-spike/design doc (`MULTI-PROVIDER.md`, `WORKSPACE-TRUST-SPIKE.md`, `SOUL-SPIKE.md`,
-`MEMORY-*.md`, `AGENT-TEAMS-SPIKE.md`, `ALLOW-ALL-POSTURE.md`), that doc is the deeper
+spike/design doc ([MULTI-PROVIDER.md](./MULTI-PROVIDER.md),
+[OPENAI-RESPONSES-API.md](./OPENAI-RESPONSES-API.md),
+[WORKSPACE-TRUST-SPIKE.md](./WORKSPACE-TRUST-SPIKE.md), [SOUL-SPIKE.md](./SOUL-SPIKE.md),
+`MEMORY-*.md`, [AGENT-TEAMS-SPIKE.md](./AGENT-TEAMS-SPIKE.md),
+[ALLOW-ALL-POSTURE.md](./ALLOW-ALL-POSTURE.md),
+[SYSTEM-PROMPT-RESEARCH.md](./SYSTEM-PROMPT-RESEARCH.md)), that doc is the deeper
 source; this file is the one-stop index of the dense detail that was crammed into CLAUDE.md.
 Prefer updating the relevant design doc + this file over re-growing CLAUDE.md.
 

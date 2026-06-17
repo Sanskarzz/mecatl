@@ -1,5 +1,8 @@
 # MECATEQUI.md — running mecatl as a single-shot GitHub Action
 
+> **Design record.** Captured during the mecatequi (GitHub Action) work; the rationale here is frozen.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+
 `mecatequi` (`cmd/mecatequi/main.go`) is the headless, single-shot mecatl runner: one
 prompt, one in-process engine, one terminal state, three artifacts (a working-tree git
 diff, a machine-readable summary JSON, an optional durable event log), and an exit code.

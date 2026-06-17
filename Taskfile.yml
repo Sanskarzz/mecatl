@@ -388,6 +388,16 @@ tasks:
     cmds:
       - go run github.com/stacklok/matlatl/cmd/matlatl@v0.0.5 check . --strict
 
+  docs:model:
+    desc: Re-render & validate the modelith domain model (edit the .yaml, never the .md)
+    cmds:
+      # modelith renders docs/architecture/mecatl.modelith.md from its .yaml source
+      # and lints the model. Pinned to the SAME revision as the CI domain-model gate
+      # (.github/workflows/ci.yml); --check / completeness=error mirror CI exactly.
+      # (A private-module fetch needs GOPRIVATE=github.com/stacklok/* set.)
+      - go run github.com/stacklok/modelith/cmd/modelith@73429dd46a22b3c3491c4654edca391fc9bd63f2 render docs/architecture/mecatl.modelith.yaml
+      - go run github.com/stacklok/modelith/cmd/modelith@73429dd46a22b3c3491c4654edca391fc9bd63f2 lint --completeness error docs/architecture/mecatl.modelith.yaml
+
   docs:
     desc: Refresh llms.txt and gate doc links (matlatl) — run before committing doc changes
     cmds:

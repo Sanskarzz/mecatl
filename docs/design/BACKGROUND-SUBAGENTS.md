@@ -1,19 +1,22 @@
 # BACKGROUND-SUBAGENTS.md — Background Subagents + Per-Child Cancel over a Shared Child-Run Registry
 
-> **Status: SHIPPED** — the whole arc is on `main`: **I1** (registry + Subagent cancel,
-> `2d0bb4f`), **I2** (parallel-branch + team-member cancel, `d6457ef`), **I3a** (background
-> mechanics + SubagentStatus + seal/drain, `3617285`), **I3b** (notice injection +
-> background-pending nudge + mecademo, `e249dae`), **I4** (TUI background surfaces +
-> description pass + this doc's promotion — the final iteration). This document is the
-> design **as built**: the post-review amendments are folded into the body where they
-> changed it. Per-subsystem implementation detail lives in
-> `docs/design/IMPLEMENTATION-NOTES.md`; companion docs: `docs/design/AGENT-TEAMS-SPIKE.md`.
->
-> The arc closed the two remaining Tier-4/Tier-5 delegation gaps as ONE co-designed
-> feature pair: per-child cancel (deferred precisely because ~60% of its machinery is the
-> background registry) and background/async delegation (the field's clearest direction:
-> Claude Code `run_in_background`/Ctrl+B, opencode background tasks + `task_status`,
-> Cursor cloud agents).
+> **Design record.** Captured during the background-subagents work; the rationale here is frozen.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+
+The whole arc is on `main`: **I1** (registry + Subagent cancel, `2d0bb4f`), **I2**
+(parallel-branch + team-member cancel, `d6457ef`), **I3a** (background mechanics +
+SubagentStatus + seal/drain, `3617285`), **I3b** (notice injection + background-pending
+nudge + mecademo, `e249dae`), **I4** (TUI background surfaces + description pass + this
+doc's promotion — the final iteration). This document is the design **as built**: the
+post-review amendments are folded into the body where they changed it. Per-subsystem
+implementation detail lives in `docs/design/IMPLEMENTATION-NOTES.md`; companion docs:
+`docs/design/AGENT-TEAMS-SPIKE.md`.
+
+The arc closed the two remaining Tier-4/Tier-5 delegation gaps as ONE co-designed feature
+pair: per-child cancel (deferred precisely because ~60% of its machinery is the background
+registry) and background/async delegation (the field's clearest direction: Claude Code
+`run_in_background`/Ctrl+B, opencode background tasks + `task_status`, Cursor cloud
+agents).
 
 ## Decisions table (as built)
 

@@ -1,5 +1,8 @@
 # Agent definitions (Tier 1)
 
+> **Design record.** Captured during the agent-definitions work; the rationale here is frozen.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+
 Named subagent specialists discovered from operator-controlled markdown files
 (`<dir>/<name>.md`, YAML frontmatter + body), mirroring the skills Source seam. **One
 definition, two consumers**: a `<name>.md` is reusable both as a Subagent delegate

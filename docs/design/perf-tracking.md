@@ -1,20 +1,11 @@
 # Long-term performance & resource regression tracking
 
-Status: **Phases 1 + 2 + 3 + 4 shipped; Phases 5–6 remain deferred-until-justified.**
-Phase 0 (decide what we track) is settled below, Phase 1 (hot-path microbenchmarks
-+ a `task bench` gate-feed) is built — see [Phase 1 — Status](#phase-1--status),
-Phase 2 (the offline scenario harness behind `task perf:scenarios`) is built — see
-[Phase 2 — Status](#phase-2--status), Phase 3 (the CI trend store + the
-allocs-first regression gate in [`.github/workflows/perf.yml`](../../.github/workflows/perf.yml))
-is built — see [Phase 3 — Status](#phase-3--status) — and Phase 4 (the PGO
-*mechanism*: `task pgo:collect`, the auto-applied `cmd/mecated/default.pgo` slot,
-and the production refresh process) is wired — see [Phase 4 — Status](#phase-4--status).
-Phases 5–6 (continuous profiling, stable wall-clock gating) remain intentionally
-deferred — the gaps there are operational/hardware, not software (see the
-[roadmap close-out](#roadmap-close-out)). Sibling to the
-[performance observability design](perf-observability.md), which covers the
-*introspection* half (pprof, flight recorder, OTel metrics, the perf MCP,
-`--perf`, goleak).
+> **Design record.** Captured during the perf tracking work; the rationale here is frozen.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+
+Sibling to the [performance observability design](perf-observability.md), which
+covers the *introspection* half (pprof, flight recorder, OTel metrics, the perf
+MCP, `--perf`, goleak).
 
 ## The gap this closes
 

@@ -1,24 +1,8 @@
 # Spike: A "soul" for mecatl — persistent identity + cross-session user-model
 
-> Status: **Phase 1 SHIPPED + Phase 2 (2a + 2b) SHIPPED + Phase 3 Items 1–3 SHIPPED**
-> (issue #14; Phase 3 Item 3 — the `/soul` + `/usermodel` read-only TUI inspector —
-> is now wired: two unary RPCs (`GetSoul` returns a build-time persona snapshot
-> with provenance/trust/drift; `GetUserModel` returns the live user-model index),
-> two `ServerCapabilities` bits (`soul`, `user_model`), and the two caps-gated
-> mecatui panels — `/soul` is a SCROLLABLE persona inspector, `/usermodel` a
-> short key→description list. The panels are READ-ONLY: neither edits the soul or
-> the user model. See `docs/tui.md`.) Phase 1 — the
-> user-scoped, agent-read-only persona fragment — is wired (`engine/prompt/soul.go`,
-> `internal/adapter/soul/`, bound in `internal/app/build.go`). Phase 2 — the user-model
-> learning loop — is now wired too: a SECOND, user-scoped, CROSS-PROJECT memory store
-> of durable FACTS about the operator (`internal/adapter/memory/usermodeltools.go`,
-> `engine/prompt/usermodel.go`), exposed as the RememberUser/RecallUser/SearchUserModel
-> tools (2a, default-on) and a turn-0 `<user-model>` block, PLUS an OPT-IN (off by
-> default) Stop-triggered background reviewer that extracts operator facts from a
-> finished transcript (`engine/agent/usermodelreview.go`, wired via a composition-
-> layer Stop-hook decorator in `internal/app/usermodelreview.go`). Author pass:
-> 2026-06-04.
->
+> **Design record.** Captured during the soul / persona work; the rationale here is frozen.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+
 > **Ground-truth corrections applied during implementation** (the as-built wins over
 > the sketch below where they conflict):
 > - **(A)** The soul is NOT read through the per-session `WorkspaceReader`. That handle

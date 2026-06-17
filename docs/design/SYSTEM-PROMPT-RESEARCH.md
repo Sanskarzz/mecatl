@@ -1,5 +1,8 @@
 # System-Prompt Research & Enhancement (issue #19)
 
+> **Design record.** Captured during the system-prompt enhancement work; the rationale here is frozen.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+
 > Research + comparative analysis + prioritized enhancement plan for mecatl's
 > system prompt (Pattern #1 of the twelve). Grounds the audit in the **actual
 > system prompts** of five reference harnesses — Claude Code (the leak), OpenAI
@@ -10,7 +13,7 @@
 > the *seams*); this doc audits the *prompt content* the seam emits.
 > Corpus refs: `docs/harnesses/02` §1, `03` §System-prompt, `06` §7, `06` §13.
 >
-> **Status: §7a enhancement plan IMPLEMENTED (issue #19, 2026-06-05).** The
+> **§7a enhancement plan implemented (issue #19, 2026-06-05).** The
 > default role/tone/safety constants are rewritten with the load-bearing
 > behavioral contracts; a generated `toolDisciplineHints` block steers
 > dedicated-tool use off the LIVE catalog; the `<env>` block gained `shell` + a

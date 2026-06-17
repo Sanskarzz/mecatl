@@ -1,7 +1,9 @@
 # Cloud-native arc: disposable process, externalized state, durable record
 
-Status: **Phase 0 deliverable** (this doc IS the Phase 0 gate). Descriptive only, no
-behavior change. Builds on the shipped driver-seams arc (`DRIVERS.md`) and the no-FS
+> **Design record.** Captured during the cloud-native arc work; the rationale here is frozen.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+
+Builds on the shipped driver-seams arc (`DRIVERS.md`) and the no-FS
 session profile (issue #55, commit `9f8ba8c`); informed by the cloud-native kit
 inventory (PR #54), whose subsystem #6 advice ("don't design resource lifetimes,
 inventory them") this doc executes, and whose session-state gaps (§1.1 to §1.4) the
@@ -44,8 +46,9 @@ The harness is unusually close by construction:
   `internal/adapter/grpcdriver/sessionstore.go:30`).
 - **The no-FS profile and its rehydration seam** (commit `9f8ba8c`, issue #55). A
   session can run with no filesystem at all (`engine/adapter/nofs`), and the first
-  run-entry rehydration seam exists: `Service.rehydrateNoFSSession`
-  (`internal/adapter/server/service.go:1084`) rebuilds a restarted no-fs session's
+  run-entry rehydration seam exists: `Service.rehydrateNoFSSession` (since generalized
+  to `Service.rehydrateSession` in Phase 1)
+  (`internal/adapter/server/service.go`) rebuilds a restarted no-fs session's
   per-session engine through the same factory create used, double-defended by the
   empty-root chokepoint in the osfs workspace factory
   (`internal/app/build.go:3815`). That is the evict/rehydrate mechanism in miniature,

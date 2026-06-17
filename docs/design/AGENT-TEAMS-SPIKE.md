@@ -1,12 +1,13 @@
 # Spike: Headless Agent Teams for mecatl
 
-> Status: **SHIPPED** — the substrate (kernel, supervisor, coordination tools, Team
-> tool, gRPC/HTTP surface, hook phases, budgets, trust gate) is live; this doc retains
-> the spike rationale plus inline status updates. Author pass: 2026-05-30; last status
-> sync: 2026-06-12.
-> Companion prototype: `engine/team/` (coordination kernel + tests).
-> Research basis: `docs/harnesses/02`, `05`; live survey of Claude Code subagents
-> & agent teams, OpenAI Agents SDK, Goose recipes (see "Sources" at end).
+> **Design record.** Captured during the agent-teams work; the rationale here is frozen.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+
+The substrate (kernel, supervisor, coordination tools, Team tool, gRPC/HTTP surface, hook
+phases, budgets, trust gate) is live; this doc retains the spike rationale plus inline
+notes. Companion prototype: `engine/team/` (coordination kernel + tests). Research basis:
+`docs/harnesses/02`, `05`; live survey of Claude Code subagents & agent teams, OpenAI
+Agents SDK, Goose recipes (see "Sources" at end).
 
 ## 1. What we're trying to add, and why
 

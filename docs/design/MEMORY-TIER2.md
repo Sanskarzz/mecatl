@@ -1,14 +1,13 @@
 # Tier-2 / semantic memory recall — assessment + buildable design
 
-> DESIGN ONLY. Task 3 of the memory work. Builds on `MEMORY-TIERING.md`
-> (Task 2: the tier-0 index) and `MEMORY-DEFAULTS.md` (Task 1: memory ON by
-> default, per-project, opaque store).
+> **Design record.** Captured during the semantic memory recall work; the rationale here is frozen.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
 
 ---
 
 ## DECISION — local BM25 lexical search first; semantic deferred
 
-> **STATUS: BM25 lexical search SHIPPED** ([#12](https://github.com/stacklok/mecatl/issues/12),
+> **BM25 lexical search shipped** ([#12](https://github.com/stacklok/mecatl/issues/12),
 > commit `ea1dd69`). The `SearchMemory` tool is implemented and on by default
 > whenever memory is enabled. Semantic / embedding recall remains **deferred** —
 > the buildable design below is retained as the future path. One divergence from

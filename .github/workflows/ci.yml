@@ -220,10 +220,10 @@ jobs:
       # relies on. Pinned to a SHA (house rule); the # comment records the
       # revision the committed .md was rendered with. `lint` validates the model
       # (completeness gaps are errors — the model is currently clean), and
-      # check-rendered fails the build if docs/mecatl.modelith.md has drifted
-      # from its .yaml source.
+      # check-rendered fails the build if docs/architecture/mecatl.modelith.md has
+      # drifted from its .yaml source.
       - uses: stacklok/modelith@73429dd46a22b3c3491c4654edca391fc9bd63f2 # post-v0.3.0
         with:
-          files: docs/mecatl.modelith.yaml
+          files: docs/architecture/mecatl.modelith.yaml
           completeness: error
           check-rendered: true

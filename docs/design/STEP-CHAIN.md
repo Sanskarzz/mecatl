@@ -1,10 +1,6 @@
 # mecatl — Implementation Step-Chain (v1)
 
-> **Historical — the v1 implementation plan, fully executed.** Package paths and
-> port placements below predate the build (e.g. `api/` → `contracts/`, the
-> connect-go sketch → grpc-go, `FileSystem`/`Workspace` live in `engine/tool` not
-> `engine/port`, the Task tool is now `Subagent`, `Logger` is now
-> `ToolCallRecorder`). See `docs/architecture.md` for the code as it exists.
+> **Historical.** v1 implementation plan, fully executed. Preserved for rationale; not maintained.
 
 > Companion to `ARCHITECTURE.md`. Work packages (WPs) sized for one expert engineer
 > each. The sequencing rule (doc 08 discipline): **freeze the shared contracts first**,
