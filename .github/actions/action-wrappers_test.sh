@@ -108,6 +108,15 @@ has "${MECATEQUI_YML}" '^[[:space:]]*MQ_SETUP_SCRIPT:[[:space:]]+\$\{\{[[:space:
 has "${MECATEQUI_YML}" 'bash[[:space:]]+-euo[[:space:]]+pipefail[[:space:]]+-c[[:space:]]+"\$\{MQ_SETUP_SCRIPT\}"' \
   "mecatequi runs the setup-script from the env via a fail-fast shell"
 
+# ── mecatequi (MAIN): the `max-turns` input must reach the binary, end-to-end ─────────────
+# Same two-halves contract as instructions: (a) the input maps onto MQ_MAX_TURNS in the Run
+# step env, and (b) that env is appended (conditional on non-empty) via
+# `args+=( --max-turns … )`. With (a) but not (b) the per-run turn cap ships INERT.
+has "${MECATEQUI_YML}" '^[[:space:]]*MQ_MAX_TURNS:[[:space:]]+\$\{\{[[:space:]]*inputs\.max-turns[[:space:]]*\}\}' \
+  "mecatequi maps max-turns -> MQ_MAX_TURNS (Run step env)"
+has "${MECATEQUI_YML}" 'args\+=\([[:space:]]*--max-turns[[:space:]]+"\$\{MQ_MAX_TURNS\}"[[:space:]]*\)' \
+  "mecatequi wires MQ_MAX_TURNS to the binary via args+=( --max-turns … )"
+
 if [ "${fail}" -ne 0 ]; then
   note "action-wrappers: FAILURES"
   exit 1

@@ -112,6 +112,14 @@ on:
         type: string
         required: false
         default: ""
+      max-turns:
+        description: >-
+          Max model calls (turns) for the run; the run ends cleanly with stop=max_turns on
+          crossing it. Empty (default) uses the binary's deployment default. Orthogonal to
+          max-run-tokens (turns vs tokens; both compose).
+        type: string
+        required: false
+        default: ""
       timeout:
         description: Wall-clock bound on the whole run (e.g. 15m). 0 disables it.
         type: string
@@ -336,6 +344,7 @@ jobs:
           model: ${{ inputs.model }}
           default-provider: ${{ inputs.default-provider }}
           max-run-tokens: ${{ inputs.max-run-tokens }}
+          max-turns: ${{ inputs.max-turns }}
           timeout: ${{ inputs.timeout }}
           openai-base-url: ${{ inputs.openai-base-url }}
           guardrails-model: ${{ inputs.guardrails-model }}

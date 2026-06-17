@@ -14,8 +14,9 @@ self-contained task (multi-step investigation or build/test/git work) to a **chi
    (running the child's Bash in the shared base is the exact hazard isolation exists
    to prevent).
 2. Builds a **fresh** child `session.New(...)` — own conversation, own (tighter)
-   `Limits` (`defaultChildLimits`: 50 turns / 200 tool calls / 3 failures —
-   half the main session's 100/400, issue #50),
+   `Limits` (`defaultChildLimits`: 50 turns / 200 tool calls / 3 failures, issue #50 —
+   deliberately far below the main session's 1000/4000 default so a delegation fan-out
+   stays bounded),
    scoped to the **run** workspace root (the worktree when forked, else the parent).
    **On `resume`** (a Subagent call carrying `resume: <agentId>`) it instead RELOADS the
    persisted child by that id and recovers its terminal state — `completed` → `Reopen()`,

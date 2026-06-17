@@ -104,6 +104,46 @@ func TestParseFlagsInstructions(t *testing.T) {
 	})
 }
 
+// TestParseFlagsMaxTurns covers the --max-turns knob: it is captured on the flags
+// struct, defaults to 0 (inherit the deployment default), and is DELIBERATELY not
+// mapped onto app.Config — it is a per-SESSION limit threaded to CreateSession via
+// run(), not an engine-build knob.
+func TestParseFlagsMaxTurns(t *testing.T) {
+	t.Run("captured on the flags struct", func(t *testing.T) {
+		f, err := parseFlags([]string{"--prompt", "x", "--max-turns", "250"})
+		if err != nil {
+			t.Fatalf("parseFlags: %v", err)
+		}
+		if f.maxTurns != 250 {
+			t.Errorf("f.maxTurns = %d, want 250", f.maxTurns)
+		}
+	})
+
+	t.Run("defaults to 0 (inherit the deployment default)", func(t *testing.T) {
+		f, err := parseFlags([]string{"--prompt", "x"})
+		if err != nil {
+			t.Fatalf("parseFlags: %v", err)
+		}
+		if f.maxTurns != 0 {
+			t.Errorf("f.maxTurns default = %d, want 0", f.maxTurns)
+		}
+	})
+
+	t.Run("does not leak into app.Config", func(t *testing.T) {
+		// --max-turns is a per-session limit (threaded to CreateSession via run), not
+		// an engine-build knob, so it must NOT appear on app.Config. A distinctive
+		// value would otherwise show up in the %+v render of every mapped field.
+		f, err := parseFlags([]string{"--prompt", "x", "--max-turns", "987654"})
+		if err != nil {
+			t.Fatalf("parseFlags: %v", err)
+		}
+		cfg := appConfig(f, newDiagnostics())
+		if strings.Contains(fmt.Sprintf("%+v", cfg), "987654") {
+			t.Errorf("--max-turns leaked into app.Config: %+v", cfg)
+		}
+	})
+}
+
 // TestAppConfigMapping is a table over the flag->app.Config mapping, including the
 // deliberate headless->Interactive inversion, the --guardrails=off kill switch, and
 // the ask-reviewer trio.

@@ -179,6 +179,7 @@ The Action codes against these frozen surfaces in `cmd/mecatequi`:
 | `posture` | `--posture` | `auto` |
 | `timeout` | `--timeout` | `15m` |
 | `max-run-tokens` | `--max-run-tokens` (omitted when empty) | `""` |
+| `max-turns` | `--max-turns` (omitted when empty) | `""` |
 | `model` | `--model` | `""` |
 | `default-provider` | `--default-provider` | `""` |
 | `default-model` | `--default-model` | `""` |
@@ -467,8 +468,9 @@ private-key `.pem` in `publish-app-private-key`. The operator walkthrough (the c
 in `docs/usage.md` ("Setting up publish-token Form 1").
 
 **Passthrough inputs vs. escape-hatch-only.** The reusable workflow exposes the per-session
-passthrough knobs (`model`, `default-provider`, `posture`, `max-run-tokens`, `timeout`,
-`openai-base-url`, `guardrails-model`, `setup-script`, the `base-branch` + PR-template knobs). It deliberately
+passthrough knobs (`model`, `default-provider`, `posture`, `max-run-tokens`, `max-turns`,
+`timeout`, `openai-base-url`, `guardrails-model`, `setup-script`, the `base-branch` + PR-template
+knobs). It deliberately
 does **not** expose `default-model` (catalog-validated — `model` is the passthrough), `openai`
 (provider is auto-detected from the present key), or `subagent-ask-reviewer` (an autonomous-
 approval capability — a deployment decision better made by editing the action than a workflow

@@ -92,7 +92,7 @@ func TestRunEndToEndMockProvider(t *testing.T) {
 	defer built.Close()
 
 	var human bytes.Buffer
-	outcome, err := run(ctx, built.Service, repo, "summarise the repo", &human)
+	outcome, err := run(ctx, built.Service, repo, session.Limits{}, "summarise the repo", &human)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestRunUsageAndFinalTextFaithfullyCopied(t *testing.T) {
 	svc := scriptedService(t, nil, nil, turn)
 
 	var human bytes.Buffer
-	outcome, err := run(context.Background(), svc, "/ws", "answer", &human)
+	outcome, err := run(context.Background(), svc, "/ws", session.Limits{}, "answer", &human)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -258,7 +258,7 @@ func TestRunNonEmptyDiffWhenAgentWritesFile(t *testing.T) {
 	)
 
 	var human bytes.Buffer
-	outcome, err := run(context.Background(), svc, repo, "edit f.txt", &human)
+	outcome, err := run(context.Background(), svc, repo, session.Limits{}, "edit f.txt", &human)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -285,7 +285,7 @@ func TestRunAdversarialError(t *testing.T) {
 	svc := scriptedService(t, nil, nil, mockllm.ErrorTurn(errors.New("upstream 503 exhausted retries")))
 
 	var human bytes.Buffer
-	outcome, err := run(context.Background(), svc, "/ws", "do the thing", &human)
+	outcome, err := run(context.Background(), svc, "/ws", session.Limits{}, "do the thing", &human)
 	if err != nil {
 		t.Fatalf("run (a model error is reported in the Summary, NOT as a setup error): %v", err)
 	}
@@ -319,7 +319,7 @@ func TestRunAdversarialNoProgress(t *testing.T) {
 	svc := scriptedService(t, nil, nil, turns...)
 
 	var human bytes.Buffer
-	outcome, err := run(context.Background(), svc, "/ws", "do nothing useful", &human)
+	outcome, err := run(context.Background(), svc, "/ws", session.Limits{}, "do nothing useful", &human)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -346,7 +346,7 @@ func TestRunAdversarialCancelled(t *testing.T) {
 	svc := scriptedService(t, nil, nil, mockllm.EmptyTurnWithStop(session.StopCancelled))
 
 	var human bytes.Buffer
-	outcome, err := run(context.Background(), svc, "/ws", "abandon", &human)
+	outcome, err := run(context.Background(), svc, "/ws", session.Limits{}, "abandon", &human)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -396,7 +396,7 @@ func TestRunCancelOnMainAskBoundsAndExits(t *testing.T) {
 	var runErr error
 	go func() {
 		var human bytes.Buffer
-		outcome, runErr = run(ctx, svc, "/ws", "write a file", &human)
+		outcome, runErr = run(ctx, svc, "/ws", session.Limits{}, "write a file", &human)
 		close(done)
 	}()
 	select {
@@ -724,12 +724,37 @@ func TestRunUnknownToolTurnCleanTerminal(t *testing.T) {
 		mockllm.TextTurn("recovered and done"),
 	)
 	var human bytes.Buffer
-	outcome, err := run(context.Background(), svc, "/ws", "call a bad tool", &human)
+	outcome, err := run(context.Background(), svc, "/ws", session.Limits{}, "call a bad tool", &human)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if got := exitCode(outcome.Summary); got != 0 {
 		t.Errorf("an unknown-tool run that recovers must end clean; exitCode=%d stop=%q", got, outcome.Summary.StopReason)
+	}
+}
+
+// TestRunMaxTurnsCapFromLimits proves the limits passed to run() (the --max-turns
+// path) actually cap the session: a provider that keeps requesting tool calls would
+// otherwise run to script exhaustion, but MaxTurns=1 stops it at the turn limit
+// (StopMaxTurns) after the first model call. The scriptedService has zero
+// DefaultLimits, so the {MaxTurns:1} survives per-field defaulting verbatim.
+func TestRunMaxTurnsCapFromLimits(t *testing.T) {
+	svc := scriptedService(t, nil, nil,
+		mockllm.ToolCallTurn(session.NewToolCall("c1", "Nonexistent", []byte(`{}`))),
+		mockllm.ToolCallTurn(session.NewToolCall("c2", "Nonexistent", []byte(`{}`))),
+		mockllm.TextTurn("would have finished here"),
+	)
+
+	var human bytes.Buffer
+	outcome, err := run(context.Background(), svc, "/ws", session.Limits{MaxTurns: 1}, "loop", &human)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if outcome.Summary.StopReason != string(session.StopMaxTurns) {
+		t.Fatalf("StopReason = %q, want max_turns (the --max-turns cap)\nhuman log:\n%s", outcome.Summary.StopReason, human.String())
+	}
+	if got := exitCode(outcome.Summary); got != 0 {
+		t.Errorf("exitCode = %d, want 0 (max_turns is a CLEAN terminal)", got)
 	}
 }
 
