@@ -194,6 +194,32 @@ func TestHTTPGetSession(t *testing.T) {
 	}
 }
 
+func TestHTTPSetMode(t *testing.T) {
+	svc := newService(t, mockllm.New(), allowRules())
+	srv := httptest.NewServer(server.NewHTTPHandler(svc))
+	defer srv.Close()
+
+	id := createHTTPSession(t, srv)
+	resp, err := http.Post(srv.URL+"/v1/sessions/"+id+"/mode", "application/json", strings.NewReader(`{"mode":"accept-edits"}`))
+	if err != nil {
+		t.Fatalf("POST /mode: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var out struct {
+		SessionID string `json:"session_id"`
+		Mode      string `json:"mode"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.SessionID != id || out.Mode != "acceptEdits" {
+		t.Fatalf("set mode response = %+v", out)
+	}
+}
+
 // resolvedModelBody is the JSON shape of the resolved_model field on the HTTP
 // create + getSession responses (a local decode mirror — the handler owns the
 // encode side).

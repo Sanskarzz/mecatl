@@ -36,6 +36,11 @@ service HarnessService {
   // GetSession returns a snapshot of an existing session.
   rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
 
+  // SetMode changes an existing session's permission posture. The session aggregate
+  // remains authoritative: a mid-turn change is rejected with InvalidArgument, so
+  // clients that want "next prompt" semantics must defer and retry once idle.
+  rpc SetMode(SetModeRequest) returns (SetModeResponse);
+
   // CloseSession ends a session and releases its server-side resources (per-session
   // learned permission rules, per-session engine/workspace). Idempotent: closing an
   // unknown or already-closed session via the wire returns NotFound only for a
@@ -371,6 +376,20 @@ message GetSessionRequest {
 // GetSessionResponse wraps the session snapshot returned by GetSession.
 message GetSessionResponse {
   // session is the snapshot of the requested session.
+  Session session = 1;
+}
+
+// SetModeRequest changes a session's permission posture.
+message SetModeRequest {
+  // session_id is the session to update.
+  string session_id = 1 [(buf.validate.field).string.min_len = 1];
+  // mode is the desired permission posture; unspecified defaults to DEFAULT.
+  PermissionMode mode = 2;
+}
+
+// SetModeResponse wraps the updated session snapshot returned by SetMode.
+message SetModeResponse {
+  // session is the updated session snapshot.
   Session session = 1;
 }
 

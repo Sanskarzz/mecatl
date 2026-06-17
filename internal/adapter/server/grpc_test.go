@@ -152,6 +152,38 @@ func TestGRPCCloseSession(t *testing.T) {
 	}
 }
 
+func TestGRPCSetMode(t *testing.T) {
+	svc := newService(t, mockllm.New(), allowRules())
+	client, cleanup := dialGRPC(t, svc)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cs, err := client.CreateSession(ctx, &mecatlv1.CreateSessionRequest{Workspace: "/ws"})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	resp, err := client.SetMode(ctx, &mecatlv1.SetModeRequest{
+		SessionId: cs.GetSessionId(),
+		Mode:      mecatlv1.PermissionMode_PERMISSION_MODE_PLAN,
+	})
+	if err != nil {
+		t.Fatalf("SetMode: %v", err)
+	}
+	if got := resp.GetSession().GetMode(); got != mecatlv1.PermissionMode_PERMISSION_MODE_PLAN {
+		t.Fatalf("mode = %v, want PLAN", got)
+	}
+
+	got, err := client.GetSession(ctx, &mecatlv1.GetSessionRequest{SessionId: cs.GetSessionId()})
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if got.GetSession().GetMode() != mecatlv1.PermissionMode_PERMISSION_MODE_PLAN {
+		t.Fatalf("persisted mode = %v, want PLAN", got.GetSession().GetMode())
+	}
+}
+
 // TestGRPCConversePermissionApprove is the headline test: the model proposes a
 // tool that requires approval; the loop pauses with a permission.ask; the
 // client replies with ResumeApproval{allow:true} on the SAME stream; the loop

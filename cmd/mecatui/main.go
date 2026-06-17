@@ -37,7 +37,6 @@ import (
 	"github.com/stacklok/mecatl/cmd/mecatui/embed"
 	"github.com/stacklok/mecatl/cmd/mecatui/theme"
 	"github.com/stacklok/mecatl/cmd/mecatui/ui"
-	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/internal/adapter/slogdiag"
 	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
@@ -131,7 +130,7 @@ func run(args []string) error {
 	globalDefault := store.LoadGlobalDefault()
 
 	deps := ui.Deps{
-		Session:             &sessionAdapter{cl: cl, workspace: cfg.workspace, mode: client.ModeFromString(cfg.mode)},
+		Session:             &sessionAdapter{cl: cl, workspace: cfg.workspace, mode: cfg.mode},
 		Conv:                cl,
 		MCP:                 cl,
 		Cmds:                cl,
@@ -621,25 +620,31 @@ func themeDirs(workspace, extraDir string) []string {
 }
 
 // sessionAdapter bridges the ui's SessionCreator to the client's
-// CreateSession(ctx, workspace, mode, sel). The workspace and mode are fixed at
-// startup (they don't change at runtime in MVP); only the model selection is
-// per-call — the ui passes the (reconciled) apply-on-next-create selection as a
-// proto-free client.ModelSelection, and this adapter forwards it to the single
-// proto-build point in client.CreateSession. The ui never sees the proto request.
+// CreateSession(ctx, workspace, mode, sel). The workspace is fixed at startup;
+// the mode and model selection are per-call so in-TUI mode switches and /models
+// restarts carry the current desired posture through the same proto-build point.
+// The ui never sees the proto request.
 type sessionAdapter struct {
 	cl        *client.Client
 	workspace string
-	mode      mecatlv1.PermissionMode
+	mode      string
 }
 
-func (s *sessionAdapter) CreateSession(ctx context.Context, sel client.ModelSelection) (string, client.Capabilities, client.ResolvedModel, error) {
-	return s.cl.CreateSession(ctx, s.workspace, s.mode, sel)
+func (s *sessionAdapter) CreateSession(ctx context.Context, sel client.ModelSelection, mode string) (string, client.Capabilities, client.ResolvedModel, error) {
+	if mode == "" {
+		mode = s.mode
+	}
+	return s.cl.CreateSession(ctx, s.workspace, client.ModeFromString(mode), sel)
 }
 
 func (s *sessionAdapter) CloseSession(ctx context.Context, id string) error {
 	return s.cl.CloseSession(ctx, id)
 }
 
-func (s *sessionAdapter) GetSession(ctx context.Context, id string) (client.ResolvedModel, error) {
+func (s *sessionAdapter) GetSession(ctx context.Context, id string) (client.SessionSnapshot, error) {
 	return s.cl.GetSession(ctx, id)
+}
+
+func (s *sessionAdapter) SetMode(ctx context.Context, id, mode string) (string, error) {
+	return s.cl.SetMode(ctx, id, mode)
 }

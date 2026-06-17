@@ -31,6 +31,10 @@ reach the right run.
   for such sessions is a future driver concern (`docs/adr/0005-driver-seams.md`), an
   explicit non-goal of the profile itself.
 - `GetSession(GetSessionRequest) → GetSessionResponse`
+- `SetMode(SetModeRequest) → SetModeResponse` — changes an existing session's
+  permission posture through `Service.SetMode`; mid-turn changes are rejected by
+  the session aggregate as `InvalidArgument`, so clients that want "next prompt"
+  semantics defer and retry once idle.
 - `ListModels(ListModelsRequest) → ListModelsResponse` — the selectable-model
   inventory: every AVAILABLE provider's catalog models projected to public metadata
   (`ModelInfo{id, provider_id, display_name, image, reasoning, context_limit}`), no
@@ -66,6 +70,7 @@ v1 enforces required checks in the Go server (protovalidate runtime is deferred)
 |---|---|---|
 | `POST /v1/sessions` | `CreateSession` | JSON body → `session_id`; optional `provider_id`/`model_id` selector + `profile` (`"no-fs"`) |
 | `GET /v1/sessions/{id}` | `GetSession` | JSON snapshot |
+| `POST /v1/sessions/{id}/mode` | `SetMode` | change permission mode; mid-turn rejection is surfaced to the client |
 | `GET /v1/models` | `ListModels` | JSON selectable-model inventory (available providers only, secret-free) |
 | `POST /v1/sessions/{id}/prompt` | start a run | `text/event-stream`; each event is `data: <proto Event as JSON>` |
 | `POST /v1/sessions/{id}/approve` | `Run.Approve` | resolves the paused ask (verdict or legacy `allow`) |

@@ -215,8 +215,15 @@ func (m Model) headerIdentityParts(sid, withNext string) []string {
 	if withNext != "" {
 		parts = append(parts, withNext)
 	}
-	if m.deps.Mode != "" {
-		parts = append(parts, "mode "+m.deps.Mode)
+	mode := m.activeMode
+	if mode == "" {
+		mode = m.deps.Mode
+	}
+	if m.pendingMode != "" {
+		mode = m.pendingMode + " pending"
+	}
+	if mode != "" {
+		parts = append(parts, "mode "+sanitizeTerminal(mode))
 	}
 	if m.deps.Server != "" {
 		parts = append(parts, m.deps.Server)

@@ -28,7 +28,7 @@ import (
 // header from turn zero, and an older server yields the zero value (no model
 // segment).
 type SessionCreator interface {
-	CreateSession(ctx context.Context, sel client.ModelSelection) (string, client.Capabilities, client.ResolvedModel, error)
+	CreateSession(ctx context.Context, sel client.ModelSelection, mode string) (string, client.Capabilities, client.ResolvedModel, error)
 	// CloseSession ends a server-side session by id. The /models restart-now handoff
 	// closes the OLD session before creating the new one so a model switch leaves no
 	// orphaned server-side session. Best-effort: the caller proceeds with the new
@@ -43,7 +43,11 @@ type SessionCreator interface {
 	// seam for it (the method also satisfies the narrower client.SessionGetter that
 	// RefreshResolvedModelCmd consumes); *client.Client (via the sessionAdapter) and
 	// the test fakes satisfy both.
-	GetSession(ctx context.Context, id string) (client.ResolvedModel, error)
+	GetSession(ctx context.Context, id string) (client.SessionSnapshot, error)
+	// SetMode asks the server to change the current session's permission mode and
+	// returns the server-confirmed mode. Mid-turn attempts may be rejected; the ui
+	// defers and retries at the next prompt boundary.
+	SetMode(ctx context.Context, id, mode string) (string, error)
 }
 
 // SelectionStore persists + loads the client-side model selection (last-used). It
@@ -340,6 +344,14 @@ type Model struct {
 	// Phase A — Phase B consumes it.
 	caps client.Capabilities
 
+	// activeMode is the server-confirmed permission mode for THIS session. It is
+	// initialized from the launch mode and updated only from SessionReady/GetSession/
+	// SetMode responses, so the server remains the authority. pendingMode is a
+	// next-prompt retry requested while the aggregate was mid-turn and refused the
+	// immediate switch.
+	activeMode  string
+	pendingMode string
+
 	// fullColor is true on a truecolor terminal, derived from the tea.ColorProfileMsg
 	// (msg.Profile == colorprofile.TrueColor) in the reducer. It gates the welcome
 	// wordmark's jade→gold gradient: on a non-truecolor profile the wordmark collapses
@@ -513,6 +525,7 @@ func New(deps Deps) Model {
 		// rejects the create, createSessionCmd's fallback leg retries on the default and
 		// surfaces a loud warning (connectFallbackMsg) — connect still completes.
 		activeModel: deps.InitialModel,
+		activeMode:  client.ModeString(client.ModeFromString(deps.Mode)),
 		models:      modelsState{active: deps.InitialModel, globalDefault: deps.GlobalDefault},
 	}
 }

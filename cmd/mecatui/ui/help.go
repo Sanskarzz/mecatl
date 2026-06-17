@@ -63,12 +63,13 @@ func helpBody(th theme.Theme, caps client.Capabilities) string {
 		{key: "esc", action: "clear staged input / queue, else cancel run"},
 	})
 
-	b.WriteString("\n" + muted.Render("Inspect (while idle)") + "\n")
+	b.WriteString("\n" + muted.Render("Inspect & control") + "\n")
 	writeHelpRows(&b, th, []helpRow{
 		{key: "ctrl+o", action: "MCP inventory", available: caps.MCP, gated: true},
 		{key: "ctrl+r", action: "MCP resources", available: caps.MCP, gated: true},
 		{key: "ctrl+p", action: "MCP prompts", available: caps.MCP, gated: true},
 		{key: "ctrl+a", action: "agents overlay (subagents / parallel / teams · tab to switch)"},
+		{key: "ctrl+m", action: "cycle permission mode (default / plan / accept-edits)"},
 		{key: "ctrl+t", action: "expand/collapse details"},
 	})
 

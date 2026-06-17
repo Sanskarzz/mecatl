@@ -354,6 +354,9 @@ type SessionReadyMsg struct {
 	// owned, echoed verbatim). The ui shows it in the header from turn zero; an older
 	// server yields the zero value (no model segment).
 	ResolvedModel ResolvedModel
+	// Mode is the server-confirmed permission posture; empty means older create path /
+	// default.
+	Mode string
 }
 
 // ConnectErrMsg reports a dial/CreateSession failure.

@@ -9,27 +9,56 @@ import (
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
 )
 
-// The session-refetch surface: a unary GetSession wrapper, the message the ui's
-// footer context-meter heal consumes, the narrow getter interface, and the
-// tea.Cmd constructor. As with the rest of this package, NO proto type leaks
-// past this file — the ui consumes only ResolvedModel / ResolvedModelMsg.
+// The session-refetch surface: unary session wrappers, the messages the ui's
+// footer context-meter heal and mode switcher consume, narrow interfaces, and the
+// tea.Cmd constructors. As with the rest of this package, NO proto type leaks past
+// this file — the ui consumes only proto-free value objects / msgs.
 
-// GetSession looks up an existing session by id and returns the EFFECTIVE
-// provider+model the server has resolved it to (echoed verbatim, including the
-// context window). This is the self-healing refetch the footer context meter uses:
+// SessionSnapshot is the proto-free subset of a server session snapshot mecatui needs.
+type SessionSnapshot struct {
+	Mode          string
+	ResolvedModel ResolvedModel
+}
+
+func snapshotFrom(s *mecatlv1.Session) SessionSnapshot {
+	if s == nil {
+		return SessionSnapshot{Mode: ModeDefaultString}
+	}
+	return SessionSnapshot{
+		Mode:          ModeString(s.GetMode()),
+		ResolvedModel: resolvedModelFrom(s.GetResolvedModel()),
+	}
+}
+
+// GetSession looks up an existing session by id and returns the server-authored
+// session snapshot subset mecatui needs: the current permission mode and the
+// EFFECTIVE provider+model the server has resolved it to (echoed verbatim,
+// including the context window). This is the self-healing refetch the footer
+// context meter uses:
 // for a session on a LIVE-ONLY model (present in the live /models listing but not
 // the curated catalog — e.g. an OpenRouter openai/gpt-5.5) the create-time echo can
 // carry a 0 / curated-floor window when the async live model-list swap had not yet
 // landed; once it has, the server's ResolvedModel resolves the real live window
 // (live-first via the same windowResolver the engine compacts at) and GetSession
-// returns it. A nil Session/ResolvedModel (older server) yields the zero value (see
-// resolvedModelFrom).
-func (c *Client) GetSession(ctx context.Context, id string) (ResolvedModel, error) {
+// returns it. A nil Session/ResolvedModel (older server) yields zero values (see
+// snapshotFrom / resolvedModelFrom).
+func (c *Client) GetSession(ctx context.Context, id string) (SessionSnapshot, error) {
 	resp, err := c.svc.GetSession(ctx, &mecatlv1.GetSessionRequest{SessionId: id})
 	if err != nil {
-		return ResolvedModel{}, fmt.Errorf("get session: %w", err)
+		return SessionSnapshot{}, fmt.Errorf("get session: %w", err)
 	}
-	return resolvedModelFrom(resp.GetSession().GetResolvedModel()), nil
+	return snapshotFrom(resp.GetSession()), nil
+}
+
+// SetMode asks the server to change the session's permission posture and returns
+// the updated authoritative mode. Mid-turn changes are rejected by the server;
+// callers that want next-prompt semantics should defer and retry once idle.
+func (c *Client) SetMode(ctx context.Context, id, mode string) (string, error) {
+	resp, err := c.svc.SetMode(ctx, &mecatlv1.SetModeRequest{SessionId: id, Mode: ModeFromString(mode)})
+	if err != nil {
+		return "", fmt.Errorf("set mode: %w", err)
+	}
+	return snapshotFrom(resp.GetSession()).Mode, nil
 }
 
 // ResolvedModelMsg carries the result of a GetSession refetch (the footer
@@ -48,7 +77,28 @@ type ResolvedModelMsg struct {
 // Splitting it out keeps the ui injectable with a fake for offline tests; *Client
 // (and the ui's wider SessionCreator, via the sessionAdapter) satisfies it.
 type SessionGetter interface {
-	GetSession(ctx context.Context, id string) (ResolvedModel, error)
+	GetSession(ctx context.Context, id string) (SessionSnapshot, error)
+}
+
+// ModeSetter changes a server-side session's permission mode.
+type ModeSetter interface {
+	SetMode(ctx context.Context, id, mode string) (string, error)
+}
+
+// ModeChangedMsg carries the async result of SetModeCmd.
+type ModeChangedMsg struct {
+	SessionID string
+	Requested string
+	Mode      string
+	Err       error
+}
+
+// SetModeCmd asks the server to change a session's permission mode off the update goroutine.
+func SetModeCmd(ctx context.Context, s ModeSetter, id, mode string) tea.Cmd {
+	return func() tea.Msg {
+		actual, err := s.SetMode(ctx, id, mode)
+		return ModeChangedMsg{SessionID: id, Requested: mode, Mode: actual, Err: err}
+	}
 }
 
 // RefreshResolvedModelCmd refetches the resolved model for session id off the
@@ -59,7 +109,7 @@ type SessionGetter interface {
 // the server's live-first resolution heals it.
 func RefreshResolvedModelCmd(ctx context.Context, g SessionGetter, id string) tea.Cmd {
 	return func() tea.Msg {
-		rm, err := g.GetSession(ctx, id)
-		return ResolvedModelMsg{SessionID: id, Resolved: rm, Err: err}
+		snap, err := g.GetSession(ctx, id)
+		return ResolvedModelMsg{SessionID: id, Resolved: snap.ResolvedModel, Err: err}
 	}
 }

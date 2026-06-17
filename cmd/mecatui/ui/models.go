@@ -345,11 +345,11 @@ func (m Model) restartOnModelCmd(oldID string, sel client.ModelSelection) tea.Cm
 		if oldID != "" {
 			_ = deps.Session.CloseSession(deps.Ctx, oldID)
 		}
-		id, caps, resolved, err := deps.Session.CreateSession(deps.Ctx, sel)
+		id, caps, resolved, err := deps.Session.CreateSession(deps.Ctx, sel, m.desiredMode())
 		if err != nil {
 			return restartFailedMsg{err: err, model: modelSelLabel(sel)}
 		}
-		return client.SessionReadyMsg{SessionID: id, Capabilities: caps, ResolvedModel: resolved}
+		return client.SessionReadyMsg{SessionID: id, Capabilities: caps, ResolvedModel: resolved, Mode: m.desiredMode()}
 	}
 }
 

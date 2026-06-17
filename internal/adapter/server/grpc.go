@@ -81,6 +81,18 @@ func (h *HarnessServer) GetSession(ctx context.Context, req *mecatlv1.GetSession
 	return &mecatlv1.GetSessionResponse{Session: toProtoSession(sess, h.svc.ResolvedModel(sess.ID))}, nil
 }
 
+// SetMode changes the permission posture of the requested session.
+func (h *HarnessServer) SetMode(ctx context.Context, req *mecatlv1.SetModeRequest) (*mecatlv1.SetModeResponse, error) {
+	if req.GetSessionId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "session_id is required")
+	}
+	sess, err := h.svc.SetMode(ctx, session.SessionID(req.GetSessionId()), modeFromProto(req.GetMode()))
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	return &mecatlv1.SetModeResponse{Session: toProtoSession(sess, h.svc.ResolvedModel(sess.ID))}, nil
+}
+
 // CloseSession ends a session and releases its server-side resources. It returns
 // NotFound only for a never-created id; an already-released session succeeds
 // (idempotent). It calls Service.EndSession, NOT the void Service.CloseSession, so

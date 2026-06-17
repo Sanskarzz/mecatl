@@ -296,6 +296,9 @@ func (m Model) applySessionReady(msg client.SessionReadyMsg) (tea.Model, tea.Cmd
 	// verbatim). The header shows it from turn zero. The model is FIXED per session,
 	// so this is set once here. An older server yields the zero value → no segment.
 	m.effectiveModel = msg.ResolvedModel
+	if msg.Mode != "" {
+		m.activeMode = client.ModeString(client.ModeFromString(msg.Mode))
+	}
 	m.restartFailed = false // a session is (re)established; any prior failure clears
 	m.phase = phaseIdle
 	m.statusMsg = "connected"
@@ -381,13 +384,16 @@ func (m Model) updateLifecycle(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		return m, nil, true
 	case clipboardErrMsg:
 		return m.onClipboardErr(msg), nil, true
+	case client.ModeChangedMsg:
+		return m.onModeChanged(msg), nil, true
 	case client.StreamClosedMsg:
 		// Clean close. If a run was still active (no terminal result seen),
 		// finalise it; otherwise it's the expected post-result close (no-op).
 		if m.phase == phaseRunning || m.phase == phaseAwaitingApproval {
 			m = m.endRun("closed")
+			modeCmd := m.retryPendingModeCmd()
 			mm, drainCmd := m.drainQueue("closed")
-			return mm, tea.Batch(m.refreshCmd(), drainCmd), true
+			return mm, tea.Batch(m.refreshCmd(), modeCmd, drainCmd), true
 		}
 		return m, nil, true
 	case client.CommandsMsg:
@@ -665,8 +671,9 @@ func (m Model) applyResult(msg client.ResultMsg) (tea.Model, tea.Cmd) {
 		m.conv.addError(msg.Error)
 	}
 	m = m.endRun(msg.Stop)
+	modeCmd := m.retryPendingModeCmd()
 	mm, drainCmd := m.drainQueue(msg.Stop)
-	return mm, tea.Batch(m.refreshCmd(), drainCmd)
+	return mm, tea.Batch(m.refreshCmd(), modeCmd, drainCmd)
 }
 
 // noticeLine renders the muted-notice text for a transient advisory message
@@ -950,6 +957,14 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.onClipboardPaste()
 	}
 
+	// ctrl+m cycles permission mode. It is handled here — before the phase switch —
+	// for idle + running so the key never feeds the textarea. When the session is
+	// awaiting approval the permission modal owns the keyboard and the switch is
+	// intentionally inert.
+	if key.Matches(msg, m.keys.ModeSwitch) && (m.phase == phaseIdle || m.phase == phaseRunning) {
+		return m.switchMode(client.NextMode(m.desiredMode()))
+	}
+
 	switch m.phase {
 	case phaseAwaitingApproval:
 		return m.onApprovalKey(msg)
@@ -984,6 +999,61 @@ func (m Model) onOverlayKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 		}
 	}
 	return m, nil, false
+}
+
+func (m Model) desiredMode() string {
+	if m.pendingMode != "" {
+		return m.pendingMode
+	}
+	if m.activeMode != "" {
+		return m.activeMode
+	}
+	return client.ModeString(client.ModeFromString(m.deps.Mode))
+}
+
+func (m Model) switchMode(mode string) (tea.Model, tea.Cmd) {
+	mode = client.ModeString(client.ModeFromString(mode))
+	if m.sessionID == "" {
+		m.statusMsg = m.deps.Theme.Style("warning").Render("no active session — mode switch unavailable")
+		return m, nil
+	}
+	if mode == m.activeMode && m.pendingMode == "" {
+		m.statusMsg = m.deps.Theme.Style("muted").Render("mode already " + mode)
+		return m, nil
+	}
+	m.pendingMode = mode
+	m.statusMsg = m.deps.Theme.Style("muted").Render("switching mode to " + mode + "…")
+	return m, client.SetModeCmd(m.deps.Ctx, m.deps.Session, m.sessionID, mode)
+}
+
+func (m Model) onModeChanged(msg client.ModeChangedMsg) tea.Model {
+	if msg.SessionID != m.sessionID {
+		return m
+	}
+	requested := client.ModeString(client.ModeFromString(msg.Requested))
+	if m.pendingMode != "" && requested != m.pendingMode {
+		return m
+	}
+	if msg.Err != nil {
+		m.pendingMode = requested
+		m.statusMsg = m.deps.Theme.Style("warning").Render("mode " + m.pendingMode + " will apply on the next prompt")
+		return m
+	}
+	mode := client.ModeString(client.ModeFromString(msg.Mode))
+	if mode != requested {
+		return m
+	}
+	m.activeMode = mode
+	m.pendingMode = ""
+	m.statusMsg = m.deps.Theme.Style("success").Render("mode " + mode)
+	return m
+}
+
+func (m Model) retryPendingModeCmd() tea.Cmd {
+	if m.pendingMode == "" || m.sessionID == "" {
+		return nil
+	}
+	return client.SetModeCmd(m.deps.Ctx, m.deps.Session, m.sessionID, m.pendingMode)
 }
 
 // onQuitKey implements the graceful double-press ctrl+c (issue #17): a second press
@@ -1528,6 +1598,10 @@ func (m Model) onIdleSubmit() (tea.Model, tea.Cmd) {
 	}
 	if m.queuePaused != "" && len(m.queued) > 0 && empty {
 		return m.resumeQueue()
+	}
+	if m.pendingMode != "" && strings.TrimSpace(m.ta.Value()) != "" {
+		m.statusMsg = m.deps.Theme.Style("warning").Render("mode " + m.pendingMode + " is still pending — press enter again after it applies")
+		return m, nil
 	}
 	return m.submitPrompt()
 }
@@ -2503,6 +2577,11 @@ func (m Model) popAndSubmit() (tea.Model, tea.Cmd) {
 	next := m.queued[0]
 	m.queued = m.queued[1:]
 	m.ta.SetValue(next)
+	if m.pendingMode != "" {
+		m.statusMsg = m.deps.Theme.Style("warning").Render("mode " + m.pendingMode + " will apply before the queued prompt — press enter to continue")
+		m.queuePaused = "mode"
+		return m, nil
+	}
 	return m.submitPrompt()
 }
 
@@ -2583,21 +2662,21 @@ func (m Model) createSessionCmd() tea.Cmd {
 	deps := m.deps
 	sel := m.activeModel // the reconciled apply-on-next-create selection (zero ⇒ server default)
 	return func() tea.Msg {
-		id, caps, resolved, err := deps.Session.CreateSession(deps.Ctx, sel)
+		id, caps, resolved, err := deps.Session.CreateSession(deps.Ctx, sel, m.desiredMode())
 		if err == nil {
-			return client.SessionReadyMsg{SessionID: id, Capabilities: caps, ResolvedModel: resolved}
+			return client.SessionReadyMsg{SessionID: id, Capabilities: caps, ResolvedModel: resolved, Mode: m.desiredMode()}
 		}
 		if sel.IsZero() || !client.IsInvalidArgument(err) {
 			return client.ConnectErrMsg{Err: err}
 		}
-		id, caps, resolved, retryErr := deps.Session.CreateSession(deps.Ctx, client.ModelSelection{})
+		id, caps, resolved, retryErr := deps.Session.CreateSession(deps.Ctx, client.ModelSelection{}, m.desiredMode())
 		if retryErr != nil {
 			// Both creates failed: the selection wasn't the problem. Surface the
 			// ORIGINAL error on the unchanged fatal path.
 			return client.ConnectErrMsg{Err: err}
 		}
 		return connectFallbackMsg{
-			ready:    client.SessionReadyMsg{SessionID: id, Capabilities: caps, ResolvedModel: resolved},
+			ready:    client.SessionReadyMsg{SessionID: id, Capabilities: caps, ResolvedModel: resolved, Mode: m.desiredMode()},
 			rejected: sel,
 			err:      err,
 		}

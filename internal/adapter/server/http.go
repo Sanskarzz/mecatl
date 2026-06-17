@@ -37,6 +37,7 @@ func NewHTTPHandler(svc *Service) *HTTPHandler {
 	h := &HTTPHandler{svc: svc, mux: http.NewServeMux()}
 	h.mux.HandleFunc("POST /v1/sessions", h.createSession)
 	h.mux.HandleFunc("GET /v1/sessions/{id}", h.getSession)
+	h.mux.HandleFunc("POST /v1/sessions/{id}/mode", h.setMode)
 	h.mux.HandleFunc("DELETE /v1/sessions/{id}", h.closeSession)
 	h.mux.HandleFunc("POST /v1/sessions/{id}/prompt", h.prompt)
 	h.mux.HandleFunc("POST /v1/sessions/{id}/approve", h.approve)
@@ -184,6 +185,10 @@ type sessionResp struct {
 	ResolvedModel *resolvedModelJSON `json:"resolved_model,omitempty"`
 }
 
+type modeBody struct {
+	Mode string `json:"mode"`
+}
+
 type promptBody struct {
 	Text string `json:"text"`
 	// Parts carries non-text media (image/audio) alongside the text. Each part
@@ -294,7 +299,27 @@ func (h *HTTPHandler) getSession(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, sessionResp{
+	h.writeSession(w, http.StatusOK, sess)
+}
+
+// setMode handles POST /v1/sessions/{id}/mode.
+func (h *HTTPHandler) setMode(w http.ResponseWriter, r *http.Request) {
+	id := session.SessionID(r.PathValue("id"))
+	var body modeBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	sess, err := h.svc.SetMode(r.Context(), id, modeFromString(body.Mode))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	h.writeSession(w, http.StatusOK, sess)
+}
+
+func (h *HTTPHandler) writeSession(w http.ResponseWriter, status int, sess *session.Session) {
+	writeJSON(w, status, sessionResp{
 		SessionID:     string(sess.ID),
 		State:         string(sess.State),
 		Mode:          string(sess.Mode),
@@ -935,7 +960,7 @@ func modeFromString(s string) session.PermissionMode {
 	switch strings.ToLower(s) {
 	case "plan":
 		return session.ModePlan
-	case "acceptedits", "accept_edits", "accept":
+	case "acceptedits", "accept-edits", "accept_edits", "accept":
 		return session.ModeAccept
 	case "default":
 		return session.ModeDefault

@@ -161,18 +161,48 @@ func (c *Client) OpenConverse(ctx context.Context) (*Stream, error) {
 	return NewStream(bidi, bidi), nil
 }
 
+// ModeDefaultString is the canonical CLI/UI spelling for default permission mode.
+const ModeDefaultString = "default"
+
 // ModeFromString maps a CLI mode string to the proto enum. Unknown/empty maps to
 // UNSPECIFIED (the server defaults that to DEFAULT).
 func ModeFromString(s string) mecatlv1.PermissionMode {
 	switch s {
 	case "plan":
 		return mecatlv1.PermissionMode_PERMISSION_MODE_PLAN
-	case "accept-edits", "acceptEdits", "accept_edits":
+	case "accept-edits", "acceptEdits", "accept_edits", "accept edits":
 		return mecatlv1.PermissionMode_PERMISSION_MODE_ACCEPT_EDITS
-	case "default", "":
+	case ModeDefaultString, "":
 		return mecatlv1.PermissionMode_PERMISSION_MODE_DEFAULT
 	default:
 		return mecatlv1.PermissionMode_PERMISSION_MODE_UNSPECIFIED
+	}
+}
+
+// ModeString maps the proto enum to the CLI/UI spelling. Unknown/unspecified values
+// degrade to "default", matching the server boundary.
+func ModeString(m mecatlv1.PermissionMode) string {
+	switch m {
+	case mecatlv1.PermissionMode_PERMISSION_MODE_PLAN:
+		return "plan"
+	case mecatlv1.PermissionMode_PERMISSION_MODE_ACCEPT_EDITS:
+		return "accept-edits"
+	case mecatlv1.PermissionMode_PERMISSION_MODE_DEFAULT, mecatlv1.PermissionMode_PERMISSION_MODE_UNSPECIFIED:
+		return ModeDefaultString
+	default:
+		return ModeDefaultString
+	}
+}
+
+// NextMode returns the next mode in the TUI's cycle order.
+func NextMode(mode string) string {
+	switch ModeString(ModeFromString(mode)) {
+	case ModeDefaultString:
+		return "plan"
+	case "plan":
+		return "accept-edits"
+	default:
+		return ModeDefaultString
 	}
 }
 

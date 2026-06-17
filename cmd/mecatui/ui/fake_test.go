@@ -147,6 +147,9 @@ type fakeConv struct {
 	// is closed once (createdOnce) on the first create so a test can sequence on the
 	// create having happened without polling rendered output.
 	createdSel  client.ModelSelection
+	mode        string
+	setModeErr  error
+	setModeSeen []string
 	created     chan struct{}
 	createdOnce sync.Once
 	// resolvedModel is the EFFECTIVE model the fake's create response echoes back —
@@ -199,21 +202,43 @@ type fakeConv struct {
 // getSessionResults (last entry repeats); empty falls back to the canned
 // resolvedModel. getSessionErr forces the benign-error path. mu guards the
 // recorders touched by the command goroutine + the test goroutine.
-func (c *fakeConv) GetSession(_ context.Context, _ string) (client.ResolvedModel, error) {
+func (c *fakeConv) GetSession(_ context.Context, _ string) (client.SessionSnapshot, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.getSessionCount++
 	if c.getSessionErr != nil {
-		return client.ResolvedModel{}, c.getSessionErr
+		return client.SessionSnapshot{}, c.getSessionErr
 	}
-	if len(c.getSessionResults) == 0 {
-		return c.resolvedModel, nil
+	resolved := c.resolvedModel
+	if len(c.getSessionResults) > 0 {
+		i := c.getSessionCount - 1
+		if i >= len(c.getSessionResults) {
+			i = len(c.getSessionResults) - 1
+		}
+		resolved = c.getSessionResults[i]
 	}
-	i := c.getSessionCount - 1
-	if i >= len(c.getSessionResults) {
-		i = len(c.getSessionResults) - 1
+	mode := c.mode
+	if mode == "" {
+		mode = client.ModeDefaultString
 	}
-	return c.getSessionResults[i], nil
+	return client.SessionSnapshot{Mode: mode, ResolvedModel: resolved}, nil
+}
+
+func (c *fakeConv) SetMode(_ context.Context, _ string, mode string) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.setModeSeen = append(c.setModeSeen, mode)
+	if c.setModeErr != nil {
+		return "", c.setModeErr
+	}
+	c.mode = mode
+	return c.mode, nil
+}
+
+func (c *fakeConv) setModes() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.setModeSeen...)
 }
 
 // getSessionCalls returns how many times GetSession was invoked (test-goroutine read).
@@ -223,9 +248,12 @@ func (c *fakeConv) getSessionCalls() int {
 	return c.getSessionCount
 }
 
-func (c *fakeConv) CreateSession(_ context.Context, sel client.ModelSelection) (string, client.Capabilities, client.ResolvedModel, error) {
+func (c *fakeConv) CreateSession(_ context.Context, sel client.ModelSelection, mode string) (string, client.Capabilities, client.ResolvedModel, error) {
 	c.mu.Lock()
 	c.createdSel = sel
+	if mode != "" {
+		c.mode = mode
+	}
 	c.createCount++
 	n := c.createCount
 	c.mu.Unlock()
@@ -267,6 +295,9 @@ func (c *fakeConv) CreateSession(_ context.Context, sel client.ModelSelection) (
 	resolved := c.resolvedModel
 	if c.echoSelAsResolved && !sel.IsZero() {
 		resolved = client.ResolvedModel{ProviderID: sel.ProviderID, ModelID: sel.ModelID}
+	}
+	if c.mode == "" {
+		c.mode = client.ModeDefaultString
 	}
 	return id, c.caps, resolved, nil
 }
