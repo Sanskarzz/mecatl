@@ -367,6 +367,7 @@ func TestRealDesignDocsCitations(t *testing.T) {
 	// citation-heavy). Widen by appending globs here.
 	patterns := []string{
 		filepath.Join(root, "docs", "design", "*.md"),
+		filepath.Join(root, "docs", "adr", "*.md"),
 		filepath.Join(root, "docs", "architecture.md"),
 		filepath.Join(root, "docs", "architecture", "*.md"),
 	}

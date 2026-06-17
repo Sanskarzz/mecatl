@@ -1,7 +1,22 @@
-# Workspace Trust — implementation plan (Phases 0+1+2)
+# ADR 0023 — Workspace Trust
 
-> **Design record.** Captured during the workspace trust work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+- Status: Accepted
+- Date: 2026
+- Scope: workspace trust resolution — admission gate, identity-anchor drift, declarative and interactive trust, registry
+
+## Context
+
+mecatl needed a trust model for project workspaces. A cloned repo can supply agent definitions, slash commands, skills, and permission allow-rules that steer the agent or grant it auto-approvals. With no gate, a freshly-cloned untrusted repo could inject these steering channels on first run. Claude Code's folder-trust prompt provided the model: gate the repo's injected authority set, not the agent's own capability.
+
+## Decision
+
+Trust is resolved in a phased approach at composition time, producing a single `TrustDecision` (flag > declared > remembered > none). An untrusted workspace withholds the project-tier authority set — project allow-rules, project soul, and project-tier agent definitions, slash commands, and skills — while leaving the agent fully functional in "ask the human" mode. A machine-written registry persists remembered decisions keyed by realpath; an identity-anchor hash (soul plus project agent/command/skill definitions, not settings.yaml) triggers re-prompts on drift. Phase 3 (in-TUI trust modal, per-scope trust) was explicitly cut.
+
+## Consequences
+
+Phases 0–2c shipped; Phase 3 descoped. Current behaviour is in docs/architecture.md. Status is in docs/design/PRODUCTION-READINESS.md. Trust never overrides a permission Deny or a configured Ask; the gate is monotonic-positive only. A mid-session trust grant takes effect only on the next process start. AGENTS.md and CLAUDE.md remain outside the trust gate and drift anchor by accepted operator decision.
+
+---
 
 Phases 0, 1, 2a, 2b, 2c all shipped. Phase 3 was cut (§11); the §11 follow-ups
 remain as later issues. Phase 0 (unify the default — mecatui resolves
@@ -745,4 +760,4 @@ agents/commands/skills, not just allows+soul — a one-line invariant update).
 
 ---
 
-*Part of the [design docs](./README.md). Related: [Guardrails — LLM-backed tool-content inspection (issue #27)](./GUARDRAILS.md), [Unattended / allow-all posture (the "YOLO mode" question)](./ALLOW-ALL-POSTURE.md).*
+*Part of the [design docs](../design/README.md). Related: [Guardrails — LLM-backed tool-content inspection (issue #27)](0021-guardrails.md), [Unattended / allow-all posture (the "YOLO mode" question)](0022-allow-all-posture.md).*

@@ -1,7 +1,22 @@
-# MECATEQUI.md — running mecatl as a single-shot GitHub Action
+# ADR 0028 — mecatequi: Single-Shot GitHub Action Runner
 
-> **Design record.** Captured during the mecatequi (GitHub Action) work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+- Status: Accepted
+- Date: 2026
+- Scope: mecatequi binary contract, split-privilege job graph, trust boundary, and reusable workflow distribution
+
+## Context
+
+mecatequi is the headless single-shot mecatl runner: one prompt, one in-process engine, one terminal state, and three artifacts (a git diff patch, a summary JSON, and an optional event log). Running it inside GitHub Actions introduced a trust problem: issue text is attacker-controllable, and a prompt-injection attack must not gain write access to the repository. The cloud-native arc makes the mecatl process disposable via externalised state; mecatequi is the inverse — it makes mecatl a stateless one-shot where the forge is the store.
+
+## Decision
+
+A three-job split-privilege graph enforces a hard token boundary: acknowledge (issues:write only, no LLM key) posts an early signal; implement (contents:read, no write token) runs the agent; publish (write token, no agent code) applies the patch as data and posts the summary. The agent job can never push code, open a PR, or comment, because it holds no token that can. A reusable workflow_call workflow is the recommended adoption path, collapsing consumer boilerplate to roughly fifteen lines while preserving per-job permissions. The binary's contract — patch, summary JSON, exit code, flags — is frozen and additive-only.
+
+## Consequences
+
+Shipped at v0.0.3. The conversational v2 (multi-turn bot) is deferred pending cloud-native rehydration seam readiness. Current behaviour and the operator walkthrough live in docs/architecture.md and docs/usage.md. Status lives in docs/design/PRODUCTION-READINESS.md. The token boundary invariant must be preserved across both adoption paths; the reusable-pins CI gate enforces hardcoded sibling-action refs match the release tag on every cut.
+
+---
 
 `mecatequi` (`cmd/mecatequi/main.go`) is the headless, single-shot mecatl runner: one
 prompt, one in-process engine, one terminal state, three artifacts (a working-tree git
@@ -23,7 +38,7 @@ and `docs/` and changes no Go.
 
 ## 1. Framing: the inverse of cloud-native
 
-The cloud-native arc (`docs/design/CLOUD-NATIVE.md`) makes the mecatl **process**
+The cloud-native arc (`docs/adr/0027-cloud-native.md`) makes the mecatl **process**
 disposable: state (sessions, the event log, approvals) is externalised to a durable store
 so a crashed or restarted process re-attaches and continues. The Action is the *inverse*
 move. It makes mecatl a **stateless one-shot** whose state is the GitHub issue and the pull
@@ -524,9 +539,9 @@ deferred. It needs two things v1 lacks:
 
 - **Snapshot fidelity** — the run state would have to survive between comment events,
   which means a durable session store the next invocation rehydrates from (the cloud-native
-  rehydration seam, `docs/design/CLOUD-NATIVE.md`).
+  rehydration seam, `docs/adr/0027-cloud-native.md`).
 - **A driver-store-as-artifact backend** — the externalised store could be backed by a
-  driver (`docs/design/DRIVERS.md`) whose storage is a workflow artifact or a repo branch,
+  driver (`docs/adr/0005-driver-seams.md`) whose storage is a workflow artifact or a repo branch,
   so the forge remains the store across turns.
 
 v1 is one-shot on purpose: it is the simplest thing that is safe, and it defers the state
@@ -543,7 +558,7 @@ place alongside the other workflows is documented in `.github/workflows/README.m
 
 ---
 
-*Part of the [design docs](./README.md). Related: [Cloud-native arc: disposable process, externalized state, durable record](./CLOUD-NATIVE.md)
-(the inverse — disposable process, externalized state), [Driver seams — ports, the gRPC driver protocol, and conformance](./DRIVERS.md) (the
-store seam a conversational v2 would build on), [Unattended / allow-all posture (the "YOLO mode" question)](./ALLOW-ALL-POSTURE.md)
+*Part of the [design docs](../design/README.md). Related: [Cloud-native arc: disposable process, externalized state, durable record](0027-cloud-native.md)
+(the inverse — disposable process, externalized state), [Driver seams — ports, the gRPC driver protocol, and conformance](0005-driver-seams.md) (the
+store seam a conversational v2 would build on), [Unattended / allow-all posture (the "YOLO mode" question)](0022-allow-all-posture.md)
 (the `auto`/`yolo` posture the CI run selects).*

@@ -1,7 +1,22 @@
-# Spike: A "soul" for mecatl — persistent identity + cross-session user-model
+# ADR 0011 — Soul and user-model: persistent identity and cross-session learning
 
-> **Design record.** Captured during the soul / persona work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+- Status: Accepted
+- Date: 2026
+- Scope: `engine/prompt` (SoulSource port, SoulAssembler), `internal/adapter/soul`, `internal/app` (soul selection, drift detection, user-model review hook), `internal/adapter/memory` (user-model partition).
+
+## Context
+
+mecatl had no persistent identity anchor: the agent's style and tone were baked into a single static `Config.Role` string in the cache-stable system prefix. There was no cross-session model of the operator's preferences. The Hermes reference implementation separates "who the agent is" (a user-authored, agent-read-only soul) from "what the agent knows" (agent-curated memory), and the community converged on a writable identity anchor being a security anti-pattern: a soul with a write path enables persistent prompt injection across all future sessions.
+
+## Decision
+
+Implement the soul as a user-authored, agent-read-only identity fragment (`~/.config/mecatl/soul.md`) injected at turn-0 as a fenced user-role message via the InstructionAssembler seam, with injection scanning and byte-capping at load. A project-sourced soul is trust-gated via `--trust-project` with user-wins precedence. Drift detection uses a harness-owned sha256 baseline sidecar; `--soul-strict` withholds a drifted soul. The user-model is a second, cross-project memory partition (`RememberUser`/`RecallUser`/`SearchUserModel` tools plus a turn-0 `<user-model>` block), with an optional Stop-hook background reviewer (`--user-model-review`) that never reopens the user's session. Both a `/soul` and `/usermodel` TUI inspection panel are provided. External dialectic modeling (Honcho-style) and per-user multi-tenant keying are explicit non-goals.
+
+## Consequences
+
+The agent has a stable, operator-controlled identity that survives compaction (re-read from disk each build) and cannot be overwritten by tool use. The user-model accumulates cross-session preferences without leaking into the governance scope. The background reviewer is off by default to avoid per-session LLM spend. Trust hierarchy and deny-dominance are unchanged; `soul:apply` and the memory tool names are pre-approved as lowest-scope floor Allows, overridable by higher-scope config. Current behaviour: docs/architecture.md. Shipped/deferred state: docs/design/PRODUCTION-READINESS.md.
+
+---
 
 > **Ground-truth corrections applied during implementation** (the as-built wins over
 > the sketch below where they conflict):
@@ -426,4 +441,4 @@ derivable from the docs, not a judgement call left open.
 
 ---
 
-*Part of the [design docs](./README.md). Related: [Genuine tiered memory (closing the tier-0 gap)](./MEMORY-TIERING.md), [Tier-2 / semantic memory recall — assessment + buildable design](./MEMORY-TIER2.md), [Conversation compaction](./COMPACTION.md).*
+*Part of the [design docs](../design/README.md). Related: [Genuine tiered memory (closing the tier-0 gap)](0009-tiered-memory.md), [Tier-2 / semantic memory recall — assessment + buildable design](0010-semantic-memory-recall.md), [Conversation compaction](0012-compaction.md).*

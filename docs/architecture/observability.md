@@ -22,7 +22,7 @@
   the audit (`ToolCallRecorder`) and the event stream (`EventSink`). `engine/` + `internal/`
   take this port and NEVER touch global slog; the `slogdiag` adapter is the only
   slog bridge and composition picks the sink per binary. The ban is `forbidigo`-
-  guarded. See `docs/design/DIAGNOSTICS.md`.
+  guarded. See `docs/adr/0020-diagnostics.md`.
 - **Telemetry** (`internal/adapter/telemetry`) — one adapter that implements
   **both** `port.EventSink` (deriving counters/gauges from the event stream) and
   `port.ToolCallRecorder` (per-tool counters + a latency histogram). It is built on the
@@ -56,7 +56,7 @@
   > runtime/latency/profile state as reduced numeric summaries (slow-turns,
   > profile rankings, FlightRecorder summaries). All of it is **live**. The MCP
   > surface is fail-closed to loopback (it is unauthenticated and can embed
-  > goroutine-derived names/timing). See `docs/design/perf-observability.md` (the
+  > goroutine-derived names/timing). See `docs/adr/0018-perf-observability.md` (the
   > decided direction) and the [Go performance measurement & observability
   > survey](../perf-measurement-survey.md) (the technique reference behind that
   > decision).
@@ -72,7 +72,7 @@
   and (cloud-native Phase 1) the per-session profile, the opaque provider/model
   selector pair, and the cumulative token `usage` — additive fields so a
   restarted process rebuilds the SAME engine and the `MaxRunTokens` budget
-  continues across restart (see `docs/design/CLOUD-NATIVE.md`).
+  continues across restart (see `docs/adr/0027-cloud-native.md`).
   A store may additionally implement the optional **`port.PrunableStore`**
   (`List`/`Delete`; `ErrPruneUnsupported` otherwise) — the retention MECHANISM.
   The POLICY lives in composition (`internal/app/childgc.go`, issue #38):
@@ -95,13 +95,13 @@
   **compaction archive** and the **permstore verdict-replay**
   (`internal/app/approvalreplay.go`) that re-derives learned allow-always rules
   after a restart so a previously-approved tool does not re-ask. See
-  `docs/design/CLOUD-NATIVE.md` Phase 3 and the `eventlogconformance` suite.
+  `docs/adr/0027-cloud-native.md` Phase 3 and the `eventlogconformance` suite.
 
 ### Remote store + source drivers (`internal/adapter/grpcdriver`)
 
 > Design rationale — the port/driver pattern, the per-seam lifecycle and
 > failure-posture decisions, the deferrals, and the workspace-driver sketch —
-> lives in `docs/design/DRIVERS.md`.
+> lives in `docs/adr/0005-driver-seams.md`.
 
 The session and memory stores have a **wire seam**: an operator can point
 either at a remote, operator-run **driver process** speaking the

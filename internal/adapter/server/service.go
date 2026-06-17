@@ -1416,7 +1416,7 @@ func (s *Service) rehydrateSession(ctx context.Context, sess *session.Session) (
 // mcpServers, never a selector), so every ACP session rides the DEFAULT engine and
 // the Agent's capture-once a.caps = svc.ProviderCapabilities() is correct for every
 // ACP session. A per-session ACP capability gate lands only when an ACP selector
-// lands (P1+) — see docs/design/MULTI-PROVIDER.md.
+// lands (P1+) — see docs/adr/0016-multi-provider.md.
 func (s *Service) ProviderCapabilities() port.ProviderCapabilities {
 	return s.cfg.DefaultCapabilities
 }
@@ -1566,7 +1566,7 @@ func (s *Service) Approve(ctx context.Context, id session.SessionID, askID strin
 // ask against the stream's OWN live in-process run only (grpc.go readControl), so a
 // gRPC client whose session was evicted has no resume path over Converse and a verdict
 // frame for a dead run is silently dropped. The gRPC rehydrate path is a tracked
-// follow-up (additive, out of the Phase 2 gate) — see docs/design/CLOUD-NATIVE.md
+// follow-up (additive, out of the Phase 2 gate) — see docs/adr/0027-cloud-native.md
 // Phase 2.
 func (s *Service) ApproveRun(ctx context.Context, id session.SessionID, askID string, verdict session.ApprovalVerdict) (*agent.Run, error) {
 	// Fast path (lock-free): a live registered run resolves the ask over its channel.

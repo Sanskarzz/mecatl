@@ -109,7 +109,7 @@ jobs:
     # wrong). We deliberately do NOT gate on author_association: GitHub's webhook
     # author_association is unreliable for membership (it reports an org MEMBER as
     # CONTRIBUTOR), so basing a gate on it wrongly SKIPS legitimate runs. For a PUBLIC
-    # repo, add a dedicated permission-check gate job (see docs/design/MECATEQUI.md)
+    # repo, add a dedicated permission-check gate job (see docs/adr/0028-mecatequi.md)
     # rather than trusting author_association.
     needs: acknowledge
     if: >-
@@ -260,7 +260,7 @@ jobs:
     # STRONGER posture is to mint a short-lived GitHub App installation token (a JIT token
     # scoped to exactly this repo's contents + pull-requests + issues) and pass it as
     # GH_TOKEN instead, removing the standing grant. Decide this where you edit these perms.
-    # See docs/design/MECATEQUI.md.
+    # See docs/adr/0028-mecatequi.md.
     permissions:
       contents: write
       pull-requests: write
@@ -270,7 +270,7 @@ jobs:
     # environment, and JOB-level env reaches a composite action's internal step whereas a
     # step-level env: on the `uses:` step does NOT. This repo uses the standing GITHUB_TOKEN
     # grant; the reusable workflow supports the stronger JIT App-token form (see
-    # docs/design/MECATEQUI.md).
+    # docs/adr/0028-mecatequi.md).
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -318,7 +318,7 @@ jobs:
           # relative to the checkout) with {{placeholder}} tokens via the pr-body-template /
           # pr-title-template inputs. Left unset here so this repo keeps the built-in body;
           # publish.sh also auto-uses .github/mecatequi/pr-body.md if present. The trust caveat
-          # is always force-prepended regardless of template. See docs/design/MECATEQUI.md.
+          # is always force-prepended regardless of template. See docs/adr/0028-mecatequi.md.
           # base-branch: main
           # pr-body-template: .github/mecatequi/pr-body.md
           # pr-title-template: .github/mecatequi/pr-title.txt

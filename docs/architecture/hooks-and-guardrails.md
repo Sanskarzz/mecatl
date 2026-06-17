@@ -90,7 +90,7 @@ The verdict parse uses the whole-output-single-object discipline (not the fail-o
 prose-extracting `ValidateJSON`), sanitize is bounded against laundering, and the
 checker engine is built tool-less with no recursion into guardrails. The fence
 helpers it shares with the child-ask reviewer live in `engine/agent/fence.go`
-(exported, single source of truth). Full mechanics: `docs/design/GUARDRAILS.md`.
+(exported, single source of truth). Full mechanics: `docs/adr/0021-guardrails.md`.
 
 ## Related
 

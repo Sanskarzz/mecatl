@@ -1,10 +1,26 @@
-# mecatl — Implementation Step-Chain (v1)
+# ADR 0006 — v1 Implementation step-chain
 
-> **Historical.** v1 implementation plan, fully executed. Preserved for rationale; not maintained.
+- Status: Historical
+- Date: 2026
+- Scope: v1 build sequencing — work package decomposition and parallelism plan for the initial harness delivery
 
-> Companion to `ARCHITECTURE.md`. Work packages (WPs) sized for one expert engineer
-> each. The sequencing rule (doc 08 discipline): **freeze the shared contracts first**,
-> then build adapters/tools/loop/API in parallel against frozen interfaces.
+## Context
+
+Building mecatl in parallel across multiple engineers required a sequencing plan that prevented interface collisions. The central risk was parallel work targeting concretions rather than frozen ports, causing merge conflicts and rework. The dependency graph had one hard bottleneck (the domain types and port interfaces) and a wide parallel middle (FS, LLM adapters, governance, prompt, store) before converging at the loop and then the API.
+
+## Decision
+
+Freeze all shared types and port interfaces first (WP1), then execute Wave B (five work packages in parallel against frozen ports), then the loop integrator (WP8), then fan out to Subagent and API (WP9/WP10 parallel), then close at the composition root (WP11). Critical path: WP1 → WP2 → WP7 → WP8 → WP10 → WP11. All adapters target ports; nothing targets a concretion except the composition root.
+
+## Consequences
+
+The plan was fully executed; all eleven work packages shipped. The frozen interface set proved sufficient — no mid-build port breaks required. The architecture established here is the one that remains in production. Current behaviour is in `docs/architecture.md`; shipped and deferred items are in `docs/design/PRODUCTION-READINESS.md`.
+
+---
+
+Companion to `ARCHITECTURE.md`. Work packages (WPs) sized for one expert engineer
+each. The sequencing rule (doc 08 discipline): **freeze the shared contracts first**,
+then build adapters/tools/loop/API in parallel against frozen interfaces.
 
 ---
 
@@ -235,4 +251,4 @@ Critical path: **WP1 → WP2 → WP7 → WP8 → WP10 → WP11**.
 
 ---
 
-*Part of the [design docs](./README.md). Related: [mecatl — Architecture](./ARCHITECTURE.md), [Implementation Notes](./IMPLEMENTATION-NOTES.md).*
+*Part of the [design docs](../design/README.md). Related: [mecatl — Architecture](0004-v1-architecture.md), [Implementation Notes](../design/IMPLEMENTATION-NOTES.md).*

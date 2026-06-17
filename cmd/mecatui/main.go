@@ -66,7 +66,7 @@ func run(args []string) error {
 	// mecated both return early from resolveTransport and would otherwise leave the
 	// default at stderr, which the alt-screen (started below for ALL paths) would let a
 	// stray ambient/third-party slog line corrupt. The host-embedded branch later refines
-	// this floor to the mecatui.log file writer. See docs/design/DIAGNOSTICS.md.
+	// this floor to the mecatui.log file writer. See docs/adr/0020-diagnostics.md.
 	installBaselineSlog(cfg.quiet)
 
 	// Operator-posture WARN: mecatui has no slog and runs on the alt screen, so emit a
@@ -238,7 +238,7 @@ func resolveTransport(ctx context.Context, cfg config) (target string, dial clie
 	// operator-recoverable rather than discarded. This second SetDefault wins over the
 	// baseline for the embedded path. cmd/ mains are the only layer allowed to call
 	// slog.SetDefault (internal/ flows through the injected port.Diagnostics, ban-
-	// guarded). See docs/design/DIAGNOSTICS.md.
+	// guarded). See docs/adr/0020-diagnostics.md.
 	slog.SetDefault(slog.New(slog.NewTextHandler(diagW, &slog.HandlerOptions{Level: slog.LevelInfo})))
 
 	cfg = applyTrustPrompt(cfg, diag)

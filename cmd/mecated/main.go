@@ -569,7 +569,7 @@ func run() error {
 	// perf surface's nil-Logger fallback) is correctly routed there. cmd/ mains are the
 	// only layer allowed to call slog.SetDefault; all of internal/ flows through the
 	// injected port.Diagnostics (ban-guarded). The TUI, by contrast, redirects the
-	// default to a FILE because it owns the alt-screen. See docs/design/DIAGNOSTICS.md.
+	// default to a FILE because it owns the alt-screen. See docs/adr/0020-diagnostics.md.
 	slog.SetDefault(logger)
 	// Diagnostics sink for the composition's build-once facts and the relocated
 	// operational logging. It wraps the SAME stderr/text/Info logger installed above,
@@ -994,7 +994,7 @@ func parseFlags(argv []string) (config, error) {
 
 	fs.BoolVar(&cfg.perfMCP, "perf-mcp", false, "mount the read-only perf MCP server at /mcp on the loopback admin listener, so an agent can introspect THIS process's runtime/latency/profile state over MCP (list_slow_turns, runtime/heap/CPU profiles, FlightRecorder). OFF by default. Requires --metrics-addr, and that address MUST be loopback: the surface is UNAUTHENTICATED (decision 6) and can embed goroutine-derived function names/timing, so a non-loopback --metrics-addr with --perf-mcp is REFUSED. Print a paste-ready client .mcp.json with `mecated perf-mcp print-config`")
 
-	fs.IntVar(&cfg.goroutineWarnThreshold, "goroutine-warn-threshold", 0, "live goroutine-leak alarm: log a slog.Warn whenever runtime.NumGoroutine() exceeds this count (decision 10 of docs/design/perf-observability.md). 0 (default) disables the alarm; the runtime collector still exports the goroutine count as a /metrics series regardless. A healthy mecated holds a low-hundreds goroutine count; pick a high ceiling (e.g. 10000) so the alarm only fires on a genuine leak, not normal concurrency")
+	fs.IntVar(&cfg.goroutineWarnThreshold, "goroutine-warn-threshold", 0, "live goroutine-leak alarm: log a slog.Warn whenever runtime.NumGoroutine() exceeds this count (decision 10 of docs/adr/0018-perf-observability.md). 0 (default) disables the alarm; the runtime collector still exports the goroutine count as a /metrics series regardless. A healthy mecated holds a low-hundreds goroutine count; pick a high ceiling (e.g. 10000) so the alarm only fires on a genuine leak, not normal concurrency")
 	fs.DurationVar(&cfg.goroutineWarnInterval, "goroutine-warn-interval", 30*time.Second, "how often the goroutine-leak watchdog samples runtime.NumGoroutine(). Only consulted when --goroutine-warn-threshold > 0")
 
 	fs.StringVar(&cfg.memoryDir, "memory-dir", "", "per-project memory store directory (empty disables the Remember/Recall tools)")
@@ -1065,7 +1065,7 @@ func parseFlags(argv []string) (config, error) {
 	fs.BoolVar(&cfg.importClaudePermissions, "import-claude-permissions", false, "also import Claude-Code settings.json permissions (project <workspace>/.claude/settings{,.local}.json and user ~/.claude/settings.json) when --permissions-conventional is set. LOSSY (fail-safe): a WebFetch(domain:...) ALLOW is DEMOTED to ask, a Read(~/...) rule is left INERT (\"~\" unexpanded), an unparseable spec is DROPPED — every case is logged")
 	fs.BoolVar(&cfg.trustProject, "trust-project", false, "honour a discovered PROJECT's ALLOW rules (its deny/ask rules are always honoured regardless). Default OFF (the safe stance): an untrusted repo's permission grants are ignored. TRUST BOUNDARY: enabling this lets a checked-in .mecatl/settings.yaml auto-approve tool calls — only pass it for a repo you trust")
 	fs.BoolVar(&cfg.allowAllTools, "yolo", false,
-		"ALIAS for --posture yolo (dangerous): allow-all server-wide AND loosen the substitution floor for CHILDREN too — a subagent's $()/backtick/heredoc command AUTO-RUNS (child prompt-injection defense OFF). A Deny in ANY scope and any DELIBERATELY configured Ask still apply (see docs/design/ALLOW-ALL-POSTURE.md). Isolated/ephemeral/single-tenant ONLY. Refused when running as root (euid 0) unless MECATL_SANDBOX=1 (or IS_SANDBOX=1) declares an isolated environment.")
+		"ALIAS for --posture yolo (dangerous): allow-all server-wide AND loosen the substitution floor for CHILDREN too — a subagent's $()/backtick/heredoc command AUTO-RUNS (child prompt-injection defense OFF). A Deny in ANY scope and any DELIBERATELY configured Ask still apply (see docs/adr/0022-allow-all-posture.md). Isolated/ephemeral/single-tenant ONLY. Refused when running as root (euid 0) unless MECATL_SANDBOX=1 (or IS_SANDBOX=1) declares an isolated environment.")
 	fs.StringVar(&cfg.posture, "posture", "",
 		"OPERATOR POSTURE LADDER (strict < trusted < auto < yolo): strict (default) prompts every mutate; trusted honours a project's ALLOW rules (= --trust-project); auto adds allow-all + main substitution loosening (recommended UNATTENDED default, child injection-defense ON); yolo additionally auto-runs $()/backtick/heredoc in CHILDREN (injection-defense OFF, isolated single-tenant only). --yolo/--trust-project are aliases. auto/yolo are refused as root outside MECATL_SANDBOX. An unknown value fails closed to strict with a WARN.")
 	fs.BoolVar(&cfg.printPosture, "print-posture", false, "print the resolved operator posture tier and a plain-English line per defense, then exit (does not start the server)")
@@ -1244,7 +1244,7 @@ func serve(ctx context.Context, cfg config, svc *server.Service, reg *prometheus
 	// SECURITY: pprof/FlightRecorder/expvar output can embed prompt text, file
 	// paths, and goroutine stacks. This listener is loopback-bound by default and
 	// MUST stay loopback — these endpoints are never mounted on the public
-	// gRPC/HTTP service surface (decision 6 in docs/design/perf-observability.md).
+	// gRPC/HTTP service surface (decision 6 in docs/adr/0018-perf-observability.md).
 	var metricsSrv *http.Server
 	adminPaths := "/metrics /debug/pprof /debug/vars /debug/flightrecorder"
 	if cfg.metricsAddr != "" {

@@ -1,9 +1,24 @@
-# Long-term performance & resource regression tracking
+# ADR 0019 — Long-term performance and resource regression tracking
 
-> **Design record.** Captured during the perf tracking work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+- Status: Accepted
+- Date: 2026-06-14
+- Scope: CI regression gating and trend tracking for allocation counts, goroutine hygiene, token spend, and cache-hit rate across mecatl's hot paths and whole-loop scenarios
 
-Sibling to the [performance observability design](perf-observability.md), which
+## Context
+
+mecatl's dominant resource costs are token spend and network wall-clock, not CPU. Point-in-time profiling (covered by ADR 0018) answers "why is it slow now" but not "did this commit make it slower than last week." The project needed a free, offline regression-tracking story that catches allocation regressions, goroutine leaks, and prompt-cache-prefix instability — all of which are invisible to wall-clock benchmarks on noisy shared CI runners.
+
+## Decision
+
+Adopt a phased approach using only OSS tooling and no paid infrastructure. Phase 0 defines KPIs (allocs/op, goroutine delta, tokens, cache-hit rate) and gating strategy (hard gate on deterministic signals; advisory on wall-clock). Phase 1 ships hot-path testing.B microbenchmarks. Phase 2 ships an offline whole-loop scenario harness with a JSON KPI emitter. Phase 3 ships a CI trend store and a deterministic allocs gate via a split mechanism: a tested allocsgate binary over task bench plus github-action-benchmark for scenario KPIs and the gh-pages dashboard. Phase 4 wires the PGO mechanism without committing a profile. Phases 5 (continuous profiling) and 6 (bare-metal wall-clock gating) are intentionally deferred.
+
+## Consequences
+
+Phases 0–4 deliver a complete, free OSS story for both regression tracking and build-time optimization with no paid infrastructure. allocs/op is hard-gated (fail-closed on empty/corrupt input); ns/op is advisory. The cache-hit whitelist must be maintained when new scenarios are added. PGO degrades gracefully on a stale or absent profile. Current behaviour lives in docs/architecture.md; shipped/deferred phase status is in the production readiness tracker.
+
+---
+
+Sibling to the [performance observability design](0018-perf-observability.md), which
 covers the *introspection* half (pprof, flight recorder, OTel metrics, the perf
 MCP, `--perf`, goleak).
 
@@ -171,7 +186,7 @@ baseline. `task bench` is deliberately NOT part of `task test` — same posture 
 [`task perf:scenarios`](../../Taskfile.yml) (manual / CI target — NOT part of
 `task test`, same posture as `task bench`):
 
-- [`perf/kpi/`](../../perf/kpi/) — the stdlib-only KPI-capture support: the
+- [`perf/kpi/`](../../perf/kpi) — the stdlib-only KPI-capture support: the
   per-scenario metric shape (`ScenarioResult` + `WriteJSON`), the
   allocation/RSS/wall-clock capture bracket (`Capture`), the Linux
   `/proc/self/status` RSS sampler (`rss_linux.go`; a `rss_other.go` no-op
@@ -179,7 +194,7 @@ baseline. `task bench` is deliberately NOT part of `task test` — same posture 
   (`GoroutinesAfterSettle`). It imports ONLY the standard library — never
   `engine/...` or `internal/...` — so the engine-shaped KPIs (tokens,
   cache-hit-rate) are passed IN by the scenario caller.
-- [`perf/scenarios/`](../../perf/scenarios/) — the four whole-loop scenario
+- [`perf/scenarios/`](../../perf/scenarios) — the four whole-loop scenario
   benchmarks (external-test package, imports `engine/...` + the
   `engine/adapter/{mockllm,memfs,memstore,permpolicy}` reference adapters +
   `perf/kpi`, never `internal/...`): `BenchmarkSingleSessionLong` (~500-turn
@@ -443,7 +458,7 @@ mecated under real load, not from the offline harness:
 1. Run a production-representative `mecated`. The loopback admin mux serves
    `/debug/pprof` alongside `/metrics` (`--metrics-addr`, default `127.0.0.1:9090`;
    set empty to disable; see the
-   [performance observability design](perf-observability.md)). The
+   [performance observability design](0018-perf-observability.md)). The
    surface is loopback-only and never exposed.
 2. Capture a CPU profile under representative traffic:
    `curl -o prod-a.pgo 'http://127.0.0.1:9090/debug/pprof/profile?seconds=30'`
@@ -536,8 +551,8 @@ Resolved in the Phase 2 build:
   [`rss_other.go`](../../perf/kpi/rss_other.go).
 - **Scenario-harness home — RESOLVED: `perf/scenarios` + a `cmd/mecatui/ui` bench,
   `testing.B`-driven, no `cmd/` binary.** The scenarios are external-test
-  Benchmarks under [`perf/scenarios/`](../../perf/scenarios/) over a stdlib-only
-  [`perf/kpi/`](../../perf/kpi/) support package; the TUI render bench lives next to
+  Benchmarks under [`perf/scenarios/`](../../perf/scenarios) over a stdlib-only
+  [`perf/kpi/`](../../perf/kpi) support package; the TUI render bench lives next to
   the code it measures as an internal `_test` file. No test-support under
   `internal/app` (it would entangle the scenarios with composition and break the
   "no `internal/...`" rule the offline harness keeps).
@@ -577,4 +592,4 @@ Still open:
 
 ---
 
-*Part of the [design docs](./README.md). Related: [Performance observability — problem, approaches, and the decided direction](./perf-observability.md), [Diagnostics, audit, and the global-slog ban](./DIAGNOSTICS.md).*
+*Part of the [design docs](../design/README.md). Related: [Performance observability — problem, approaches, and the decided direction](0018-perf-observability.md), [Diagnostics, audit, and the global-slog ban](0020-diagnostics.md).*

@@ -1,7 +1,22 @@
-# Driver seams — ports, the gRPC driver protocol, and conformance
+# ADR 0005 — Driver seams: ports, the gRPC driver protocol, and conformance
 
-> **Design record.** Captured during the driver seams work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+- Status: Accepted
+- Date: 2026
+- Scope: every externalizable store/source in the harness — session store, memory, skills, soul, agent defs, slash commands, event log
+
+## Context
+
+The harness needed its stores and content sources to be swappable across process boundaries without coupling the engine to gRPC or proto types. The risk was either over-coupling (proto types leaking into engine ports) or under-specifying the contract (divergence between in-process and remote implementations). Six seams needed to cross process boundaries reliably, each with different snapshot-vs-live semantics and different failure postures.
+
+## Decision
+
+Each externalizable store/source is a minimal Go interface in the engine. A single versioned gRPC driver protocol (`contracts/proto/mecatl/driver/v1/`) is the ONE remote path — never multiple transports. In-process reference adapters are both the defaults and the conformance baselines; the conformance suites are the contract. Every driver client (and matching server wrapper) lives in one adapter family. Non-local cleartext is refused for all driver dials. Trust is enforced at source construction in composition, never re-checked downstream.
+
+## Consequences
+
+A driver author in any language proves conformance by running the exported Go suites against their endpoint. Snapshot format evolution uses additive JSON fields under the existing `sessnap-json/1` tag; a format-tag bump is reserved for encoding replacement only. The workspace/FS driver is deliberately left as a sketch (the one unimplemented seam) because it breaks the 64 MiB unary rule and the Bash-needs-real-exec constraint. Server-wrapper promotion to a public API is deferred until an external Go consumer exists. Current behaviour is in `docs/architecture.md`; shipped and deferred items are in `docs/design/PRODUCTION-READINESS.md`.
+
+---
 
 This doc records the pattern, the seam inventory, the wire rules, and the
 deliberate deferrals. The operator-facing flags live in `docs/usage.md`
@@ -347,4 +362,4 @@ streaming, paging, and a sync protocol with no consumer to validate against.
 
 ---
 
-*Part of the [design docs](./README.md). Related: [mecatl — Architecture](./ARCHITECTURE.md), [Implementation Notes](./IMPLEMENTATION-NOTES.md).*
+*Part of the [design docs](../design/README.md). Related: [mecatl — Architecture](0004-v1-architecture.md), [Implementation Notes](../design/IMPLEMENTATION-NOTES.md).*

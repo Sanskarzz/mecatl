@@ -915,5 +915,5 @@ task test:golden     # go test ./cmd/mecatui/ui -update, then re-run
 
 - [Usage & operator guide](usage.md) — the `mecated` server `mecatui` dials (or embeds), and every server flag.
 - [Architecture guide](architecture.md) — the event stream and gRPC `Converse` surface this client renders.
-- [UX discoverability design](design/UX-DISCOVERABILITY.md) — the rationale behind the capability-wiring approach this UI takes.
-- [Clipboard image paste design](design/CLIPBOARD-IMAGE-PASTE.md) — the non-obvious decisions behind `ctrl+v`.
+- [UX discoverability design](adr/0025-ux-discoverability.md) — the rationale behind the capability-wiring approach this UI takes.
+- [Clipboard image paste design](adr/0026-clipboard-image-paste.md) — the non-obvious decisions behind `ctrl+v`.

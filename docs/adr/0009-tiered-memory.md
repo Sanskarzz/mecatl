@@ -1,7 +1,22 @@
-# Genuine tiered memory (closing the tier-0 gap)
+# ADR 0009 — Tiered memory: tier-0 index and BM25 search
 
-> **Design record.** Captured during the tiered memory work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+- Status: Accepted
+- Date: 2026
+- Scope: `engine/tool` (MemoryStore interface), `engine/prompt` (MemoryIndexAssembler), `internal/adapter/memory` (store, tools), `internal/app` (composition wiring).
+
+## Context
+
+The memory store described itself as "tiered" but was a flat key-to-value map with no always-in-context routing table. The Recall tool description told the model memory "is not an index," leaving it blind to what it had stored. Without a tier-0 index the model could only retrieve entries by guessing exact keys. Tier-2 cold storage and semantic/embedding recall were candidates but assessed as premature at this scale with consolidation off by default.
+
+## Decision
+
+Add a tier-0 index: a derived, capped (200 entries/~8 KB), one-line-per-entry digest injected once per run as a turn-0 user-role message via the existing InstructionAssembler seam, so the model always sees what it has stored. Extend the MemoryStore interface with `Index` and `RememberEntry` (adding an optional description field to entries). The Remember tool echoes the resulting index line on write so the model sees its own write immediately. Tier-2 cold storage is rejected in favour of the single store plus a keyword-search tool; semantic/embedding recall remains deferred. BM25 lexical SearchMemory ships as the blind-spot backstop (issue #12).
+
+## Consequences
+
+The model can enumerate its memory at session start and search trimmed entries by keyword without guessing keys. The `memory.json` format gains an additive `description` field (zero-migration: old files load cleanly with an empty description, which falls back to the first line of value). Cross-process safety is provided by a flock sentinel so concurrent writers cannot lose updates. The one-`*Store`-per-dir invariant must be upheld by composition. Semantic/embedding recall stays deferred; the deferred path and its design are recorded in docs/adr/0010-semantic-memory-recall.md. Current behaviour: docs/architecture.md. Shipped/deferred state: docs/design/PRODUCTION-READINESS.md.
+
+---
 
 ## TL;DR / recommended increment
 
@@ -585,4 +600,4 @@ the index lives outside `prompt.Build`, so `StablePrefix` is unchanged. Assert i
 
 ---
 
-*Part of the [design docs](./README.md). Read in order: [Memory enabled by default on the embedded mecatui server](./MEMORY-DEFAULTS.md) ← MEMORY-TIERING → [Tier-2 / semantic memory recall — assessment + buildable design](./MEMORY-TIER2.md).*
+*Part of the [design docs](../design/README.md). Read in order: [Memory enabled by default on the embedded mecatui server](0008-memory-on-by-default.md) ← MEMORY-TIERING → [Tier-2 / semantic memory recall — assessment + buildable design](0010-semantic-memory-recall.md).*

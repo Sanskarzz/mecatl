@@ -1,7 +1,22 @@
-# Guardrails — LLM-backed tool-content inspection (issue #27)
+# ADR 0021 — Guardrails: LLM-backed tool-content inspection
 
-> **Design record.** Captured during the guardrails work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+- Status: Accepted
+- Date: 2026-06-03
+- Scope: operator-tier content inspection of tool arguments (outbound) and tool results (inbound) via a separate checker model; enforcement modes, cost controls, and recursion guard
+
+## Context
+
+A coding agent crosses two trust boundaries on every tool call: outbound arguments chosen by a potentially coaxed model, and inbound results that may carry prompt-injection payloads from attacker-influenced sources such as web pages or MCP responses. Existing permission rules gate tool invocation but do not inspect content. The dual-LLM quarantine pattern (a separate checker model that judges content as data, never as instructions) closes this gap without modifying the agent loop's control flow.
+
+## Decision
+
+Implement guardrails as an opt-in, operator-tier-only hook adapter that decorates the main engine's pre- and post-tool-use hook chain. Configuring a checker model is the explicit opt-in to spend; without a model the feature is byte-identical to absent. A PostToolUse Block is inert (the tool has already run), so enforcing-mode inbound interception rewrites results via HookOutcome.Mutated rather than Block. The verdict parser requires the whole checker output to be a single JSON object, preventing forged verdicts echoed inside fenced content from being extracted. The feature is operator-tier-only: a project-tier guardrails block is ignored with a loud warning, inverting the usual tighten-only project gate.
+
+## Consequences
+
+The checker fires only on the main engine (recursion guard: the checker engine itself is built with inert hooks and a tool-less catalog). A default advisory rule set applies when a model is configured but no explicit rules are authored, with an auto-applied per-session cap of 200 checker calls. The sanitize path is bounded against oversized or invalid sanitized content falling back to block. Current behaviour — enforcement modes, cost model, fail-open/closed escalation, multi-runner merge — is described in docs/architecture.md; shipped state is in the production readiness tracker.
+
+---
 
 Guardrails are an **operator-tier, LLM-backed content checker** that inspects the
 data crossing the agent's tool boundary in both directions and enforces a verdict on
@@ -268,4 +283,4 @@ asks to a human (unlike the headless-only ask reviewer).
 
 ---
 
-*Part of the [design docs](./README.md). Related: [Unattended / allow-all posture (the "YOLO mode" question)](./ALLOW-ALL-POSTURE.md), [Workspace Trust — implementation plan (Phases 0+1+2)](./WORKSPACE-TRUST-SPIKE.md).*
+*Part of the [design docs](../design/README.md). Related: [Unattended / allow-all posture (the "YOLO mode" question)](0022-allow-all-posture.md), [Workspace Trust — implementation plan (Phases 0+1+2)](0023-workspace-trust.md).*

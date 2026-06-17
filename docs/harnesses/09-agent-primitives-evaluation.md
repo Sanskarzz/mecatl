@@ -9,7 +9,7 @@ keywords: [delegation, subagent, teams, parallel, background agents, per-child c
 
 > **Status (2026-06-10).** Tiers 1–4 of the roadmap below shipped as commits
 > `3b982bb..e4cb72b`; the Tier-5 headline (background delegation + per-child cancel) shipped as
-> the bg-arc `2d0bb4f..0bdcc21` (design: `docs/design/BACKGROUND-SUBAGENTS.md`). The remaining
+> the bg-arc `2d0bb4f..0bdcc21` (design: `docs/adr/0015-background-subagents.md`). The remaining
 > items are tracked as GitHub issues #28–#40. This document is preserved as the evaluation that
 > drove that work and as the field-comparison reference the issues cite.
 

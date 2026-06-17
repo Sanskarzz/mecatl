@@ -62,7 +62,7 @@ mirrored `AudienceSubagent` rule that binds children (`childRules`), loosening o
 `Ask` are preserved exactly at **every** tier including `yolo`. The one extra step at
 `yolo`: child command-substitution auto-runs too (`WithLooseSubstitution` extended to
 children) — at `auto`/`trusted`/`strict` a child's `$(...)` still resolves through the
-[subagents & teams](subagents-and-teams.md) child-ask model. See `docs/design/ALLOW-ALL-POSTURE.md` and the CLAUDE.md "CONFIG
+[subagents & teams](subagents-and-teams.md) child-ask model. See `docs/adr/0022-allow-all-posture.md` and the CLAUDE.md "CONFIG
 axis" / "Posture ladder" notes.
 
 For Bash, `bash.go` splits compound lines (`SplitCommands`, honouring quotes and
@@ -160,7 +160,7 @@ skipped. Trust is **monotonic-positive**: it only ever *grants* admission of a
 project's ALLOWs/soul — it never overrides a Deny or a configured Ask (those remain
 deny-dominant in the evaluator). A missing/malformed/unparseable `settings.yaml`
 **or** `trust.yaml` fails safe to untrusted (a corrupt config never grants trust).
-See `docs/design/WORKSPACE-TRUST-SPIKE.md`.
+See `docs/adr/0023-workspace-trust.md`.
 
 ## Related
 

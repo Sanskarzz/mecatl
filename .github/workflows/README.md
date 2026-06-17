@@ -74,7 +74,7 @@ ledger is appended to the job summary when present in the test output.
 ## `perf.yml` — push to `main` + every pull request
 
 The **Phase 3** performance-regression gate + trend store of
-`docs/design/perf-tracking.md`. Deliberately a **separate** workflow from `ci.yml`
+`docs/adr/0019-perf-tracking.md`. Deliberately a **separate** workflow from `ci.yml`
 because its two jobs need different permission postures. Runs on `pull_request`
 (**not** `pull_request_target`) — PR code is untrusted; the only credential is the
 automatic `GITHUB_TOKEN`, scoped per job.
@@ -98,7 +98,7 @@ a *bigger-is-better* suite (`cache_hit_rate`, `105%`, ONLY for the whitelist
 `{single_session_long, team_fanout}` — the by-design-0 scenarios emit no point).
 allocs/op is hard-gated; `ns/op` is advisory. The first PR before any baseline
 exists skips the allocs gate green with a notice. See
-`docs/design/perf-tracking.md` (Phase 3 — Status) for the full rationale.
+`docs/adr/0019-perf-tracking.md` (Phase 3 — Status) for the full rationale.
 
 **Live trend dashboard:** https://potential-barnacle-mvm429e.pages.github.io/dev/bench/
 (sign in to GitHub with repo access; the random slug is GitHub's private-Pages
@@ -114,7 +114,7 @@ via the toolchain default `-pgo=auto` — no flag, no workflow edit. Today no pr
 is committed (the offline one `task pgo:collect` produces is provisional and stays
 under the gitignored `.scratch/pgo/`), so `-pgo=auto` is a no-op and the build is the
 non-PGO build. PGO never gates a PR — it does not catch regressions, it shaves CPU —
-so `perf.yml` is unaffected. See `docs/design/perf-tracking.md` (Phase 4 — Status).
+so `perf.yml` is unaffected. See `docs/adr/0019-perf-tracking.md` (Phase 4 — Status).
 
 ## `release.yml` — `v*` tag push (+ `workflow_dispatch` with a `tag` input, for idempotently re-publishing an existing tag's artifacts)
 
@@ -250,7 +250,7 @@ the standing `GITHUB_TOKEN` with a `::warning::`. The three provider keys
 (`openrouter-key` / `openai-key` / `anthropic-key`) are also `secrets:` (an
 undefined one is the empty string, treated as absent). Full operator walkthrough:
 `docs/usage.md` ("Adopting via the reusable workflow"); design + rationale:
-`docs/design/MECATEQUI.md` §5.1.
+`docs/adr/0028-mecatequi.md` §5.1.
 
 ## `mecatequi-example.yml` — EXAMPLE / TEMPLATE (the escape hatch; not run in this repo)
 
@@ -278,7 +278,7 @@ their wrapper actions as their single home (so the reusable workflow can reach t
 path); `author-gate.sh` stays under `.github/actions/mecatequi/` as an example-only
 defense-in-depth illustration. Every event-derived value crosses via `env:`/inputs, never
 argv. Full design + the trust model + the `/proc`-exfiltration follow-up:
-`docs/design/MECATEQUI.md`; the operator walkthrough: `docs/usage.md`.
+`docs/adr/0028-mecatequi.md`; the operator walkthrough: `docs/usage.md`.
 
 ## References
 

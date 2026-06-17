@@ -1,7 +1,22 @@
-# BACKGROUND-SUBAGENTS.md — Background Subagents + Per-Child Cancel over a Shared Child-Run Registry
+# ADR 0015 — Background subagents and per-child cancel
 
-> **Design record.** Captured during the background-subagents work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+- Status: Accepted
+- Date: 2026
+- Scope: the child-run registry, background Subagent execution mode, per-child cancel, run-end drain/seal, and completion delivery via notice injection and SubagentStatus
+
+## Context
+
+The two remaining delegation gaps after teams shipped were: (1) per-child cancel — there was no way to cancel a single in-flight child without cancelling the whole run; and (2) background/async delegation — a Subagent call blocked the parent loop for its entire duration, which is the opposite of the parallelism the field converged on (Claude Code `run_in_background`, opencode background tasks). These two features share approximately 60% of their machinery, making them natural co-design.
+
+## Decision
+
+A shared child-run registry on the parent `Run`, keyed by child session id, is the single anchor for per-child cancel functions, surfaced ask ids, background state, and drain/seal coordination. Background mode is a flag on the existing Subagent tool — not a new tool — that returns an immediate started-result and drives the child in a detached goroutine. Completion delivery uses a turn-boundary harness-note (ids only, no child-authored content) plus `SubagentStatus` as the sole body channel, satisfying the OWASP LLM01 role-elevation constraint. Background children are run-scoped in v1; true session-scoped detach is deferred.
+
+## Consequences
+
+Per-child cancel and background execution work across all three delegation families (Subagent, Parallel branch, team member) through a single code path. The "loop emits exactly N diagnostics lines" invariant is amended to three (adding the drain-abandon warn). Session-scoped background detach requires a durable per-session outbox and is explicitly named as v2 work. Current behaviour is described in `docs/architecture.md`; shipped/deferred state is tracked in `docs/design/PRODUCTION-READINESS.md`.
+
+---
 
 The whole arc is on `main`: **I1** (registry + Subagent cancel, `2d0bb4f`), **I2**
 (parallel-branch + team-member cancel, `d6457ef`), **I3a** (background mechanics +
@@ -10,7 +25,7 @@ nudge + mecademo, `e249dae`), **I4** (TUI background surfaces + description pass
 doc's promotion — the final iteration). This document is the design **as built**: the
 post-review amendments are folded into the body where they changed it. Per-subsystem
 implementation detail lives in `docs/design/IMPLEMENTATION-NOTES.md`; companion docs:
-`docs/design/AGENT-TEAMS-SPIKE.md`.
+`docs/adr/0014-agent-teams.md`.
 
 The arc closed the two remaining Tier-4/Tier-5 delegation gaps as ONE co-designed feature
 pair: per-child cancel (deferred precisely because ~60% of its machinery is the background
@@ -454,4 +469,4 @@ budget. The RunTeam-path `CancelTeammate` unary (D4) is done (issue #29).
 
 ---
 
-*Part of the [design docs](./README.md). Related: [Agent definitions (Tier 1)](./AGENT-DEFINITIONS.md), [Spike: Headless Agent Teams for mecatl](./AGENT-TEAMS-SPIKE.md), [Cloud-native arc: disposable process, externalized state, durable record](./CLOUD-NATIVE.md).*
+*Part of the [design docs](../design/README.md). Related: [Agent definitions (Tier 1)](0013-agent-definitions.md), [Spike: Headless Agent Teams for mecatl](0014-agent-teams.md), [Cloud-native arc: disposable process, externalized state, durable record](0027-cloud-native.md).*

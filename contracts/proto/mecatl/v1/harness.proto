@@ -123,7 +123,7 @@ service HarnessService {
   // --- Agent teams (experimental) -----------------------------------------
   //
   // A team is a set of long-lived member sessions that coordinate through a
-  // shared task list and mailbox (see docs/design/AGENT-TEAMS-SPIKE.md). Unlike
+  // shared task list and mailbox (see docs/adr/0014-agent-teams.md). Unlike
   // a Converse run (one session) or a Task/Fork subagent (one-shot, drained),
   // team members are re-driven across rounds and their events stream to the
   // client tagged with the producing member — the headless analogue of

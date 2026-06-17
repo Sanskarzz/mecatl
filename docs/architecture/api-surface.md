@@ -28,7 +28,7 @@ reach the right run.
   its Subagent/Team children run the same file-less surface (memory six +
   WebFetch + WebSearch + global MCP) with no forkers and no shell. The model is told via a
   system-prompt posture note and an honest Subagent spec. A REMOTE filesystem
-  for such sessions is a future driver concern (`docs/design/DRIVERS.md`), an
+  for such sessions is a future driver concern (`docs/adr/0005-driver-seams.md`), an
   explicit non-goal of the profile itself.
 - `GetSession(GetSessionRequest) → GetSessionResponse`
 - `ListModels(ListModelsRequest) → ListModelsResponse` — the selectable-model

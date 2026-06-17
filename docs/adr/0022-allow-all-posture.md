@@ -1,7 +1,22 @@
-# Unattended / allow-all posture (the "YOLO mode" question)
+# ADR 0022 — Unattended / allow-all posture (the "YOLO mode" question)
 
-> **Design record.** Captured during the allow-all-posture work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+- Status: Accepted
+- Date: 2026-06-03
+- Scope: the operator posture ladder (strict / trusted / auto / yolo), the rejection of a PermissionMode bypass, and the allow-all rule mechanism
+
+## Context
+
+Users wanted a "don't prompt me for anything" posture for unattended CI and container runs. A prior spike implemented a fourth PermissionMode that short-circuited the governance evaluator before any deny was checked, defeating ScopeManaged denies and including a substring command denylist that was both trivially bypassed and produced false positives on benign paths. The spike's own test suite was internally contradictory.
+
+## Decision
+
+Reject the PermissionMode bypass entirely. Express allow-all as a single ScopeCLI Allow rule injected into the existing governance fold, so deny-dominance, configured Ask rules, and plan-mode hard-denies all survive at every posture tier. Introduce a four-tier operator posture ladder (strict / trusted / auto / yolo) subsuming the standalone --yolo and --trust-project flags. The yolo tier additionally loosens the child substitution floor; the auto tier (recommended unattended default) keeps the child injection defence on. Posture is operator-tier-only: a project-tier posture setting is ignored with a warning. The privilege-plus-no-sandbox combination refuses to start.
+
+## Consequences
+
+The allow-all path goes through governance.Evaluate at every tier; a ScopeManaged Deny and a configured Ask survive even under yolo. No proto, ACP, or session.PermissionMode change was needed. The child substitution loosening under yolo is the one user-visible behaviour change in the ladder and is documented as a release note in the body. Current behaviour — the posture table, the rule injection, the refusal logic — is described in docs/architecture.md; shipped state is in the production readiness tracker.
+
+---
 
 Supersedes the abandoned `ModeYolo` spike (see "What we rejected"). Decision-support for
 issue: *"add a yolo mode."*
@@ -308,4 +323,4 @@ https://code.claude.com/docs/en/permissions.
 
 ---
 
-*Part of the [design docs](./README.md). Related: [Guardrails — LLM-backed tool-content inspection (issue #27)](./GUARDRAILS.md), [Workspace Trust — implementation plan (Phases 0+1+2)](./WORKSPACE-TRUST-SPIKE.md).*
+*Part of the [design docs](../design/README.md). Related: [Guardrails — LLM-backed tool-content inspection (issue #27)](0021-guardrails.md), [Workspace Trust — implementation plan (Phases 0+1+2)](0023-workspace-trust.md).*

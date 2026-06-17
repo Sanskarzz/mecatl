@@ -8,7 +8,7 @@
 > mecatl is provider-agnostic, with the native Anthropic Messages API as a peer
 > adapter and a per-session provider/model registry — see the [multi-provider](#multi-provider--registry-per-session-routing--model-inventory) section below.
 > The deeper design brief for this adapter is
-> [`docs/design/OPENAI-RESPONSES-API.md`](../design/OPENAI-RESPONSES-API.md).
+> [`docs/adr/0017-openai-responses-api.md`](../adr/0017-openai-responses-api.md).
 
 `Provider` implements `port.LLMProvider` over `POST /v1/responses` using
 `github.com/openai/openai-go/v3`. It owns its own conversation state
@@ -159,7 +159,7 @@ every child routes through `engineDepsForProvider` so it never contaminates the
 parent's compactor/counter. Composition-only — the registry never reaches the child
 engine (a bare `port.LLMProvider` is handed down).
 
-**Full design: see [`docs/design/MULTI-PROVIDER.md`](../design/MULTI-PROVIDER.md)** (registry, catalog-as-data, DTO
+**Full design: see [`docs/adr/0016-multi-provider.md`](../adr/0016-multi-provider.md)** (registry, catalog-as-data, DTO
 neutrality, selection primitive, per-session engine, capability intersection,
 disclosure posture + per-client key custody, per-sub-agent provider, and the P0→P3
 phasing).

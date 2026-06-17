@@ -6,12 +6,12 @@ when `CLAUDE.md` was trimmed back to a lean correction file (~1k words).
 
 **This is reference, not a contract.** It captures decisions, invariants, and the
 SHIPPED/DEFERRED state of each subsystem as of the trim. When a subsystem has a dedicated
-spike/design doc ([Multi-provider / multi-model (Phase 0)](./MULTI-PROVIDER.md),
-[OpenAI Responses API for a Go Agentic Coding Harness — 2026 Implementation Brief](./OPENAI-RESPONSES-API.md),
-[Workspace Trust — implementation plan (Phases 0+1+2)](./WORKSPACE-TRUST-SPIKE.md), [Spike: A "soul" for mecatl — persistent identity + cross-session user-model](./SOUL-SPIKE.md),
-`MEMORY-*.md`, [Spike: Headless Agent Teams for mecatl](./AGENT-TEAMS-SPIKE.md),
-[Unattended / allow-all posture (the "YOLO mode" question)](./ALLOW-ALL-POSTURE.md),
-[System-Prompt Research & Enhancement (issue #19)](./SYSTEM-PROMPT-RESEARCH.md)), that doc is the deeper
+spike/design doc ([Multi-provider / multi-model (Phase 0)](../adr/0016-multi-provider.md),
+[OpenAI Responses API for a Go Agentic Coding Harness — 2026 Implementation Brief](../adr/0017-openai-responses-api.md),
+[Workspace Trust — implementation plan (Phases 0+1+2)](../adr/0023-workspace-trust.md), [Spike: A "soul" for mecatl — persistent identity + cross-session user-model](../adr/0011-soul-and-user-model.md),
+`MEMORY-*.md`, [Spike: Headless Agent Teams for mecatl](../adr/0014-agent-teams.md),
+[Unattended / allow-all posture (the "YOLO mode" question)](../adr/0022-allow-all-posture.md),
+[System-Prompt Research & Enhancement (issue #19)](../adr/0024-system-prompt-research.md)), that doc is the deeper
 source; this file is the one-stop index of the dense detail that was crammed into CLAUDE.md.
 Prefer updating the relevant design doc + this file over re-growing CLAUDE.md.
 
@@ -882,7 +882,7 @@ FINAL-MESSAGE sentence, and the duplicated report-format/fresh-context guidance 
 `prompt` arg description) was trimmed so token cost stays ~flat; `backgroundStartedBody` and the
 `background` arg description now both name the turn-boundary note ("a note will tell you when it
 finishes"). The Spec guard test grew to require SubagentStatus + background. Docs finale: the
-design promoted to `docs/design/BACKGROUND-SUBAGENTS.md` (as-built, amendments folded, I1-I4
+design promoted to `docs/adr/0015-background-subagents.md` (as-built, amendments folded, I1-I4
 hashes), architecture §8 gained the background/SubagentStatus/cancel paragraph (+ the stale
 forking-only-gate and blanket-auto-deny bullets corrected to the childGate/4-step reality),
 docs/tui.md gained the marker/notice/footer-count notes, docs/usage.md's delegation note gained
@@ -2369,7 +2369,7 @@ engine has the FS tools baked in) and `server.SessionEngineFactory` grew a
 ### Snapshot fidelity — persisted per-session facts (cloud-native Phase 1)
 
 Three per-session facts are persisted so a restarted process is indistinguishable
-mid-conversation (`docs/design/CLOUD-NATIVE.md` ledger rows 1/2/3):
+mid-conversation (`docs/adr/0027-cloud-native.md` ledger rows 1/2/3):
 
 - **The aggregate gained four inert, opaque fields** on `session.Session`: `Usage`
   (cumulative run tokens), `Profile`, `ProviderID`, `ModelID`. The domain STORES the three
@@ -2410,7 +2410,7 @@ mid-conversation (`docs/design/CLOUD-NATIVE.md` ledger rows 1/2/3):
 The FOURTH run-entry seam: `Approve`/`Deny` against a session whose process died
 while parked awaiting approval re-enters the loop AT the ask and drives it to
 completion. Durability was already correct (sessnap round-trips the `Pending` ask
-via `PauseForApproval`); Phase 2 adds only the liveness (`docs/design/CLOUD-NATIVE.md`
+via `PauseForApproval`); Phase 2 adds only the liveness (`docs/adr/0027-cloud-native.md`
 ledger row 5).
 
 - **The fourth seam, NOT a fourth transition verb.** The three existing
@@ -2760,7 +2760,7 @@ surface for a self-healing scalar). Accepted trade-off: a session created before
 lands reads the 128k floor; the next turn (engine) and the next `GetSession` (echo) read
 the live window. nil resolver (memstore/driver/test paths) ⇒ identity-only echo + disabled
 compaction, byte-identical to the no-overlay posture. No new resource — `decision = derive`
-in `docs/design/CLOUD-NATIVE.md`. Guarded by the engine non-freeze test
+in `docs/adr/0027-cloud-native.md`. Guarded by the engine non-freeze test
 (`engine/agent/compaction_test.go` `TestContextWindowResolvedAtUse`), the selector
 self-correct test (`internal/app/session_engine_test.go`
 `TestSelectorEngineWindowSelfCorrectsAtUse`), the same-source anti-drift test
@@ -3259,4 +3259,4 @@ secrets).
 
 ---
 
-*Part of the [design docs](./README.md). Related: [mecatl — Architecture](./ARCHITECTURE.md), [Driver seams — ports, the gRPC driver protocol, and conformance](./DRIVERS.md), [mecatl — Implementation Step-Chain (v1)](./STEP-CHAIN.md).*
+*Part of the [design docs](./README.md). Related: [mecatl — Architecture](../adr/0004-v1-architecture.md), [Driver seams — ports, the gRPC driver protocol, and conformance](../adr/0005-driver-seams.md), [mecatl — Implementation Step-Chain (v1)](../adr/0006-v1-step-chain.md).*

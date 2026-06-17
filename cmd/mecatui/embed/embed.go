@@ -56,7 +56,7 @@ const socketName = "mecated.sock"
 const DefaultPerfAddr = "127.0.0.1:9099"
 
 // PerfConfig is the opt-in perf-observability configuration for the embedded
-// server (decision 7 in docs/design/perf-observability.md). It is OFF by default
+// server (decision 7 in docs/adr/0018-perf-observability.md). It is OFF by default
 // (the zero value): mecatui hosts a bare gRPC socket with no telemetry, exactly
 // as before. When Enabled, Start arms the SAME runtime-introspection surface
 // mecated exposes — pprof, expvar, the runtime/RSS snapshot, and the execution

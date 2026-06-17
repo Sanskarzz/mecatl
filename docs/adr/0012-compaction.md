@@ -1,13 +1,28 @@
-# Conversation compaction
+# ADR 0012 — Conversation compaction
 
-> **Design record.** Captured during the compaction work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+- Status: Accepted
+- Date: 2026
+- Scope: `engine/agent` (compaction trigger, HeuristicCompactor, CascadeCompactor), `engine/session` (ReplaceHistory, ValidateToolPairing), `internal/app` (buildCompactor wiring).
+
+## Context
+
+A coding agent's conversation grows without bound: every tool call appends large, low-signal results. A naive sliding window fails because load-bearing facts (the goal, the plan, decisions from 40 turns ago) are scattered across the whole history, not concentrated in the recent tail. A naive summarise-old-messages approach loses tool IDs, file paths, and error context. The context window must be reclaimed before the provider returns an overflow error, but the compaction must preserve what the agent actually needs to continue.
+
+## Decision
+
+Implement compaction as a turn-boundary check at 80% of the context window, applying a four-tier cascade cheapest-first: snip settled turns, strip large tool bodies, collapse file-read bodies to re-fetch pointers, then (with an LLM injected) produce a structured summary. Both compactors pin the first user message (the goal), back-snap the verbatim tail to the most-recent user instructions (not a role-blind last-N), and include a touched-file-paths synthesis so the agent can re-read on demand. Compaction is best-effort and never fatal: any failure keeps the original history and emits a WARN. A non-destructive EvCompactionArchive event carries the pre-compaction conversation to the durable event log so pre-compaction turns are recoverable.
+
+## Consequences
+
+The agent survives long coding sessions without losing its goal or the most-recent user instruction. Middle instructions (between the goal and the recent tail) are best-effort: summarised verbatim by tier 4 when an LLM is wired, dropped otherwise. The unpaired-history invariant is enforced by three independent layers (forward-snap, ValidateToolPairing, ReplaceHistory). The archive event grows the event log super-linearly across many compactions; the deferred delta-archive optimization is recorded in docs/adr/0027-cloud-native.md. Current behaviour: docs/architecture.md. Shipped/deferred state: docs/design/PRODUCTION-READINESS.md.
+
+---
 
 This is the deep reference for how mecatl compresses a
 conversation that has grown past the context window. The terse per-subsystem status
 detail lives in `docs/design/IMPLEMENTATION-NOTES.md` ("Compaction never emits
 unpaired history"); the cloud-native non-destructive archive is owned by
-`docs/design/CLOUD-NATIVE.md` (Phase 3b). This doc is the rationale and the full
+`docs/adr/0027-cloud-native.md` (Phase 3b). This doc is the rationale and the full
 mechanics; those two stay the status/inventory channels and cross-link back here.
 
 Code lives in three files: the trigger in `engine/agent/loop.go` (`maybeCompact`),
@@ -415,7 +430,7 @@ can replay the log and recover the pre-compaction turns the session snapshot no
 longer holds. Like `EvApproval` it is log-only — skipped on the client wire. The
 full mechanics, the no-leak contract (the archive is the parent's OWN conversation,
 gauntlet #7), and the deliberate log-growth cost are owned by
-`docs/design/CLOUD-NATIVE.md` (Phase 3b) — see there, not duplicated here.
+`docs/adr/0027-cloud-native.md` (Phase 3b) — see there, not duplicated here.
 
 ## 8. Prior art and what mecatl adopted
 
@@ -496,10 +511,10 @@ no promise about the middle, and `buildSummary` says so.
 - **The archive is the full pre-compaction history, not a delta.** Across many
   compactions this re-logs the retained tail and grows the event log super-linearly.
   The deferred optimization (a delta archive) is owned by
-  `docs/design/CLOUD-NATIVE.md` (Phase 3b), where the cost is recorded as an accepted,
+  `docs/adr/0027-cloud-native.md` (Phase 3b), where the cost is recorded as an accepted,
   reasoned decision.
 
 
 ---
 
-*Part of the [design docs](./README.md). Related: [Genuine tiered memory (closing the tier-0 gap)](./MEMORY-TIERING.md), [Cloud-native arc: disposable process, externalized state, durable record](./CLOUD-NATIVE.md).*
+*Part of the [design docs](../design/README.md). Related: [Genuine tiered memory (closing the tier-0 gap)](0009-tiered-memory.md), [Cloud-native arc: disposable process, externalized state, durable record](0027-cloud-native.md).*

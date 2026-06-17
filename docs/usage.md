@@ -257,10 +257,10 @@ mailbox). See the delegation-capabilities note below.
 | `--subagent-ask-reviewer` | `""` | **OPT-IN headless ask reviewer**: model id or `--model-alias` of a tool-less ONE-TURN reviewer that adjudicates a **headless** subagent/member/branch permission ask the 4-step model would otherwise blanket auto-deny. **Requires `--headless`** (on an interactive server — including the `mecatui` embedded server — it is inert: asks surface to the client/modal instead). An allow approves **this call only** (never learned); a deny — or any reviewer error/timeout/ambiguity — keeps the call denied (**fail-safe**); each adjudication is **one extra LLM call** on the reviewer model. Configured `deny`/`ask` rules always win. The gRPC `RunTeam`-direct path is **excluded** (it runs zero-caps — no reviewer). Resolved on the **session's provider** (same-provider only). Empty (default) disables it; an unusable model id **fails startup** (validated even when inert). Deliberately a **server flag, not a permission-config key** — see the permissions section. `mecatui` accepts the same flag for its embedded server but it is inert there (the embedded server is interactive). |
 | `--subagent-ask-reviewer-max-denies` | `3` | circuit breaker for the reviewer: after this many **consecutive** non-allow reviewer outcomes (denies/failures/timeouts) within one run, further asks skip the reviewer and fall through to the plain auto-deny; an allow resets the count. |
 | `--subagent-ask-reviewer-policy` | `""` | path to a **TRUSTED** policy rubric file; its content replaces the built-in rubric the reviewer applies. The built-in rubric (allow only clearly read-only or standard build/vet/test commands; deny anything that mutates shared state, touches the network/credentials, or whose effect is unclear) lives in `defaultAskReviewPolicy` (`engine/agent/askadjudicator.go`); a custom file is **plain prose** in the same style. Read once at startup; an unreadable file **fails startup**. |
-| `--agents-dir` | `""` | directory of named **agent definitions** (`<name>.md` + YAML frontmatter — `name`/`description`/`tools`/`model`/`provider`/`permissionMode`/`maxTurns`/`maxToolCalls`/`color`/`skills`/`mcpServers`/`hooks`/`memory`; full reference in `docs/design/AGENT-DEFINITIONS.md`), reusable as a `Subagent(agent=<name>)` delegate and as a team-member role (repeatable; highest precedence). **TRUST BOUNDARY:** a def body steers the model like `AGENTS.md`/`CLAUDE.md`. A `memory: user\|project` field (issue #33) injects a per-agent `MEMORY.md` head into the def's prompt at startup (READ-ONLY in v1); the **project** tier is **`--trust-project`-gated** (it points into the attacker-controllable workspace). |
+| `--agents-dir` | `""` | directory of named **agent definitions** (`<name>.md` + YAML frontmatter — `name`/`description`/`tools`/`model`/`provider`/`permissionMode`/`maxTurns`/`maxToolCalls`/`color`/`skills`/`mcpServers`/`hooks`/`memory`; full reference in `docs/adr/0013-agent-definitions.md`), reusable as a `Subagent(agent=<name>)` delegate and as a team-member role (repeatable; highest precedence). **TRUST BOUNDARY:** a def body steers the model like `AGENTS.md`/`CLAUDE.md`. A `memory: user\|project` field (issue #33) injects a per-agent `MEMORY.md` head into the def's prompt at startup (READ-ONLY in v1); the **project** tier is **`--trust-project`-gated** (it points into the attacker-controllable workspace). |
 | `--agents-conventional` | `true` | also discover agent defs from the conventional locations (`<workspace>/.mecatl/agents`, `<workspace>/.claude/agents`, `$XDG_CONFIG_HOME/mecatl/agents`, `~/.claude/agents`; lower precedence than `--agents-dir`). ON and **inert** until such a dir exists. Project-tier defs are **trust-gated** (`--trust-project`). |
 | `--model-alias` | `""` | model alias mapping `name=model-id` (repeatable), resolved only in composition — an agent def's `model: <alias>` resolves through this map (then the built-in sonnet/opus/haiku aliases). |
-| `--guardrails-model` | `""` | **GUARDRAILS** (issue #27): model id / `--model-alias` of a tool-less checker that inspects **outbound** tool-call args (`PreToolUse`, exfil) and **inbound** tool results (`PostToolUse`, prompt injection) and enforces a verdict. Empty (default) **disables** guardrails; an unusable model id **fails startup**. Configuring a model is the **opt-in to spend** — with **no rule list** it takes the **default advisory rule set** (WebSearch/WebFetch/mcp__\*, observe-only). The optional **rule list** + cost knobs live in the **user-global** `settings.yaml` `guardrails:` subtree (operator-tier **only** — a project repo cannot configure or weaken a checker; a project-tier block is ignored with a WARN); an explicit rule list replaces the defaults. `--guardrails-model` overrides the YAML model. Fires on the main loop regardless of `--headless`. **See the guardrails section below + `docs/design/GUARDRAILS.md`.** |
+| `--guardrails-model` | `""` | **GUARDRAILS** (issue #27): model id / `--model-alias` of a tool-less checker that inspects **outbound** tool-call args (`PreToolUse`, exfil) and **inbound** tool results (`PostToolUse`, prompt injection) and enforces a verdict. Empty (default) **disables** guardrails; an unusable model id **fails startup**. Configuring a model is the **opt-in to spend** — with **no rule list** it takes the **default advisory rule set** (WebSearch/WebFetch/mcp__\*, observe-only). The optional **rule list** + cost knobs live in the **user-global** `settings.yaml` `guardrails:` subtree (operator-tier **only** — a project repo cannot configure or weaken a checker; a project-tier block is ignored with a WARN); an explicit rule list replaces the defaults. `--guardrails-model` overrides the YAML model. Fires on the main loop regardless of `--headless`. **See the guardrails section below + `docs/adr/0021-guardrails.md`.** |
 | `--guardrails` | `""` | guardrails master switch: pass `--guardrails=off` to force the checker **off** regardless of `--guardrails-model` / the `guardrails:` YAML (the kill-switch). Leave it unset to keep guardrails governed by the model + rule config. **Only `off` is accepted** — any other value (e.g. `--guardrails=on`, which does NOT enable: set `--guardrails-model` for that) **fails startup** rather than silently doing nothing. |
 
 > **Delegation capabilities (Subagent / Parallel / Team).** Beyond the shared
@@ -283,7 +283,7 @@ mailbox). See the delegation-capabilities note below.
 > end ⇒ cancelled but persisted + resumable), and every child — subagent, parallel
 > branch, team member — is **individually cancellable** by its id (gRPC `cancel_child`
 > frame / HTTP `POST /v1/sessions/{id}/cancel-child` / the `x` key in mecatui's
-> overlay) without touching the run; see `docs/design/BACKGROUND-SUBAGENTS.md`.
+> overlay) without touching the run; see `docs/adr/0015-background-subagents.md`.
 > **Parallel** is observable
 > over a dedicated `parallel.*` event family, and its result carries the preserved
 > fork-workspace paths. A **Team** additionally honours a **team-wide token budget**
@@ -469,7 +469,7 @@ state, so they must never be bound off-localhost:
 
 > These are the **in-process** profiling sources — no external profiling backend
 > is required. The `/mcp` endpoint (opt-in via `--perf-mcp`) exposes reduced,
-> agent-readable summaries of the same data. See `docs/design/perf-observability.md`.
+> agent-readable summaries of the same data. See `docs/adr/0018-perf-observability.md`.
 
 #### The perf MCP server (`--perf-mcp`)
 
@@ -895,7 +895,7 @@ tool-less checker model** and enforce a verdict — the *dual-LLM quarantine*. T
 catch **outbound exfiltration** (a secret in `PreToolUse` args) and **inbound prompt
 injection** (instruction-like content in a `PostToolUse` result). **OFF until a
 checker model is configured** — configuring a model is the opt-in to spend. Full
-rationale + threat model: `docs/design/GUARDRAILS.md`.
+rationale + threat model: `docs/adr/0021-guardrails.md`.
 
 **The minimal config is just a model.** With `--guardrails-model X` (and no rule
 list) guardrails are ON with the **default advisory rule set** — observe-only for the
@@ -1344,7 +1344,7 @@ It is **read-only to the agent by construction**: no tool can write the soul, an
 loader has no write path. This is deliberate — a writable identity anchor is a
 prompt-injection trap (a single poisoned write would rewrite "who the agent is" across
 *every* future session). Bootstrap and edit it by hand, with a text editor. (See
-`docs/design/SOUL-SPIKE.md` for the threat model and the Phase-2 learning loop.)
+`docs/adr/0011-soul-and-user-model.md` for the threat model and the Phase-2 learning loop.)
 
 **Drift detection (issue #14, Phase 3).** The harness fingerprints the soul's content
 (sha256 of the clean body) and records it in a **harness-owned sidecar** next to the
@@ -1423,7 +1423,7 @@ poisoned transcript cannot launder steering into the block or break its data fen
 Over-eager memory is *steered* (by the descriptions), not *enforced* (there is no
 rule/fact classifier); this is a deliberate, accepted residual risk. Single-operator
 assumption: there is no per-user keying — "the operator" is implicitly singular, the
-same trust-zone assumption the soul and `docs/design/MEMORY-TIERING.md` carry. Disable
+same trust-zone assumption the soul and `docs/adr/0009-tiered-memory.md` carry. Disable
 it with `--no-user-model`.
 
 ### Graceful shutdown
@@ -2241,7 +2241,7 @@ $ OPENAI_API_KEY=token go run ./cmd/mecated --openai \
 
 `/v1/chat/completions` is broadly supported, but `/v1/responses` support is thin
 and version-dependent (llama.cpp: none yet; vLLM: partial; LiteLLM proxies
-translate). Per `docs/design/OPENAI-RESPONSES-API.md` §8, features **commonly
+translate). Per `docs/adr/0017-openai-responses-api.md` §8, features **commonly
 missing** on compatible servers include:
 
 - `previous_response_id` / `store` (the harness already avoids these by design —
@@ -2265,7 +2265,7 @@ state. Two adoption paths wire it into GitHub Actions safely: a **reusable `work
 workflow** (the recommended path — a ~15-line caller, no vendored scripts) and a hand-rolled
 **example workflow** (the escape hatch — vendor it when you need to customise the job graph).
 Both build on the same **composite actions**. The design rationale, the trust model, and the
-(now fixed) secret-scrubbed agent shell live in `docs/design/MECATEQUI.md`; this section is
+(now fixed) secret-scrubbed agent shell live in `docs/adr/0028-mecatequi.md`; this section is
 the operator walkthrough.
 
 > The example workflow is a **template** — copy it into your own repo and review it. This
@@ -2514,7 +2514,7 @@ silently **skips legitimate runs**. The **live** workflow for this repo
 
 `author-gate.sh` (which asserts `author_association`) ships in the **example template
 only** as a defense-in-depth illustration; it is deliberately absent from the live
-workflow. See the [mecatequi design doc](design/MECATEQUI.md).
+workflow. See the [mecatequi design doc](adr/0028-mecatequi.md).
 
 The action and its scripts are meant to be **vendored** — copied into your repo and
 reviewed, not referenced by tag — so you control exactly what runs. To enable it:
@@ -2527,7 +2527,7 @@ reviewed, not referenced by tag — so you control exactly what runs. To enable 
    before anyone tries to apply it, or the workflow simply does nothing with no error.
 4. Review the posture (`auto` is the documented CI default) and decide whether to keep the
    broad `GITHUB_TOKEN` in the `publish` job or upgrade to a JIT GitHub App token (the
-   stronger option — see `docs/design/MECATEQUI.md`).
+   stronger option — see `docs/adr/0028-mecatequi.md`).
 5. Apply the `mecatequi` label to a test issue and watch the run.
 
 **Configurable trigger label / mention.** The trigger label and comment mention default to
@@ -2577,7 +2577,7 @@ needs:
 
 Honest cost: the action builds the binary from source on each run (no cached release asset
 yet). A signed, checksummed binary / container is the later speed optimization — see
-`docs/design/MECATEQUI.md` §5.
+`docs/adr/0028-mecatequi.md` §5.
 
 ### Customising the PR description (templates)
 
@@ -2608,7 +2608,7 @@ Two things to know: the `⚠️ Agent-authored — review carefully before mergi
 line in the template, or you get a duplicate), and **issue linkage is yours** in a custom
 template — use `{{issue_ref}}` with `Closes`/`Refs` (the built-in default uses `Closes`).
 Substitution is literal and single-pass over agent-authored (untrusted) values — see
-`docs/design/MECATEQUI.md` for the mechanism and the full rationale.
+`docs/adr/0028-mecatequi.md` for the mechanism and the full rationale.
 
 ### Injection safety (why it is built this way)
 
@@ -2621,7 +2621,7 @@ with a secret-scrubbed environment (`internal/adapter/envscrub` — the harness'
 provider/auth/forge credentials are dropped before the shell sees them), so a hijacked
 agent cannot `echo $OPENROUTER_API_KEY` / `cat /proc/self/environ` to exfiltrate them; and
 the workflow still bounds the blast radius by holding only the rotatable LLM key (no write
-token) in the agent's job. See `docs/design/MECATEQUI.md` §6.
+token) in the agent's job. See `docs/adr/0028-mecatequi.md` §6.
 
 ---
 

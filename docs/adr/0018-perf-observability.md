@@ -1,15 +1,26 @@
-# Performance observability — problem, approaches, and the decided direction
+# ADR 0018 — Performance observability
 
-> **Design record.** Captured during the perf observability work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+- Status: Accepted
+- Date: 2026-06-03
+- Scope: how mecatl exposes its own runtime performance for measurement — by humans, by tooling, and by an AI agent over MCP
 
-- Date: 2026-06-03.
-- Scope: how mecatl exposes its own runtime performance for measurement —
-  by humans, by tooling, and (the new idea) by an **AI agent over MCP**.
+## Context
+
+mecatl had no runtime visibility: no goroutine count, no GC metrics, no process RSS, and no pprof handlers. The dominant cost is off-CPU (model + tool I/O), so CPU profiling alone was insufficient. A proposal surfaced to expose perf data to an AI agent via an MCP server so the agent could query p99 latency, goroutine counts, and top allocation sites as ranked numeric summaries rather than raw blobs.
+
+## Decision
+
+Adopt a phased hybrid (Approach D). Phase 1 lands stdlib foundations — pprof on the loopback admin mux, Go and Process collectors on the Prometheus registry, FlightRecorder, goleak in concurrency-heavy tests, and a process-RSS gauge. Phase 2 layers an opt-in perf-over-MCP server reading those same Phase 1 sources. Phase 3 (fleet OTel + continuous profiling) is deferred until mecated runs as a real long-lived service. No external profiling infrastructure is stood up; profiling is delivered in-process via the MCP server.
+
+## Consequences
+
+Phase 1 closes the embarrassing gaps (no goroutine count, no RSS instrument) and every later phase reuses those same sources. The MCP Go SDK was already a direct dependency, so Phase 2 adds no new SDK. The loopback-only enforcement is fail-closed: enabling the perf MCP on a non-loopback address refuses to start. Phase 3 remains intentionally deferred; current behaviour and shipped/deferred state are tracked in docs/architecture.md and the production readiness tracker respectively.
+
+---
 - Companion: the [Go-perf measurement survey](../perf-measurement-survey.md) (the
   Go-perf technique survey and the agent-consumable decision table). This doc
   grounds that survey in mecatl and lays out concrete approaches with trade-offs.
-  See also the sibling [long-term performance regression tracking](perf-tracking.md),
+  See also the sibling [long-term performance regression tracking](0019-perf-tracking.md),
   which covers the *regression-gating* half (baselines, the CI trend store, PGO).
 
 > This follows the `docs/design/` convention: rationale + options + a
@@ -22,7 +33,7 @@
 ## 1. Problem statement — what actually goes slow in mecatl
 
 mecatl is a **streaming agentic loop** (`engine/agent`, see
-`docs/architecture.md` §5). Its performance profile is dominated by *off-CPU*
+`docs/architecture/agent-loop.md`). Its performance profile is dominated by *off-CPU*
 time — waiting on the model and on tool I/O — which means the naive "run a CPU
 profile" instinct measures the wrong thing. The concerns that are real here, tied
 to the code paths that cause them:
@@ -33,12 +44,12 @@ to the code paths that cause them:
 | **Dispatch lock contention / mutate-serial queueing** | `Engine.dispatch` read-parallel/mutate-serial (`engine/agent/dispatch.go`); results merged under a mutex | A slow `Edit` serially blocks every queued mutation — an internal **coordinated-omission** source (survey §12). Mean tool latency won't show the queueing. |
 | **Goroutine leaks** | per-run background goroutine (`Engine.Run` → `drive`), the SSE consumer + its cancel path, subagent/parallel drain loops (`subagent.go`, the Parallel tool in `parallel.go`), the server Run registry (`internal/adapter/server/service.go`) | Each run spins goroutines; a cancellation path that doesn't unwind leaks them across a long-lived `mecated`. |
 | **GC pressure / allocation churn** | chunk decoding, event fan-out (`Run.emit`), prompt assembly, the compaction cascade (`engine/agent/cascade.go`) | High alloc/op on the hot streaming path drives GC pauses that show up as inter-token jitter. |
-| **Long-session memory growth** | conversation history before compaction; the jsonl store; historically the tree-sitter WASM leak (`adapter/repomap`, now **removed** — see `docs/design/REPOMAP-TREE-SITTER.md`) | Memory climbs over a long session. The since-removed WASM leak (~23 MB RSS per call) was **off the Go heap** — invisible to `pprof heap` and `runtime/metrics`; only process RSS saw it (survey §9). The off-heap-growth signature still applies to any future off-heap consumer. |
+| **Long-session memory growth** | conversation history before compaction; the jsonl store; historically the tree-sitter WASM leak (`adapter/repomap`, now **removed** — see `docs/adr/0029-repomap-tree-sitter.md`) | Memory climbs over a long session. The since-removed WASM leak (~23 MB RSS per call) was **off the Go heap** — invisible to `pprof heap` and `runtime/metrics`; only process RSS saw it (survey §9). The off-heap-growth signature still applies to any future off-heap consumer. |
 | **TUI render cadence** | `cmd/mecatui/ui` coalescing streamed deltas to frame cadence | Render must keep up with inter-token rate without scrambling markdown; a starved render goroutine is the symptom the (now-removed) WASM hang already produced once. The measured idle-churn source was the footer spinner's self-perpetuating tick chain (a 10fps full-screen Update→View re-render forever: ~12.6% CPU, ~3.7MB/s alloc, GC every ~3.5s idle) — now phase-gated (`spinnerVisible`, dropped outside running/connecting, re-armed on every transition in). |
 | **Tail latency** | run/turn timing across all the above | p99 turn latency is the SLO that matters; averages lie. |
 
 What mecatl **already has** (verified against `internal/adapter/telemetry/` and
-`docs/architecture.md` §11):
+`docs/architecture/observability.md`):
 
 - **Prometheus `/metrics`** on a separate loopback listener (`--metrics-addr
   127.0.0.1:9090`), exposing **domain-derived** series only: `mecatl_events_total`,
@@ -152,7 +163,7 @@ The admin mux is single-user loopback. The proportionate posture:
 
 A new **edge adapter** `internal/adapter/mcpperf` imports the SDK + the perf
 sources; **domain / port / agent never import it** (the inward-only rule,
-`docs/architecture.md` §2). Wiring is confined to `internal/app` (behind a flag,
+`docs/architecture.md`). Wiring is confined to `internal/app` (behind a flag,
 `app.Build`) and `cmd/mecated` (owns the flag + token, mounts on the loopback
 mux). This mirrors exactly how the MCP *client* and skills adapters sit.
 A `mecated perf-mcp print-config` helper (mirroring the `skills promote`
@@ -359,7 +370,7 @@ and 2 are both committed (not "maybe later").
    FlightRecorder summaries; leak/contention/GC-pressure signatures). Built with
    `/skill-write`; the MCP server itself is built with `/mcp-server-authoring`.
 9. **WASM leak — resolved by removal.** Tree-sitter / RepoMap has been **removed**
-   entirely (see `docs/design/REPOMAP-TREE-SITTER.md`), so the specific ~23 MB-RSS
+   entirely (see `docs/adr/0029-repomap-tree-sitter.md`), so the specific ~23 MB-RSS
    leak no longer exists in the tree. A **process-RSS gauge** still ships (Phase 1)
    for general long-session memory visibility (history, jsonl store), but no
    leak-specific alarm and no Option-E rework in this effort.
@@ -371,4 +382,4 @@ and 2 are both committed (not "maybe later").
 
 ---
 
-*Part of the [design docs](./README.md). Related: [Long-term performance & resource regression tracking](./perf-tracking.md), [Diagnostics, audit, and the global-slog ban](./DIAGNOSTICS.md).*
+*Part of the [design docs](../design/README.md). Related: [Long-term performance & resource regression tracking](0019-perf-tracking.md), [Diagnostics, audit, and the global-slog ban](0020-diagnostics.md).*

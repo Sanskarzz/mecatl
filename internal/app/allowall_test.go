@@ -13,7 +13,7 @@ import (
 // TestMainRulesInjectsAllowAllWhenSet proves the AllowAllTools posture injects a
 // single ScopeCLI allow-all rule into the main engine's static ruleset, and is a
 // pure no-op (identical to defaultRules) when unset. See
-// docs/design/ALLOW-ALL-POSTURE.md.
+// docs/adr/0022-allow-all-posture.md.
 func TestMainRulesInjectsAllowAllWhenSet(t *testing.T) {
 	withAllowAll := mainRules(Config{AllowAllTools: true})
 	var found bool

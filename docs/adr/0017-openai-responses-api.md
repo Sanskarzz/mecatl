@@ -1,6 +1,22 @@
-# OpenAI Responses API for a Go Agentic Coding Harness — 2026 Implementation Brief
+# ADR 0017 — OpenAI Responses API adapter
 
-> **Research note.** Captured 2026-05-29. A point-in-time study, not a description of current code. Frozen.
+- Status: Accepted (research/implementation brief; the adapter shipped)
+- Date: 2026-05-29
+- Scope: the stateless Responses API adapter for OpenAI and OpenRouter, including reasoning-blob replay, phase capture, prompt-cache strategy, and streaming assembly
+
+## Context
+
+mecatl needed a production Go adapter for OpenAI's Responses API (`POST /v1/responses`) — the successor to Chat Completions and the Assistants API, with richer reasoning-item support and better cache utilisation. The primary design questions were: client-owned state vs server-side chaining, how to handle encrypted reasoning items across turns in a stateless harness, and how to preserve the `phase` marker that GPT-5.x requires to avoid treating preambles as final answers.
+
+## Decision
+
+The adapter uses the stateless, client-owned strategy (`store:false`, no `previous_response_id`): the harness owns the full `input` item slice, compacts it, and replays reasoning items verbatim each turn via `include:["reasoning.encrypted_content"]`. The `phase` marker on assistant message items is captured as an opaque string and replayed byte-for-byte. The prompt-prefix cache strategy puts static content (instructions, tools, stable context) before volatile per-turn content and tool outputs.
+
+## Consequences
+
+The adapter is portable across OpenAI-compatible endpoints; server-side state chaining is not used, so all compaction, persistence, and multi-provider portability remain in the harness. The reasoning blob and phase replay are regression-pinned by tests. OpenAI-only features (encrypted reasoning, `prompt_cache_key`, hosted tools) degrade gracefully on compatible endpoints. Current behaviour is described in `docs/architecture.md`; shipped/deferred state is tracked in `docs/design/PRODUCTION-READINESS.md`.
+
+---
 
 > Scope: building a Go harness that owns its own context window, compaction, and tool loop, talking to OpenAI and OpenAI-compatible `/v1/responses` endpoints via `github.com/openai/openai-go/v3`.
 > Captured 2026-05-29 by the `responses-researcher` agent. Treat SDK field/constructor names as "verify against pinned `api.md`".
@@ -155,4 +171,4 @@ Context cancellation surfaces as a context error, not `*openai.Error` — handle
 
 ---
 
-*Part of the [design docs](./README.md). Related: [Multi-provider / multi-model (Phase 0)](./MULTI-PROVIDER.md).*
+*Part of the [design docs](../design/README.md). Related: [Multi-provider / multi-model (Phase 0)](0016-multi-provider.md).*

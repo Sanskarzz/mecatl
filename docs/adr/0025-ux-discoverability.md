@@ -1,7 +1,22 @@
-# mecatui — UX discoverability design (Option C: wire capabilities)
+# ADR 0025 — mecatui UX Discoverability
 
-> **Design record.** Captured during the UX discoverability work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+- Status: Accepted
+- Date: 2026
+- Scope: ServerCapabilities wire channel and mecatui help overlay, honest empty-states, and zero-state card
+
+## Context
+
+mecatui's secondary feature set — MCP inventory, resources, prompts, agent team, expand details — was reachable only through control-key chords advertised in one cramped footer line. There was no help overlay, no first-run guidance, and on the default embedded server most chords opened an empty box with no explanation. The core problem was that a static, ui-local capability matrix cannot distinguish "feature not enabled on this server" from "feature enabled but currently empty" for an external mecated with different configuration.
+
+## Decision
+
+Option C was chosen: a real ServerCapabilities wire channel, delivered as a field on CreateSessionResponse so it arrives in zero additional round-trips. The server populates it from the built service state — registered tools and wired config seams — never from a static list. The client translates it to a proto-free plain struct. Phase A delivers the wire channel; Phase B delivers the UX surfaces: a question-mark help overlay (empty-input guarded), a shortened footer, caps-aware honest empty-states for MCP overlays and the slash-command palette, and a first-run zero-state welcome card. Built-in TUI commands that always exist are registered client-side independent of server caps.
+
+## Consequences
+
+Both phases shipped. Current behaviour is in docs/architecture.md. Status is in docs/design/PRODUCTION-READINESS.md. Adding a new optional feature requires only a new bool field on the proto message and corresponding logic in the server capabilities method; old clients treat absent fields as false. The port.ProviderCapabilities multimodal-input seam is a distinct concept from ServerCapabilities feature enablement and must not be conflated.
+
+---
 
 Decision: the availability seam is **Option C — a real `ServerCapabilities`
 wire channel** (authoritative for embedded AND external servers), structured as
@@ -755,4 +770,4 @@ drive at chosen caps fixtures.
 
 ---
 
-*Part of the [design docs](./README.md). Related: [Clipboard image paste (`ctrl+v`)](./CLIPBOARD-IMAGE-PASTE.md).*
+*Part of the [design docs](../design/README.md). Related: [Clipboard image paste (`ctrl+v`)](0026-clipboard-image-paste.md).*

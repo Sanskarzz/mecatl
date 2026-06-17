@@ -68,7 +68,7 @@ id or a `--model-alias` name, resolved same-provider; precedence `def.Model >
 --subagent-model > parent model`, empty inheriting the parent's). None of
 these widen `port.LLMRequest` — they are `subagentArgs`/`RunOptions`/factory concerns.
 
-**Background, SubagentStatus & per-child cancel (`docs/design/BACKGROUND-SUBAGENTS.md`).**
+**Background, SubagentStatus & per-child cancel (`docs/adr/0015-background-subagents.md`).**
 `background: true` DETACHES the child, RUN-scoped: the call returns an immediate
 started-result (agentId trailer first) and a goroutine owns fork → drive → persist →
 result-stash in the parent `Run`'s **child-run registry** (`childRunRegistry` — every

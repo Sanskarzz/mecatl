@@ -7,7 +7,7 @@ import (
 )
 
 // TestMain installs a goroutine-leak gate (decision 10 of
-// docs/design/perf-observability.md) across the agent package — the
+// docs/adr/0018-perf-observability.md) across the agent package — the
 // concurrency-heaviest part of mecatl. The per-run drive goroutine
 // (loop.go), the read-batch fan-out (dispatch.go), and the
 // subagent/fork/judge/team observable goroutines all live here, so a

@@ -485,7 +485,7 @@ type Config struct {
 	// WithLooseSubstitution; childEvaluatorOptions deliberately omits it), so a
 	// child's $()/backtick command still resolves through the child-ask model. A
 	// Deny in any scope and any CONFIGURED Ask still win (see
-	// docs/design/ALLOW-ALL-POSTURE.md).
+	// docs/adr/0022-allow-all-posture.md).
 	AllowAllTools bool
 
 	// Posture is the graduated operator trust/automation tier (strict < trusted <
@@ -4564,7 +4564,7 @@ func defaultRules() []governance.Rule {
 // substitution-floor LOOSENING (WithLooseSubstitution) is separate from this rule: it
 // rides mainEvaluatorOptions always, and childEvaluatorOptions only under posture yolo
 // (the tier-dependent child loosening) — see internal/app/posture.go and
-// docs/design/ALLOW-ALL-POSTURE.md.
+// docs/adr/0022-allow-all-posture.md.
 func yoloAllowAllRule(audience governance.Audience) governance.Rule {
 	return governance.Rule{Scope: governance.ScopeCLI, Effect: governance.Allow, Audience: audience}
 }

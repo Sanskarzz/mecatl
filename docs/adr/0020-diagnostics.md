@@ -1,7 +1,22 @@
-# Diagnostics, audit, and the global-slog ban
+# ADR 0020 — Diagnostics, audit, and the global-slog ban
 
-> **Design record.** Captured during the diagnostics work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+- Status: Accepted
+- Date: 2026-06-03
+- Scope: operational logging and per-tool audit seams in the engine and adapters; the ban on package-level slog in engine/ and internal/
+
+## Context
+
+mecatl's engine and adapters must never reach for a global slog logger because doing so would corrupt mecatui's alt-screen, cause cross-session tag leakage on shared engines, and create a hidden dependency on the deployment's slog configuration. Two distinct concerns — general operational logging and per-tool audit records — needed separate ports rather than a single free-form sink, and the engine needed to remain backend-free at the port layer.
+
+## Decision
+
+Introduce two separate ports: port.Diagnostics for operational lifecycle/degraded-mode lines (injected, nil-safe, slog-shaped but imports only context) and port.ToolCallRecorder for structured per-tool audit records. Ban all package-level slog calls in engine/ and internal/ via forbidigo in the linter config; cmd/ mains are the only layer permitted to call slog.SetDefault. The slogdiag adapter is the sole slog bridge. Build-once composition facts are emitted once in app.Build and never re-emitted in per-session engine builders.
+
+## Consequences
+
+The engine tree is backend-free: a consumer can inject any Diagnostics implementation without linking slog infrastructure. Cross-session tag leakage is structurally impossible because the run-scoped sink is bound per-run inside the loop, not at engine construction. The forbidigo gate makes the discipline structural rather than aspirational. Current behaviour — the three loop-emitted lines, the session-correlation model, the child role-scoped metrics — is described in docs/architecture.md; shipped state is in the production readiness tracker.
+
+---
 
 This is a correction/reference doc, not an essay — it records the seams, the
 sink-per-binary policy, the build-once rule, and the enforcement guard.
@@ -199,4 +214,4 @@ the contributor back at this doc and the `port.Diagnostics` seam.
 
 ---
 
-*Part of the [design docs](./README.md). Related: [Performance observability — problem, approaches, and the decided direction](./perf-observability.md), [Long-term performance & resource regression tracking](./perf-tracking.md).*
+*Part of the [design docs](../design/README.md). Related: [Performance observability — problem, approaches, and the decided direction](0018-perf-observability.md), [Long-term performance & resource regression tracking](0019-perf-tracking.md).*

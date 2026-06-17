@@ -1,17 +1,17 @@
 # Measuring & observing performance in Go — a reference for mecatl
 
-> Reference companion to `docs/design/perf-observability.md` (the rationale +
+> Reference companion to `docs/adr/0018-perf-observability.md` (the rationale +
 > approaches + decision). This doc is the **survey**: the menu of techniques for
 > measuring a Go program's performance, distilled and then filtered through one
 > question that matters for this project — *which sources can an AI agent consume
 > numerically, and which are human-only artifacts.* Where it names a package it
 > uses the real import path; where it says "mecatl already has X" it has been
-> checked against the tree (see `docs/architecture.md` §11).
+> checked against the tree (see `docs/architecture/observability.md`).
 >
 > **Status: the §14 recommendations have since SHIPPED** (perf-observability
 > Phases 1+2 — pprof on the loopback admin mux, FlightRecorder, process RSS, the
 > runtime-metrics snapshot, OTel metrics, goleak, the perf MCP server; see the
-> [perf & observability decision doc](design/perf-observability.md)). The "gap"
+> [perf & observability decision doc](adr/0018-perf-observability.md)). The "gap"
 > claims below (§2, §5, §6 —
 > e.g. "the Go collector is not registered", "mecatl does NOT have OTel metrics",
 > "`EventSink.Emit` carries no ctx") describe the pre-implementation tree and are
@@ -27,7 +27,7 @@ axes, and picking the wrong axis is how you measure the wrong thing:
 | **What clock** | on-CPU · wall-clock · off-CPU (blocked) | A streaming agent spends most of its wall time *blocked* on the model and on tool I/O. A CPU profile of mecatl will look idle and tell you nothing about TTFT. |
 | **Granularity** | aggregate (a counter/histogram) · per-event (a trace span) | Aggregates answer "is p99 turn latency regressing"; per-event answers "*why was this one turn* slow". |
 | **Fidelity** | sampling (pprof, perf) · exact (counters, the execution tracer) | Sampling is cheap and lossy; exact is precise and costly. |
-| **Locus** | in-process (pprof, runtime/metrics) · out-of-process (perf, eBPF, /proc) | Only out-of-process sees memory the Go runtime cannot — the tree-sitter WASM leak (in the **since-removed** RepoMap tool) lived in wazero linear memory, invisible to the Go heap profiler (see §9, §10, and `docs/design/REPOMAP-TREE-SITTER.md`); it remains the canonical off-heap-leak example. |
+| **Locus** | in-process (pprof, runtime/metrics) · out-of-process (perf, eBPF, /proc) | Only out-of-process sees memory the Go runtime cannot — the tree-sitter WASM leak (in the **since-removed** RepoMap tool) lived in wazero linear memory, invisible to the Go heap profiler (see §9, §10, and `docs/adr/0029-repomap-tree-sitter.md`); it remains the canonical off-heap-leak example. |
 
 ## §1 — pprof: `net/http/pprof` + `runtime/pprof`
 
@@ -180,7 +180,7 @@ The only locus that sees what the Go runtime cannot.
   structurally cannot see.** The load-bearing example for mecatl: the (since-removed)
   tree-sitter binding leaked ~23 MB of RSS per RepoMap session in WASM memory that
   `/memory/classes` and `pprof heap` both reported as *nothing*
-  (`docs/design/REPOMAP-TREE-SITTER.md`). To detect that class of leak you **must**
+  (`docs/adr/0029-repomap-tree-sitter.md`). To detect that class of leak you **must**
   read process RSS, not the Go heap.
 
 ## §10 — GC, GOMEMLIMIT, escape analysis

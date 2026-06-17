@@ -189,7 +189,7 @@ to the opt-in ask-reviewer, and a *main-engine* ask under `posture strict` cance
 with an actionable message (the intended CI posture is `--posture auto`). It is **forge-
 agnostic** — the GitHub-Actions glue that turns an issue into a pull request (a composite
 action + a split-privilege workflow) lives entirely under `.github/` and changes no Go.
-See `docs/design/MECATEQUI.md`. The three real-provider mains (`mecated`, `mecatui`,
+See `docs/adr/0028-mecatequi.md`. The three real-provider mains (`mecated`, `mecatui`,
 `mecatequi`) share provider credential + base-URL wiring through `internal/cliconfig`, so
 all three read the same `OPENAI_API_KEY` / `OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY`
 environment keys and register the same base-URL flags.

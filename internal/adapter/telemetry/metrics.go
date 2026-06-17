@@ -21,7 +21,7 @@ import (
 const meterName = "github.com/stacklok/mecatl/internal/adapter/telemetry"
 
 // Latency-instrument names. Each is a base-2 exponential-histogram latency
-// instrument (decision 2 in docs/design/perf-observability.md §5). They are
+// instrument (decision 2 in docs/adr/0018-perf-observability.md §5). They are
 // exported as package constants because the MeterProvider installs an
 // exponential-histogram metric.View keyed on each exact name; the view and the
 // instrument name MUST agree, so views target instruments by these constants
@@ -73,7 +73,7 @@ func exponentialLatencyAggregation() sdkmetric.AggregationBase2ExponentialHistog
 
 // LatencyViews returns the base-2 exponential-histogram views for EVERY latency
 // instrument (tool/turn duration, TTFT, inter-token, tool-queue; decision 2 in
-// docs/design/perf-observability.md §5). It is the single source of truth for the
+// docs/adr/0018-perf-observability.md §5). It is the single source of truth for the
 // latency aggregation: any MeterProvider feeding NewMetrics MUST install these
 // (sdkmetric.WithView(LatencyViews()...)), or the latency series degrade silently
 // to the default explicit-bucket histogram.

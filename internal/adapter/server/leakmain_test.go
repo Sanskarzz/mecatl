@@ -7,7 +7,7 @@ import (
 )
 
 // TestMain installs a goroutine-leak gate (decision 10 of
-// docs/design/perf-observability.md) over the server adapter — the Run
+// docs/adr/0018-perf-observability.md) over the server adapter — the Run
 // registry and stream lifecycle in service.go spin goroutines per run. A
 // leaked stream or registry goroutine fails the suite.
 //

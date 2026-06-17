@@ -1,7 +1,22 @@
-# Memory enabled by default on the embedded mecatui server
+# ADR 0008 — Memory on by default in the embedded mecatui server
 
-> **Design record.** Captured during the memory-defaults work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+- Status: Accepted
+- Date: 2026
+- Scope: `cmd/mecatui` composition root — XDG memory-dir resolution, embedded-server config, and `--memory-dir`/`--no-memory` flags.
+
+## Context
+
+The embedded mecatui server never wired a memory directory into its configuration, so the Remember/Recall/SearchMemory tools were silently absent. A "store this in memory" prompt produced a chat reply with no persistence and no feedback. The session had the tools in its catalog only when the shared engine was not used; the per-session path had no dir to open.
+
+## Decision
+
+Compute a per-project default memory directory under XDG data (`~/.local/share/mecatui/memory/<path-slug>`, using the full absolute workspace path as the leaf so each checkout is collision-free), wire it into the embedded config at composition time, and add `--memory-dir` and `--no-memory` flags. Consolidation stays off by default to avoid background LLM spend the user has not opted into. The directory is treated as opaque and store-owned so the on-disk format can evolve without touching this wiring.
+
+## Consequences
+
+Memory tools are available in every mecatui session by default without user configuration. The XDG data base is resolved via `adrg/xdg` (promoted to a direct dependency) rather than a hand-rolled env dance, consolidating two previously inconsistent XDG lookups. The store creates the directory; `cmd/mecatui` only computes the path string, keeping the wiring forward-compatible with tiering changes. Current behaviour: docs/architecture.md. Shipped/deferred state: docs/design/PRODUCTION-READINESS.md.
+
+---
 
 ## Summary
 
@@ -397,4 +412,4 @@ treating the directory as **opaque and store-owned**:
 
 ---
 
-*Part of the [design docs](./README.md). Read in order: MEMORY-DEFAULTS → [Genuine tiered memory (closing the tier-0 gap)](./MEMORY-TIERING.md) → [Tier-2 / semantic memory recall — assessment + buildable design](./MEMORY-TIER2.md). Related: [Spike: A "soul" for mecatl — persistent identity + cross-session user-model](./SOUL-SPIKE.md).*
+*Part of the [design docs](../design/README.md). Read in order: MEMORY-DEFAULTS → [Genuine tiered memory (closing the tier-0 gap)](0009-tiered-memory.md) → [Tier-2 / semantic memory recall — assessment + buildable design](0010-semantic-memory-recall.md). Related: [Spike: A "soul" for mecatl — persistent identity + cross-session user-model](0011-soul-and-user-model.md).*

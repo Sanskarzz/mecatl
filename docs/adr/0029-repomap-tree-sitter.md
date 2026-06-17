@@ -1,6 +1,22 @@
-# Repo-map tree-sitter: freeze root cause + binding evaluation
+# ADR 0029 — Repo-map Tree-sitter Binding
 
-> **Historical.** Retired 2026-06-06; feature removed. Preserved for rationale; not maintained.
+- Status: Superseded
+- Date: 2026-06-06
+- Scope: the (removed) Aider-style repo-map tool and its WASM tree-sitter extraction mechanism
+
+## Context
+
+The repo-map tool relied on a WASM tree-sitter binding running on wazero. The binding leaked unrecoverably (~23 MB per session) and hung after roughly 160 files due to per-file handles that were never freed. Because mecatui hosts the engine in-process, the hang starved the Bubble Tea render loop and froze the whole program. The tool was already gated off by default.
+
+## Decision
+
+Rather than rework the extraction mechanism (options ranged from forking the dormant binding, to subprocess isolation, to a CGO binding, to a pure-Go redesign), the RepoMap tool and its tree-sitter dependency were removed entirely. The cost of carrying a broken, default-off tool plus its heavy dependency outweighed its value. A repo-map capability may return from a clean design but not by re-enabling this code.
+
+## Consequences
+
+Removed in commit a6a9229 on 2026-06-06. The entire repomap adapter package, the enable-repomap flag, the app.Config field, and the catalog registration were deleted. The github.com/malivvan/tree-sitter dependency was removed; github.com/tetratelabs/wazero was retained because it has another live consumer. This ADR is superseded in the sense that the feature no longer exists; the investigation below is the historical record that informed the removal decision.
+
+---
 
 > ## RESOLUTION — RETIRED / REMOVED (2026-06-06)
 >
@@ -166,4 +182,4 @@ would otherwise delete.
 
 ---
 
-*Part of the [design docs](./README.md). Related: [mecatl — Architecture](./ARCHITECTURE.md).*
+*Part of the [design docs](../design/README.md). Related: [mecatl — Architecture](0004-v1-architecture.md).*

@@ -1,6 +1,22 @@
-# mecatl — Architecture
+# ADR 0004 — v1 Architecture: hexagonal DDD harness
 
-> **Historical.** Superseded by `docs/architecture.md`. Preserved for rationale; not maintained.
+- Status: Historical
+- Date: 2026
+- Scope: the entire mecatl system shape — package layout, domain model, ports, adapters, API surface
+
+## Context
+
+mecatl needed a shape that would keep the agent loop provider-agnostic, unit-testable without a network, and extensible without touching the core. The primary risk was coupling: the LLM provider type, gRPC types, and `os` imports bleeding into the domain. A secondary risk was picking the wrong API surface (connect-go vs grpc-go) before the bidi pause/resume flow was understood.
+
+## Decision
+
+Adopt hexagonal architecture with a DDD core. Dependencies point inward only: domain packages (`session`, `prompt`, `governance`, `tool`) never import adapters, LLM SDKs, gRPC, or `os`. Ports live where consumed (`engine/port`). Adapters meet ports only at the composition root. The API is grpc-go + buf (bidi `Converse` stream for pause/resume) with a thin hand-rolled SSE adapter for HTTP clients. Server-side session state is held by the harness (not the provider). Two machine-checked enforcement mechanisms — a depguard allowlist and a whole-graph DAG test — prevent layer violations.
+
+## Consequences
+
+The domain is fully unit-testable offline via reference adapters (`mockllm`, `memfs`, etc.). New LLM providers, tools, and storage backends slot in without touching the loop. The `FileSystem`/`Workspace` types must live in `engine/tool` (not `engine/port`) to avoid a `port↔tool` import cycle. The composition root (`internal/app`, `cmd/`) is the only place adapters meet ports. Current behaviour is in `docs/architecture.md`; shipped and deferred items are in `docs/design/PRODUCTION-READINESS.md`.
+
+---
 
 mecatl is a **headless agentic coding-harness**: a service/library that runs the
 agent loop, executes coding tools, enforces permissions and hooks, and streams typed
@@ -661,7 +677,7 @@ was designed for. The authoritative tracker is
 | Four-tier compaction cascade | **Done** | `CascadeCompactor` (`agent/cascade.go`) behind the `Compactor` seam — tiered snip→strip→collapse→summarize with trigger/target hysteresis. Default stays `HeuristicCompactor`; opt in with `--compaction=cascade`. |
 | Real tokenizer | **Done** | `TokenCounter` seam (`agent/tokencount.go`); offline tiktoken adapter `internal/adapter/tokenizer`. Default stays the heuristic counter. |
 | MCP client (**streaming-HTTP transport ONLY — stdio MCP is explicitly NOT supported, ever**) | **Done** | `internal/adapter/mcp`: streaming-HTTP transport only (no `os/exec`-spawned stdio server is ever created); registers remote tools into `tool.Catalog` namespaced `mcp__<server>__<tool>`. |
-| Repo map / embeddings | **Removed (repo map); embeddings unbuilt** | The Aider-style repo-map tool (`internal/adapter/repomap`, tree-sitter + PageRank) was **retired and removed** — the WASM tree-sitter binding leaked and hung after ~160 files. See `docs/design/REPOMAP-TREE-SITTER.md`. May be reintroduced later from a clean design. Embeddings remain unbuilt. |
+| Repo map / embeddings | **Removed (repo map); embeddings unbuilt** | The Aider-style repo-map tool (`internal/adapter/repomap`, tree-sitter + PageRank) was **retired and removed** — the WASM tree-sitter binding leaked and hung after ~160 files. See `docs/adr/0029-repomap-tree-sitter.md`. May be reintroduced later from a clean design. Embeddings remain unbuilt. |
 | Persistent cross-session memory | **Done** | `tool.MemoryStore` seam + file-backed `internal/adapter/memory` (Remember/Recall tools, per-project), plus opt-in `dream` consolidation. The `SessionStore` + AGENTS.md/CLAUDE.md discovery still cover the file-as-memory case. |
 | Slash commands / skills | **Done (commands)** | `prompt.CommandExpander` seam + `DirCommandExpander` (`.mecatl/commands` / `.claude/commands` templates). Skill packaging remains future. |
 | Fork-join parallelism (pattern 8) | **Done** | `tool.WorkspaceForker` seam + `internal/adapter/forker` (git-worktree / copy isolation) + `agent.NewParallelTool`. |
@@ -675,4 +691,4 @@ post-v1 work above only extended seams that the v1 shape already exposed.
 
 ---
 
-*Part of the [design docs](./README.md). Related: [Driver seams — ports, the gRPC driver protocol, and conformance](./DRIVERS.md), [Implementation Notes](./IMPLEMENTATION-NOTES.md), [mecatl — Implementation Step-Chain (v1)](./STEP-CHAIN.md).*
+*Part of the [design docs](../design/README.md). Related: [Driver seams — ports, the gRPC driver protocol, and conformance](0005-driver-seams.md), [Implementation Notes](../design/IMPLEMENTATION-NOTES.md), [mecatl — Implementation Step-Chain (v1)](0006-v1-step-chain.md).*

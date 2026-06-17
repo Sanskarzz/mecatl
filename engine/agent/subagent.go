@@ -2322,7 +2322,7 @@ func resolveChildAsk(run *Run, ask session.PendingAsk, posture childPosture) {
 	// rationale folded into the model-facing message. Every variant emits a
 	// correlated operator INFO at this SAME child-ask diagnostic chokepoint (the
 	// sanctioned emission OUTSIDE the loop's three-line contract — see
-	// docs/design/DIAGNOSTICS.md). A NOT-reviewed outcome (abstention / breaker-open
+	// docs/adr/0020-diagnostics.md). A NOT-reviewed outcome (abstention / breaker-open
 	// / reviewer failure) falls through to the plain auto-deny below with the
 	// EXISTING message — no false "reviewer declined" claim — after, on a failure,
 	// emitting the distinct reviewer-failure INFO (and, once per run, the

@@ -1,19 +1,35 @@
-# Twelve Agentic-Harness Patterns — Pluggability Audit
+# ADR 0007 — Twelve agentic-harness patterns: pluggability audit
 
-> **Historical.** Superseded audit snapshot (2026-05-29); all gaps closed. Preserved for rationale; not maintained.
+- Status: Historical
+- Date: 2026-05-29
+- Scope: the twelve agentic-harness patterns from the research corpus — pluggability gaps and DDD-correct seams to close them
 
-> Audits mecatl against the 12 patterns catalogued in
-> `docs/harnesses/02-twelve-patterns.md`. For each pattern: what it is, its
-> status in the code, whether it sits behind a DDD seam (a port/interface a new
-> adapter can implement) or is hardcoded, and the smallest DDD-correct seam to
-> close any gap.
->
-> Author: software-architect agent. Verified against source on 2026-05-29.
-> Layering rules assumed (from `ARCHITECTURE.md` and verified by import audit):
-> `agent` imports only `session`/`port`/`tool`/`governance`/`prompt`+stdlib;
-> domain owns the interfaces the loop consumes; adapters are wired at
-> `cmd/mecated`. `governance` imports nothing from `internal` (session-free).
-> `FileSystem`/`Workspace` live in `engine/tool` to break a `port↔tool` cycle.
+## Context
+
+After the v1 core shipped, mecatl was audited against the twelve patterns catalogued in the research corpus to identify which were fully pluggable, which were partial, and which were missing. The audit was conducted by a software-architect agent, verified against source on 2026-05-29. Four patterns were fully pluggable with no gaps; eight had seam or coverage issues requiring additional work packages.
+
+## Decision
+
+Prioritize five work packages to close the gaps: fire the three missing hook phases (P1), add a layer-2 permission classifier decorator (P2), introduce a scoped instruction-assembly seam (P3), add progressive tool disclosure (P4, gated on MCP tool count), and add fork-join parallelism (P5, gated on a forcing function). Patterns already complete (1, 6, 7, 11) and seams that are correct but need only additional adapters (5, 10-layer-1) are explicitly not gold-plated.
+
+## Consequences
+
+All five work packages shipped; all gaps in the audit are now closed. The audit is superseded as a live status tracker — it is preserved here as the rationale record for why each seam exists in its current form. Current behaviour is in `docs/architecture.md`; shipped and deferred items are in `docs/design/PRODUCTION-READINESS.md`.
+
+---
+
+Audits mecatl against the 12 patterns catalogued in
+`docs/harnesses/02-twelve-patterns.md`. For each pattern: what it is, its
+status in the code, whether it sits behind a DDD seam (a port/interface a new
+adapter can implement) or is hardcoded, and the smallest DDD-correct seam to
+close any gap.
+
+Author: software-architect agent. Verified against source on 2026-05-29.
+Layering rules assumed (from `ARCHITECTURE.md` and verified by import audit):
+`agent` imports only `session`/`port`/`tool`/`governance`/`prompt`+stdlib;
+domain owns the interfaces the loop consumes; adapters are wired at
+`cmd/mecated`. `governance` imports nothing from `internal` (session-free).
+`FileSystem`/`Workspace` live in `engine/tool` to break a `port↔tool` cycle.
 
 ## Summary table
 
@@ -582,4 +598,4 @@ be serialized; the non-loop work of every package can proceed concurrently.
 
 ---
 
-*Part of the [design docs](./README.md). Related: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md), [System-Prompt Research & Enhancement (issue #19)](./SYSTEM-PROMPT-RESEARCH.md).*
+*Part of the [design docs](../design/README.md). Related: [Production Readiness — status & roadmap](../design/PRODUCTION-READINESS.md), [System-Prompt Research & Enhancement (issue #19)](0024-system-prompt-research.md).*

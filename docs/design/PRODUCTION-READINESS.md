@@ -10,34 +10,33 @@
 ## Design records → status
 
 One row per [design record](./README.md). Status is here; the *why* is in the linked
-record; current behaviour is in [`docs/architecture.md`](../architecture.md) at the
-noted section. Per-area production checklists follow below.
+record; current behaviour is in the linked [architecture](../architecture.md) doc. Per-area production checklists follow below.
 
-| Subsystem | Status | Design record | Arch § |
+| Subsystem | Status | Design record | Architecture |
 |---|---|---|---|
-| Multi-provider / multi-model | ✅ P0+P1+live listing & metadata · ⛔ disk cache (P2) · ⛔ secrets/OAuth/per-client keys (P3) | [MULTI-PROVIDER.md](./MULTI-PROVIDER.md) | §18 |
-| OpenAI Responses adapter | ✅ shipped (research brief frozen) | [OPENAI-RESPONSES-API.md](./OPENAI-RESPONSES-API.md) | §9 |
-| Agent definitions (Tier-1 specialists) | ✅ shipped · ⛔ per-agent memory write path · ⛔ `local` tier | [AGENT-DEFINITIONS.md](./AGENT-DEFINITIONS.md) | §8 |
-| Agent teams (kernel, supervisor, coordination) | ✅ shipped (substrate) · ⛔ mutating-fork join strategies · ⛔ `TeamStore` restart durability | [AGENT-TEAMS-SPIKE.md](./AGENT-TEAMS-SPIKE.md) | §8 |
-| Background subagents + per-child cancel | ✅ shipped · ⛔ session-scoped detach (v2) | [BACKGROUND-SUBAGENTS.md](./BACKGROUND-SUBAGENTS.md) | §8 |
-| Parallelism — fork-join | ✅ shipped | — | §15 |
-| Memory defaults (on-by-default) | ✅ shipped | [MEMORY-DEFAULTS.md](./MEMORY-DEFAULTS.md) | §14 |
-| Tiered memory (tier-0 index + BM25) | ✅ tier-0 index + BM25 `SearchMemory` · ⛔ semantic / embedding recall | [MEMORY-TIERING.md](./MEMORY-TIERING.md) · [MEMORY-TIER2.md](./MEMORY-TIER2.md) | §14 |
-| Soul / persona + user-model | ✅ Phase 1 + 2a + 2b + Phase 3 items 1–3 | [SOUL-SPIKE.md](./SOUL-SPIKE.md) | — |
-| Compaction (heuristic + cascade) | ✅ shipped | [COMPACTION.md](./COMPACTION.md) | §13 |
-| System-prompt enhancement | ✅ §7a shipped (`agencyDelta`, tool-discipline hints, `<env>`) | [SYSTEM-PROMPT-RESEARCH.md](./SYSTEM-PROMPT-RESEARCH.md) | — |
-| Guardrails (LLM-backed tool-content inspection) | ✅ shipped | [GUARDRAILS.md](./GUARDRAILS.md) | §7 |
-| Allow-all / posture ladder | ✅ shipped · ⛔ managed-scope kill-switch · ⛔ `auto`+reviewer posture | [ALLOW-ALL-POSTURE.md](./ALLOW-ALL-POSTURE.md) | §17 |
-| Workspace trust | ✅ Phases 0/1/2a/2b/2c · ⛔ Phase 3 (descoped) | [WORKSPACE-TRUST-SPIKE.md](./WORKSPACE-TRUST-SPIKE.md) | §17 |
-| Driver seams (remote stores/sources) | ✅ Phases A–C2 · ⛔ workspace/FS driver (sketch only) | [DRIVERS.md](./DRIVERS.md) | §11 |
-| Cloud-native arc | ✅ Phases 0–3 · ⛔ Phase 4 (writer exclusion / leasing) | [CLOUD-NATIVE.md](./CLOUD-NATIVE.md) | §11 |
-| Diagnostics (injected `port.Diagnostics`) | ✅ shipped | [DIAGNOSTICS.md](./DIAGNOSTICS.md) | §11 |
-| Perf observability (live admin/MCP) | ✅ Phases 1+2 · 🟦 Phase 3 (fleet/Pyroscope, optional) | [perf-observability.md](./perf-observability.md) | §11 |
-| Perf tracking (offline regression gate) | ✅ Phases 0–4 · ⛔ Phases 5–6 (deferred-until-justified) | [perf-tracking.md](./perf-tracking.md) | §11 |
-| UX discoverability (mecatui) | ✅ shipped | [UX-DISCOVERABILITY.md](./UX-DISCOVERABILITY.md) | — |
-| Clipboard image paste (mecatui `ctrl+v`) | ✅ shipped | [CLIPBOARD-IMAGE-PASTE.md](./CLIPBOARD-IMAGE-PASTE.md) | — |
-| mecatequi (single-shot GitHub Action) | ✅ shipped (v1 forge glue) | [MECATEQUI.md](./MECATEQUI.md) | §1 |
-| _Historical / retired_ | — | [ARCHITECTURE.md](./ARCHITECTURE.md) · [STEP-CHAIN.md](./STEP-CHAIN.md) · [TWELVE-PATTERNS-AUDIT.md](./TWELVE-PATTERNS-AUDIT.md) · [REPOMAP-TREE-SITTER.md](./REPOMAP-TREE-SITTER.md) | — |
+| Multi-provider / multi-model | ✅ P0+P1+live listing & metadata · ⛔ disk cache (P2) · ⛔ secrets/OAuth/per-client keys (P3) | [MULTI-PROVIDER.md](../adr/0016-multi-provider.md) | [providers](../architecture/providers.md) |
+| OpenAI Responses adapter | ✅ shipped (research brief frozen) | [OPENAI-RESPONSES-API.md](../adr/0017-openai-responses-api.md) | [providers](../architecture/providers.md) |
+| Agent definitions (Tier-1 specialists) | ✅ shipped · ⛔ per-agent memory write path · ⛔ `local` tier | [AGENT-DEFINITIONS.md](../adr/0013-agent-definitions.md) | [subagents & teams](../architecture/subagents-and-teams.md) |
+| Agent teams (kernel, supervisor, coordination) | ✅ shipped (substrate) · ⛔ mutating-fork join strategies · ⛔ `TeamStore` restart durability | [AGENT-TEAMS-SPIKE.md](../adr/0014-agent-teams.md) | [subagents & teams](../architecture/subagents-and-teams.md) |
+| Background subagents + per-child cancel | ✅ shipped · ⛔ session-scoped detach (v2) | [BACKGROUND-SUBAGENTS.md](../adr/0015-background-subagents.md) | [subagents & teams](../architecture/subagents-and-teams.md) |
+| Parallelism — fork-join | ✅ shipped | — | [parallelism](../architecture/parallelism.md) |
+| Memory defaults (on-by-default) | ✅ shipped | [MEMORY-DEFAULTS.md](../adr/0008-memory-on-by-default.md) | [memory](../architecture/memory.md) |
+| Tiered memory (tier-0 index + BM25) | ✅ tier-0 index + BM25 `SearchMemory` · ⛔ semantic / embedding recall | [MEMORY-TIERING.md](../adr/0009-tiered-memory.md) · [MEMORY-TIER2.md](../adr/0010-semantic-memory-recall.md) | [memory](../architecture/memory.md) |
+| Soul / persona + user-model | ✅ Phase 1 + 2a + 2b + Phase 3 items 1–3 | [SOUL-SPIKE.md](../adr/0011-soul-and-user-model.md) | — |
+| Compaction (heuristic + cascade) | ✅ shipped | [COMPACTION.md](../adr/0012-compaction.md) | [context & compaction](../architecture/context-and-compaction.md) |
+| System-prompt enhancement | ✅ §7a shipped (`agencyDelta`, tool-discipline hints, `<env>`) | [SYSTEM-PROMPT-RESEARCH.md](../adr/0024-system-prompt-research.md) | — |
+| Guardrails (LLM-backed tool-content inspection) | ✅ shipped | [GUARDRAILS.md](../adr/0021-guardrails.md) | [hooks & guardrails](../architecture/hooks-and-guardrails.md) |
+| Allow-all / posture ladder | ✅ shipped · ⛔ managed-scope kill-switch · ⛔ `auto`+reviewer posture | [ALLOW-ALL-POSTURE.md](../adr/0022-allow-all-posture.md) | [deployment & hardening](../architecture/deployment-and-hardening.md) |
+| Workspace trust | ✅ Phases 0/1/2a/2b/2c · ⛔ Phase 3 (descoped) | [WORKSPACE-TRUST-SPIKE.md](../adr/0023-workspace-trust.md) | [deployment & hardening](../architecture/deployment-and-hardening.md) |
+| Driver seams (remote stores/sources) | ✅ Phases A–C2 · ⛔ workspace/FS driver (sketch only) | [DRIVERS.md](../adr/0005-driver-seams.md) | [observability](../architecture/observability.md) |
+| Cloud-native arc | ✅ Phases 0–3 · ⛔ Phase 4 (writer exclusion / leasing) | [CLOUD-NATIVE.md](../adr/0027-cloud-native.md) | [observability](../architecture/observability.md) |
+| Diagnostics (injected `port.Diagnostics`) | ✅ shipped | [DIAGNOSTICS.md](../adr/0020-diagnostics.md) | [observability](../architecture/observability.md) |
+| Perf observability (live admin/MCP) | ✅ Phases 1+2 · 🟦 Phase 3 (fleet/Pyroscope, optional) | [perf-observability.md](../adr/0018-perf-observability.md) | [observability](../architecture/observability.md) |
+| Perf tracking (offline regression gate) | ✅ Phases 0–4 · ⛔ Phases 5–6 (deferred-until-justified) | [perf-tracking.md](../adr/0019-perf-tracking.md) | [observability](../architecture/observability.md) |
+| UX discoverability (mecatui) | ✅ shipped | [UX-DISCOVERABILITY.md](../adr/0025-ux-discoverability.md) | — |
+| Clipboard image paste (mecatui `ctrl+v`) | ✅ shipped | [CLIPBOARD-IMAGE-PASTE.md](../adr/0026-clipboard-image-paste.md) | — |
+| mecatequi (single-shot GitHub Action) | ✅ shipped (v1 forge glue) | [MECATEQUI.md](../adr/0028-mecatequi.md) | [overview](../architecture.md) |
+| _Historical / retired_ | — | [ARCHITECTURE.md](../adr/0004-v1-architecture.md) · [STEP-CHAIN.md](../adr/0006-v1-step-chain.md) · [TWELVE-PATTERNS-AUDIT.md](../adr/0007-twelve-patterns-audit.md) · [REPOMAP-TREE-SITTER.md](../adr/0029-repomap-tree-sitter.md) | — |
 
 ## Security
 
@@ -107,8 +106,8 @@ noted section. Per-area production checklists follow below.
 
 | Item | Status | Rationale |
 |---|---|---|
-| Multi-vendor model routing | ✅ | SHIPPED — server-side provider registry + native Anthropic Messages adapter + embedded models.dev catalog + OpenRouter, with per-session provider/model routing and capability intersection. See `docs/design/MULTI-PROVIDER.md` |
-| Repo map (tree-sitter PageRank) | ❌ removed | The Aider-style repo-map tool was **retired and removed** — its WASM tree-sitter binding leaked (~23 MB/session) and hung after ~160 files. See `docs/design/REPOMAP-TREE-SITTER.md`. May return later from a clean design |
+| Multi-vendor model routing | ✅ | SHIPPED — server-side provider registry + native Anthropic Messages adapter + embedded models.dev catalog + OpenRouter, with per-session provider/model routing and capability intersection. See `docs/adr/0016-multi-provider.md` |
+| Repo map (tree-sitter PageRank) | ❌ removed | The Aider-style repo-map tool was **retired and removed** — its WASM tree-sitter binding leaked (~23 MB/session) and hung after ~160 files. See `docs/adr/0029-repomap-tree-sitter.md`. May return later from a clean design |
 | Slash commands | ✅ | `prompt.CommandExpander` + `DirCommandExpander` (`.mecatl/commands`/`.claude/commands` templates); `--commands-dir`/`--enable-commands`. (Skills since shipped too: Skill/SkillDraft tools + the `engine/tool` `SkillSource` port + the `/skills` browser.) |
 | Live OpenAI validation | ✅ | validated against Sonnet 4.5 via OpenRouter (full tool-calling loop) |
 | Fuzz tests (bash splitter, SSE decoder) | ✅ | native Go fuzzers + Taskfile `fuzz` target; security invariants asserted; no crashers found |
@@ -129,4 +128,4 @@ Optional features (🟦) are left as documented seams unless requested.
 
 ---
 
-*Part of the [design docs](./README.md). Related: [TWELVE-PATTERNS-AUDIT.md](./TWELVE-PATTERNS-AUDIT.md), [ARCHITECTURE.md](./ARCHITECTURE.md).*
+*Part of the [design docs](./README.md). Related: [TWELVE-PATTERNS-AUDIT.md](../adr/0007-twelve-patterns-audit.md), [ARCHITECTURE.md](../adr/0004-v1-architecture.md).*

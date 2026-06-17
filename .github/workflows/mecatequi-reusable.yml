@@ -18,7 +18,7 @@
 # THIS IS THE RECOMMENDED ADOPTION PATH. The hand-rolled template
 # .github/workflows/mecatequi-example.yml remains the ESCAPE HATCH for a consumer that
 # needs to customise the job graph itself (a custom author-gate job, an extra approval
-# stage, a different trigger). Full design: docs/design/MECATEQUI.md §5.
+# stage, a different trigger). Full design: docs/adr/0028-mecatequi.md §5.
 # ════════════════════════════════════════════════════════════════════════════════════
 #
 # THE TOKEN BOUNDARY INVARIANT (the whole point — and why this is a reusable WORKFLOW, not
@@ -257,7 +257,7 @@ jobs:
     # on it wrongly SKIPS legitimate runs. For a PRIVATE repo the trigger IS the gate (label
     # application needs triage/write; comment access is team-only). For a PUBLIC repo, the
     # caller should use the escape-hatch template and add a dedicated permission-check gate
-    # job (see docs/design/MECATEQUI.md).
+    # job (see docs/adr/0028-mecatequi.md).
     needs: acknowledge
     if: >-
       needs.acknowledge.result == 'success' && (
@@ -436,7 +436,7 @@ jobs:
             echo "mecatequi-publish: using the pre-minted publish-token (form 2)."
           else
             gh_token="${STANDING_TOKEN}"
-            echo "::warning::mecatequi-publish: no publish-app-private-key and no publish-token were provided; falling back to the standing GITHUB_TOKEN grant (form 3). The stronger posture is a JIT GitHub App installation token (publish-app-id + publish-app-private-key) or a pre-minted publish-token — see docs/design/MECATEQUI.md."
+            echo "::warning::mecatequi-publish: no publish-app-private-key and no publish-token were provided; falling back to the standing GITHUB_TOKEN grant (form 3). The stronger posture is a JIT GitHub App installation token (publish-app-id + publish-app-private-key) or a pre-minted publish-token — see docs/adr/0028-mecatequi.md."
           fi
           # Write to $GITHUB_ENV so publish.sh reads GH_TOKEN from the process environment.
           # The value never appears in the log: it is piped to the file, not echoed.

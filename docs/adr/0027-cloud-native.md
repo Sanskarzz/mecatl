@@ -1,7 +1,22 @@
-# Cloud-native arc: disposable process, externalized state, durable record
+# ADR 0027 — Cloud-native arc: disposable process, externalized state, durable record
 
-> **Design record.** Captured during the cloud-native arc work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+- Status: Accepted
+- Date: 2026
+- Scope: process disposability — snapshot fidelity, awaiting-approval evict/rehydrate, durable event log, multi-replica readiness
+
+## Context
+
+The harness already had turn-boundary persistence and a stateless full-replay LLM provider, making it unusually close to disposable by construction. The remaining gaps were: the snapshot was not fully faithful (profile, provider/model selector, and cumulative token usage were not persisted); a process death while a run was parked awaiting approval stranded the session; and the event stream (approvals, pre-compaction history) was emitted and discarded rather than durably recorded. Without these, a restarted process could lose the user's permission grants, their budget progress, and the audit record.
+
+## Decision
+
+Deliver the arc in four phases: Phase 1 adds three missing snapshot fields (profile, provider/model selector, cumulative usage) and generalizes the rehydration seam; Phase 2 adds a resume-from-awaiting loop entry so a post-restart `Approve` re-enters the loop at the exact pending ask; Phase 3 adds a durable append-only event log (port, local JSONL adapter, gRPC driver service) with two consumers (compaction archive, permstore verdict replay); Phase 4 (multi-replica leasing) is deferred until a real deployment needs it. The loop stays storage-agnostic throughout — it only emits events, never imports the log port.
+
+## Consequences
+
+Phases 0–3 are shipped; the harness is now genuinely disposable across process restarts. Teams are the largest honest gap: mid-round team coordination state does not survive restart (row 10 of the fidelity ledger). Phase 4 (session leasing for multi-replica deployments) is deferred. The v1 constraint — session-affinity routing, one writer per session — must be stated in operator deployment guidance until Phase 4 ships. Current behaviour is in `docs/architecture.md`; shipped and deferred items are in `docs/design/PRODUCTION-READINESS.md`.
+
+---
 
 Builds on the shipped driver-seams arc (`DRIVERS.md`) and the no-FS
 session profile (issue #55, commit `9f8ba8c`); informed by the cloud-native kit
@@ -628,4 +643,4 @@ needs a lease; the GC liveness gap rides the same mechanism for free.
 
 ---
 
-*Part of the [design docs](./README.md). Related: [BACKGROUND-SUBAGENTS.md — Background Subagents + Per-Child Cancel over a Shared Child-Run Registry](./BACKGROUND-SUBAGENTS.md), [Conversation compaction](./COMPACTION.md), [mecatl — Architecture](./ARCHITECTURE.md).*
+*Part of the [design docs](../design/README.md). Related: [BACKGROUND-SUBAGENTS.md — Background Subagents + Per-Child Cancel over a Shared Child-Run Registry](0015-background-subagents.md), [Conversation compaction](0012-compaction.md), [mecatl — Architecture](0004-v1-architecture.md).*

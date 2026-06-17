@@ -1,7 +1,22 @@
-# Spike: Headless Agent Teams for mecatl
+# ADR 0014 — Agent teams
 
-> **Design record.** Captured during the agent-teams work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+- Status: Accepted (substrate shipped)
+- Date: 2026
+- Scope: the team coordination kernel, supervisor, member lifecycle, workspace isolation tiers, gRPC/HTTP surface, and the lead-synthesis deliverable
+
+## Context
+
+mecatl's existing Subagent and Parallel tools were one-shot and context-isolated; there was no way for two running agents to see a shared task list, message each other, or self-coordinate over time. Claude Code's agent-teams feature demonstrated that a long-lived, multi-member orchestration substrate has real value for complex coding workflows. mecatl is headless (gRPC + HTTP), so the goal was the orchestration substrate exposed over the wire — not a TUI split-pane port.
+
+## Decision
+
+A team is modelled as "Parallel, but long-lived and talking." The coordination kernel (`engine/team`) is a pure domain object — mutex-guarded task list, mailbox, and member lifecycle — with no I/O or goroutines of its own. The supervisor drives member sessions via `Engine.Run` plus the new `session.Reopen` continuation seam, streams member events to the client, and produces a lead-synthesis deliverable. Workspace isolation follows a three-tier model: base-share, read-only worktree, and mutating force-copy fork. The lead synthesis is the team's canonical deliverable, with a three-tier fallback chain.
+
+## Consequences
+
+Teams are linearly more expensive than a single session; a per-engine and per-team token budget bound runaway costs. Join strategies for mutating-member forks and a `TeamStore` for restart durability remain deferred. Current behaviour is described in `docs/architecture.md`; shipped/deferred state is tracked in `docs/design/PRODUCTION-READINESS.md`.
+
+---
 
 The substrate (kernel, supervisor, coordination tools, Team tool, gRPC/HTTP surface, hook
 phases, budgets, trust gate) is live; this doc retains the spike rationale plus inline
@@ -539,7 +554,7 @@ Still deferred (intentional, not oversights):
 - ~~Per-teammate model/agent-definition selection~~ — since SHIPPED via agent
   definitions: `MemberSpec.AgentType` routes to a per-def `MemberEngine` factory,
   and the model resolves per def (`def.Model` > `--subagent-model` > parent; per-def
-  `provider:` too). See `docs/design/AGENT-DEFINITIONS.md`.
+  `provider:` too). See `docs/adr/0013-agent-definitions.md`.
 
 ## 9. Risks / open questions
 
@@ -574,4 +589,4 @@ Still deferred (intentional, not oversights):
 
 ---
 
-*Part of the [design docs](./README.md). Related: [Agent definitions (Tier 1)](./AGENT-DEFINITIONS.md), [BACKGROUND-SUBAGENTS.md — Background Subagents + Per-Child Cancel over a Shared Child-Run Registry](./BACKGROUND-SUBAGENTS.md).*
+*Part of the [design docs](../design/README.md). Related: [Agent definitions (Tier 1)](0013-agent-definitions.md), [BACKGROUND-SUBAGENTS.md — Background Subagents + Per-Child Cancel over a Shared Child-Run Registry](0015-background-subagents.md).*

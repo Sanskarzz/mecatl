@@ -34,7 +34,7 @@ import (
 //
 // RESTORE-to-baseline is deliberately OUT of MVP: a hash-only baseline gives
 // detection + alert without a harness-owned COPY of the approved bytes (which would
-// be both a content write surface and disproportionate). See docs/design/SOUL-SPIKE.md.
+// be both a content write surface and disproportionate). See docs/adr/0011-soul-and-user-model.md.
 //
 // LAYERING: drift is NOT routed through the permission evaluator — the soul is
 // fenced DATA, never a permission scope. The hash is computed in the adapter

@@ -1,7 +1,22 @@
-# Agent definitions (Tier 1)
+# ADR 0013 — Agent definitions (Tier 1)
 
-> **Design record.** Captured during the agent-definitions work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+- Status: Accepted
+- Date: 2026
+- Scope: named specialist agent definitions discovered from operator-controlled markdown files, consumed by the Subagent and team-member delegation paths
+
+## Context
+
+mecatl's Subagent and Parallel tools delegated to anonymous explorers with no persona, fixed tooling, and the parent's model. Operators needed reusable named specialists — a code reviewer, an implementer, a researcher — with their own system-prompt body, tool allowlist, model, run limits, per-agent MCP servers, hooks, and persistent memory, without leaking registry or filesystem concerns into the domain.
+
+## Decision
+
+Agent definitions are operator-controlled markdown files with YAML frontmatter that are discovered once at build time via a snapshot port (`AgentDefSource`). The `AgentDef` value object is pure data — no path, no locator — and the composition layer is the only consumer of the discovery adapter. Both the Subagent delegate path and the team-member spawn path share one definition format and one resolution chain.
+
+## Consequences
+
+Named specialists work across both delegation surfaces without duplicating the format. The domain stays free of filesystem and registry concerns; per-def MCP, hooks, and memory are adapter-construction options, never domain fields. Mutating specialists must use the team-member fork path — the Subagent path stays read-only. Per-agent memory write and a `local` memory tier are deferred to a future ADR.
+
+---
 
 Named subagent specialists discovered from operator-controlled markdown files
 (`<dir>/<name>.md`, YAML frontmatter + body), mirroring the skills Source seam. **One
@@ -219,4 +234,4 @@ consistent with `EnableTeams`/`EnableParallel`.
 
 ---
 
-*Part of the [design docs](./README.md). Related: [Spike: Headless Agent Teams for mecatl](./AGENT-TEAMS-SPIKE.md), [BACKGROUND-SUBAGENTS.md — Background Subagents + Per-Child Cancel over a Shared Child-Run Registry](./BACKGROUND-SUBAGENTS.md).*
+*Part of the [design docs](../design/README.md). Related: [Spike: Headless Agent Teams for mecatl](0014-agent-teams.md), [BACKGROUND-SUBAGENTS.md — Background Subagents + Per-Child Cancel over a Shared Child-Run Registry](0015-background-subagents.md).*

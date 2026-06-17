@@ -1,7 +1,22 @@
-# Clipboard image paste (`ctrl+v`)
+# ADR 0026 — Clipboard Image Paste
 
-> **Design record.** Captured during the clipboard image paste work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+- Status: Accepted
+- Date: 2026
+- Scope: ctrl+v clipboard read in mecatui, the shell-out strategy, and the marker-reconcile staging model
+
+## Context
+
+mecatui needed a way to paste images from the OS clipboard into the prompt so they could ride the existing media attachment send path. There is no portable, pure-Go clipboard read that works on Wayland; the common library requires cgo and X11 headers and does not support wl-clipboard at all. Adding a cgo dependency that still fails on the most common modern Linux desktop was not acceptable.
+
+## Decision
+
+The reader shells out to the platform's clipboard binary using direct argv — never via a shell — so there is no shell-injection surface. It tries an image first and falls back to text, returning the mime type so the caller can take the right branch. The reader lives in the client package behind a proto-free interface the ui consumes, keeping os/exec out of the domain. Staged images are keyed by a monotonic marker inserted into the textarea; submitPrompt reconciles by presence, strips markers, and builds the media part through the shared cap-gate and size-cap choke point. Later extensions — middle-click PRIMARY paste and large-paste placeholders — ride the same staging machinery.
+
+## Consequences
+
+Shipped. The macOS Chromium/Electron gap (pngpaste does not see the public.png UTI) is a known accepted limitation with no shell-only fix. Current behaviour is in docs/architecture.md. Status is in docs/design/PRODUCTION-READINESS.md. The injected-runner seam keeps all tests offline with no real subprocess.
+
+---
 
 `ctrl+v` in the mecatui prompt reads the OS clipboard and, when it holds an image,
 stages it as an inline media attachment that rides the existing `Prompt.parts` send
@@ -86,4 +101,4 @@ model, and the `buildMediaPart` choke point are as described.
 
 ---
 
-*Part of the [design docs](./README.md). Related: [mecatui — UX discoverability design (Option C: wire capabilities)](./UX-DISCOVERABILITY.md).*
+*Part of the [design docs](../design/README.md). Related: [mecatui — UX discoverability design (Option C: wire capabilities)](0025-ux-discoverability.md).*

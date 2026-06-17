@@ -19,7 +19,7 @@ import (
 )
 
 // teamsupervisor.go is the APPLICATION-layer orchestrator for agent teams (see
-// docs/design/AGENT-TEAMS-SPIKE.md). It owns one shared *team.Team and drives a
+// docs/adr/0014-agent-teams.md). It owns one shared *team.Team and drives a
 // set of long-lived member sessions that coordinate through that team's task list
 // and mailbox. Unlike Subagent/Fork (one-shot, drained internally), team members are
 // re-driven across rounds and their events are STREAMED to the caller (tagged with

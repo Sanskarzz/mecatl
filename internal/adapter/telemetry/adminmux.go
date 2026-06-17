@@ -12,7 +12,7 @@ import (
 //
 // It lives in the telemetry adapter (not a cmd main) so BOTH composition roots —
 // the standalone cmd/mecated daemon and the cmd/mecatui embedded server (decision
-// 7 in docs/design/perf-observability.md) — serve the IDENTICAL admin surface
+// 7 in docs/adr/0018-perf-observability.md) — serve the IDENTICAL admin surface
 // from one helper, rather than each hand-rolling a mux that could drift.
 //
 // recorder may be nil (FlightRecorder disabled), in which case
@@ -21,7 +21,7 @@ import (
 // SECURITY: pprof/FlightRecorder/expvar output can embed prompt text, file paths,
 // and goroutine stacks. The returned mux MUST be served only on a loopback-bound
 // listener — never on the public gRPC/HTTP service surface (decision 6 in
-// docs/design/perf-observability.md).
+// docs/adr/0018-perf-observability.md).
 func NewAdminMux(reg *prometheus.Registry, recorder *FlightRecorder) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", MetricsHandler(reg))

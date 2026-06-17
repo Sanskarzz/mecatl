@@ -1,7 +1,22 @@
-# System-Prompt Research & Enhancement (issue #19)
+# ADR 0024 — System-Prompt Research and Enhancement
 
-> **Design record.** Captured during the system-prompt enhancement work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+- Status: Accepted
+- Date: 2026-06-05
+- Scope: default system-prompt constants and the composition-layer model-family delta
+
+## Context
+
+mecatl's main-session system prompt was roughly 200 tokens of behavioral guidance — far below the 6–24 KB every serious reference harness ships. A cross-harness audit of Claude Code, OpenAI Codex CLI, sst/opencode, NousResearch Hermes, and OpenClaw identified the load-bearing behavioral contracts that the field has converged on: dedicated-tool discipline, convention-following, anti-over-engineering, read-before-edit workflow, proactiveness balance, error-recovery, and code-reference formatting. A secondary finding was that GPT-family models empirically under-act without an explicit persistence and tool-use contract, which Hermes and opencode gate per model family.
+
+## Decision
+
+The default system-prompt constants were rewritten to cover the consensus behavioral contracts at roughly 300–400 tokens of stable-prefix guidance. A generated toolDisciplineHints block derives dedicated-tool guidance from the live catalog rather than hardcoding it. The env block gained shell and a start-of-session git-status snapshot. A plan-mode reminder was added to the volatile suffix. The GPT-vs-Claude agency persistence delta is injected per model family at the composition layer via agencyDelta, keeping the prompt package model-neutral. Memory-tool descriptions were updated with Hermes anti-poisoning guidance.
+
+## Consequences
+
+Section 7a is implemented. The prompt package domain stays provider-agnostic; per-model tuning is a composition concern. Cache stability is preserved: the agency delta is per-session, not per-turn, and env changes never alter the stable prefix. Current behaviour lives in docs/architecture.md. Status lives in docs/design/PRODUCTION-READINESS.md. The "Responses API is the only provider" framing in this document is historical; the multi-provider registry shipped after this research.
+
+---
 
 > Research + comparative analysis + prioritized enhancement plan for mecatl's
 > system prompt (Pattern #1 of the twelve). Grounds the audit in the **actual
@@ -41,7 +56,7 @@ Claude. This is the highest-value, lowest-cost enhancement.
 
 > **Since superseded (multi-provider):** a native Anthropic Messages adapter and
 > the multi-provider registry shipped after this research (see
-> `docs/design/MULTI-PROVIDER.md`), so the "the Responses API is the only
+> `docs/adr/0016-multi-provider.md`), so the "the Responses API is the only
 > provider today" statements in this doc are historical. The model-family switch
 > built here (`agencyDelta`) now serves both buckets for real.
 
@@ -591,13 +606,13 @@ Repo commits directly to `main`; sequence as commits, not a multi-issue split:
 - **Hermes:** `github.com/NousResearch/hermes-agent` — `agent/system_prompt.py`,
   `agent/prompt_builder.py`, `hermes_cli/default_soul.py`, `agent/background_review.py`,
   `tools/memory_tool.py`; `hermes-agent.nousresearch.com/docs`. See also
-  `docs/design/SOUL-SPIKE.md`.
+  `docs/adr/0011-soul-and-user-model.md`.
 - **OpenClaw / claw-code / ClawSec:** `github.com/openclaw/openclaw`,
   `github.com/AI-App/InstructKr.Claw-Code`, `github.com/prompt-security/clawsec`.
 - **Corpus:** `docs/harnesses/02` §1, `03` §System-prompt, `06` §7 + §13;
-  `docs/design/TWELVE-PATTERNS-AUDIT.md`.
+  `docs/adr/0007-twelve-patterns-audit.md`.
 
 
 ---
 
-*Part of the [design docs](./README.md). Related: [Twelve Agentic-Harness Patterns — Pluggability Audit](./TWELVE-PATTERNS-AUDIT.md), [Spike: A "soul" for mecatl — persistent identity + cross-session user-model](./SOUL-SPIKE.md).*
+*Part of the [design docs](../design/README.md). Related: [Twelve Agentic-Harness Patterns — Pluggability Audit](0007-twelve-patterns-audit.md), [Spike: A "soul" for mecatl — persistent identity + cross-session user-model](0011-soul-and-user-model.md).*

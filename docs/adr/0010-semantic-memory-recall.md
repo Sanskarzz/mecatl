@@ -1,7 +1,22 @@
-# Tier-2 / semantic memory recall — assessment + buildable design
+# ADR 0010 — Semantic memory recall: BM25 shipped, semantic deferred
 
-> **Design record.** Captured during the semantic memory recall work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+- Status: Accepted
+- Date: 2026
+- Scope: `internal/adapter/memory` (SearchMemory tool, BM25 ranking), `engine/tool` (MemoryStore.Search), assessment of semantic/embedding path.
+
+## Context
+
+The tier-0 index caps at 200 entries and trims oldest-first. With consolidation off by default, a long-lived project can exceed the cap and leave the model unable to discover trimmed entries by meaning. Semantic/embedding recall was evaluated but requires a cloud embeddings call, a heavy in-process model, or a local server — none of which satisfy the local-first, no-external-by-default posture. The keyword gap is a retrieval-surface problem, not a scale problem.
+
+## Decision
+
+Ship a pure-Go BM25 lexical SearchMemory tool as the blind-spot backstop: it searches all entries (including trimmed ones) by keyword across key, description, and value, ranks them, and returns key-description lines so the model then calls Recall for full values. SearchMemory is implemented as a store-owned `Search` method (ranking under the existing shared flock for atomicity) rather than a tool-over-List shape. Semantic/embedding recall is explicitly deferred; the buildable design (port.Embedder, OpenAI embedder adapter, cosine scan, lazy backfill, opt-in wiring) is retained in this record as the future path.
+
+## Consequences
+
+The model can find trimmed or forgotten-key entries by keyword with no external dependency, no new Go module, and no network egress. The three-step loop becomes index (see recent) → SearchMemory (find by keyword) → Recall (load full value). Semantic recall remains off; the trigger to revisit is a real store observed near the cap with consolidation already enabled. The buildable semantic design is preserved here for future reference. Current behaviour: docs/architecture.md. Shipped/deferred state: docs/design/PRODUCTION-READINESS.md.
+
+---
 
 ---
 
@@ -491,7 +506,7 @@ etc.). Justification, on the record:
 
 - The repo has been **burned by a heavyweight native dep** (the tree-sitter WASM
   binding: ~23 MB/session leak + freeze, since **removed entirely** — see
-  `docs/design/REPOMAP-TREE-SITTER.md`). A CGO vector lib is exactly that risk class.
+  `docs/adr/0029-repomap-tree-sitter.md`). A CGO vector lib is exactly that risk class.
 - The ACP layer was deliberately **hand-rolled rather than take a Go library**
   that failed the governance+maturity screen. A vector-DB dep faces the same
   screen and fails it here for want of a forcing function.
@@ -997,4 +1012,4 @@ is orthogonal), the OpenAI Responses streaming path.
 
 ---
 
-*Part of the [design docs](./README.md). Read in order: [Memory enabled by default on the embedded mecatui server](./MEMORY-DEFAULTS.md) → [Genuine tiered memory (closing the tier-0 gap)](./MEMORY-TIERING.md) ← MEMORY-TIER2. Related: [Spike: A "soul" for mecatl — persistent identity + cross-session user-model](./SOUL-SPIKE.md).*
+*Part of the [design docs](../design/README.md). Read in order: [Memory enabled by default on the embedded mecatui server](0008-memory-on-by-default.md) → [Genuine tiered memory (closing the tier-0 gap)](0009-tiered-memory.md) ← MEMORY-TIER2. Related: [Spike: A "soul" for mecatl — persistent identity + cross-session user-model](0011-soul-and-user-model.md).*

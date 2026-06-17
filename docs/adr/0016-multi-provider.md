@@ -1,7 +1,22 @@
-# Multi-provider / multi-model (Phase 0)
+# ADR 0016 — Multi-provider and multi-model
 
-> **Design record.** Captured during the multi-provider work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+- Status: Accepted (P0/P1 shipped; P2/P3 deferred)
+- Date: 2026
+- Scope: the provider registry, per-session engine binding, DTO neutrality at the LLM port, capability single-source intersection, live model listing, and per-sub-agent provider selection
+
+## Context
+
+mecatl started with a single hardwired OpenAI provider. Adding Anthropic's native Messages API — a genuinely different wire shape — would contaminate the domain and agent loop if provider-private concerns leaked past the port. Capability truth (which models accept images, audio) also needed a single authoritative source to avoid the ACP gate and the picker diverging. Operators also needed to route specific agent definitions to cheaper or specialist models on different providers.
+
+## Decision
+
+All multi-provider wiring lives in the composition layer only; the domain, agent loop, and server adapters receive only a bare `port.LLMProvider` or a neutral value. Provider-private knobs (thinking budget, reasoning effort, store/include flags) are adapter-construction options, never `port.LLMRequest` fields — a reflection guard enforces this. Capability truth is a single composition-computed intersection of per-model catalog modalities and adapter transmit ability, feeding `ListModels`, the session echo, and the ACP gate from one value. P2 (disk cache, periodic refresh, Chat-Completions adapter) and P3 (secrets store, OAuth, per-client key custody) remain deferred.
+
+## Consequences
+
+Adding Anthropic required zero domain or port changes — only composition and cmd wiring — validating the abstraction. Per-session context-window resolution is a live-first closure, not a frozen scalar, so a post-build live-catalog swap self-corrects without an engine rebuild. Disclosure hardening ensures no API key or credentialed URL reaches any wire, log, or proto surface. Current behaviour is described in `docs/architecture.md`; shipped/deferred state is tracked in `docs/design/PRODUCTION-READINESS.md`.
+
+---
 
 mecatl serves more than one LLM provider in a single process and binds a **provider +
 model per session**, speaking a provider-agnostic `port.LLMProvider` behind a
@@ -473,7 +488,7 @@ FS session keeps riding the shared engine, which self-corrects at use.
 prompt arrives before the live swap, the resolver returns the 128k floor ⇒ that ONE run
 compacts at the floor; the next post-swap turn reads the live window through the same
 resolver. No new resource, no rehydration trigger; `decision = derive` (nothing new
-persisted) — see `docs/design/CLOUD-NATIVE.md`.
+persisted) — see `docs/adr/0027-cloud-native.md`.
 - client/ui (`cmd/mecatui`): a proto-free `client.ResolvedModel` (sibling of
   `client.Capabilities`) + `resolvedModelFrom` mapper (nil ⇒ zero), threaded out of the
   `CreateSession` wrapper and stored on `Model.effectiveModel`. The header shows the
@@ -845,4 +860,4 @@ bundled here.
 
 ---
 
-*Part of the [design docs](./README.md). Related: [OpenAI Responses API for a Go Agentic Coding Harness — 2026 Implementation Brief](./OPENAI-RESPONSES-API.md), [mecatl — Architecture](./ARCHITECTURE.md).*
+*Part of the [design docs](../design/README.md). Related: [OpenAI Responses API for a Go Agentic Coding Harness — 2026 Implementation Brief](0017-openai-responses-api.md), [mecatl — Architecture](0004-v1-architecture.md).*
