@@ -82,9 +82,10 @@ func TestUsageCacheReadSubsetOfInput(t *testing.T) {
 	// terminal error for these (exercised via decodeFixtureErr elsewhere),
 	// so the happy-path helper can't decode them.
 	skip := map[string]bool{
-		"error_event.sse":          true,
-		"response_failed.sse":      true,
-		"multi_text_part_turn.sse": true,
+		"error_event.sse":                true,
+		"response_failed.sse":            true,
+		"response_failed_rate_limit.sse": true,
+		"multi_text_part_turn.sse":       true,
 	}
 	paths, err := filepath.Glob(filepath.Join("testdata", "*.sse"))
 	if err != nil {
@@ -379,6 +380,176 @@ func TestTranslateResponseFailed(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not contain %q", err.Error(), want)
 		}
+	}
+}
+
+// TestResponseFailedRateLimitIsRetryable verifies that a response.failed event
+// carrying code "rate_limit_exceeded" returns a *responseStreamError whose
+// StatusCode() is 429 (retryable by DefaultClassifier). This is the root cause
+// of the "no retry on rate_limit_exceeded" bug: the old code discarded the code
+// into an opaque fmt.Errorf string that the resilience classifier treated as
+// non-retryable.
+func TestResponseFailedRateLimitIsRetryable(t *testing.T) {
+	chunks, err := decodeFixtureErr(t, "response_failed_rate_limit.sse")
+	if err == nil {
+		t.Fatal("expected an error from response.failed (rate_limit_exceeded), got nil")
+	}
+	if len(chunks) != 0 {
+		t.Errorf("expected no chunks before the error, got %+v", chunks)
+	}
+	// The error must implement StatusCode() int with value 429.
+	type statusCoder interface{ StatusCode() int }
+	sc, ok := err.(statusCoder)
+	if !ok {
+		t.Fatalf("error %T does not implement StatusCode() int — the resilience classifier cannot classify it retryable", err)
+	}
+	if got := sc.StatusCode(); got != 429 {
+		t.Errorf("StatusCode() = %d, want 429 (rate_limit_exceeded must map to HTTP 429)", got)
+	}
+	// The human-readable message must still contain the provider code and message.
+	for _, want := range []string{"rate_limit_exceeded", "Too Many Requests"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not contain %q (human-readable message must be unchanged)", err.Error(), want)
+		}
+	}
+	// Prefix must also be preserved.
+	if !strings.HasPrefix(err.Error(), "response failed: ") {
+		t.Errorf("error %q does not start with %q", err.Error(), "response failed: ")
+	}
+}
+
+// TestResponseFailedNonTransientIsNotRetryable verifies that a response.failed
+// event carrying a non-transient code (e.g. "server_error") returns a
+// *responseStreamError that is STILL retryable (server_error → 503), while a
+// permanent code (e.g. "content_filter") maps to status 0 / non-retryable.
+func TestResponseFailedNonTransientIsNotRetryable(t *testing.T) {
+	// "server_error" must be retryable (503).
+	eventServerErr := responses.ResponseStreamEventUnion{
+		Type: "response.failed",
+		Response: responses.Response{
+			Status: responses.ResponseStatusFailed,
+			Error:  responses.ResponseError{Code: "server_error", Message: "The model produced an internal error"},
+		},
+	}
+	_, err := translate(eventServerErr, &streamState{})
+	if err == nil {
+		t.Fatal("expected error for server_error response.failed")
+	}
+	type statusCoder interface{ StatusCode() int }
+	sc, ok := err.(statusCoder)
+	if !ok {
+		t.Fatalf("server_error: error %T does not implement StatusCode()", err)
+	}
+	if got := sc.StatusCode(); got < 500 || got > 599 {
+		t.Errorf("server_error: StatusCode() = %d, want a 5xx (retryable)", got)
+	}
+
+	// "content_filter" must NOT be retryable (maps to 0).
+	eventContentFilter := responses.ResponseStreamEventUnion{
+		Type: "response.failed",
+		Response: responses.Response{
+			Status: responses.ResponseStatusFailed,
+			Error:  responses.ResponseError{Code: "content_filter", Message: "Content blocked"},
+		},
+	}
+	_, err2 := translate(eventContentFilter, &streamState{})
+	if err2 == nil {
+		t.Fatal("expected error for content_filter response.failed")
+	}
+	sc2, ok2 := err2.(statusCoder)
+	if !ok2 {
+		t.Fatalf("content_filter: error %T does not implement StatusCode()", err2)
+	}
+	if got := sc2.StatusCode(); got != 0 {
+		t.Errorf("content_filter: StatusCode() = %d, want 0 (non-retryable permanent code)", got)
+	}
+}
+
+// TestErrorEventRateLimitIsRetryable verifies that a top-level "error" stream
+// event with code "rate_limit_exceeded" also returns a StatusCode() == 429 error.
+func TestErrorEventRateLimitIsRetryable(t *testing.T) {
+	chunks, err := decodeFixtureErr(t, "error_event.sse")
+	if err == nil {
+		t.Fatal("expected an error from the error event, got nil")
+	}
+	if len(chunks) != 0 {
+		t.Errorf("expected no chunks before the error, got %+v", chunks)
+	}
+	type statusCoder interface{ StatusCode() int }
+	sc, ok := err.(statusCoder)
+	if !ok {
+		t.Fatalf("error %T does not implement StatusCode() int", err)
+	}
+	if got := sc.StatusCode(); got != 429 {
+		t.Errorf("StatusCode() = %d, want 429 for rate_limit_exceeded error event", got)
+	}
+	// Human-readable message is unchanged.
+	for _, want := range []string{"rate_limit_exceeded", "Rate limit reached for requests"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not contain %q", err.Error(), want)
+		}
+	}
+}
+
+// TestResponseStreamErrorMessageUnchanged pins the invariant that switching from
+// fmt.Errorf to *responseStreamError does NOT change the human-readable Error()
+// string for either the response.failed path or the top-level error path.
+func TestResponseStreamErrorMessageUnchanged(t *testing.T) {
+	t.Run("response.failed server_error message", func(t *testing.T) {
+		// The existing TestTranslateResponseFailed fixture uses server_error; the
+		// message must still equal what fmt.Errorf("response failed: %s", ...) produced.
+		_, err := decodeFixtureErr(t, "response_failed.sse")
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		want := "response failed: server_error: The model produced an internal error"
+		if err.Error() != want {
+			t.Errorf("Error() = %q, want %q", err.Error(), want)
+		}
+	})
+	t.Run("error event rate_limit_exceeded message", func(t *testing.T) {
+		// The existing TestTranslateErrorEvent fixture: message must equal what
+		// fmt.Errorf("stream error: %s", streamErrorString(...)) produced.
+		_, err := decodeFixtureErr(t, "error_event.sse")
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		want := "stream error: rate_limit_exceeded: Rate limit reached for requests (param: model)"
+		if err.Error() != want {
+			t.Errorf("Error() = %q, want %q", err.Error(), want)
+		}
+	})
+}
+
+// TestProviderCodeToHTTPStatus exercises the mapping helper directly.
+func TestProviderCodeToHTTPStatus(t *testing.T) {
+	cases := []struct {
+		code       string
+		wantStatus int
+		retryable  bool
+	}{
+		{"rate_limit_exceeded", 429, true},
+		{"server_error", 503, true},
+		{"engine_overloaded", 503, true},
+		{"service_unavailable", 503, true},
+		{"gateway_timeout", 504, true},
+		{"timeout", 504, true},
+		// Permanent / unknown codes must be non-retryable.
+		{"content_filter", 0, false},
+		{"invalid_request_error", 0, false},
+		{"model_not_found", 0, false},
+		{"insufficient_quota", 0, false},
+		{"access_denied", 0, false},
+		{"", 0, false},
+		{"some_future_unknown_code", 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.code, func(t *testing.T) {
+			got := providerCodeToHTTPStatus(tc.code)
+			if got != tc.wantStatus {
+				t.Errorf("providerCodeToHTTPStatus(%q) = %d, want %d", tc.code, got, tc.wantStatus)
+			}
+		})
 	}
 }
 

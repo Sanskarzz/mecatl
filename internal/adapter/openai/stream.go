@@ -168,7 +168,10 @@ func translate(event responses.ResponseStreamEventUnion, st *streamState) ([]por
 			return nil, nil
 		}
 		st.done = true
-		return nil, fmt.Errorf("response failed: %s", responseErrorString(event.Response.Error))
+		return nil, &responseStreamError{
+			msg:    "response failed: " + responseErrorString(event.Response.Error),
+			status: providerCodeToHTTPStatus(string(event.Response.Error.Code)),
+		}
 
 	case "error":
 		// Top-level transport/protocol error event. The message/code/param live
@@ -177,7 +180,10 @@ func translate(event responses.ResponseStreamEventUnion, st *streamState) ([]por
 			return nil, nil
 		}
 		st.done = true
-		return nil, fmt.Errorf("stream error: %s", streamErrorString(event))
+		return nil, &responseStreamError{
+			msg:    "stream error: " + streamErrorString(event),
+			status: providerCodeToHTTPStatus(event.Code),
+		}
 
 	default:
 		return nil, nil
@@ -244,6 +250,64 @@ func streamErrorString(event responses.ResponseStreamEventUnion) string {
 		msg = fmt.Sprintf("%s (param: %s)", msg, event.Param)
 	}
 	return msg
+}
+
+// responseStreamError is a typed error returned by the stream translator for
+// response.failed and top-level error events. It preserves the original
+// human-readable message AND carries an HTTP-status equivalent so the
+// llmresilience DefaultClassifier (which checks for interface{ StatusCode() int })
+// can classify transient codes (e.g. 429 rate-limit) as retryable.
+//
+// The human-readable Error() string is identical to what a plain fmt.Errorf
+// would have produced, so existing user-facing output is unchanged.
+type responseStreamError struct {
+	msg    string // human-readable, e.g. "response failed: rate_limit_exceeded: Too Many Requests"
+	status int    // HTTP-status equivalent; 0 means unknown/non-retryable
+}
+
+func (e *responseStreamError) Error() string { return e.msg }
+
+// StatusCode returns the HTTP-status equivalent of the provider error code. The
+// llmresilience DefaultClassifier recognises this interface and routes retryable
+// statuses (408, 429, 5xx) through its retry logic.
+func (e *responseStreamError) StatusCode() int { return e.status }
+
+// providerCodeToHTTPStatus maps a provider error-code string to an HTTP-status
+// equivalent for retry classification. The mapping is a conservative allowlist:
+// only KNOWN-transient codes receive a retryable status (429 or 5xx); everything
+// else — including permanent client-error codes — maps to 0, which the
+// DefaultClassifier treats as non-retryable.
+//
+// Retryable (transient) codes:
+//   - "rate_limit_exceeded"        → 429  (too many requests; canonical retry)
+//   - "server_error"               → 503  (provider-side internal error)
+//   - "engine_overloaded"          → 503  (provider capacity; retry is correct)
+//   - "service_unavailable"        → 503  (provider unavailable)
+//   - "gateway_timeout"            → 504  (upstream timeout)
+//   - "timeout"                    → 504  (generic timeout)
+//
+// Non-retryable (permanent) codes map to 0:
+//   - "invalid_request_error"      — bad request; replaying won't fix it
+//   - "content_filter"             — moderation block; replaying trips the same gate
+//   - "model_not_found"            — wrong model; replaying won't fix it
+//   - "insufficient_quota"         — billing; replaying won't fix it
+//   - "access_denied"              — auth/permission; replaying won't fix it
+//   - ""                           — unknown code; fail-safe non-retryable
+//   - (all other codes)            — unknown; fail-safe non-retryable
+func providerCodeToHTTPStatus(code string) int {
+	switch code {
+	case "rate_limit_exceeded":
+		return 429
+	case "server_error", "engine_overloaded", "service_unavailable":
+		return 503
+	case "gateway_timeout", "timeout":
+		return 504
+	default:
+		// Unknown or permanent codes: return 0 so the classifier treats them as
+		// non-retryable. This is the fail-safe path: we never retry something we
+		// don't know to be transient.
+		return 0
+	}
 }
 
 // incompleteReason extracts the incomplete_details.reason from a response,

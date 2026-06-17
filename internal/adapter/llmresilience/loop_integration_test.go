@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"iter"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -130,6 +131,125 @@ func TestEstablishErrorTerminatesStopError(t *testing.T) {
 	}
 	if !strings.Contains(res.Error, "bad tool schema (400)") {
 		t.Fatalf("result error = %q, want the provider message surfaced", res.Error)
+	}
+}
+
+// streamStatusError is a minimal error type that implements StatusCode() int,
+// mirroring the openai adapter's *responseStreamError so we can test the
+// DefaultClassifier's StatusCode interface hook without importing the openai package
+// (engine/agent and internal/adapter/llmresilience must not import each other's
+// concrete adapters). The type is local to this test file only.
+type streamStatusError struct {
+	msg    string
+	status int
+}
+
+func (e *streamStatusError) Error() string   { return e.msg }
+func (e *streamStatusError) StatusCode() int { return e.status }
+
+// TestStreamRateLimitErrorIsRetried verifies the end-to-end fix for the reported
+// "no retry on rate_limit_exceeded" bug: a rate-limit arriving as a first-chunk
+// error carrying StatusCode()==429 must be retried by DefaultClassifier, and the
+// SECOND attempt succeeds. This covers the path where response.failed or a top-level
+// "error" stream event (both now return *responseStreamError with StatusCode==429 for
+// rate_limit_exceeded) surfaces as the first-chunk cerr in llmresilience.establish.
+func TestStreamRateLimitErrorIsRetried(t *testing.T) {
+	rateLimitErr := &streamStatusError{
+		msg:    "response failed: rate_limit_exceeded: Too Many Requests",
+		status: 429,
+	}
+	successChunks := []port.Chunk{
+		{Kind: port.ChunkText, Text: "hello"},
+		{Kind: port.ChunkDone, Stop: session.StopEndTurn},
+	}
+
+	// First call: first-chunk yields the rate-limit error (pre-first-chunk seam).
+	// Second call: succeeds with real chunks.
+	inner := &firstChunkErrProvider{err: rateLimitErr}
+	var callCount int32
+	inner2 := &countingFirstChunkProvider{
+		firstErr:      rateLimitErr,
+		successChunks: successChunks,
+		calls:         &callCount,
+	}
+	_ = inner // suppress unused var; we use inner2 below
+
+	llm := llmresilience.Wrap(inner2, llmresilience.Config{
+		MaxAttempts: 3,
+		BaseBackoff: time.Millisecond, // fast for tests
+	})
+
+	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t)})
+	r := e.Run(context.Background(), newSession(t, session.Limits{}), memfs.NewWorkspace("/ws"), "go")
+
+	res := lastResult(t, drain(r))
+	// The run must succeed, not fail.
+	if res.Stop == session.StopError {
+		t.Fatalf("stop = StopError (got %q), want StopEndTurn — rate_limit_exceeded must be retried", res.Stop)
+	}
+	// Must have made at least 2 calls (1 failing + 1 succeeding).
+	if got := atomic.LoadInt32(&callCount); got < 2 {
+		t.Errorf("calls = %d, want >= 2 (the rate-limit must trigger a retry)", got)
+	}
+}
+
+// countingFirstChunkProvider fails with firstErr on the first call (as a
+// first-chunk error), then succeeds on subsequent calls with successChunks.
+type countingFirstChunkProvider struct {
+	firstErr      error
+	successChunks []port.Chunk
+	calls         *int32
+}
+
+func (*countingFirstChunkProvider) Capabilities() port.ProviderCapabilities {
+	return port.ProviderCapabilities{}
+}
+
+func (p *countingFirstChunkProvider) Stream(_ context.Context, _ port.LLMRequest) (iter.Seq2[port.Chunk, error], error) {
+	n := int(atomic.AddInt32(p.calls, 1))
+	if n == 1 {
+		// First call: return a non-nil iterator whose first chunk is an error.
+		err := p.firstErr
+		return func(yield func(port.Chunk, error) bool) {
+			yield(port.Chunk{}, err)
+		}, nil
+	}
+	// Subsequent calls: yield success chunks.
+	chunks := p.successChunks
+	return func(yield func(port.Chunk, error) bool) {
+		for _, c := range chunks {
+			if !yield(c, nil) {
+				return
+			}
+		}
+	}, nil
+}
+
+// TestStreamRateLimitDefaultClassifier verifies that DefaultClassifier itself
+// correctly classifies a StatusCode()==429 error as retryable. This is a direct
+// unit test of the classifier without the full engine loop.
+func TestStreamRateLimitDefaultClassifier(t *testing.T) {
+	err429 := &streamStatusError{msg: "rate_limit_exceeded: Too Many Requests", status: 429}
+	if !llmresilience.DefaultClassifier(err429) {
+		t.Error("DefaultClassifier(status=429) = false, want true (rate_limit_exceeded must be retryable)")
+	}
+
+	// 5xx is also retryable.
+	err503 := &streamStatusError{msg: "server_error: internal error", status: 503}
+	if !llmresilience.DefaultClassifier(err503) {
+		t.Error("DefaultClassifier(status=503) = false, want true (server_error must be retryable)")
+	}
+
+	// status=0 (unknown/permanent code) must NOT be retryable.
+	err0 := &streamStatusError{msg: "content_filter: Content blocked", status: 0}
+	if llmresilience.DefaultClassifier(err0) {
+		t.Error("DefaultClassifier(status=0) = true, want false (permanent codes must not be retried)")
+	}
+
+	// status=400 (permanent) must NOT be retryable.
+	err400 := &streamStatusError{msg: "invalid_request_error: bad request", status: 400}
+	if llmresilience.DefaultClassifier(err400) {
+		t.Error("DefaultClassifier(status=400) = true, want false (4xx non-408/409/429 must not be retried)")
 	}
 }
 
