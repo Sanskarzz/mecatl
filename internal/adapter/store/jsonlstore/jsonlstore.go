@@ -58,9 +58,12 @@ var (
 	_ port.EventLog         = (*Store)(nil)
 )
 
-// New constructs a Store writing under dir, creating dir if needed.
+// New constructs a Store writing under dir, creating dir if needed. The dir is
+// created at mode 0700: the store holds raw conversation transcripts (session
+// snapshots, tool-call args/results, and the relayed event stream) in plaintext,
+// so it is owner-only by construction.
 func New(dir string) (*Store, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("jsonlstore: create dir: %w", err)
 	}
 	return &Store{dir: dir}, nil

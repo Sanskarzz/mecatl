@@ -51,21 +51,44 @@ func isChildSession(id session.SessionID) (family string, ok bool) {
 	return "", false
 }
 
+// isMainSession reports whether id is a TOP-LEVEL (operator/service) session —
+// i.e. NOT one of the delegation families' child prefixes. It is the exact
+// complement of isChildSession over the same prefix list, so the child sweep
+// and the main sweep partition the inventory with no overlap.
+func isMainSession(id session.SessionID) bool {
+	_, ok := isChildSession(id)
+	return !ok
+}
+
 // childGCPolicy is the operator-tunable retention policy.
 type childGCPolicy struct {
-	// retention is the age threshold for the age pass: a child snapshot whose
-	// ModifiedAt is older than now-retention is deleted. <=0 disables the age
-	// pass.
+	// retention is the age threshold for the child age pass: a child snapshot
+	// whose ModifiedAt is older than now-retention is deleted. <=0 disables the
+	// age pass.
 	retention time.Duration
 	// maxPerFamily is the per-family count cap: within one prefix family the
 	// newest maxPerFamily child snapshots survive, the rest are deleted
 	// oldest-first. <=0 disables the cap pass.
 	maxPerFamily int
+	// mainRetention is the age threshold for the MAIN (top-level) age pass: a
+	// main snapshot whose ModifiedAt is older than now-mainRetention is deleted.
+	// <=0 disables it (issue #79).
+	mainRetention time.Duration
+	// mainMaxTotal is the GLOBAL count cap over main sessions: the newest
+	// mainMaxTotal main snapshots survive, the rest are deleted oldest-first.
+	// <=0 disables it. Unlike maxPerFamily this is a single store-wide cap, not
+	// per-prefix (issue #79).
+	mainMaxTotal int
 }
 
 // enabled reports whether any pass is active (the all-zero policy is the
 // fully-disabled posture).
-func (p childGCPolicy) enabled() bool { return p.retention > 0 || p.maxPerFamily > 0 }
+func (p childGCPolicy) enabled() bool {
+	return p.retention > 0 || p.maxPerFamily > 0 || p.mainRetention > 0 || p.mainMaxTotal > 0
+}
+
+// mainEnabled reports whether either MAIN pass is active (issue #79).
+func (p childGCPolicy) mainEnabled() bool { return p.mainRetention > 0 || p.mainMaxTotal > 0 }
 
 // childGC sweeps child-session snapshots out of a prunable store per the
 // policy. Everything is injected (store, clock, liveness, diagnostics) so the
@@ -115,22 +138,25 @@ func (g *childGC) sweep(ctx context.Context) (deleted, retained int) {
 	if err != nil {
 		if errors.Is(err, port.ErrPruneUnsupported) {
 			g.disabled = true
-			g.diag.Log(ctx, port.LevelInfo, "child-session GC: store does not support retention; disabling child GC", "err", err)
+			g.diag.Log(ctx, port.LevelInfo, "session GC: store does not support retention; disabling session GC", "err", err)
 			return 0, 0
 		}
-		g.diag.Log(ctx, port.LevelWarn, "child-session GC: list failed; skipping sweep", "err", err)
+		g.diag.Log(ctx, port.LevelWarn, "session GC: list failed; skipping sweep", "err", err)
 		return 0, 0
 	}
 
-	// Partition the inventory into the per-family child sets. Unprefixed ids
-	// (operator/service sessions) are NOT collected: they are invisible to
-	// both passes by construction.
+	// Partition the inventory into the per-family child sets and the main set.
+	// Unprefixed ids (operator/service sessions) go to mains, swept ONLY by the
+	// main passes (issue #79); when those passes are disabled they are invisible
+	// to the sweeper exactly as before.
 	byFamily := make(map[string][]port.StoredSession, len(childSessionPrefixes))
+	var mains []port.StoredSession
 	for _, e := range entries {
-		family, ok := isChildSession(e.ID)
-		if !ok {
+		if isMainSession(e.ID) {
+			mains = append(mains, e)
 			continue
 		}
+		family, _ := isChildSession(e.ID)
 		byFamily[family] = append(byFamily[family], e)
 	}
 
@@ -144,12 +170,19 @@ func (g *childGC) sweep(ctx context.Context) (deleted, retained int) {
 	}
 	retained -= deleted
 
+	// Main (top-level) sweep AFTER the family loop (issue #79). A disabled main
+	// policy makes this a no-op, so an UNPREFIXED session is never touched unless
+	// the operator turned the main passes on.
+	mainDeleted := g.sweepMain(ctx, mains, &errs)
+	deleted += mainDeleted
+	retained += len(mains) - mainDeleted
+
 	if errs.count > 0 {
-		g.diag.Log(ctx, port.LevelWarn, "child-session GC: some deletes failed (retained; retried next sweep)",
+		g.diag.Log(ctx, port.LevelWarn, "session GC: some deletes failed (retained; retried next sweep)",
 			"failed", errs.count, "first_err", errs.first)
 	}
 	if deleted > 0 {
-		g.diag.Log(ctx, port.LevelInfo, "child-session GC: swept",
+		g.diag.Log(ctx, port.LevelInfo, "session GC: swept",
 			"deleted", deleted, "retained", retained)
 	}
 	return deleted, retained
@@ -225,6 +258,60 @@ func (g *childGC) sweepFamily(ctx context.Context, kids []port.StoredSession, er
 	return deleted
 }
 
+// sweepMain runs the MAIN age pass then a single GLOBAL count cap over the
+// top-level (operator/service) sessions and returns how many it deleted (issue
+// #79). It mirrors sweepFamily's idioms (oldest-first sort with an ID tiebreak,
+// live-skip, best-effort delete) but the cap is store-wide, not per-prefix. A
+// disabled main policy (both knobs <=0) returns 0 with no deletes — the
+// historical "main sessions are never touched" behaviour.
+func (g *childGC) sweepMain(ctx context.Context, mains []port.StoredSession, errs *deleteErrors) (deleted int) {
+	if !g.policy.mainEnabled() {
+		return 0
+	}
+	// Oldest-first, with an ID tiebreak on equal mtimes so the cap evicts
+	// deterministically (store List order is unspecified) — same rationale as
+	// sweepFamily.
+	sort.SliceStable(mains, func(i, j int) bool {
+		if mains[i].ModifiedAt.Equal(mains[j].ModifiedAt) {
+			return mains[i].ID < mains[j].ID
+		}
+		return mains[i].ModifiedAt.Before(mains[j].ModifiedAt)
+	})
+
+	survivors := mains
+	if g.policy.mainRetention > 0 {
+		survivors = mains[:0]
+		cutoff := g.now().Add(-g.policy.mainRetention)
+		for _, e := range mains {
+			if e.ModifiedAt.Before(cutoff) && !g.isLive(e.ID) && g.remove(ctx, e.ID, errs) {
+				deleted++
+				continue
+			}
+			survivors = append(survivors, e)
+		}
+	}
+
+	if g.policy.mainMaxTotal <= 0 || len(survivors) <= g.policy.mainMaxTotal {
+		return deleted
+	}
+	over := len(survivors) - g.policy.mainMaxTotal
+	for _, e := range survivors {
+		if over == 0 {
+			break
+		}
+		if g.isLive(e.ID) {
+			// A live id keeps its slot; the next-oldest NON-live id is deleted
+			// in its stead (the loop keeps scanning).
+			continue
+		}
+		if g.remove(ctx, e.ID, errs) {
+			deleted++
+		}
+		over--
+	}
+	return deleted
+}
+
 // startChildGC wires the child-session retention sweeper: a no-op (with one
 // build-once INFO, the startMemoryConsolidation idiom) when the policy is
 // fully disabled or the store is not prunable; otherwise one startup sweep
@@ -233,14 +320,19 @@ func (g *childGC) sweepFamily(ctx context.Context, kids []port.StoredSession, er
 // liveness predicate is the Service's in-flight run registry, threaded in by
 // Build AFTER the Service exists.
 func startChildGC(ctx context.Context, cfg Config, store port.SessionStore, isLive func(session.SessionID) bool) {
-	policy := childGCPolicy{retention: cfg.ChildRetention, maxPerFamily: cfg.ChildRetentionMaxPerFamily}
+	policy := childGCPolicy{
+		retention:     cfg.ChildRetention,
+		maxPerFamily:  cfg.ChildRetentionMaxPerFamily,
+		mainRetention: cfg.MainRetention,
+		mainMaxTotal:  cfg.MainRetentionMaxTotal,
+	}
 	if !policy.enabled() {
-		cfg.diag().Log(ctx, port.LevelInfo, "child-session GC DISABLED (no retention and no per-family cap)")
+		cfg.diag().Log(ctx, port.LevelInfo, "session GC DISABLED (no child retention/cap and no main retention/cap)")
 		return
 	}
 	prunable, ok := store.(port.PrunableStore)
 	if !ok {
-		cfg.diag().Log(ctx, port.LevelInfo, "child-session GC unavailable (session store is not prunable); store is never swept")
+		cfg.diag().Log(ctx, port.LevelInfo, "session GC unavailable (session store is not prunable); store is never swept")
 		return
 	}
 	gc := &childGC{
@@ -250,8 +342,9 @@ func startChildGC(ctx context.Context, cfg Config, store port.SessionStore, isLi
 		now:    time.Now,
 		diag:   cfg.diag(),
 	}
-	cfg.diag().Log(ctx, port.LevelInfo, "child-session GC ENABLED",
-		"retention", cfg.ChildRetention, "max_per_family", cfg.ChildRetentionMaxPerFamily,
+	cfg.diag().Log(ctx, port.LevelInfo, "session GC ENABLED",
+		"child_retention", cfg.ChildRetention, "child_max_per_family", cfg.ChildRetentionMaxPerFamily,
+		"main_retention", cfg.MainRetention, "main_max_total", cfg.MainRetentionMaxTotal,
 		"interval", cfg.ChildGCInterval)
 	go func() {
 		gc.sweep(ctx)

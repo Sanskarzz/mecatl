@@ -90,6 +90,8 @@ absolute path (the server requires absolute).
 | `--no-bash` | off | **embedded** server: disable the Bash tool (shell-less) |
 | `--memory-dir` | – (auto) | **embedded** server: per-project memory store dir; empty = a default under `$XDG_DATA_HOME/mecatui/memory` |
 | `--no-memory` | off | **embedded** server: disable cross-session memory (Remember/Recall) |
+| `--store-dir` | – (auto) | **embedded** server: durable JSONL session/event store dir; empty = a per-workspace default under `$XDG_STATE_HOME/mecatui/sessions`, so sessions survive restart. **Privacy:** stores the raw conversation (prompts, model output, tool args/results) in **plaintext**; the dir is created mode `0700` (owner-only) |
+| `--no-store` | off | **embedded** server: disable the durable session store (use an in-memory store, persisting nothing to disk) |
 | `--commands-dir` | – (auto) | **embedded** server: slash-command template dir; empty = the conventional `.mecatl/commands`, `.claude/commands` |
 | `--no-commands` | off | **embedded** server: disable slash-command expansion |
 | `--skills-dir` | – (auto) | **embedded** server: skill-unit dir (`<name>/SKILL.md`); empty = the conventional dirs (e.g. `.claude/skills`) |
@@ -312,6 +314,32 @@ set), where `<path-slug>` is the absolute workspace path with `/` replaced by `-
 across same-named checkouts. Pass `--no-memory` to disable it or `--memory-dir` to
 relocate the store. Background memory consolidation (the "dream" distiller, which
 spends tokens) stays **off** on the embedded server.
+
+**The durable session store is ON by default** (issue #79): the embedded server
+persists every session as append-only JSONL — the snapshot, the tool-call audit
+log, and the relayed event timeline — under a per-workspace dir
+`~/.local/state/mecatui/sessions/<path-slug>/` (or `$XDG_STATE_HOME/...` when set),
+using the SAME `<path-slug>` scheme as the memory store so the two sit side by
+side per workspace. So a session survives a restart and can be inspected after the
+fact. To find your own history, list the per-workspace store and pick the subdir
+matching your workspace (its name is the workspace path with `/` replaced by `-`):
+
+```console
+$ ls ~/.local/state/mecatui/sessions/   # each subdir is one workspace
+-var-home-ozz-dev-mecatl   -home-ozz-scratch
+```
+
+**Privacy:** the store holds the **raw conversation** — your prompts, the
+model's output, and tool arguments/results — in **plaintext** on disk; the dir is
+created mode `0700` (owner-only). Pass `--no-store` to keep everything in memory
+(persisting nothing), or `--store-dir` to relocate it. To keep the durable store
+from growing without bound, a retention GC reaps stale sessions: child snapshots
+(subagent/parallel/team) after 7 days or 500-per-family, and top-level sessions
+after 30 days or 200 store-wide, always skipping an in-flight run. **Concurrency:**
+the per-workspace default assumes a single `mecatui` per workspace; a second
+instance hosting an embedded server on the same workspace shares the dir, and its
+retention GC may prune the other instance's idle sessions early — give a second
+instance its own `--store-dir` (or `--no-store`) to avoid that.
 
 ### `@`-file mentions and media attachments
 
@@ -580,7 +608,12 @@ with ANSI stripped). These bands are a visual fill gauge, **not** a compaction c
 the harness automatically compacts older history at ~80% full (the default trigger), so
 in practice it keeps the window from running out before the `⚠` band is reached — the
 `▓` warn band at ~60% is the earlier "filling up" cue, and the `⚠` may not appear at all
-on a session that compacts first.
+on a session that compacts first. One subtlety (issue #82): when a turn produces no
+usage frame at all — a stalled or usage-less turn — the meter's input figure for that
+turn is a conversation-size **estimate** (a heuristic token count over the live history),
+not a provider-reported count, so the ctx meter stays meaningful instead of snapping to
+zero. The estimate is display-only: it never feeds the session-cumulative facets or any
+token budget, which stay on the provider's actual reported usage.
 
 ### Watching subagents, parallel runs, and teams — the fleet footer + the unified `ctrl+a` overlay
 

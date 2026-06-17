@@ -337,7 +337,7 @@ func embeddedConfig(cfg config, diag port.Diagnostics) app.Config {
 		Compaction:                   "heuristic",
 		Tokenizer:                    "heuristic",
 		LLMMaxAttempts:               3,
-		LLMPerAttemptTimeout:         30 * time.Second,
+		LLMPerAttemptTimeout:         60 * time.Second,
 		LLMStreamIdleTimeout:         120 * time.Second,
 		LLMBreakerThreshold:          5,
 		LLMBreakerCooldown:           30 * time.Second,
@@ -349,13 +349,23 @@ func embeddedConfig(cfg config, diag port.Diagnostics) app.Config {
 		// calls the real provider on a timer, so a default-on interval would
 		// silently spend tokens on an idle TUI. mecated defaults it to 0 too.
 		MemoryDir: resolveMemoryDir(cfg),
-		// Child-session retention GC, mecated's defaults (issue #38). The embedded
-		// store is the in-memory memstore (no StoreDir), so nothing persists across
-		// restarts — but memstore is prunable and a LONG-LIVED TUI process otherwise
-		// accumulates every subagent/parallel/team child snapshot in RAM. Free and
-		// local, so on by default; main sessions are never touched.
+		// Durable session/event store ON by default (issue #79): a per-workspace dir
+		// under $XDG_STATE_HOME/mecatui/sessions, so a session survives restart and
+		// can be inspected after the fact. --no-store opts out (in-memory store);
+		// --store-dir relocates it. See resolveStoreDir.
+		StoreDir: resolveStoreDir(cfg),
+		// Session retention GC (issues #38 + #79). With a DURABLE default store the
+		// child snapshots (subagent/parallel/team) AND the top-level main-session
+		// snapshots accumulate on disk, so a LONG-LIVED TUI process otherwise grows
+		// without bound. Free and local, so on by default. The child knobs are
+		// mecated's defaults; the main knobs (issue #79) bound the durable store the
+		// TUI now defaults on — a 30-day age horizon plus a 200-session global cap, so
+		// recent history is recoverable but stale sessions are reaped. A live run is
+		// always skipped.
 		ChildRetention:             168 * time.Hour,
 		ChildRetentionMaxPerFamily: 500,
+		MainRetention:              720 * time.Hour,
+		MainRetentionMaxTotal:      200,
 		ChildGCInterval:            time.Hour,
 		// Soul ON by default (issue #14, Phase 1): a user-scoped, agent-READ-ONLY
 		// persona fragment read from the conventional ~/.config/mecatl/soul.md
@@ -530,6 +540,50 @@ func defaultMemoryDir(dataHome, workspace string) string {
 	}
 	leaf := strings.ReplaceAll(workspace, string(filepath.Separator), "-")
 	return filepath.Join(dataHome, "mecatui", "memory", leaf)
+}
+
+// resolveStoreDir applies the embedded-server session-store precedence (issue
+// #79): --no-store disables it (""), an explicit --store-dir overrides,
+// otherwise a per-workspace default under the XDG STATE base (see
+// defaultStoreDir). An empty result makes the engine fall back to the in-memory
+// store. The store owns creating the dir (mode 0700); main only computes a path
+// string and treats the location as opaque.
+//
+// CONCURRENCY CAVEAT: the per-workspace default isolates the common case (one
+// mecatui per workspace). There is NO file lock — a SECOND mecatui hosting an
+// embedded server on the SAME workspace shares this dir, and its retention GC
+// may prune the other instance's idle (non-live) main sessions early. Point a
+// second instance at its own --store-dir, or --no-store, to avoid that.
+func resolveStoreDir(cfg config) string {
+	if cfg.noStore {
+		return ""
+	}
+	if cfg.storeDir != "" {
+		return cfg.storeDir
+	}
+	// The single place that reads the XDG STATE base — main is the composition
+	// root, so the one global read lives here (via xdgconfig.UserStateDir), and
+	// defaultStoreDir stays a pure function of its arguments (cheap to table-test).
+	return defaultStoreDir(xdgconfig.UserStateDir(xdgconfig.OSEnv), cfg.workspace)
+}
+
+// defaultStoreDir derives a stable, per-workspace session-store directory under
+// the XDG state base stateBase ($XDG_STATE_HOME, else ~/.local/state — resolved
+// by the caller via xdgconfig.UserStateDir). The leaf is the resolved absolute
+// workspace path with the OS separator replaced by '-' (preserving the leading
+// separator as a leading '-'), e.g. "/var/home/ozz/dev/mecatl" →
+// "-var-home-ozz-dev-mecatl" — the SAME slug scheme as defaultMemoryDir, so the
+// two stores sit side by side per workspace. Encoding the FULL path keeps it
+// deterministic, human-legible, and collision-free across same-named projects.
+// Returns "" when stateBase or workspace is empty — in that degraded case the
+// store stays in-memory rather than anchoring at a bogus path. Pure in its
+// arguments: it reads no globals.
+func defaultStoreDir(stateBase, workspace string) string {
+	if stateBase == "" || workspace == "" {
+		return ""
+	}
+	leaf := strings.ReplaceAll(workspace, string(filepath.Separator), "-")
+	return filepath.Join(stateBase, "mecatui", "sessions", leaf)
 }
 
 // buildRegistry seeds the theme registry with built-ins and loads user theme

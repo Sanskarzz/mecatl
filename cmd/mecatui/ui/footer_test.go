@@ -297,6 +297,7 @@ func TestStopReasonLabel(t *testing.T) {
 		{"budget", "stopped · token budget", "ctxWarn"},
 		{"cancelled", "cancelled", "muted"},
 		{"no_progress", "stopped · no progress", "ctxWarn"},
+		{"structured_output", "stopped · schema unmet", "ctxWarn"},
 		{"error", "error", "errorText"},
 		{"some_future_reason", "some_future_reason", "muted"},
 	}
@@ -307,6 +308,35 @@ func TestStopReasonLabel(t *testing.T) {
 		}
 		if slot != c.slot {
 			t.Errorf("stopReasonLabel(%q) slot = %q, want %q", c.stop, slot, c.slot)
+		}
+	}
+}
+
+// TestResultMsgStopReachesFooter is the end-to-end regression guard for the stop
+// reason wiring (issue #81 Part 5): a terminal client.ResultMsg{Stop} must drive
+// applyResult → endRun → stopReasonLabel → m.statusMsg, and the rendered footer
+// must show the human label. It covers the explicit-mapped reasons and an unknown
+// passthrough. structured_output is now explicitly phrased ("stopped · schema
+// unmet") so the raw underscore'd token never leaks even though it is a
+// subagent-only stop that does not reach the main footer today.
+func TestResultMsgStopReachesFooter(t *testing.T) {
+	cases := []struct {
+		stop string
+		want string
+	}{
+		{"no_progress", "stopped · no progress"},
+		{"budget", "stopped · token budget"},
+		{"error", "error"},
+		{"structured_output", "stopped · schema unmet"},
+		{"some_future_reason", "some_future_reason"},
+	}
+	for _, c := range cases {
+		m, _, _ := newTestModel(t, theme.New("aztec", theme.AztecPalette()))
+		m.phase = phaseRunning
+		m = applyAll(m, client.ResultMsg{Stop: c.stop})
+		got := stripANSIstr(m.renderFooter())
+		if !strings.Contains(got, c.want) {
+			t.Errorf("ResultMsg{Stop:%q} → footer = %q, want it to contain %q", c.stop, got, c.want)
 		}
 	}
 }

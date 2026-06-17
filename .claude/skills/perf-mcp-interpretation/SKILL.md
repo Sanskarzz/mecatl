@@ -55,7 +55,8 @@ for the perturbing CPU tools only with a hypothesis to confirm.
   heap_objects, heap_object_bytes, total_memory_bytes, rss_bytes, available[]).
 - `perf://metrics/summary` — every curated metric reduced: histograms → count +
   p50/p90/p99 **bucket upper bounds (seconds)**; counters/gauges → a scalar value.
-  Histograms and `tool_calls_total`/`tokens` also carry a bounded `by_role`
+  Histograms and the `tool_calls_total`/`tokens`/`turns_total`/`turn_empty_total`/
+  `active_runs` counters also carry a bounded `by_role`
   breakdown over the CLOSED engine role family
   `main|subagent|member|parallel|usermodel|child` (the main engine vs the
   delegation children — the axis for "which agent family is burning

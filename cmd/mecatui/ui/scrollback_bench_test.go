@@ -146,13 +146,18 @@ func BenchmarkScrollbackView(b *testing.B) {
 }
 
 // BenchmarkScrollbackViewSteady measures the OTHER half of the per-frame cost: a
-// re-render where the conversation did NOT change (a cursor move, input keystroke,
-// scroll, overlay toggle, or the at-least-twice-per-message renderInput chokepoint
-// — all of which call refreshView). Before the join cache this still re-joined the
-// whole scrollback into a fresh Builder every time (the profile-confirmed
-// O(scrollback) hotspot); the join cache reuses the memoized string, so the steady
-// frame allocates ~nothing. This is the benchmark that exercises the join-cache fast
-// path — the streaming bench above is structurally all-miss (it mutates every op).
+// re-render where the conversation did NOT change — the INTERACTION-CADENCE frame (a
+// cursor move, input keystroke, scroll, overlay toggle, or the
+// at-least-twice-per-message renderInput chokepoint — all of which call refreshView
+// on viewDirty). This is NOT the idle/per-tick path: the render tick self-terminates
+// when the stream goes quiet, so the steady frame only fires on a user interaction.
+// With no selection / expand active, refreshView now drives the line-slice path
+// (renderConversationLines): the prefix over the settled scrollback is fully cached,
+// so the steady frame rebuilds only the per-frame line slice — no O(scrollback)
+// copy. (The #80 incremental-join change traded a small steady-frame B/op increase —
+// the fresh per-frame line slice — for the ~−98% streaming win above; this benchmark
+// is the steady-frame regression tripwire for that trade. The streaming bench above
+// is structurally all-miss — it mutates every op.)
 func BenchmarkScrollbackViewSteady(b *testing.B) {
 	m := buildScrollbackModel(b)
 	m.refreshView() // warm the per-block caches AND the join cache

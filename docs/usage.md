@@ -184,9 +184,11 @@ $ go run ./cmd/mecated --openai --workspace "$PWD"
 | `--memory-consolidate-interval` | `0` | interval for background consolidation ("dream") of the per-project memory store; `0` disables. Only meaningful with `--memory-dir`. |
 | `--memory-store-url` | `""` | `host:port` of a remote **memory-store gRPC driver** (`mecatl.driver.v1.MemoryStoreService`); replaces the local flock store — mutually exclusive with `--memory-dir`, enables the memory tools like `--memory-dir` does. |
 | `--event-log-url` | `""` | `host:port` of a remote **event-log gRPC driver** (`mecatl.driver.v1.EventLogService`) for the durable per-session event timeline (reasoning, ask/verdict pairs, delegation lifecycle); **INDEPENDENT of the session store** (not mutually exclusive with `--store-dir`). Empty keeps the local default (the `--store-dir` JSONL log, or in-memory). Append happens at the relay (a fault WARNs, never aborts the run); Read is server-streaming. Same auth/TLS posture as `--session-store-url` (equal URLs share one connection). **See the store-driver note below.** |
-| `--child-retention` | `168h` | how long persisted **child** session snapshots (`subagent-*`/`parallel-*`/`team-*` ids — the `InspectSubagent`/`resume:` handles) are retained before the GC sweep deletes them. **Main sessions are never touched.** Durable-store-only in effect (`--store-dir` or a prunable `--session-store-url` driver; the in-memory default never accumulates across restarts). `0` disables the age pass. |
+| `--child-retention` | `168h` | how long persisted **child** session snapshots (`subagent-*`/`parallel-*`/`team-*` ids — the `InspectSubagent`/`resume:` handles) are retained before the GC sweep deletes them. **Main sessions are governed by `--main-retention` instead** (default off). Durable-store-only in effect (`--store-dir` or a prunable `--session-store-url` driver; the in-memory default never accumulates across restarts). `0` disables the age pass. |
 | `--child-retention-max-per-family` | `500` | max persisted child snapshots kept **per delegation family** (subagent/parallel/team); the oldest beyond the cap are deleted, skipping in-flight runs. `0` disables the cap. |
-| `--child-gc-interval` | `1h` | how often the child-session retention GC re-sweeps after the startup sweep; `0` = sweep at startup only. Only meaningful when `--child-retention` or `--child-retention-max-per-family` is active. |
+| `--main-retention` | `0` | how long persisted **main** (top-level operator/service) session snapshots are retained before the GC sweep deletes them; child sessions use `--child-retention` instead. Durable-store-only. `0` (default) **disables** the main age pass entirely, so main sessions are never touched — `mecated`'s behaviour is unchanged unless you opt in (`mecatui` defaults it on for its durable per-workspace store). |
+| `--main-retention-max-total` | `0` | max persisted **main** session snapshots kept **store-wide** (a single global cap, not per-family); the oldest beyond the cap are deleted, skipping in-flight runs. Durable-store-only. `0` (default) disables the cap. |
+| `--child-gc-interval` | `1h` | how often the session retention GC re-sweeps after the startup sweep; `0` = sweep at startup only. Only meaningful when a child or main retention/cap knob is active. |
 | `--driver-auth-token` | `""` | bearer token sent on every store-driver RPC (or `MECATL_DRIVER_AUTH_TOKEN`; empty disables driver auth). Refused over cleartext to a non-loopback driver — pair with `--driver-tls`. |
 | `--driver-tls` | `false` | enable transport TLS on the store-driver connections. |
 | `--driver-tls-ca` | `""` | PEM CA bundle to verify the store driver's certificate (with `--driver-tls`; empty uses system roots). |
@@ -507,6 +509,20 @@ It prints (note: **no `Authorization` header** — the surface is loopback/no-au
 > snippet by overriding the address — `mecated perf-mcp print-config --metrics-addr
 > 127.0.0.1:9099` — or simply hardcode the `http://127.0.0.1:9099/mcp` URL, since
 > the port is now predictable across restarts.
+
+The perf server's `query_metric` tool and `perf://metrics/summary` resource expose
+a **curated** counter/gauge/histogram set (not the full `/metrics` scrape). Beside
+the per-run `runs_total{stop}`, the turn-semantics counters (issue #81)
+`turns_total` (one per COMPLETED turn — the per-turn denominator, unlabelled by
+stop) and `turn_empty_total` (the EMPTY SUBSET of those turns — no tool call, no
+text) are curated too, each with the bounded per-role breakdown in the summary.
+The two are not disjoint: an empty turn bumps **both** (`turns_total` via its
+`EvTurnEnd`, then `turn_empty_total` via `EvNoProgress`), so
+`turn_empty_total / turns_total` is the empty-turn **share** (empty turns ⊂ all
+completed turns). `turn_empty_total` counts `EvNoProgress` emissions (one per
+advisory nudge plus the give-up, up to `MaxNoProgressNudges+1` per stuck
+sequence), not distinct sequences. A high share is the signature of a model going
+silent mid-run.
 
 A companion **interpretation skill** ships at
 `.claude/skills/perf-mcp-interpretation/` — it teaches an agent to read this
@@ -1899,18 +1915,31 @@ compatible endpoints.
 | empty (default) | in-memory (`memstore`) | nothing persists across restarts |
 | set to a dir | JSONL replay (`jsonlstore`) | snapshots + tool-call log on disk |
 
-The JSONL store writes two files per session under `--store-dir`:
+The JSONL store writes three files per session under `--store-dir`:
 
 ```
 <dir>/<id>.session.jsonl   # one snapshot per Save (latest line wins)
 <dir>/<id>.tools.jsonl     # one record per tool call (call, result, duration)
+<dir>/<id>.events.jsonl    # the relayed event timeline (reasoning, ask/verdict, delegation)
 ```
 
-Persisted **child** sessions (`subagent-*`/`parallel-*`/`team-*` ids, written
-by the delegation paths so `InspectSubagent`/`InspectMember`/`resume:` work)
-are garbage-collected by a background sweep — see `--child-retention`,
-`--child-retention-max-per-family` and `--child-gc-interval` above (defaults
-168h / 500 / 1h). Main sessions are never swept; deleting a child removes both
+> **Privacy:** the durable store holds the **raw conversation** — prompts, model
+> output, and tool arguments/results — in **plaintext** on disk. The store
+> directory is created mode `0700` (owner-only). `mecated` keeps the store **off**
+> by default (empty `--store-dir` → in-memory); `mecatui` defaults it **on** at a
+> per-workspace directory under `$XDG_STATE_HOME/mecatui/sessions` (see
+> [the TUI guide](tui.md)), so a session survives restart and can be inspected
+> after the fact.
+
+Persisted sessions are garbage-collected by a background sweep so the durable
+store does not grow without bound. **Child** sessions (`subagent-*`/`parallel-*`/
+`team-*` ids, written by the delegation paths so `InspectSubagent`/`InspectMember`/
+`resume:` work) are bounded by `--child-retention` /
+`--child-retention-max-per-family` (defaults 168h / 500). **Main** (top-level)
+sessions are bounded by `--main-retention` / `--main-retention-max-total` — **both
+off by default for `mecated`** (main sessions are then never swept), and on for
+`mecatui` (30 days / 200 store-wide). The sweep re-runs every `--child-gc-interval`
+(default 1h) and always skips an in-flight run; deleting a session removes all of
 its files.
 
 ### Remote store drivers
@@ -2724,17 +2753,31 @@ started, or you used the wrong id. Approve/cancel only work while the prompt's
 SSE stream is open.
 
 **Reading the JSONL replay log**
-With `--store-dir DIR`, inspect a session after the fact:
+With `--store-dir DIR` (for `mecatui`, the per-workspace default under
+`$XDG_STATE_HOME/mecatui/sessions/<path-slug>/`), inspect a session after the fact
+— note these files hold the **raw conversation in plaintext**:
+
+For `mecatui` you do not pass `DIR` — find your per-workspace store under the
+default base and pick the subdir matching your workspace (its name is the
+workspace path with `/` replaced by `-`):
+
+```console
+$ ls ~/.local/state/mecatui/sessions/   # each subdir is one workspace
+-var-home-ozz-dev-mecatl   -home-ozz-scratch
+```
 
 ```console
 $ ls DIR
-8867….session.jsonl   8867….tools.jsonl
+8867….session.jsonl   8867….tools.jsonl   8867….events.jsonl
 
 # Latest session snapshot (last line wins):
 $ tail -n1 DIR/8867….session.jsonl | jq .
 
 # Every tool call with its result and duration:
 $ jq . DIR/8867….tools.jsonl
+
+# The relayed event timeline (reasoning, ask/verdict pairs, delegation lifecycle):
+$ jq . DIR/8867….events.jsonl
 ```
 
 ## See also

@@ -47,6 +47,22 @@
   `main|subagent|member|parallel|usermodel|child`, never the raw role (which can
   embed a def name or model id), so label cardinality stays bounded; without a
   scoper they stay nil, byte-identical to the metrics-off posture.
+  The domain counters include the run-terminal `mecatl_runs_total{stop,role}`
+  (one per run, by terminal stop reason) and — for **turn-semantics**
+  observability (issue #81) — `mecatl_turns_total{role}` (one per COMPLETED
+  turn — every model exchange that reached a turn boundary, the per-turn
+  denominator; deliberately UNLABELLED by stop, since `EvTurnEnd` carries no stop
+  reason) and `mecatl_turn_empty_total{role}` (the EMPTY SUBSET — a turn that
+  produced NEITHER a tool call NOR text, derived from `EvNoProgress`). The two are
+  **not** mutually exclusive: an empty turn emits `EvTurnEnd` first (bumping
+  `turns_total`) and then `EvNoProgress` (bumping `turn_empty_total`), so
+  `turn_empty_total / turns_total` is the empty-turn **share** (empty turns ⊂ all
+  completed turns), not a disjoint numerator/denominator. `turn_empty_total` counts
+  `EvNoProgress` *emissions* — the loop emits one per advisory nudge AND on the
+  give-up, up to `MaxNoProgressNudges+1` per stuck sequence. Abnormal terminal
+  stops stay on `runs_total{stop}`; the turn counters carry only the bounded
+  `role` label. The perf MCP surfaces both with a per-role breakdown
+  (`turns_total`, `turn_empty_total` in `perf://metrics/summary`).
   > A broader performance-observability effort lands incrementally on a
   > **loopback-only, unauthenticated admin listener** (`--metrics-addr`, default
   > `127.0.0.1:9090`): `/metrics`, `/debug/pprof/*`, `/debug/vars` (a curated
@@ -228,6 +244,18 @@ synthesize it because the adapters deliberately swallow the ctx error on
 cancel and would otherwise yield nothing. The stall is TERMINAL, never retried
 (no-replay-after-first-chunk holds); pre-first-chunk stalls stay on
 `PerAttemptTimeout` + retry, unchanged.
+
+The `llmresilience` decorator emits stream-lifecycle diagnostics through an
+**injected `port.Diagnostics`** (`Config.Diagnostics`, defaulted to
+`port.NopDiagnostics`, wired at composition from the build-time sink): a DEBUG
+line on each retry and per-attempt-timeout, and INFO on the idle-stall terminal
+(the decisive #82 stall signal), the breaker open/half-open/close transitions,
+and retry exhaustion. Every line is metadata-only (the wrapper sees only
+`port.LLMRequest` + errors, never prompt text; error strings are clamped). This
+is an **ADAPTER seam** and is deliberately OUTSIDE the agent loop's three-line
+diagnostic budget (that budget governs the loop's run-scoped sink, not adapters
+— see `docs/adr/0020-diagnostics.md`); the wrapper is per-provider and logs
+provider-level lifecycle, not session-correlated lines.
 
 Auto-resume complements this: `GetSession`/`Approve`/`Cancel` fall back to
 `SessionStore.Load`, and the service persists at create, on entering `awaiting`,

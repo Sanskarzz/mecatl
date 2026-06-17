@@ -11,6 +11,30 @@ import (
 	"github.com/stacklok/mecatl/cmd/mecatui/theme"
 )
 
+// TestTurnEndZeroUsageKeepsStickyContextMeter pins issue-#82 Fix A2: a TurnEndMsg
+// reporting zero input tokens (a stalled / usage-less turn) must NOT erase a
+// previously-known context occupancy. The meter is sticky, mirroring the sticky
+// window denominator.
+func TestTurnEndZeroUsageKeepsStickyContextMeter(t *testing.T) {
+	m, _, _ := newTestModel(t, theme.New("aztec", theme.AztecPalette()))
+	m = applyAll(m,
+		tea.WindowSizeMsg{Width: 160, Height: 30},
+		client.SessionReadyMsg{
+			SessionID:     "sess-sticky-0001",
+			ResolvedModel: client.ResolvedModel{ProviderID: "openai", ModelID: "m", ContextWindow: 200000},
+		},
+		client.TurnEndMsg{Turn: 1, Usage: client.Usage{InputTokens: 40000}},
+	)
+	if m.contextTokens != 40000 {
+		t.Fatalf("after a non-zero turn contextTokens = %d, want 40000", m.contextTokens)
+	}
+	// A subsequent zero-usage turn.end must leave the last-known value intact.
+	m = applyAll(m, client.TurnEndMsg{Turn: 2, Usage: client.Usage{InputTokens: 0, OutputTokens: 0}})
+	if m.contextTokens != 40000 {
+		t.Errorf("after a zero-usage turn contextTokens = %d, want 40000 (sticky, not erased)", m.contextTokens)
+	}
+}
+
 // TestCreateSessionCmdCarriesCaps asserts the createSessionCmd builds a
 // SessionReadyMsg carrying the capabilities the SessionCreator returned (the
 // relayed truth), and that the SessionReadyMsg handler stores them on m.caps.

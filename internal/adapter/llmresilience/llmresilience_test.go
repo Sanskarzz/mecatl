@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -529,6 +530,112 @@ func TestPreFirstChunkStallStillUsesPerAttemptTimeout(t *testing.T) {
 	}
 	if f.Calls() != 2 {
 		t.Fatalf("inner called %d times, want 2 (pre-first-chunk stall retried)", f.Calls())
+	}
+}
+
+// TestFirstChunkTimeoutSwallowedByAdapterIsRetriedAndExhausts pins the issue-#82
+// root-cause fix (Fix C). It models the laundered path: the inner Stream connects
+// (returns a non-nil seq, no outer error) but the model takes longer than the
+// per-attempt budget to the FIRST chunk, and the adapter SWALLOWS the ctx error on
+// cancel (yields NOTHING — modelled by stallAfterChunks with zero chunks). Before
+// the fix this returned firstChunk{empty:true} with NO error → no retry, breaker
+// untouched → a phantom clean (empty) completion. After the fix the per-attempt
+// DeadlineExceeded is surfaced as a retryable establishment failure: the attempt is
+// retried MaxAttempts times, the final error is *ExhaustedError wrapping
+// DeadlineExceeded, and the breaker counted every (transient) timeout.
+func TestFirstChunkTimeoutSwallowedByAdapterIsRetriedAndExhausts(t *testing.T) {
+	// stallAfterChunks with NO chunks: the seq blocks on ctx.Done() during the first
+	// next() and yields nothing once the per-attempt ctx is cancelled — exactly the
+	// openai/anthropic swallow-on-cancel behaviour.
+	f := &fakeProvider{steps: []step{{stallAfterChunks: true}}}
+	diag := &recordingDiag{}
+	cfg := Config{
+		MaxAttempts:       3,
+		BaseBackoff:       time.Nanosecond,
+		MaxBackoff:        time.Nanosecond,
+		PerAttemptTimeout: 20 * time.Millisecond,
+		// Threshold == MaxAttempts: the breaker counts each timeout but only OPENS on
+		// the third (after the run exhausts), so the run reaches *ExhaustedError and a
+		// FOLLOW-UP call then fails fast — proving the timeouts were counted as transient.
+		BreakerThreshold: 3,
+		BreakerCooldown:  time.Hour,
+		Diagnostics:      diag,
+	}
+	p := Wrap(f, cfg)
+
+	_, err := p.Stream(context.Background(), port.LLMRequest{})
+	var ex *ExhaustedError
+	if !errors.As(err, &ex) {
+		t.Fatalf("err = %v, want *ExhaustedError (a first-chunk timeout must surface, not phantom-done)", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("ExhaustedError does not wrap context.DeadlineExceeded: %v", err)
+	}
+	if !errors.Is(err, errFirstChunkTimeout) {
+		t.Fatalf("ExhaustedError does not wrap errFirstChunkTimeout: %v", err)
+	}
+	if f.Calls() != 3 {
+		t.Fatalf("inner called %d times, want 3 (each first-chunk timeout retried)", f.Calls())
+	}
+	// The breaker counted the timeouts as transient: a follow-up call fails fast with
+	// *BreakerError without touching the inner provider.
+	if _, berr := p.Stream(context.Background(), port.LLMRequest{}); !errorsAsBreaker(berr) {
+		t.Fatalf("follow-up err = %v, want *BreakerError (timeouts must count toward the breaker)", berr)
+	}
+	if f.Calls() != 3 {
+		t.Fatalf("inner called %d times after breaker-open call, want still 3", f.Calls())
+	}
+	// The #81 per-attempt-timeout DEBUG line now actually fires on this path.
+	if rec := diag.find("per-attempt timeout fired"); len(rec) == 0 {
+		t.Fatalf("expected the per-attempt-timeout DEBUG line to fire on the first-chunk-timeout path; records=%+v", diag.records)
+	}
+	// The OPERATOR-FACING message (issue #82, MUST 2): the string that surfaces to
+	// the TUI must read in plain language, name the timeout duration, name an action,
+	// and NOT leak the internal "llmresilience:" package prefix.
+	msg := err.Error()
+	if strings.Contains(msg, "llmresilience:") {
+		t.Errorf("operator message leaks the package prefix: %q", msg)
+	}
+	if !strings.Contains(msg, "did not start responding") {
+		t.Errorf("operator message lacks the plain-language cause: %q", msg)
+	}
+	if !strings.Contains(msg, "--llm-per-attempt-timeout") {
+		t.Errorf("operator message lacks the actionable hint: %q", msg)
+	}
+	if !strings.Contains(msg, "20ms") { // the configured PerAttemptTimeout, threaded in
+		t.Errorf("operator message lacks the timeout duration: %q", msg)
+	}
+}
+
+// TestGenuinelyEmptyStreamStaysSuccessAfterFix is the NEGATIVE guard for Fix C: an
+// inner that yields zero chunks and FINISHES (no per-attempt deadline) must still
+// take the empty-success path — no error, no retry. This guards against
+// over-broadening the new DeadlineExceeded disambiguation. (Complements the
+// PerAttemptTimeout=0 case in TestEmptyStreamIsSuccess by setting a generous, never-
+// firing per-attempt budget so the cause is provably non-deadline.)
+func TestGenuinelyEmptyStreamStaysSuccessAfterFix(t *testing.T) {
+	f := &fakeProvider{steps: []step{{}}} // zero chunks, no error, no block: empty + done
+	cfg := Config{
+		MaxAttempts:       3,
+		BaseBackoff:       time.Nanosecond,
+		MaxBackoff:        time.Nanosecond,
+		PerAttemptTimeout: time.Hour, // generous; never fires → cause stays nil
+	}
+	p := Wrap(f, cfg)
+
+	seq, err := p.Stream(context.Background(), port.LLMRequest{})
+	if err != nil {
+		t.Fatalf("Stream error = %v, want nil (genuinely empty stream is success)", err)
+	}
+	got, derr := drain(t, seq)
+	if derr != nil {
+		t.Fatalf("drain error: %v", derr)
+	}
+	if len(got) != 0 {
+		t.Fatalf("got %d chunks, want 0", len(got))
+	}
+	if f.Calls() != 1 {
+		t.Fatalf("inner called %d times, want 1 (no retry on a genuinely empty stream)", f.Calls())
 	}
 }
 

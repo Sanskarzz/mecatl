@@ -866,6 +866,25 @@ func (e *Engine) runLoop(ctx context.Context, r *Run, sess *session.Session, ws 
 			e.terminate(ctx, r, sess, session.StopError, lastText, total, err)
 			return
 		}
+		// Zero-input-usage fallback (issue #82) — DISPLAY-ONLY. A turn that produced
+		// no ChunkUsage (e.g. an adapter that swallowed a stalled stream, or a
+		// provider that omitted the usage frame) leaves usage.InputTokens == 0, which
+		// would zero the context meter. We estimate the prompt size from the
+		// conversation via the TokenCounter (always non-nil — defaulted to
+		// HeuristicTokenCounter in NewEngine) into a LOCAL emitUsage that feeds ONLY
+		// the EvTurnEnd payload (the footer meter + the per-turn latency telemetry).
+		// The budget brakes (MaxRunTokens / MaxTeamTokens) and the cumulative
+		// sess.Usage / EvResult.Usage figure stay on the provider's ACTUAL usage
+		// below, so an estimate never moves a token-budget decision — provider truth
+		// only. Output tokens are NOT fabricated. estimated records whether the
+		// fallback fired so the footer can show a "~" hint. Guarded on a non-empty
+		// conversation so a genuinely empty session never gets a phantom estimate.
+		emitUsage := usage
+		estimated := false
+		if est, ok := estimateZeroUsageInput(usage.InputTokens, sess.Conversation.Messages, e.deps.TokenCounter); ok {
+			emitUsage.InputTokens = est
+			estimated = est > 0 // a zero estimate is no estimate worth flagging
+		}
 		total = total.Add(usage)
 		// Accumulate this turn's usage onto the aggregate's CUMULATIVE Usage. This is
 		// the value the budget brake reads (budgetExhausted(r, sess.Usage)) and the
@@ -885,15 +904,17 @@ func (e *Engine) runLoop(ctx context.Context, r *Run, sess *session.Session, ws 
 		// Close the turn's model exchange with its own usage and elapsed time in a
 		// typed TurnEndPayload. Emitted only on the success path (never on the
 		// error/cancel returns above), before the assistant message is recorded.
-		// usage here is THIS turn's accounting; Event.Usage is left unset so it
-		// keeps its single cumulative-on-result meaning.
+		// emitUsage is THIS turn's accounting for DISPLAY (the provider figure, or
+		// the zero-usage estimate above when the provider reported none); Event.Usage
+		// is left unset so it keeps its single cumulative-on-result meaning.
 		var durMs int64
 		if e.deps.Clock != nil {
 			durMs = e.deps.Clock.Now().Sub(turnStart).Milliseconds()
 		}
 		e.emit(r, session.Event{Type: session.EvTurnEnd, Turn: turnIdx,
 			TurnEnd: &session.TurnEndPayload{
-				Usage:            usage,
+				Usage:            emitUsage,
+				Estimated:        estimated,
 				DurationMs:       durMs,
 				TTFTMs:           timing.ttftMs,
 				InterTokenMeanMs: timing.interTokenMeanMs,

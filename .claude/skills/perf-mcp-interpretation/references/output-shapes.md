@@ -49,7 +49,7 @@ One entry per curated metric. `kind` ∈ `"histogram" | "scalar" | "absent"`.
     "kind": "histogram",
     "count": 0,                                                 // aggregated across ALL role series
     "quantiles": [ { "quantile": 0.99, "upper_bound": 0.0 } ],  // upper_bound = bucket ceiling, seconds
-    "by_role": [ { "role": "main", "count": 0 } ]               // bounded per-role breakdown (histograms + tool_calls_total/tokens)
+    "by_role": [ { "role": "main", "count": 0 } ]               // bounded per-role breakdown (histograms + tool_calls_total/tokens/turns_total/turn_empty_total/active_runs)
   },
   {
     "name": "active_runs",
@@ -80,8 +80,9 @@ included (redaction).
 ### `query_metric{metric_name?, quantile?, role?}`
 - No `metric_name` → `{ "available_metrics": ["..."] }` (discovery).
 - With a name → `{ "metric": MetricSummaryEntry }` (same shape as above),
-  aggregated across all role series by default; histograms and
-  `tool_calls_total`/`tokens` also carry the `by_role` breakdown.
+  aggregated across all role series by default; histograms and the
+  `tool_calls_total`/`tokens`/`turns_total`/`turn_empty_total`/`active_runs`
+  counters also carry the `by_role` breakdown.
 - With `role` (one of `main|subagent|member|parallel|usermodel|child`) →
   that role family's share only (no `by_role`). Unknown roles → `isError`
   naming the valid set.
@@ -90,8 +91,19 @@ included (redaction).
 Curated metric short names (pass to `metric_name`):
 `tool_duration_seconds`, `turn_duration_seconds`, `ttft_seconds`,
 `inter_token_seconds`, `inter_token_max_seconds`, `tool_queue_seconds`,
-`events_total`, `runs_total`, `tool_calls_total`, `tokens`,
+`events_total`, `runs_total`, `turns_total`, `turn_empty_total`,
+`tool_calls_total`, `tokens`,
 `permission_asks_total`, `active_runs`, `cache_hit_ratio`, `process_rss_bytes`.
+`turns_total` counts ALL COMPLETED turns (the per-turn denominator, unlabelled by
+stop); `turn_empty_total` counts the EMPTY SUBSET — turns with no tool call and no
+text. They are NOT disjoint: an empty turn bumps both (its `EvTurnEnd` →
+`turns_total`, then its `EvNoProgress` → `turn_empty_total`), so
+`turn_empty_total / turns_total` is the empty-turn **share** (empty turns ⊂ all
+completed turns), not numerator/denominator. `turn_empty_total` counts
+`EvNoProgress` emissions (one per advisory nudge plus the give-up, up to
+`MaxNoProgressNudges+1` per stuck sequence), not distinct sequences. Both carry the
+per-role `by_role` breakdown. A high share is the **empty-turn signature** (a model
+going silent mid-run, #82).
 (Underlying Prometheus family names are `mecatl_<name>`.) Histogram quantiles
 default to p50/p90/p99 unless `quantile` is given.
 

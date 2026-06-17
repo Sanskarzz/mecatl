@@ -116,6 +116,157 @@ func TestChildGCMainSessionsNeverDeleted(t *testing.T) {
 	}
 }
 
+// TestChildGCMainSessionAgePass pins the MAIN age pass (issue #79): with
+// mainRetention set, UNPREFIXED (operator/service) sessions older than the
+// threshold are deleted while younger ones survive, and CHILD snapshots are
+// left to the child passes (none configured here).
+func TestChildGCMainSessionAgePass(t *testing.T) {
+	f := newGCFixture(t, childGCPolicy{mainRetention: 24 * time.Hour})
+	f.save(t, "main-old-a")
+	f.save(t, "main-old-b")
+	f.save(t, "subagent-old") // a child: no child pass configured -> retained
+	f.now = f.now.Add(48 * time.Hour)
+	f.save(t, "main-young")
+
+	deleted, retained := f.gc.sweep(context.Background())
+	if deleted != 2 || retained != 2 {
+		t.Errorf("sweep = (deleted %d, retained %d), want (2, 2)", deleted, retained)
+	}
+	got := f.ids(t)
+	for _, old := range []session.SessionID{"main-old-a", "main-old-b"} {
+		if got[old] {
+			t.Errorf("aged-out main %q survived the main age pass", old)
+		}
+	}
+	if !got["main-young"] {
+		t.Error("young main session was deleted by the age pass")
+	}
+	if !got["subagent-old"] {
+		t.Error("a child snapshot was deleted by the MAIN pass (no child pass was configured)")
+	}
+}
+
+// TestChildGCMainSessionCountCap pins the GLOBAL main count cap (issue #79):
+// past mainMaxTotal, the OLDEST main snapshots go first, the cap is store-wide
+// (not per-prefix), and a live main keeps its slot (the next-oldest non-live is
+// deleted in its stead).
+func TestChildGCMainSessionCountCap(t *testing.T) {
+	f := newGCFixture(t, childGCPolicy{mainMaxTotal: 2})
+	live := map[session.SessionID]bool{"main-a": true}
+	f.gc.isLive = func(id session.SessionID) bool { return live[id] }
+	for i, id := range []session.SessionID{"main-a", "main-b", "main-c", "main-d"} {
+		f.save(t, id)
+		f.now = f.now.Add(time.Duration(i+1) * time.Minute)
+	}
+
+	// 4 mains > cap 2, oldest-first with the live main-a skipped => main-b and
+	// main-c deleted (main-a kept though oldest; main-d newest).
+	deleted, retained := f.gc.sweep(context.Background())
+	if deleted != 2 || retained != 2 {
+		t.Errorf("sweep = (deleted %d, retained %d), want (2, 2)", deleted, retained)
+	}
+	got := f.ids(t)
+	if !got["main-a"] {
+		t.Error("LIVE main was deleted — the liveness exclusion is broken for the main cap")
+	}
+	if got["main-b"] || got["main-c"] {
+		t.Errorf("cap pass kept the oldest non-live mains (b=%v c=%v), want them deleted", got["main-b"], got["main-c"])
+	}
+	if !got["main-d"] {
+		t.Error("newest main was deleted under the cap pass")
+	}
+}
+
+// TestChildGCMainPassDisabledByDefault pins that with the main knobs at 0,
+// UNPREFIXED sessions are NEVER touched even when ancient — the historical
+// "main sessions are never deleted" guarantee holds for the zero-config default
+// (the mecated posture). It is the safety twin of TestChildGCMainSessionsNeverDeleted
+// but with the CHILD passes also off, so ONLY the main knobs could touch them.
+func TestChildGCMainPassDisabledByDefault(t *testing.T) {
+	f := newGCFixture(t, childGCPolicy{retention: time.Hour, maxPerFamily: 1}) // child passes only
+	mains := []session.SessionID{"main-a", "main-b", "main-c"}
+	for _, id := range mains {
+		f.save(t, id)
+	}
+	f.now = f.now.Add(1000 * time.Hour) // ancient
+
+	deleted, _ := f.gc.sweep(context.Background())
+	if deleted != 0 {
+		t.Errorf("sweep deleted %d sessions, want 0 (main passes disabled -> mains untouched)", deleted)
+	}
+	got := f.ids(t)
+	for _, id := range mains {
+		if !got[id] {
+			t.Errorf("main session %q was deleted with the main passes OFF — the zero-config safety invariant is broken", id)
+		}
+	}
+}
+
+// TestChildGCMainAgePassSkipsLive pins the liveness exclusion on the MAIN AGE
+// pass specifically (issue #79): a LIVE main older than mainRetention keeps its
+// slot — the in-flight run protects it from the age pass, mirroring the
+// child-side TestChildGCSkipsLiveChildren age-pass leg. (Mutation-verified:
+// removing the `!g.isLive(e.ID)` guard from sweepMain's age loop makes this
+// fail.)
+func TestChildGCMainAgePassSkipsLive(t *testing.T) {
+	f := newGCFixture(t, childGCPolicy{mainRetention: 24 * time.Hour})
+	live := map[session.SessionID]bool{"main-live-old": true}
+	f.gc.isLive = func(id session.SessionID) bool { return live[id] }
+
+	f.save(t, "main-live-old") // ancient but live: must survive the age pass
+	f.save(t, "main-dead-old") // ancient and dead: age pass takes it
+	f.now = f.now.Add(48 * time.Hour)
+
+	deleted, retained := f.gc.sweep(context.Background())
+	if deleted != 1 || retained != 1 {
+		t.Errorf("sweep = (deleted %d, retained %d), want (1, 1)", deleted, retained)
+	}
+	got := f.ids(t)
+	if !got["main-live-old"] {
+		t.Error("LIVE main was deleted by the age pass — the liveness exclusion is broken for the main age pass")
+	}
+	if got["main-dead-old"] {
+		t.Error("dead aged-out main survived the age pass")
+	}
+}
+
+// TestChildGCMainAgeThenCap pins the two-pass interaction for mains (issue #79):
+// the age pass deletes the ancient mains, then the GLOBAL cap trims the fresh
+// SURVIVORS down to mainMaxTotal. Exercises the `survivors` plumbing that the
+// single-knob tests never hit together (an off-by-one in the carry-over from
+// the age pass to the cap would surface here).
+func TestChildGCMainAgeThenCap(t *testing.T) {
+	f := newGCFixture(t, childGCPolicy{mainRetention: 24 * time.Hour, mainMaxTotal: 2})
+	// Two ancient mains the age pass must reap.
+	f.save(t, "main-old-a")
+	f.save(t, "main-old-b")
+	// Jump past the retention horizon, then save four FRESH mains with distinct
+	// ages so the cap evicts deterministically oldest-first.
+	f.now = f.now.Add(48 * time.Hour)
+	for i, id := range []session.SessionID{"main-new-a", "main-new-b", "main-new-c", "main-new-d"} {
+		f.save(t, id)
+		f.now = f.now.Add(time.Duration(i+1) * time.Minute)
+	}
+
+	// Age pass deletes old-a/old-b (2). Survivors = the 4 fresh mains > cap 2,
+	// oldest-first => new-a and new-b deleted (2). Total deleted 4, retained 2.
+	deleted, retained := f.gc.sweep(context.Background())
+	if deleted != 4 || retained != 2 {
+		t.Errorf("sweep = (deleted %d, retained %d), want (4, 2)", deleted, retained)
+	}
+	got := f.ids(t)
+	for _, gone := range []session.SessionID{"main-old-a", "main-old-b", "main-new-a", "main-new-b"} {
+		if got[gone] {
+			t.Errorf("%q survived, want deleted (age pass took the old, cap trimmed the oldest survivors)", gone)
+		}
+	}
+	for _, kept := range []session.SessionID{"main-new-c", "main-new-d"} {
+		if !got[kept] {
+			t.Errorf("%q was deleted, want retained (the two newest survivors fit under the cap)", kept)
+		}
+	}
+}
+
 // TestChildGCCapPassOldestFirst pins the per-family count cap: past the cap,
 // the OLDEST snapshots go first, and the cap is per FAMILY (a full subagent
 // family does not evict team members).
@@ -407,7 +558,7 @@ func pruneUnsupportedErr() error {
 
 // TestChildGCPruneUnsupportedDisablesStickily pins the permanent-posture
 // degradation: a store signalling port.ErrPruneUnsupported gets ONE INFO
-// ("disabling child GC"), never a WARN, and every subsequent sweep is a no-op
+// ("disabling session GC"), never a WARN, and every subsequent sweep is a no-op
 // that does not even List.
 func TestChildGCPruneUnsupportedDisablesStickily(t *testing.T) {
 	rec := &recordingDiag{}
@@ -427,7 +578,7 @@ func TestChildGCPruneUnsupportedDisablesStickily(t *testing.T) {
 	if !gc.disabled {
 		t.Fatal("ErrPruneUnsupported did not set the sticky disable")
 	}
-	if !rec.has("disabling child GC") {
+	if !rec.has("disabling session GC") {
 		t.Errorf("expected the one disabling INFO, got %q", rec.messages())
 	}
 	if rec.has("list failed") {
@@ -441,7 +592,7 @@ func TestChildGCPruneUnsupportedDisablesStickily(t *testing.T) {
 	}
 	var infos int
 	for _, m := range rec.messages() {
-		if strings.Contains(m, "disabling child GC") {
+		if strings.Contains(m, "disabling session GC") {
 			infos++
 		}
 	}
@@ -575,11 +726,11 @@ func TestBuildZeroConfigChildGCIsNoOp(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 	defer built.Close()
-	if got := diag.countContaining("child-session GC DISABLED"); got != 1 {
-		t.Errorf("zero-config Build narrated 'child-session GC DISABLED' %d times, want exactly 1", got)
+	if got := diag.countContaining("session GC DISABLED"); got != 1 {
+		t.Errorf("zero-config Build narrated 'session GC DISABLED' %d times, want exactly 1", got)
 	}
-	if got := diag.countContaining("child-session GC ENABLED"); got != 0 {
-		t.Errorf("zero-config Build narrated 'child-session GC ENABLED' %d times, want 0", got)
+	if got := diag.countContaining("session GC ENABLED"); got != 0 {
+		t.Errorf("zero-config Build narrated 'session GC ENABLED' %d times, want 0", got)
 	}
 }
 
@@ -603,7 +754,7 @@ func TestBuildEnabledChildGCNarratesAndStops(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 	defer built.Close()
-	if got := diag.countContaining("child-session GC ENABLED"); got != 1 {
-		t.Errorf("Build narrated 'child-session GC ENABLED' %d times, want exactly 1", got)
+	if got := diag.countContaining("session GC ENABLED"); got != 1 {
+		t.Errorf("Build narrated 'session GC ENABLED' %d times, want exactly 1", got)
 	}
 }

@@ -140,6 +140,8 @@ const (
 type Metrics struct {
 	events     metric.Int64Counter
 	runs       metric.Int64Counter
+	turns      metric.Int64Counter
+	turnsEmpty metric.Int64Counter
 	toolCalls  metric.Int64Counter
 	tokens     metric.Int64Counter
 	permAsks   metric.Int64Counter
@@ -198,6 +200,18 @@ func NewMetrics(mp metric.MeterProvider) (*Metrics, error) {
 		metric.WithDescription("Total runs finished, by stop reason."),
 	); err != nil {
 		return nil, fmt.Errorf("telemetry: runs counter: %w", err)
+	}
+	if m.turns, err = meter.Int64Counter(
+		"mecatl.turns",
+		metric.WithDescription("Total turns completed (the per-turn denominator)."),
+	); err != nil {
+		return nil, fmt.Errorf("telemetry: turns counter: %w", err)
+	}
+	if m.turnsEmpty, err = meter.Int64Counter(
+		"mecatl.turn_empty",
+		metric.WithDescription("Total turns that produced no tool call and no text (empty/no-progress turns)."),
+	); err != nil {
+		return nil, fmt.Errorf("telemetry: turn empty counter: %w", err)
 	}
 	if m.toolCalls, err = meter.Int64Counter(
 		"mecatl.tool.calls",
@@ -352,7 +366,23 @@ func (m *Metrics) emit(ctx context.Context, ev session.Event, prefix []attribute
 		m.activeRuns.Add(ctx, -1, withAttrs(prefix))
 		m.recordResult(ctx, ev.Result, prefix)
 	case session.EvTurnEnd:
+		// turns_total counts ALL completed turns — every model exchange that ran
+		// to a turn boundary and produced an EvTurnEnd, including empty/no-progress
+		// ones (EvTurnEnd fires unconditionally before the no-progress branch in
+		// the loop). It is the per-turn denominator. Abnormal RUN terminals
+		// (error/cancelled/budget/no-progress) are counted at the run level by
+		// runs_total{stop}; EvTurnEnd carries no stop reason, so this counter is
+		// deliberately NOT labelled by stop (only by role).
+		m.turns.Add(ctx, 1, withAttrs(prefix))
 		m.recordTurnEnd(ctx, ev.TurnEnd, prefix)
+	case session.EvNoProgress:
+		// The EMPTY SUBSET of completed turns: a turn that produced NEITHER a tool
+		// call NOR text (#82). NOT mutually exclusive with turns_total — the same
+		// turn already bumped turns_total via EvTurnEnd above, so
+		// turn_empty_total/turns_total is the empty-turn SHARE. EvNoProgress fires
+		// on every advisory nudge AND the give-up, so this counts up to
+		// MaxNoProgressNudges+1 emissions per stuck sequence. prefix carries role.
+		m.turnsEmpty.Add(ctx, 1, withAttrs(prefix))
 	case session.EvTurnStart,
 		session.EvMessageDelta,
 		session.EvToolCall,

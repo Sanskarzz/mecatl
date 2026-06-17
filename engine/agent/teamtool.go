@@ -755,10 +755,14 @@ func TeamStop(o TeamOutcome) session.StopReason {
 // avoid double-counting; every other kind contributes the zero Usage.
 //
 // AUTHORITY: the supervisor independently accumulates the team total from the per-drive
-// EvResult.Usage (memberRT.tokensUsed → TeamOutcome.Usage) for the budget gate. The two
-// sums are equal BY CONSTRUCTION (EvResult.Usage == Σ that drive's turn.end usage), but
-// THIS sink's turn.end sum stays authoritative for the EvTeamEnd payload — they are not
-// reconciled, only documented as equal.
+// EvResult.Usage (memberRT.tokensUsed → TeamOutcome.Usage) for the budget gate. THIS
+// sink's turn.end sum is the EvTeamEnd DISPLAY payload only. The two were equal BY
+// CONSTRUCTION (EvResult.Usage == Σ that drive's turn.end usage) until issue #82: a turn
+// that reports no usage frame now carries a conversation-size ESTIMATE on its turn.end
+// (DISPLAY-ONLY, see loop.go's emitUsage), while EvResult.Usage stays on provider truth
+// (0 for that turn). So on a usage-less turn the DISPLAY sum here can exceed the budget
+// total — deliberate: the meter figure stays meaningful, the budget gate stays on
+// provider truth. They are not reconciled.
 func memberEventUsage(ev session.Event) session.Usage {
 	if ev.Type == session.EvTurnEnd && ev.TurnEnd != nil {
 		return ev.TurnEnd.Usage

@@ -117,6 +117,12 @@ mid-conversation. Per the ledger below, all three facts are now persisted:
   restart. The brake is evaluated against the cumulative aggregate Usage;
   `resetToIdle` preserves Usage (the deliberate divergence from Counters).
 
+The whole arc presupposes a DURABLE store is actually in use. As of issue #79,
+`mecatui` enables one by default (a per-workspace JSONL store under
+`$XDG_STATE_HOME/mecatui/sessions`, owner-only `0700`), so the restart-fidelity
+this phase delivers is now exercised by the default interactive client, not only
+by an operator who passed `mecated --store-dir`.
+
 A documented side effect: because `resetToIdle` preserves Usage, a reused
 child/member session's per-engine `MaxRunTokens` brake is now CUMULATIVE across
 `Reopen` (team rounds, structured-output validation retries), which is the

@@ -469,7 +469,17 @@ func (m Model) updateStreamEvent(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// affordance, then append a muted stat line unless the turn was trivial.
 		// The turn's prompt size is the CURRENT context occupancy (latest turn,
 		// assigned not summed — mirroring the team lane meter's turn.end handling).
-		m.contextTokens = msg.Usage.InputTokens
+		// Keep it STICKY: a turn that reports zero input tokens (a stalled/usage-less
+		// turn) must not erase a known occupancy (mirroring the sticky window at
+		// conversation.go endReasoningStream/turn.end and ContextWindow above). The
+		// engine's DISPLAY-ONLY zero-usage fallback (issue #82) fills turn_end with a
+		// conversation-size estimate so this is normally non-zero already (the estimate
+		// feeds only this meter, never the cumulative ↑/↓/⊕ totals or any token budget,
+		// which stay on provider truth) — this guard is belt-and-braces for the edge
+		// where even the estimate is zero.
+		if msg.Usage.InputTokens > 0 {
+			m.contextTokens = msg.Usage.InputTokens
+		}
 		m.conv.endReasoningStream()
 		if !trivialTurn(msg) {
 			m.conv.addTurnStat(turnStatLine(msg))
@@ -2388,6 +2398,22 @@ func (m Model) onScrollKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // split/measure of the full content; trimming that is a follow-up, out of scope here.
 func (m *Model) refreshView() {
 	m.viewDirty = false
+	// FAST PATH: the line-slice handoff. When no selection is active AND the
+	// changed-files footer is not in play (it renders only under the global expand
+	// toggle), feed vp.SetContentLines directly with the incrementally-joined line
+	// slice — reusing the cached prefix of settled blocks and only building the
+	// changed suffix. This skips the O(scrollback) Builder copy + strings.Split that
+	// the string SetContent path forces on every streaming frame (the live tail
+	// re-renders every token, so the whole-join memo never helps streaming). The
+	// selection and footer paths both post-process the JOINED STRING, so they fall
+	// back to the byte-identical string path below.
+	if !m.sel.active && !m.expandTools {
+		m.vp.SetContentLines(m.rend.renderConversationLines(&m.conv, m.expandTools))
+		if m.stuck {
+			m.vp.GotoBottom()
+		}
+		return
+	}
 	content := m.rend.renderConversation(&m.conv, m.expandTools)
 	// When the global details toggle is on, fold the session's changed-files list
 	// in beneath the scrollback so the muted "Δ N files" header indicator has a

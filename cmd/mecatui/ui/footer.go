@@ -300,6 +300,11 @@ func stopReasonLabel(stop string) (text, slot string) {
 		// The model went silent (no tool call, no text) across the nudge budget. Not a
 		// failure, but worth noticing — styled like the limit stops.
 		return "stopped · no progress", slotCtxWarn
+	case "structured_output":
+		// A subagent could not satisfy the requested output schema within the
+		// retry budget. Subagent-only today (it does not reach the main footer),
+		// but mapped so the raw token never leaks if it ever does.
+		return "stopped · schema unmet", slotCtxWarn
 	case stopError:
 		return "error", "errorText"
 	default:

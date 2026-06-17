@@ -174,6 +174,17 @@ not loop lines and do not count against it): the headless subagent auto-deny INF
 and the team member-reopen-failure WARN (`warnUnexpectedReopen`, when a member's
 `Reopen` fails for a reason other than the expected cancelled case).
 
+In the same spirit, two ADAPTER-level emitters sit outside the loop's three-line
+contract because they are not loop lines at all: the `telemetry` adapter derives
+the turn-semantics counters (`mecatl_turns_total` / `mecatl_turn_empty_total`,
+issue #81) from the `EvTurnEnd` / `EvNoProgress` event stream — a metrics
+derivation over `port.EventSink`, never a diagnostics line — and the
+`llmresilience` decorator emits provider-level stream-lifecycle diagnostics
+(retry / per-attempt-timeout / idle-stall / breaker / exhaustion) through its OWN
+injected `port.Diagnostics` (`Config.Diagnostics`, composition-wired). The
+resilience wrapper is per-provider, not session-correlated, so its lines are an
+adapter seam outside the loop's run-scoped sink and its three-line budget.
+
 The opt-in headless ask REVIEWER (issue #31, `--headless` + `--subagent-ask-reviewer`)
 adds four INFO variants at that same `resolveChildAsk` child-ask chokepoint —
 sanctioned emissions, never a fourth loop line. Each carries the clamped `command`

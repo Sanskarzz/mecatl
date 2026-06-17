@@ -22,6 +22,22 @@ type TokenCounter interface {
 	CountMessages(msgs []session.Message) int
 }
 
+// estimateZeroUsageInput implements the issue-#82 DISPLAY-ONLY zero-usage input
+// fallback. When a turn reported a real input-token figure (reported != 0) it returns
+// (0, false): no estimate. When the turn reported NO input usage (a stalled / usage-less
+// turn) AND the conversation is non-empty, it returns the TokenCounter's estimate over
+// the conversation and (est, true) so the caller knows the value is an estimate. The
+// non-empty guard is load-bearing: it ensures a genuinely empty conversation NEVER gets
+// a phantom estimate even if the counter would attribute framing overhead to an empty
+// slice — it is the boundary the fallback must not cross. The estimate feeds ONLY the
+// display meter (turn.end), never the cumulative usage or any token budget.
+func estimateZeroUsageInput(reported int, msgs []session.Message, tc TokenCounter) (int, bool) {
+	if reported != 0 || len(msgs) == 0 {
+		return 0, false
+	}
+	return tc.CountMessages(msgs), true
+}
+
 // charsPerToken is the bytes→tokens ratio the heuristic counter uses. English
 // prose and code both sit near ~4 characters per token for the common
 // byte-pair-encoding tokenizers, so this is a serviceable offline estimate.

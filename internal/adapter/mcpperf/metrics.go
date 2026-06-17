@@ -40,6 +40,8 @@ var curatedMetrics = []curatedMetric{
 	{name: "tool_queue_seconds", family: "mecatl_tool_queue_seconds", desc: "Tool dispatch queue time (histogram, seconds)."},
 	{name: "events_total", family: "mecatl_events_total", desc: "Total domain events observed, by type (counter)."},
 	{name: "runs_total", family: "mecatl_runs_total", desc: "Total runs finished, by stop reason (counter)."},
+	{name: "turns_total", family: "mecatl_turns_total", desc: "Total turns completed (the per-turn denominator) (counter)."},
+	{name: "turn_empty_total", family: "mecatl_turn_empty_total", desc: "Empty turns (no tool call, no text) — the empty SUBSET of turns_total; counts EvNoProgress emissions, up to MaxNoProgressNudges+1 per stuck sequence (counter)."},
 	{name: "tool_calls_total", family: "mecatl_tool_calls_total", desc: "Total tool calls executed, by tool and error outcome (counter)."},
 	// NOTE: the OTel prometheus exporter appends the counter _total suffix to the
 	// GATHERED family name too (mecatl.tokens → mecatl_tokens_total); the short
@@ -129,6 +131,8 @@ var roleBreakdownMetrics = map[string]bool{
 	"tool_calls_total": true,
 	"tokens":           true,
 	"active_runs":      true,
+	"turns_total":      true,
+	"turn_empty_total": true,
 }
 
 // metricsSummary builds the curated metrics-summary payload: one entry per

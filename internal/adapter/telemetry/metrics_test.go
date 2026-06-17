@@ -114,6 +114,92 @@ func TestMetricsRunsAndActiveRuns(t *testing.T) {
 	}
 }
 
+// TestMetricsTurnEndCountsTurn asserts an EvTurnEnd increments the per-turn
+// counter (mecatl.turns) — the true per-turn denominator, distinct from the
+// run-level mecatl.runs. The counter carries NO stop attribute (EvTurnEnd has
+// no stop reason; a non-varying label would mislead an operator).
+func TestMetricsTurnEndCountsTurn(t *testing.T) {
+	m, reader := newTestMetrics(t)
+
+	m.Emit(context.Background(), session.Event{Type: session.EvTurnEnd, TurnEnd: &session.TurnEndPayload{DurationMs: 10}})
+
+	turns := collect(t, reader)["mecatl.turns"]
+	sum, ok := turns.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatalf("turns is %T, want Sum[int64]", turns)
+	}
+	if len(sum.DataPoints) != 1 || sum.DataPoints[0].Value != 1 {
+		t.Fatalf("turns = %+v, want single point 1", sum.DataPoints)
+	}
+	// The point must not carry a "stop" attribute (label dropped).
+	if _, present := sum.DataPoints[0].Attributes.Value(attrStop); present {
+		t.Errorf("turns carries a %q attribute; it must be unlabelled by stop", attrStop)
+	}
+}
+
+// TestMetricsNoProgressCountsEmpty asserts that an EvNoProgress in ISOLATION
+// increments the empty-turn counter (mecatl.turn_empty) and on its own does not
+// touch mecatl.turns. This is a unit fact about the EvNoProgress branch alone;
+// in the real loop an empty turn ALSO emits EvTurnEnd (see
+// TestMetricsEmptyTurnBumpsBothCounters for the realistic relationship).
+func TestMetricsNoProgressCountsEmpty(t *testing.T) {
+	m, reader := newTestMetrics(t)
+
+	m.Emit(context.Background(), session.Event{Type: session.EvNoProgress})
+
+	data := collect(t, reader)
+	empty := data["mecatl.turn_empty"]
+	sum, ok := empty.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatalf("turn_empty is %T, want Sum[int64]", empty)
+	}
+	if len(sum.DataPoints) != 1 || sum.DataPoints[0].Value != 1 {
+		t.Errorf("turn_empty = %+v, want single point 1", sum.DataPoints)
+	}
+	// A bare EvNoProgress (no accompanying EvTurnEnd) does not bump turns.
+	if _, present := data["mecatl.turns"]; present {
+		t.Errorf("turns recorded on a bare no-progress event; want none")
+	}
+}
+
+// TestMetricsEmptyTurnBumpsBothCounters drives the REALISTIC loop sequence for
+// one empty/no-progress turn: the loop emits EvTurnEnd unconditionally on the
+// turn boundary, THEN EvNoProgress. Both fire, so turns_total AND turn_empty
+// both increment by one — they are NOT mutually exclusive; turn_empty is the
+// empty SUBSET of turns (the empty-turn share, turn_empty/turns).
+func TestMetricsEmptyTurnBumpsBothCounters(t *testing.T) {
+	m, reader := newTestMetrics(t)
+
+	// Realistic per-turn ordering: turn boundary, then the no-progress nudge.
+	m.Emit(context.Background(), session.Event{Type: session.EvTurnEnd, TurnEnd: &session.TurnEndPayload{DurationMs: 5}})
+	m.Emit(context.Background(), session.Event{Type: session.EvNoProgress})
+
+	data := collect(t, reader)
+
+	turns, ok := data["mecatl.turns"].(metricdata.Sum[int64])
+	if !ok || len(turns.DataPoints) != 1 || turns.DataPoints[0].Value != 1 {
+		t.Fatalf("turns = %+v, want single point 1 (the empty turn IS a completed turn)", data["mecatl.turns"])
+	}
+	empty, ok := data["mecatl.turn_empty"].(metricdata.Sum[int64])
+	if !ok || len(empty.DataPoints) != 1 || empty.DataPoints[0].Value != 1 {
+		t.Fatalf("turn_empty = %+v, want single point 1 (the empty subset)", data["mecatl.turn_empty"])
+	}
+}
+
+// TestMetricsTurnEmptyRoleScoped asserts a role-scoped view tags the empty-turn
+// counter with its role family (a child's no-progress turn is role-attributed).
+func TestMetricsTurnEmptyRoleScoped(t *testing.T) {
+	m, reader := newTestMetrics(t)
+	sub := m.WithRole(RoleSubagent)
+
+	sub.Emit(context.Background(), session.Event{Type: session.EvNoProgress})
+
+	empty := collect(t, reader)["mecatl.turn_empty"]
+	if got := sumPointWith(t, empty, map[string]string{attrRole: RoleSubagent}); got != 1 {
+		t.Errorf("turn_empty{role=subagent} = %d, want 1", got)
+	}
+}
+
 // TestMetricsResultNil drives the distinct r == nil branch of recordResult: a
 // terminal EvResult with no payload must still count the run (stop=none) and must
 // not touch tokens or the cache-hit gauge, and must not panic.
@@ -400,6 +486,7 @@ func TestMetricsScrapeThroughPrometheusExporter(t *testing.T) {
 	m.Emit(context.Background(), session.Event{Type: session.EvTurnEnd, TurnEnd: &session.TurnEndPayload{
 		DurationMs: 100, TTFTMs: 20, InterTokenMeanMs: 10, InterTokenMaxMs: 15,
 	}})
+	m.Emit(context.Background(), session.Event{Type: session.EvNoProgress})
 	m.ToolCall("s", session.NewToolCall("c", "bash", nil), session.NewToolResult("c", "ok"), 3*time.Millisecond, 5*time.Millisecond)
 
 	body := scrape(t, MetricsHandler(reg))
@@ -408,6 +495,8 @@ func TestMetricsScrapeThroughPrometheusExporter(t *testing.T) {
 	for _, name := range []string{
 		"mecatl_events_total",
 		"mecatl_runs_total",
+		"mecatl_turns_total",
+		"mecatl_turn_empty_total",
 		"mecatl_tool_calls_total",
 		"mecatl_tokens_total",
 		"mecatl_permission_asks_total",

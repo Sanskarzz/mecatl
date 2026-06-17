@@ -364,6 +364,13 @@ type ResultPayload struct {
 type TurnEndPayload struct {
 	// Usage is THIS turn's model-call usage (not the cumulative run total).
 	Usage Usage
+	// Estimated is true when Usage.InputTokens is a conversation-size ESTIMATE
+	// rather than a provider-reported figure — the issue-#82 zero-usage fallback
+	// fired because the turn produced no usage frame (a stalled/usage-less turn).
+	// It is DISPLAY-ONLY: the estimate never feeds the cumulative run total or a
+	// token budget (those stay on provider truth), only the context meter, which a
+	// client may flag with a "~" hint. False for an ordinary provider-reported turn.
+	Estimated bool
 	// DurationMs is the elapsed milliseconds for the turn's model call; 0 when no
 	// Clock is injected.
 	DurationMs int64

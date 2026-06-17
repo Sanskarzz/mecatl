@@ -175,6 +175,43 @@ type renderer struct {
 	// per-frame allocation on the steady-state join hit. The strings it holds are the
 	// same ones blockCache already retains, so it pins nothing extra.
 	joinScratch []string
+
+	// joinPrefixLines / joinPrefixN / joinPrefixKey are the INCREMENTAL-join state
+	// powering renderConversationLines: the streaming-frame fast path that skips the
+	// O(scrollback) rejoin the whole-join memo (joinCache, above) cannot help with —
+	// during streaming the live tail block re-renders every token, so blockRenders
+	// bumps every frame and the joinCache fast path always misses, forcing a full
+	// Builder copy of the entire scrollback per frame.
+	//
+	// The canonical per-block segment framing is: block i contributes
+	// sep(i) + scratch[i] + "\n", where sep(0)="" and sep(i>0)="\n". The full join is
+	// the concatenation of all segments, byte-for-byte identical to the monolithic
+	// loop below — so the PREFIX (segments [0, joinPrefixN)) plus a freshly built
+	// SUFFIX (segments [joinPrefixN, n)) is exactly today's output.
+	//
+	// joinPrefixLines holds the prefix ALREADY SPLIT into single (newline-free) lines,
+	// so renderConversationLines can hand it straight to vp.SetContentLines (no Split,
+	// no Builder copy of the settled scrollback) and only the suffix is built fresh
+	// each frame. joinPrefixN is the number of blocks the cached prefix covers;
+	// joinPrefixKey pins the (width, expand) it was built at (the prefix blocks did NOT
+	// re-render — that is precisely why they are in the prefix — so no per-block rev
+	// is needed; width/expand are the global axes that would change every block's
+	// render at once). A NON-TAIL mutation (resolveTool/subagentBlock/teamBlock bump a
+	// block BEHIND the tail) lowers firstChanged below joinPrefixN, which truncates the
+	// prefix before the changed index — never serving it stale.
+	joinPrefixLines []string
+	joinPrefixN     int
+	joinPrefixKey   joinPrefixState
+}
+
+// joinPrefixState is the validity key of the cached incremental-join prefix: the
+// width and expand toggle it was built under. (The prefix blocks did not re-render
+// this frame — they are in the prefix BECAUSE they were unchanged — so a per-block
+// rev is unnecessary; a width or expand change re-renders every block and must drop
+// the prefix.)
+type joinPrefixState struct {
+	width  int
+	expand bool
 }
 
 // joinRenderKey is the validity key of the memoized conversation join. blockRenders
@@ -250,6 +287,12 @@ func (r *renderer) resetBlockCaches() {
 	// index reuse that aliases a stale block entry would equally alias a stale join.
 	r.joinValid = false
 	r.joinKey = joinRenderKey{}
+	// And the incremental-join prefix, for the same index-reuse reason: the prefix is
+	// the cached render of blocks [0, joinPrefixN), so a rebuilt conversation reusing
+	// those indices would otherwise serve a stale prefix.
+	r.joinPrefixLines = r.joinPrefixLines[:0]
+	r.joinPrefixN = 0
+	r.joinPrefixKey = joinPrefixState{}
 }
 
 // setWidth records the current wrap width. Width changes are handled by the
@@ -520,15 +563,7 @@ func stripVS16(s string) string {
 // here.)
 func (r *renderer) renderConversation(c *conversation, expand bool) string {
 	before := r.blockRenders
-	// Walk every block: warms each block's cache (and re-renders the live tail,
-	// bumping blockRenders on a miss). Collect the per-block strings into a scratch
-	// slice REUSED across frames (so the walk itself adds no per-frame allocation on
-	// the steady-state hit) so the join, if it has to be rebuilt, reuses these
-	// results rather than calling renderBlock a second time per block.
-	r.joinScratch = r.joinScratch[:0]
-	for i := range c.blocks {
-		r.joinScratch = append(r.joinScratch, r.renderBlock(i, &c.blocks[i], expand))
-	}
+	r.walkBlocks(c, expand)
 
 	// Fast path: no block re-rendered this frame and the join signature is
 	// unchanged, so the previously joined string is still byte-identical — reuse it
@@ -566,6 +601,127 @@ func (r *renderer) renderConversation(c *conversation, expand bool) string {
 	return result
 }
 
+// walkBlocks renders every block (warming the per-block cache, re-rendering the
+// live tail) into the reused joinScratch buffer and returns firstChanged: the
+// LOWEST block index that re-rendered this frame (sentinel len(c.blocks) = nothing
+// changed). It detects a re-render by comparing blockRenders before/after each
+// renderBlock call — the same monotonic cache-miss counter the join memo keys on —
+// so it stays decoupled from renderBlock itself. firstChanged is the truncation
+// point the incremental-join prefix relies on: every block below it hit the cache
+// and is byte-identical to last frame, so the prefix [0, firstChanged) is reusable;
+// a NON-TAIL mutation lowers firstChanged to the mutated index, truncating the
+// prefix before it.
+func (r *renderer) walkBlocks(c *conversation, expand bool) (firstChanged int) {
+	firstChanged = len(c.blocks)
+	r.joinScratch = r.joinScratch[:0]
+	for i := range c.blocks {
+		before := r.blockRenders
+		r.joinScratch = append(r.joinScratch, r.renderBlock(i, &c.blocks[i], expand))
+		if r.blockRenders != before && i < firstChanged {
+			firstChanged = i
+		}
+	}
+	return firstChanged
+}
+
+// renderConversationLines is the line-slice sibling of renderConversation: it
+// returns the conversation as a slice of single (newline-free) lines ready for
+// vp.SetContentLines, REUSING the cached prefix of settled blocks and only building
+// the changed suffix fresh each frame. This is the streaming-frame fast path — the
+// live tail re-renders every token, so the whole-join memo (joinCache) always
+// misses during streaming and a full O(scrollback) Builder copy fires every frame;
+// here only the (small) suffix is rebuilt.
+//
+// Canonical segment framing (identical to renderConversation's monolithic loop):
+// block i contributes sep(i) + scratch[i] + "\n" with sep(0)="" and sep(i>0)="\n".
+// The prefix is the line-split of segments [0, prefixN); the suffix is the
+// line-split of segments [prefixN, n). prefixN = min(firstChanged, n): blocks below
+// firstChanged did NOT re-render, so they are byte-identical to last frame.
+//
+// Correctness invalidation (a stale prefix is worse than the perf cost): the cached
+// prefix is reused ONLY when it covers EXACTLY [0, prefixN) — i.e. joinPrefixN ==
+// prefixN — at the SAME (width, expand). The joinPrefixN == prefixN check is THE
+// load-bearing guard: a NON-TAIL mutation lowers firstChanged (→ prefixN), a block
+// count shrink lowers prefixN, and a width/expand change re-renders EVERY block so
+// firstChanged drops to 0 (→ prefixN 0) — all three move prefixN away from the cached
+// joinPrefixN and force a rebuild. The joinPrefixKey (width, expand) compare is
+// therefore belt-and-suspenders, NOT separately load-bearing — exactly like the
+// joinKey {width, expand} fields on the whole-join memo: it guards a hypothetical
+// future where the prefix could change WITHOUT firstChanged dropping to 0 (e.g. a
+// width-dependent inter-block separator), a case today's render cannot reach. Keep
+// it for the same reason joinKey keeps its fields; removing it is not observable
+// because firstChanged already subsumes it (see the report's mutation note).
+//
+// The returned slice is freshly allocated EACH call (prefix lines appended into a
+// new backing array, then suffix lines), so vp.SetContentLines — which retains and
+// may mutate the slice it is handed (slices.Insert on embedded newlines) — never
+// corrupts the cached joinPrefixLines. The slice safety rests on TWO facts: the
+// fresh backing array (SetContentLines mutates that array, not joinPrefixLines'),
+// and Go string immutability (the prefix STRINGS are shared by value but can never
+// be mutated in place). It does NOT rely on the prefix lines being newline-free —
+// they are split single lines, but SetContentLines is free to re-split them and the
+// fresh array still absorbs the result.
+func (r *renderer) renderConversationLines(c *conversation, expand bool) []string {
+	firstChanged := r.walkBlocks(c, expand)
+	n := len(r.joinScratch)
+	prefixN := min(firstChanged, n)
+
+	// Decide whether the cached prefix still covers exactly [0, prefixN) at the
+	// current width/expand. If not, rebuild it from the settled segments.
+	wantKey := joinPrefixState{width: r.width, expand: expand}
+	if r.joinPrefixKey != wantKey || r.joinPrefixN != prefixN {
+		r.rebuildPrefix(prefixN)
+		r.joinPrefixN = prefixN
+		r.joinPrefixKey = wantKey
+	}
+
+	// Assemble the frame: a fresh slice = cached prefix lines + freshly-split suffix
+	// segments + the ONE terminal "" element. Pre-size generously to keep the suffix
+	// appends allocation-light.
+	lines := make([]string, 0, len(r.joinPrefixLines)+(n-prefixN)*2+1)
+	lines = append(lines, r.joinPrefixLines...)
+	for i := prefixN; i < n; i++ {
+		appendSegmentLines(&lines, i, r.joinScratch[i])
+	}
+	// The full join ends with the last segment's trailing "\n", whose split tail is a
+	// single trailing "" element — the same one strings.Split(join, "\n") produces.
+	// It belongs to no segment's prefix-cacheable lines (when a suffix exists, an
+	// inter-block "\n\n" boundary owns the blank line via the next segment's leading
+	// ""), so it is appended once here, per frame, at the absolute end — covering the
+	// empty conversation too (n==0 → just [""], which SetContentLines maps to nil).
+	lines = append(lines, "")
+	return lines
+}
+
+// rebuildPrefix rebuilds joinPrefixLines as the line-split of segments [0, prefixN),
+// reusing the existing backing array (truncate-and-append). prefixN==0 leaves it
+// empty.
+func (r *renderer) rebuildPrefix(prefixN int) {
+	r.joinPrefixLines = r.joinPrefixLines[:0]
+	for i := 0; i < prefixN; i++ {
+		appendSegmentLines(&r.joinPrefixLines, i, r.joinScratch[i])
+	}
+}
+
+// appendSegmentLines appends block i's content lines to dst, modelling the
+// canonical segment sep(i) + scratch + "\n" (sep(0)="", sep(i>0)="\n") MINUS its
+// trailing "\n" — that terminal "\n"'s split tail is handled once, at the absolute
+// end of the frame, by renderConversationLines. The leading "\n" of block i>0 (the
+// inter-block separator) becomes one blank "" line BEFORE the block's content; the
+// content itself is scratch split on "\n". Concatenated across all blocks this
+// yields strings.Split(fullJoin, "\n") exactly, modulo that single terminal "".
+func appendSegmentLines(dst *[]string, i int, scratch string) {
+	if i > 0 {
+		// The inter-block separator "\n" produces one blank line before this block.
+		*dst = append(*dst, "")
+	}
+	// scratch may be empty (an empty block render); SplitSeq still yields one ""
+	// element for it, matching strings.Split over the full join.
+	for line := range strings.SplitSeq(scratch, "\n") {
+		*dst = append(*dst, line)
+	}
+}
+
 // renderBlock is the CACHED per-block entry point: it returns the memoized
 // render when the block's revision, the wrap width, and the expand toggle all
 // match the cached entry, and otherwise renders fresh via renderBlockFresh,
@@ -593,6 +749,28 @@ func (r *renderer) renderBlock(idx int, b *block, expand bool) string {
 	}
 	r.blockCache[idx] = blockEntry{rev: b.rev, width: r.width, expand: expand, out: out}
 	r.blockRenders++
+	// CORRECTNESS CHOKEPOINT (shared by BOTH render paths): a fresh render of a block
+	// inside the cached incremental-join prefix invalidates that prefix. The prefix
+	// (joinPrefixLines, maintained by renderConversationLines) covers [0, joinPrefixN),
+	// but blockCache/blockRenders are mutated by renderConversation (the string path
+	// taken under selection/expand) TOO — so without this, a string-path frame could
+	// re-render a non-tail block (resolveTool/subagentBlock/teamBlock/an
+	// ex-tail assistant), update blockCache, and leave joinPrefixLines stale; the next
+	// lines-path frame would then HIT blockCache for that block (no blockRenders bump,
+	// firstChanged stays high, joinPrefixN matches) and serve the STALE prefix.
+	// Couple the invalidation to this single shared re-render point — not the
+	// lines-path walk — so either path drops the prefix the instant a covered block
+	// re-renders. Invalidate-to-0 (full rebuild next lines frame) is the simplest
+	// correct choice; the cost is paid only on the rare non-tail-mutation/path-switch
+	// frame, never on the streaming hot path (where the tail block is at index n-1 ≥
+	// joinPrefixN, so this never fires). INVARIANT: after any frame on either path,
+	// joinPrefixLines covers exactly [0, joinPrefixN) and no block in [0, joinPrefixN)
+	// has re-rendered since the prefix was built.
+	if idx < r.joinPrefixN {
+		r.joinPrefixLines = r.joinPrefixLines[:0]
+		r.joinPrefixN = 0
+		r.joinPrefixKey = joinPrefixState{}
+	}
 	return out
 }
 

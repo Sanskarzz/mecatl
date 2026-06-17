@@ -45,6 +45,7 @@ import (
 	"net"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	oai "github.com/openai/openai-go/v3"
 
@@ -83,6 +84,14 @@ type Config struct {
 	// Clock returns the current time; injectable for tests. nil selects
 	// time.Now.
 	Clock func() time.Time
+	// Diagnostics is the optional operational-logging sink for stream-lifecycle
+	// events (retries, per-attempt timeouts, idle stalls, breaker transitions,
+	// exhaustion). nil selects port.NopDiagnostics. This is an ADAPTER seam — it is
+	// NOT the loop's run-scoped sink and so is NOT subject to the loop's three-line
+	// budget (see docs/adr/0020-diagnostics.md): the wrapper is per-provider and
+	// logs provider-level lifecycle. It sees only port.LLMRequest + errors, never
+	// prompt text, so every emitted record is metadata-only.
+	Diagnostics port.Diagnostics
 }
 
 // Wrap decorates inner with the resilience behaviour described by cfg and
@@ -96,6 +105,9 @@ func Wrap(inner port.LLMProvider, cfg Config) port.LLMProvider {
 	}
 	if cfg.Clock == nil {
 		cfg.Clock = time.Now
+	}
+	if cfg.Diagnostics == nil {
+		cfg.Diagnostics = port.NopDiagnostics{}
 	}
 	return &resilientProvider{inner: inner, cfg: cfg}
 }
@@ -119,10 +131,32 @@ type ExhaustedError struct {
 	Attempts int
 	// Err is the final underlying error.
 	Err error
+	// PerAttempt is the per-attempt establishment budget that was in force, used to
+	// name the timeout duration in the operator-facing message. 0 when unset.
+	PerAttempt time.Duration
 }
 
+// Error renders an OPERATOR-FACING message (issue #82): it surfaces verbatim to the
+// TUI footer / transcript, so it avoids the internal package prefix and the raw inner
+// sentinel, says in plain language what went wrong, and names the next action. The
+// first-chunk timeout (the model connected but never started responding within the
+// per-attempt budget — errFirstChunkTimeout) gets a tailored message; any other
+// exhausted cause falls back to a generic but still prefix-free, action-bearing line.
 func (e *ExhaustedError) Error() string {
-	return fmt.Sprintf("llmresilience: stream not established after %d attempt(s): %v", e.Attempts, e.Err)
+	if errors.Is(e.Err, errFirstChunkTimeout) {
+		within := "the per-attempt timeout"
+		if e.PerAttempt > 0 {
+			within = fmt.Sprintf("%s (%s)", within, e.PerAttempt)
+		}
+		return fmt.Sprintf(
+			"the model did not start responding within %s, across %d attempt(s). "+
+				"Try resending, switching to a faster model, or raising --llm-per-attempt-timeout.",
+			within, e.Attempts)
+	}
+	return fmt.Sprintf(
+		"the model stream could not be established after %d attempt(s): %v. "+
+			"Try resending or raising --llm-per-attempt-timeout.",
+		e.Attempts, e.Err)
 }
 
 // Unwrap exposes the final underlying error to errors.Is/As.
@@ -148,6 +182,15 @@ func (e *StreamIdleError) Error() string {
 // holds, classifying the stall as a deadline (not a caller cancel).
 func (*StreamIdleError) Unwrap() error { return context.DeadlineExceeded }
 
+// errFirstChunkTimeout is the synthesized inner error for an establishment
+// attempt that connected but produced no first chunk before the per-attempt
+// deadline fired (the adapter swallowed the ctx error and yielded nothing).
+// attemptError wraps it as `DeadlineExceeded: errFirstChunkTimeout`, so it is
+// retryable per DefaultClassifier and transient per isTransientForBreaker (both
+// key off context.DeadlineExceeded), and it surfaces a diagnosable message
+// instead of a phantom empty-success completion. See establish's empty branch.
+var errFirstChunkTimeout = errors.New("llmresilience: per-attempt timeout before first chunk")
+
 // breakerState is the closed/open/half-open state machine, guarded by mu.
 type breakerState struct {
 	mu sync.Mutex
@@ -165,6 +208,39 @@ type resilientProvider struct {
 	inner   port.LLMProvider
 	cfg     Config
 	breaker breakerState
+}
+
+// diag returns the configured Diagnostics sink, nil-safe (mirrors the engine's
+// cfg.diag() helper). Wrap defaults cfg.Diagnostics to port.NopDiagnostics, but a
+// resilientProvider constructed directly (zero Config in a test) may still hold a
+// nil, so guard here too.
+func (p *resilientProvider) diag() port.Diagnostics {
+	if p.cfg.Diagnostics == nil {
+		return port.NopDiagnostics{}
+	}
+	return p.cfg.Diagnostics
+}
+
+// clampErr renders an error to a length-bounded string for a diagnostics arg.
+// The wrapper sees only port.LLMRequest + errors, never prompt text, but a
+// provider error body can still be large — clamp it so a single log line stays
+// bounded.
+func clampErr(err error) string {
+	if err == nil {
+		return ""
+	}
+	const maxLen = 256
+	s := err.Error()
+	if len(s) > maxLen {
+		// Back off to the nearest rune boundary so we never split a multi-byte
+		// UTF-8 rune (which would render as a replacement char in the log line).
+		cut := maxLen
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		return s[:cut] + "…"
+	}
+	return s
 }
 
 // Capabilities forwards the wrapped provider's capabilities unchanged: the
@@ -192,6 +268,7 @@ func (p *resilientProvider) allow(now time.Time) error {
 	}
 	// Cooldown elapsed: admit a single half-open trial.
 	p.breaker.halfOpen = true
+	p.diag().Log(context.Background(), port.LevelInfo, "llm circuit breaker half-open; admitting a trial")
 	return nil
 }
 
@@ -201,10 +278,14 @@ func (p *resilientProvider) recordSuccess() {
 		return
 	}
 	p.breaker.mu.Lock()
-	defer p.breaker.mu.Unlock()
+	wasOpen := p.breaker.open || p.breaker.halfOpen
 	p.breaker.consecutiveFailures = 0
 	p.breaker.open = false
 	p.breaker.halfOpen = false
+	p.breaker.mu.Unlock()
+	if wasOpen {
+		p.diag().Log(context.Background(), port.LevelInfo, "llm circuit breaker closed (recovered)")
+	}
 }
 
 // recordFailure tallies a failed attempt and opens the breaker once the
@@ -218,18 +299,33 @@ func (p *resilientProvider) recordFailure(now time.Time) {
 		return
 	}
 	p.breaker.mu.Lock()
-	defer p.breaker.mu.Unlock()
+	// A half-open trial leaves open=true (allow() sets halfOpen without clearing
+	// open), so a failed trial is NOT a closed→open crossing by the open bit
+	// alone. Treat a failed half-open trial as its own crossing: it is an
+	// operator-meaningful "breaker re-opened" event. `crossing` is therefore the
+	// UNION of (closed→open) and (half-open trial failed and re-opened).
+	wasOpen := p.breaker.open
+	wasHalfOpen := p.breaker.halfOpen
 	p.breaker.consecutiveFailures++
 	if p.breaker.halfOpen {
 		// A failed trial re-opens the breaker and restarts the cooldown.
 		p.breaker.halfOpen = false
 		p.breaker.open = true
 		p.breaker.openedAt = now
-		return
-	}
-	if p.breaker.consecutiveFailures >= p.cfg.BreakerThreshold {
+	} else if p.breaker.consecutiveFailures >= p.cfg.BreakerThreshold {
 		p.breaker.open = true
 		p.breaker.openedAt = now
+	}
+	// Emit on a fresh closed→open crossing OR on a half-open→open re-open.
+	opened := p.breaker.open && (!wasOpen || wasHalfOpen)
+	failures := p.breaker.consecutiveFailures
+	p.breaker.mu.Unlock()
+	// Log the open transition exactly once per crossing: the initial
+	// closed→open, and again each time a failed half-open trial re-opens it.
+	if opened {
+		p.diag().Log(context.Background(), port.LevelInfo, "llm circuit breaker opened",
+			"consecutive_failures", failures,
+			"cooldown", p.cfg.BreakerCooldown)
 	}
 }
 
@@ -278,18 +374,34 @@ func (p *resilientProvider) Stream(ctx context.Context, req port.LLMRequest) (it
 		if isTransientForBreaker(err) {
 			p.recordFailure(p.cfg.Clock())
 		}
+		// A per-attempt timeout (establishment deadline) is a distinct, diagnosable
+		// stall signal — surface it before backing off / retrying.
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			p.diag().Log(ctx, port.LevelDebug, "llm stream per-attempt timeout fired",
+				"per_attempt_timeout", p.cfg.PerAttemptTimeout,
+				"attempt", attempt+1,
+				"max_attempts", p.cfg.MaxAttempts)
+		}
 		// Permanent (non-retryable) errors are surfaced verbatim, not retried.
 		if !p.cfg.Classifier(err) {
 			return nil, err
 		}
 		// Backoff before the next attempt, unless this was the last one.
 		if attempt < p.cfg.MaxAttempts-1 {
-			if berr := p.backoff(ctx, attempt); berr != nil {
+			d := p.backoffDuration(attempt)
+			p.diag().Log(ctx, port.LevelDebug, "llm stream attempt failed; retrying",
+				"attempt", attempt+1,
+				"max_attempts", p.cfg.MaxAttempts,
+				"backoff", d,
+				"err", clampErr(err))
+			if berr := p.backoffWith(ctx, d); berr != nil {
 				return nil, berr
 			}
 		}
 	}
-	return nil, &ExhaustedError{Attempts: p.cfg.MaxAttempts, Err: lastErr}
+	p.diag().Log(ctx, port.LevelInfo, "llm stream not established after all attempts",
+		"attempts", p.cfg.MaxAttempts)
+	return nil, &ExhaustedError{Attempts: p.cfg.MaxAttempts, Err: lastErr, PerAttempt: p.cfg.PerAttemptTimeout}
 }
 
 // establish performs a single attempt: it applies the per-attempt timeout,
@@ -331,11 +443,26 @@ func (p *resilientProvider) establish(ctx context.Context, req port.LLMRequest) 
 	next, stop := iter.Pull2(seq)
 	chunk, cerr, ok := next()
 	if !ok {
-		// Empty stream: not a failure — treat as a successful (empty) stream.
+		// next() returned ok=false: either a genuinely empty stream (the inner
+		// yielded zero chunks and finished) OR the per-attempt deadline fired
+		// during the first-chunk read and the adapter swallowed the ctx error
+		// (it yields nothing on cancel). Disambiguate by the per-attempt cause,
+		// captured BEFORE cleanup cancel() runs (same discipline as attemptError):
+		// a DeadlineExceeded that is NOT a caller cancel is a retryable
+		// establishment timeout — surface it as a real failure so the retry/
+		// breaker path engages and an exhausted attempt becomes a *ExhaustedError
+		// (→ StopError), NOT a phantom clean-done empty completion. A genuinely
+		// empty stream (cause == nil) stays the empty-success path unchanged.
+		// We are still PRE-first-chunk here, so no-replay-after-first-chunk holds.
+		cause := attemptCtx.Err()
 		stop()
 		if cancel != nil {
 			cancel()
 		}
+		if errors.Is(cause, context.DeadlineExceeded) && ctx.Err() == nil {
+			return nil, attemptError(cause, errFirstChunkTimeout)
+		}
+		// Empty stream: not a failure — treat as a successful (empty) stream.
 		return &firstChunk{empty: true}, nil
 	}
 	if cerr != nil {
@@ -448,6 +575,8 @@ func (p *resilientProvider) restSeq(next func() (port.Chunk, error, bool), stop 
 				// stop()/next() may not run concurrently, so the helper's next() has to
 				// have completed first.
 				<-results
+				p.diag().Log(context.Background(), port.LevelInfo, "llm stream stalled (idle timeout); ending turn",
+					"idle", p.cfg.StreamIdleTimeout)
 				yield(port.Chunk{}, &StreamIdleError{Idle: p.cfg.StreamIdleTimeout})
 				return
 			}
@@ -502,10 +631,11 @@ func wrap(head *firstChunk) iter.Seq2[port.Chunk, error] {
 	}
 }
 
-// backoff sleeps before the next attempt with full-jitter exponential backoff,
-// honouring ctx (it aborts promptly on cancellation and returns ctx.Err()).
-func (p *resilientProvider) backoff(ctx context.Context, attempt int) error {
-	d := p.backoffDuration(attempt)
+// backoffWith sleeps for the pre-computed duration d before the next attempt,
+// honouring ctx (it aborts promptly on cancellation and returns ctx.Err()). The
+// duration is computed by the caller (so it can also be logged) via
+// backoffDuration.
+func (*resilientProvider) backoffWith(ctx context.Context, d time.Duration) error {
 	if d <= 0 {
 		return ctx.Err()
 	}

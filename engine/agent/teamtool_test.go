@@ -191,9 +191,19 @@ func TestTeamToolFormsTeamAndIsolatesContent(t *testing.T) {
 	if end.Usage != wantUsage {
 		t.Errorf("team.end usage = %+v, want the summed member total %+v", end.Usage, wantUsage)
 	}
-	// Sum of the 6 scripted member turns (5 scheduled + 1 synthesis): in=210 out=42.
-	if end.Usage.InputTokens != 210 || end.Usage.OutputTokens != 42 {
-		t.Errorf("team.end usage = %+v, want in=210 out=42 (sum of the 6 scripted turns)", end.Usage)
+	// end.Usage is the EvTeamEnd DISPLAY payload (summed from member turn.end events,
+	// memberEventUsage) — the meter-class figure, NOT the budget figure (the supervisor's
+	// budget total reads per-drive EvResult.Usage = provider truth; see
+	// TestTeamTokenBudgetZeroUsageNeverTrips). The 6 scripted member turns report
+	// in=210 out=42; additional usage-LESS turns (an exhausted mockllm script yields an
+	// empty turn) pick up the issue-#82 DISPLAY-ONLY zero-usage estimate on their
+	// turn.end, so the summed input is >= 210 (a small positive estimate, never the
+	// budget). Output is never fabricated, so it stays exactly 42.
+	if end.Usage.OutputTokens != 42 {
+		t.Errorf("team.end output = %d, want 42 (sum of scripted turn output; the zero-usage fallback never fabricates output)", end.Usage.OutputTokens)
+	}
+	if end.Usage.InputTokens < 210 {
+		t.Errorf("team.end input = %d, want >= 210 (scripted 210 + display-only zero-usage estimate on usage-less turns)", end.Usage.InputTokens)
 	}
 
 	// --- CONTENT ISOLATION: only the joined summary enters the parent ------

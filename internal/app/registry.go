@@ -316,6 +316,10 @@ func newOpenAIEntry(cfg Config, id, key, baseURL string) providerEntry {
 		StreamIdleTimeout: cfg.LLMStreamIdleTimeout,
 		BreakerThreshold:  cfg.LLMBreakerThreshold,
 		BreakerCooldown:   cfg.LLMBreakerCooldown,
+		// Provider-tag every resilience line so a multi-provider operator can tell
+		// WHICH provider stalled/opened its breaker (the lines themselves carry no
+		// provider identity otherwise).
+		Diagnostics: cfg.diag().With("provider", id),
 	})
 	cfg.diag().Log(context.Background(), port.LevelInfo, "LLM resilience enabled",
 		"provider", id,
@@ -381,6 +385,8 @@ func newAnthropicEntry(cfg Config, key string, meta *liveMetaStore) providerEntr
 		StreamIdleTimeout: cfg.LLMStreamIdleTimeout,
 		BreakerThreshold:  cfg.LLMBreakerThreshold,
 		BreakerCooldown:   cfg.LLMBreakerCooldown,
+		// Provider-tag every resilience line (see the openai entry).
+		Diagnostics: cfg.diag().With("provider", providerAnthropic),
 	})
 	cfg.diag().Log(context.Background(), port.LevelInfo, "LLM resilience enabled",
 		"provider", providerAnthropic,

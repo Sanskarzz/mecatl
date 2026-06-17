@@ -123,6 +123,19 @@ type config struct {
 	memoryDir string
 	noMemory  bool
 
+	// Embedded-server session-store config (issue #79; used only when hosting an
+	// in-process server). The durable JSONL session/event store. ON by default at
+	// a per-workspace dir under $XDG_STATE_HOME/mecatui/sessions (see
+	// resolveStoreDir/defaultStoreDir), so a session survives restart and can be
+	// inspected after the fact. PRIVACY: the store holds the RAW conversation
+	// (prompts, model output, tool args/results) in PLAINTEXT on disk; the dir is
+	// created mode 0700 (owner-only). storeDir overrides the path; noStore opts
+	// out entirely and wins (the engine then falls back to the in-memory store and
+	// nothing persists). Precedence is applied in embeddedConfig (resolveStoreDir),
+	// not here.
+	storeDir string
+	noStore  bool
+
 	// Embedded-server soul config (issue #14, Phase 1; used only when hosting an
 	// in-process server). A user-scoped, agent-READ-ONLY persona fragment injected
 	// as turn-0 context. ON by default reading the conventional
@@ -241,6 +254,8 @@ func parseFlags(args []string) (config, error) {
 		"discard the embedded server's operational diagnostics instead of writing them to $XDG_STATE_HOME/mecatl/mecatui.log (fallback ~/.local/state/mecatl/mecatui.log). Diagnostics NEVER go to stderr (that corrupts the TUI alt-screen); --quiet drops them entirely")
 	fs.StringVar(&cfg.memoryDir, "memory-dir", "", "embedded server only: per-project memory store directory (empty = a per-project default under $XDG_DATA_HOME/mecatui/memory)")
 	fs.BoolVar(&cfg.noMemory, "no-memory", false, "embedded server only: disable cross-session memory (Remember/Recall) entirely")
+	fs.StringVar(&cfg.storeDir, "store-dir", "", "embedded server only: durable JSONL session/event store directory (empty = a per-workspace default under $XDG_STATE_HOME/mecatui/sessions, so sessions survive restart and can be inspected after the fact). PRIVACY: stores the RAW conversation (prompts, model output, tool args/results) in PLAINTEXT; the dir is created mode 0700 (owner-only). Tool args/results include file contents and command output the agent read, so secrets it touched (e.g. a .env it opened) are persisted too")
+	fs.BoolVar(&cfg.noStore, "no-store", false, "embedded server only: disable the durable session store (use an in-memory store instead, so nothing is persisted to disk)")
 	fs.StringVar(&cfg.soulFile, "soul-file", "", "embedded server only: path to a user-scoped, agent-READ-ONLY persona/\"soul\" file injected as turn-0 context (empty = the conventional $XDG_CONFIG_HOME/mecatl/soul.md, fallback ~/.config/mecatl/soul.md; fail-soft if absent)")
 	fs.BoolVar(&cfg.noSoul, "no-soul", false, "embedded server only: disable the user-scoped persona/soul fragment entirely")
 	fs.BoolVar(&cfg.approveSoul, "approve-soul", false, "embedded server only: (re)write the soul DRIFT BASELINE to the current soul's content hash, accepting the file as-is. The baseline is a harness-owned sidecar next to the soul (<soul-path>.sha256); a later run whose hash differs logs a drift WARN")

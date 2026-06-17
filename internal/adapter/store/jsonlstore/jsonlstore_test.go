@@ -27,6 +27,23 @@ func newStore(t *testing.T) (*jsonlstore.Store, string) {
 	return st, dir
 }
 
+// TestNewCreatesDirAt0700 pins the privacy posture (issue #79): the store holds
+// raw conversation transcripts in plaintext, so New creates a not-yet-existing
+// store dir owner-only (mode 0700).
+func TestNewCreatesDirAt0700(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "store") // a fresh path New must create
+	if _, err := jsonlstore.New(dir); err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o700 {
+		t.Errorf("store dir mode = %o, want 0700 (owner-only; the store holds plaintext transcripts)", perm)
+	}
+}
+
 func driven(t *testing.T) *session.Session {
 	t.Helper()
 	s := session.New("sess-1", session.ModePlan, "/ws", session.Limits{

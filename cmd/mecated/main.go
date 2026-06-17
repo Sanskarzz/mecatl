@@ -283,6 +283,14 @@ type config struct {
 	childRetentionMaxPerFamily int
 	childGCInterval            time.Duration
 
+	// Main-session retention/GC (issue #79): age threshold and a global count cap
+	// for persisted TOP-LEVEL (operator/service) session snapshots, which the
+	// child sweep never touches. Durable-store-only, like the child knobs. Both
+	// default 0 (DISABLED) — mecated's behaviour is byte-unchanged unless an
+	// operator opts in; mecatui defaults them on for its durable per-workspace store.
+	mainRetention         time.Duration
+	mainRetentionMaxTotal int
+
 	// Slash commands: directory of <name>.md command templates, and an explicit
 	// enable switch. commandsDir set OR enableCommands true wires the
 	// DirCommandExpander; otherwise the default NoopExpander is left in place.
@@ -763,6 +771,8 @@ func appConfig(cfg config, sink port.EventSink, recorder port.ToolCallRecorder, 
 		MemoryConsolidateInterval:    cfg.memoryConsolidateInterval,
 		ChildRetention:               cfg.childRetention,
 		ChildRetentionMaxPerFamily:   cfg.childRetentionMaxPerFamily,
+		MainRetention:                cfg.mainRetention,
+		MainRetentionMaxTotal:        cfg.mainRetentionMaxTotal,
 		ChildGCInterval:              cfg.childGCInterval,
 		SessionStoreURL:              cfg.sessionStoreURL,
 		MemoryStoreURL:               cfg.memoryStoreURL,
@@ -975,7 +985,7 @@ func parseFlags(argv []string) (config, error) {
 	fs.IntVar(&cfg.contextWindowOverride, "context-window-override", 0, "override the model's context window in tokens for BOTH the compaction trigger (compaction fires at 80% of it) AND the footer context-meter denominator echoed to clients. Set this to the model's ACTUAL window when a model under-reports its window or sits behind a proxy that does. 0 (default) keeps the live/catalogued/128k resolution unchanged. A small value (below a few thousand tokens) forces the agent to compact on nearly every turn — degraded, only useful for stress-testing compaction.")
 
 	fs.IntVar(&cfg.llmMaxAttempts, "llm-max-attempts", 3, "max LLM stream-establish attempts (initial call plus retries)")
-	fs.DurationVar(&cfg.llmPerAttemptTimeout, "llm-per-attempt-timeout", 30*time.Second, "per-attempt timeout for establishing an LLM stream (0 disables)")
+	fs.DurationVar(&cfg.llmPerAttemptTimeout, "llm-per-attempt-timeout", 60*time.Second, "per-attempt timeout for establishing an LLM stream incl. the first chunk (0 disables); large-context reasoning models can take >30s to first token")
 	fs.DurationVar(&cfg.llmStreamIdleTimeout, "llm-stream-idle-timeout", 120*time.Second, "max idle gap between LLM stream chunks after the first chunk; a longer stall terminates the turn (0 disables)")
 	fs.IntVar(&cfg.llmBreakerThreshold, "llm-breaker-threshold", 5, "consecutive LLM failures that open the circuit breaker (0 disables)")
 	fs.DurationVar(&cfg.llmBreakerCooldown, "llm-breaker-cooldown", 30*time.Second, "how long the LLM circuit breaker stays open before half-opening")
@@ -1001,7 +1011,9 @@ func parseFlags(argv []string) (config, error) {
 	fs.DurationVar(&cfg.memoryConsolidateInterval, "memory-consolidate-interval", 0, "interval for background memory consolidation (dream); 0 disables. Only meaningful with --memory-dir")
 	fs.DurationVar(&cfg.childRetention, "child-retention", 168*time.Hour, "how long persisted CHILD session snapshots (subagent-*/parallel-*/team-* ids — the InspectSubagent/resume handles) are retained before the GC sweep deletes them; main sessions are never touched. Only meaningful with a durable store (--store-dir or a prunable --session-store-url driver). 0 disables the age pass")
 	fs.IntVar(&cfg.childRetentionMaxPerFamily, "child-retention-max-per-family", 500, "max persisted child session snapshots kept per delegation family (subagent/parallel/team); the oldest beyond the cap are deleted, skipping in-flight runs. Durable-store-only, like --child-retention. 0 disables the cap")
-	fs.DurationVar(&cfg.childGCInterval, "child-gc-interval", time.Hour, "how often the child-session retention GC re-sweeps after the startup sweep; 0 = sweep at startup only. Only meaningful when --child-retention or --child-retention-max-per-family is active")
+	fs.DurationVar(&cfg.mainRetention, "main-retention", 0, "how long persisted MAIN (top-level operator/service) session snapshots are retained before the GC sweep deletes them; child sessions are governed by --child-retention instead. Only meaningful with a durable store (--store-dir or a prunable --session-store-url driver). 0 (default) disables the main age pass entirely, so main sessions are never touched")
+	fs.IntVar(&cfg.mainRetentionMaxTotal, "main-retention-max-total", 0, "max persisted MAIN (top-level) session snapshots kept store-wide; the oldest beyond the cap are deleted, skipping in-flight runs. Durable-store-only, like --main-retention. 0 (default) disables the cap, so main sessions are never touched")
+	fs.DurationVar(&cfg.childGCInterval, "child-gc-interval", time.Hour, "how often the session retention GC re-sweeps after the startup sweep; 0 = sweep at startup only. Only meaningful when a child or main retention/cap knob is active")
 	fs.StringVar(&cfg.memoryStoreURL, "memory-store-url", "", "host:port of a remote memory-store gRPC driver (mecatl.driver.v1.MemoryStoreService); replaces the local flock store, so it is mutually exclusive with --memory-dir. Enables the Remember/Recall tools like --memory-dir does. Same auth/TLS posture as --session-store-url (equal URLs share one connection)")
 	fs.StringVar(&cfg.eventLogURL, "event-log-url", "", "host:port of a remote event-log gRPC driver (mecatl.driver.v1.EventLogService) for the durable per-session event timeline (reasoning, ask/verdict pairs, delegation lifecycle); INDEPENDENT of the session store. Empty keeps the local default (the --store-dir jsonl log, or in-memory). Append happens at the relay (a fault WARNs, never aborts the run); Read is server-streaming. Same auth/TLS posture as --session-store-url (equal URLs share one connection)")
 	fs.StringVar(&cfg.driverAuthToken, "driver-auth-token", "", "bearer token sent on every store-driver RPC (or MECATL_DRIVER_AUTH_TOKEN; empty disables driver auth). Refused over cleartext to a non-loopback driver — pair with --driver-tls")

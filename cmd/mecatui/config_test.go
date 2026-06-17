@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/adrg/xdg"
 
@@ -297,6 +298,154 @@ func TestParseFlagsMemoryFlags(t *testing.T) {
 	}
 	if !cfg.noMemory {
 		t.Error("--no-memory did not set noMemory")
+	}
+}
+
+// TestParseFlagsStoreDefaults asserts the session-store flags default to
+// off/empty; the per-workspace default PATH is computed later in embeddedConfig
+// (resolveStoreDir), not here (issue #79).
+func TestParseFlagsStoreDefaults(t *testing.T) {
+	cfg, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if cfg.storeDir != "" {
+		t.Errorf("storeDir = %q, want \"\" (default computed in embeddedConfig)", cfg.storeDir)
+	}
+	if cfg.noStore {
+		t.Error("noStore = true by default, want false (durable store on)")
+	}
+}
+
+// TestParseFlagsStoreFlags asserts --store-dir and --no-store map onto the config
+// fields (issue #79).
+func TestParseFlagsStoreFlags(t *testing.T) {
+	cfg, err := parseFlags([]string{"-store-dir", "/tmp/store", "-no-store"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if cfg.storeDir != "/tmp/store" {
+		t.Errorf("storeDir = %q, want /tmp/store", cfg.storeDir)
+	}
+	if !cfg.noStore {
+		t.Error("--no-store did not set noStore")
+	}
+}
+
+// TestDefaultStoreDir is a pure table test of defaultStoreDir: it reads no
+// globals (the stateBase is injected), so it needs no env dance and is safe to
+// run in parallel. Covers the path-slug encoding (the SAME scheme as
+// defaultMemoryDir), per-workspace disambiguation, and both degraded guards
+// (empty base, empty workspace) (issue #79).
+func TestDefaultStoreDir(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name          string
+		stateBase, ws string
+		want          string
+	}{
+		{
+			name:      "path slug under state home",
+			stateBase: "/xdg/state",
+			ws:        "/var/home/jaosorior/Development/stacklok/mecatl",
+			want:      filepath.Join("/xdg/state", "mecatui", "sessions", "-var-home-jaosorior-Development-stacklok-mecatl"),
+		},
+		{
+			name:      "local-state fallback base (resolved by the caller)",
+			stateBase: "/home/tester/.local/state",
+			ws:        "/ws/proj",
+			want:      filepath.Join("/home/tester/.local/state", "mecatui", "sessions", "-ws-proj"),
+		},
+		{
+			name:      "distinct parents, same basename -> distinct leaves (a)",
+			stateBase: "/xdg/state",
+			ws:        "/a/proj",
+			want:      filepath.Join("/xdg/state", "mecatui", "sessions", "-a-proj"),
+		},
+		{
+			name:      "distinct parents, same basename -> distinct leaves (b)",
+			stateBase: "/xdg/state",
+			ws:        "/b/proj",
+			want:      filepath.Join("/xdg/state", "mecatui", "sessions", "-b-proj"),
+		},
+		{
+			name:      "empty state home degrades to disabled",
+			stateBase: "",
+			ws:        "/ws/proj",
+			want:      "",
+		},
+		{
+			name:      "empty workspace degrades to disabled",
+			stateBase: "/xdg/state",
+			ws:        "",
+			want:      "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := defaultStoreDir(tc.stateBase, tc.ws)
+			if got != tc.want {
+				t.Errorf("defaultStoreDir(%q, %q) = %q, want %q", tc.stateBase, tc.ws, got, tc.want)
+			}
+			if tc.want != "" && !strings.HasPrefix(filepath.Base(got), "-") {
+				t.Errorf("leaf %q should preserve the leading separator as a leading '-'", filepath.Base(got))
+			}
+		})
+	}
+
+	// Determinism: the same inputs always produce the same path.
+	if a, b := defaultStoreDir("/xdg/state", "/a/proj"), defaultStoreDir("/xdg/state", "/a/proj"); a != b {
+		t.Errorf("defaultStoreDir is not deterministic: %q != %q", a, b)
+	}
+}
+
+// TestResolveStoreDirPrecedence covers the precedence table on the real
+// resolveStoreDir path (which reads the XDG state base via
+// xdgconfig.UserStateDir, hence t.Setenv XDG_STATE_HOME — UserStateDir reads the
+// env directly, so no xdg.Reload is needed): --no-store wins, then an explicit
+// --store-dir, then the computed per-workspace default under the resolved state
+// base (issue #79).
+func TestResolveStoreDirPrecedence(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", "/xdg/state")
+
+	// --no-store wins even over an explicit --store-dir.
+	if got := resolveStoreDir(config{workspace: "/ws", storeDir: "/x", noStore: true}); got != "" {
+		t.Errorf("--no-store should win: got %q, want \"\"", got)
+	}
+	// explicit --store-dir overrides the default.
+	if got := resolveStoreDir(config{workspace: "/ws", storeDir: "/x"}); got != "/x" {
+		t.Errorf("explicit --store-dir: got %q, want /x", got)
+	}
+	// neither -> computed default under the resolved XDG state base.
+	got := resolveStoreDir(config{workspace: "/var/home/ozz/dev/mecatl"})
+	want := filepath.Join("/xdg/state", "mecatui", "sessions", "-var-home-ozz-dev-mecatl")
+	if got != want {
+		t.Errorf("default: got %q, want %q", got, want)
+	}
+}
+
+// TestEmbeddedConfigStore asserts the embedded server defaults the durable store
+// ON (a non-empty per-workspace StoreDir) with the main-retention defaults wired,
+// and that --no-store yields an empty StoreDir (in-memory fallback) (issue #79).
+func TestEmbeddedConfigStore(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", "/xdg/state")
+
+	on := embeddedConfig(config{workspace: "/var/home/ozz/dev/mecatl", model: "m", mock: true}, port.NopDiagnostics{})
+	wantStore := filepath.Join("/xdg/state", "mecatui", "sessions", "-var-home-ozz-dev-mecatl")
+	if on.StoreDir != wantStore {
+		t.Errorf("default StoreDir = %q, want %q", on.StoreDir, wantStore)
+	}
+	if on.MainRetention != 720*time.Hour {
+		t.Errorf("MainRetention = %v, want 720h", on.MainRetention)
+	}
+	if on.MainRetentionMaxTotal != 200 {
+		t.Errorf("MainRetentionMaxTotal = %d, want 200", on.MainRetentionMaxTotal)
+	}
+
+	off := embeddedConfig(config{workspace: "/var/home/ozz/dev/mecatl", model: "m", mock: true, noStore: true}, port.NopDiagnostics{})
+	if off.StoreDir != "" {
+		t.Errorf("--no-store StoreDir = %q, want \"\" (in-memory fallback)", off.StoreDir)
 	}
 }
 

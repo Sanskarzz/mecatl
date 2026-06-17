@@ -204,12 +204,30 @@ type Config struct {
 	// family survive, oldest-first past it deleted; 0 disables), skipping ids
 	// with an in-flight run. UNPREFIXED (operator/service) sessions are NEVER
 	// touched. ChildGCInterval is the sweep cadence after the startup sweep
-	// (0 = startup-only). Both knobs zero = fully disabled (the zero-config
-	// default; mecated's flags default to 168h/500/1h). A non-prunable store
-	// (e.g. a thin remote driver) is never swept — a no-op with one INFO.
+	// (0 = startup-only) — it is the SINGLE shared interval for the whole sweep,
+	// so it ALSO governs the MainRetention/MainRetentionMaxTotal passes below
+	// (there is no separate main-GC interval). Both knobs zero = fully disabled
+	// (the zero-config default; mecated's flags default to 168h/500/1h). A
+	// non-prunable store (e.g. a thin remote driver) is never swept — a no-op
+	// with one INFO.
 	ChildRetention             time.Duration
 	ChildRetentionMaxPerFamily int
 	ChildGCInterval            time.Duration
+
+	// Main-session retention/GC (issue #79): the durable session store also
+	// accumulates the TOP-LEVEL (operator/service) session snapshots, which the
+	// child sweep above NEVER touches. When a long-lived mecatui defaults its
+	// StoreDir on, that store would otherwise grow without bound. The same
+	// startChildGC sweeper handles them via the OPTIONAL port.PrunableStore seam:
+	// an age pass (delete main snapshots whose last-modified time is older than
+	// MainRetention; 0 disables) then a single GLOBAL count cap (the newest
+	// MainRetentionMaxTotal main snapshots survive, oldest-first past it deleted;
+	// 0 disables), always skipping ids with an in-flight run. Both knobs zero =
+	// the main pass is fully disabled (the zero-config default; mecated's flags
+	// default to 0/0 so its behaviour is byte-unchanged, mecatui defaults them on).
+	// A non-prunable store (e.g. a thin remote driver) is never swept.
+	MainRetention         time.Duration
+	MainRetentionMaxTotal int
 
 	// Remote store drivers (Phase B): gRPC driver endpoints that replace the
 	// LOCAL session/memory stores with internal/adapter/grpcdriver clients.

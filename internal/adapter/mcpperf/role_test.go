@@ -98,7 +98,25 @@ func (roleGatherer) Gather() ([]*dto.MetricFamily, error) {
 			gaugeSeriesWithLabels(3, map[string]string{"role": "subagent"}),
 		},
 	}
-	return []*dto.MetricFamily{roleSplitHistogram(), toolCalls, tokens, activeRuns}, nil
+	// Per-turn counters, role-split. turns_total carries ONLY the role label
+	// (the stop label was dropped — EvTurnEnd has no stop reason).
+	turns := &dto.MetricFamily{
+		Name: proto.String("mecatl_turns_total"),
+		Type: &ctype,
+		Metric: []*dto.Metric{
+			counterSeriesWithLabels(12, map[string]string{"role": "main"}),
+			counterSeriesWithLabels(8, map[string]string{"role": "subagent"}),
+		},
+	}
+	turnEmpty := &dto.MetricFamily{
+		Name: proto.String("mecatl_turn_empty_total"),
+		Type: &ctype,
+		Metric: []*dto.Metric{
+			counterSeriesWithLabels(2, map[string]string{"role": "main"}),
+			counterSeriesWithLabels(1, map[string]string{"role": "subagent"}),
+		},
+	}
+	return []*dto.MetricFamily{roleSplitHistogram(), toolCalls, tokens, activeRuns, turns, turnEmpty}, nil
 }
 
 // TestHistogramQuantilesAggregatesAllRoleSeries guards the metrics[0] bug at
@@ -374,6 +392,32 @@ func TestMetricsSummaryCarriesRoleBreakdown(t *testing.T) {
 	}
 	if activeRoles["main"] != 1 || activeRoles["subagent"] != 3 {
 		t.Errorf("active_runs by_role = %+v, want main:1 subagent:3", active.ByRole)
+	}
+
+	// turns_total / turn_empty_total are in the breakdown set too: the per-turn
+	// denominator and the empty-turn numerator, each split per role family.
+	turns := byName["turns_total"]
+	if turns.Kind != "scalar" || turns.Value != 20 {
+		t.Fatalf("turns_total = %+v, want scalar 20 (12 main + 8 subagent)", turns)
+	}
+	turnRoles := map[string]float64{}
+	for _, r := range turns.ByRole {
+		turnRoles[r.Role] = r.Value
+	}
+	if turnRoles["main"] != 12 || turnRoles["subagent"] != 8 {
+		t.Errorf("turns_total by_role = %+v, want main:12 subagent:8", turns.ByRole)
+	}
+
+	empty := byName["turn_empty_total"]
+	if empty.Kind != "scalar" || empty.Value != 3 {
+		t.Fatalf("turn_empty_total = %+v, want scalar 3 (2 main + 1 subagent)", empty)
+	}
+	emptyRoles := map[string]float64{}
+	for _, r := range empty.ByRole {
+		emptyRoles[r.Role] = r.Value
+	}
+	if emptyRoles["main"] != 2 || emptyRoles["subagent"] != 1 {
+		t.Errorf("turn_empty_total by_role = %+v, want main:2 subagent:1", empty.ByRole)
 	}
 }
 
