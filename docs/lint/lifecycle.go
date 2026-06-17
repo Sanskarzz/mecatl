@@ -46,9 +46,11 @@ var statusLine = regexp.MustCompile(`^[ \t]*>?[ \t]*\*{0,2}[Ss]tatus\b[ \t]*\*{0
 type LifecycleKind int
 
 const (
-	// MissingBanner: the doc declares no lifecycle banner in its preamble.
+	// MissingBanner is reported when a design doc declares no lifecycle banner in
+	// its preamble.
 	MissingBanner LifecycleKind = iota
-	// StatusInDesignDoc: a mutable "Status:" line appears in a frozen design doc.
+	// StatusInDesignDoc is reported when a mutable "Status:" line appears in a
+	// frozen design doc.
 	StatusInDesignDoc
 )
 
