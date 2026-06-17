@@ -36,6 +36,7 @@ record; current behaviour is in the linked [architecture](../architecture.md) do
 | UX discoverability (mecatui) | ✅ shipped | [UX-DISCOVERABILITY.md](../adr/0025-ux-discoverability.md) | — |
 | Clipboard image paste (mecatui `ctrl+v`) | ✅ shipped | [CLIPBOARD-IMAGE-PASTE.md](../adr/0026-clipboard-image-paste.md) | — |
 | mecatequi (single-shot GitHub Action) | ✅ shipped (v1 forge glue) | [MECATEQUI.md](../adr/0028-mecatequi.md) | [overview](../architecture.md) |
+| ACP adapter (editor stdio surface) | ✅ Phase 1+2 + bounded Phase 3 + multimodal shipped · ⛔ Phase 3 long-tail (rule persistence, grep-over-buffers, fs/* on resume) | [0001-acp-adapter.md](../adr/0001-acp-adapter.md) | [api surface](../architecture/api-surface.md) |
 | _Historical / retired_ | — | [ARCHITECTURE.md](../adr/0004-v1-architecture.md) · [STEP-CHAIN.md](../adr/0006-v1-step-chain.md) · [TWELVE-PATTERNS-AUDIT.md](../adr/0007-twelve-patterns-audit.md) · [REPOMAP-TREE-SITTER.md](../adr/0029-repomap-tree-sitter.md) | — |
 
 ## Security
