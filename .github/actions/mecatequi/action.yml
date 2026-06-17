@@ -53,6 +53,22 @@
 # rule set the operator would have to author and check into the repo, which is a deliberate
 # deployment decision better made by editing this action than by a workflow input. The
 # built-in rubric is the safe default; add the input here if a deployment needs a custom one.
+#
+# SELF-VERIFICATION TOOLCHAIN (always-on) + the consumer setup-script hook. The baked-in
+# `instructions` default asks the agent to self-verify by running the repo's build/lint/test and
+# making them green. For the 80% Go case that works with ZERO extra config: this action provisions
+# `task` (go-task) and `golangci-lint` onto PATH in the SAME job, BEFORE the Run step, so a
+# consumer's `task lint` / `task test` resolve out of the box. Go is already provisioned for the
+# binary build above and serves the linter install too.
+#
+# For a project toolchain we cannot guess (buf, protoc plugins, node, system packages), the
+# `setup-script` input runs operator-supplied shell in this SAME job, BEFORE the binary. TRUST
+# POSTURE: `setup-script` is the OPERATOR'S OWN TRUSTED CODE — a maintainer sets it in the workflow
+# — and is a DIFFERENT trust zone from the untrusted prompt. The prompt body (`prompt-file`) is
+# attacker-controllable issue text wrapped in the untrusted-data fence; the setup-script is a
+# maintainer-authored build step. It runs in the implement job, which holds `contents: read` and
+# NO GitHub write token, so even a buggy or over-broad setup-script cannot push code or open a PR
+# — the token boundary still bounds the blast radius.
 
 name: mecatequi
 description: >-
@@ -94,6 +110,17 @@ inputs:
       lint`, `task test`, or the language-native equivalents) and make them pass. If a
       check fails, fix it and re-run until the build, lint, and tests are green; only then
       end your turn. Do not claim success without having run them.
+  setup-script:
+    description: >-
+      OPTIONAL multi-line shell run in THIS job, BEFORE the mecatequi binary, to install a
+      PROJECT-SPECIFIC self-verification toolchain the baked-in build/lint/test framing needs
+      (e.g. buf, protoc plugins, node, system packages). `task` (go-task) and golangci-lint are
+      ALWAYS provisioned by this action, so a plain Go repo needs nothing here. TRUST: this is the
+      OPERATOR'S OWN TRUSTED code (a maintainer sets it in the workflow), distinct from the
+      untrusted prompt body — and it runs in the agent job, which holds contents:read and NO write
+      token, so the token boundary still bounds it. Empty (default) runs no hook.
+    required: false
+    default: ""
   workspace:
     description: Session workspace root (must be a git repository so the diff can be computed).
     required: false
@@ -272,6 +299,43 @@ runs:
         export GOFLAGS=-mod=readonly
         go build -C "${REPO_ROOT}" -o "${RUNNER_TEMP}/mecatequi" ./cmd/mecatequi
         echo "Built mecatequi from the action checkout at ${RUNNER_TEMP}/mecatequi"
+
+    # ── Self-verification toolchain (always-on: task + golangci-lint) ──────────────────
+    # The baked-in `instructions` default asks the agent to self-verify with the repo's
+    # build/lint/test. Provision the two tools a Go consumer's `task lint` / `task test` need so
+    # the 80% case works with zero extra config — Go is already set up above. A non-Go or
+    # extra-toolchain consumer adds the rest via the `setup-script` input below. An EXACT
+    # setup-task version dodges the release-resolution API call, so no repo-token is needed (and
+    # this job holds none); SHA-pinned to the house set (matches mecatequi.yml / ci.yml).
+    - name: Set up Task
+      uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
+      with:
+        version: 3.51.1
+
+    # `go install` the linter (NO remotely-fetched install script — it gains Go module-proxy +
+    # checksum-database integrity on the download) at the version the Taskfile documents, and add
+    # GOPATH/bin to PATH so a consumer's `task lint` finds it. Go is provisioned by "Set up Go".
+    - name: Install golangci-lint
+      shell: bash
+      run: |
+        set -euo pipefail
+        go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+        echo "$(go env GOPATH)/bin" >> "${GITHUB_PATH}"
+
+    # ── Consumer setup-script (project-specific toolchain) ─────────────────────────────
+    # Operator-supplied, TRUSTED shell (see the header trust note): a maintainer installs the
+    # project toolchain the agent's self-verification needs BEYOND task + golangci-lint (buf,
+    # protoc plugins, node, …). The script crosses via env (never an inline interpolation of the
+    # run body) and runs under a fail-fast shell. It runs in THIS (implement) job — contents:read,
+    # NO write token — so it cannot push or open a PR. Skipped when the input is empty.
+    - name: Consumer setup-script
+      if: ${{ inputs.setup-script != '' }}
+      shell: bash
+      env:
+        MQ_SETUP_SCRIPT: ${{ inputs.setup-script }}
+      run: |
+        set -euo pipefail
+        bash -euo pipefail -c "${MQ_SETUP_SCRIPT}"
 
     # ── Run (Finding B mitigation lives in the WORKFLOW, not here): capture rc, never
     # fail the step ───────────────────────────────────────────────────────────────────

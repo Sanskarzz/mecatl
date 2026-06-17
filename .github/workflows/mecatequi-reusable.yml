@@ -131,6 +131,17 @@ on:
         type: string
         required: false
         default: ""
+      setup-script:
+        description: >-
+          OPTIONAL multi-line shell run in the implement job BEFORE the binary, to install a
+          PROJECT-SPECIFIC self-verification toolchain (buf, protoc plugins, node, system
+          packages). `task` (go-task) and golangci-lint are ALWAYS provisioned by the mecatequi
+          action, so a plain Go repo needs nothing here. This is TRUSTED operator code (a
+          maintainer sets it), distinct from the untrusted prompt; it runs at contents:read with
+          NO write token. Empty (default) runs no hook.
+        type: string
+        required: false
+        default: ""
       base-branch:
         description: >-
           Base branch for the PR. Empty (default) lets publish.sh resolve the repo default
@@ -293,14 +304,14 @@ jobs:
           persist-credentials: false
           ref: ${{ github.sha }}
 
-      # AGENT SELF-VERIFICATION TOOLCHAIN (Fix 3, OPTIONAL — not added here). The mecatequi
-      # action bakes in a `--instructions` framing asking the agent to run the repo's
-      # build/lint/test and make them green before finishing. A consumer who wants that
-      # self-verification must install their PROJECT's OWN build/lint/test toolchain on PATH
-      # BEFORE the mecatequi step — but a reusable workflow cannot, because the caller's stack
-      # is unknown. A consumer needing pre-mecatequi toolchain steps vendors the escape-hatch
-      # template (.github/workflows/mecatequi-example.yml) instead. Go for the binary build is
-      # provisioned by the mecatequi composite action itself.
+      # AGENT SELF-VERIFICATION TOOLCHAIN. The mecatequi action bakes in a `--instructions`
+      # framing asking the agent to run the repo's build/lint/test and make them green before
+      # finishing. The action now PROVISIONS `task` (go-task) + golangci-lint itself (before it
+      # runs the binary), so a plain Go consumer's `task lint` / `task test` work out of the box
+      # with zero config here. For a project toolchain beyond that (buf, protoc plugins, node,
+      # system packages) pass the `setup-script` input below — operator-supplied, TRUSTED shell
+      # the action runs in THIS job before the binary. Go for the binary build is provisioned by
+      # the action too.
 
       # Extract the UNTRUSTED prompt from the event JSON into a file via jq — never an inline
       # ${{ }} of the body. FULL-PATH sibling-action ref (see the header): `./` would resolve
@@ -328,6 +339,7 @@ jobs:
           timeout: ${{ inputs.timeout }}
           openai-base-url: ${{ inputs.openai-base-url }}
           guardrails-model: ${{ inputs.guardrails-model }}
+          setup-script: ${{ inputs.setup-script }}
 
       - name: Upload run artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

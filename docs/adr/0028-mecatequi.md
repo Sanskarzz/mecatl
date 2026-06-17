@@ -174,6 +174,7 @@ The Action codes against these frozen surfaces in `cmd/mecatequi`:
 | `prompt-file` (required) | `--prompt-file` | — |
 | `untrusted` | `--untrusted-prompt` (when `true`) | `true` |
 | `instructions` | `--instructions` (omitted when empty) | baked-in PR-description + self-verify framing |
+| `setup-script` | composite pre-run step (not a binary flag) — runs before the binary | `""` (no hook) |
 | `workspace` | `--workspace` | `${{ github.workspace }}` |
 | `posture` | `--posture` | `auto` |
 | `timeout` | `--timeout` | `15m` |
@@ -199,12 +200,24 @@ The `mecatequi` composite action bakes in a default `--instructions` value (TRUS
 emitted **outside** the prompt fence) so every consumer gets it with zero config: write the
 final message as a PR description, and self-verify (run the repo's build/lint/test and make
 them green) before finishing. For that self-verification to actually run, the agent needs the
-repo's build/lint/test tools on PATH — so the **live** `.github/workflows/mecatequi.yml`
-installs `task` + golangci-lint (v2.12.2) before the mecatequi step (Go itself is provisioned
-by the composite). Other-repo consumers must install their **own** project toolchain before
-the step; the example/reusable workflows document this but add no tools (their stacks are
-unknown). Override the `instructions` input to replace the baked-in framing wholesale; an
-empty value omits it.
+repo's build/lint/test tools on PATH — so the composite action itself now **always provisions
+`task` (go-task) + golangci-lint** (v2.12.2, via `go install`) onto PATH in the same job,
+before it runs the binary (Go is already provisioned for the binary build). That makes the
+**80% Go case work out of the box** on **both** adoption paths — the reusable workflow and a
+direct action reference — with no per-consumer toolchain steps. A project toolchain we cannot
+guess (buf, protoc plugins, node, system packages) is installed via the **`setup-script`
+input**: operator-supplied shell the action runs in the same job, before the binary. Override
+the `instructions` input to replace the baked-in framing wholesale; an empty value omits it.
+
+> **The `setup-script` trust posture.** `setup-script` is the **operator's own trusted code**
+> — a maintainer sets it in the workflow — and is a different trust zone from the prompt body.
+> The prompt (`prompt-file`) is attacker-controllable issue text wrapped in the untrusted-data
+> fence; `setup-script` is a maintainer-authored build step. It runs in the **implement** job,
+> which holds `contents: read` and **no GitHub write token**, so even a buggy or over-broad
+> setup-script cannot push code or open a PR — the token boundary still bounds the blast radius.
+> The reusable workflow threads it through as a `workflow_call` input wired into the implement
+> job; the live `.github/workflows/mecatequi.yml` keeps its explicit `task` + golangci-lint
+> steps (they are now redundant with the composite default, harmlessly so).
 
 ### Configurable PR-description formatting
 
@@ -455,7 +468,7 @@ in `docs/usage.md` ("Setting up publish-token Form 1").
 
 **Passthrough inputs vs. escape-hatch-only.** The reusable workflow exposes the per-session
 passthrough knobs (`model`, `default-provider`, `posture`, `max-run-tokens`, `timeout`,
-`openai-base-url`, `guardrails-model`, the `base-branch` + PR-template knobs). It deliberately
+`openai-base-url`, `guardrails-model`, `setup-script`, the `base-branch` + PR-template knobs). It deliberately
 does **not** expose `default-model` (catalog-validated — `model` is the passthrough), `openai`
 (provider is auto-detected from the present key), or `subagent-ask-reviewer` (an autonomous-
 approval capability — a deployment decision better made by editing the action than a workflow
