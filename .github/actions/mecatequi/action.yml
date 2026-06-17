@@ -133,9 +133,11 @@ inputs:
     required: false
     default: "auto"
   timeout:
-    description: Wall-clock bound on the whole run (e.g. 15m). 0 disables it.
+    description: >-
+      Wall-clock bound on the whole run (e.g. 40m); the primary cost ceiling for a
+      headless run — lower it to cap CI minutes / model spend. 0 disables it.
     required: false
-    default: "15m"
+    default: "40m"
   max-run-tokens:
     description: >-
       Max cumulative input+output tokens per run; the run ends cleanly with stop=budget

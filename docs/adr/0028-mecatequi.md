@@ -177,7 +177,7 @@ The Action codes against these frozen surfaces in `cmd/mecatequi`:
 | `setup-script` | composite pre-run step (not a binary flag) — runs before the binary | `""` (no hook) |
 | `workspace` | `--workspace` | `${{ github.workspace }}` |
 | `posture` | `--posture` | `auto` |
-| `timeout` | `--timeout` | `15m` |
+| `timeout` | `--timeout` | `40m` |
 | `max-run-tokens` | `--max-run-tokens` (omitted when empty) | `""` |
 | `max-turns` | `--max-turns` (omitted when empty) | `""` |
 | `model` | `--model` | `""` |

@@ -121,10 +121,12 @@ on:
         required: false
         default: ""
       timeout:
-        description: Wall-clock bound on the whole run (e.g. 15m). 0 disables it.
+        description: >-
+          Wall-clock bound on the whole run (e.g. 40m); the primary cost ceiling for a
+          headless run — lower it to cap CI minutes / model spend. 0 disables it.
         type: string
         required: false
-        default: 15m
+        default: 40m
       openai-base-url:
         description: >-
           Override the OpenAI API base URL (for an OpenAI-compatible endpoint). Empty
@@ -263,7 +265,12 @@ jobs:
   implement:
     name: Run mecatequi (agent, no write token)
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # 50m job ceiling vs the 40m agent --timeout default: the 10m envelope absorbs
+    # pre-agent setup (toolchain install, setup-script) AND the post-agent artifact
+    # upload before the hard SIGKILL. The agent timeout is graceful (clean summary);
+    # the job timeout is destructive (kills the upload post-mortems depend on), so the
+    # margin is biased to the job side. Keep job > agent on every path.
+    timeout-minutes: 50
     # Run after `acknowledge` so the issue always carries an early trace before the agent
     # starts. `needs: acknowledge` makes implement skip whenever acknowledge was skipped
     # (the gate did not match), and `needs.acknowledge.result == 'success'` keeps implement
