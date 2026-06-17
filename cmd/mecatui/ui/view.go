@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"strings"
 
+	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/stacklok/mecatl/cmd/mecatui/client"
 	"github.com/stacklok/mecatl/cmd/mecatui/theme"
 )
 
@@ -222,13 +224,53 @@ func (m Model) headerIdentityParts(sid, withNext string) []string {
 	if m.pendingMode != "" {
 		mode = m.pendingMode + " pending"
 	}
+	// Mode segment: the active/pending permission mode is colour-coded as the
+	// persistent visual cue for the same state the input box advertises.
 	if mode != "" {
-		parts = append(parts, "mode "+sanitizeTerminal(mode))
+		parts = append(parts, m.renderHeaderMode(mode))
 	}
 	if m.deps.Server != "" {
 		parts = append(parts, m.deps.Server)
 	}
 	return parts
+}
+
+func (m Model) inputMode() string {
+	return client.ModeString(client.ModeFromString(m.desiredMode()))
+}
+
+func modeAccentStyle(th theme.Theme, mode string) lipgloss.Style {
+	s := lipgloss.NewStyle().Bold(true)
+	mode = client.ModeString(client.ModeFromString(strings.TrimSuffix(mode, " pending")))
+	switch mode {
+	case "plan":
+		return s.Foreground(th.Color("info"))
+	case "accept-edits":
+		return s.Foreground(th.Color("success"))
+	default:
+		return s.Foreground(th.Color("accent"))
+	}
+}
+
+func (m *Model) applyModeInputStyle() {
+	mode := m.inputMode()
+	styles := m.ta.Styles()
+	base := textarea.DefaultDarkStyles()
+	accent := modeAccentStyle(m.deps.Theme, mode)
+	styles.Focused.Prompt = accent
+	styles.Focused.LineNumber = accent
+	styles.Focused.CursorLineNumber = accent
+	styles.Focused.Placeholder = base.Focused.Placeholder.Foreground(accent.GetForeground())
+	styles.Blurred.Prompt = accent.Faint(true)
+	styles.Blurred.LineNumber = accent.Faint(true)
+	styles.Blurred.CursorLineNumber = accent.Faint(true)
+	styles.Cursor.Color = accent.GetForeground()
+	m.ta.SetStyles(styles)
+}
+
+func (m Model) renderHeaderMode(mode string) string {
+	clean := sanitizeTerminal(mode)
+	return "mode " + modeAccentStyle(m.deps.Theme, clean).Render(clean)
 }
 
 // headerNextBadge is the muted "next: <model>" header badge previewing the
@@ -642,10 +684,13 @@ func (m Model) renderQueue() string {
 // the cursor crosses the visible window, i.e. row/rowOffset/width/height changed;
 // the blink phase flips only on Focus/Blur, since the reducer never routes
 // cursor.BlinkMsg to the textarea — the cursor is static, not blinking, today).
+// The active permission mode is deliberately keyed because it changes the input
+// colour cue without necessarily changing any textarea-owned state.
 // (2) renderInput runs on EVERY reduced message (the relayout chokepoint's
 // chrome()), so the cache is re-keyed in the same step the mutation lands — there
 // is no window in which a hidden-state change can hide behind an unchanged key.
 func (m Model) renderInput() string {
+	m.applyModeInputStyle()
 	li := m.ta.LineInfo()
 	key := inputRenderKey{
 		value:     m.ta.Value(),
@@ -655,6 +700,7 @@ func (m Model) renderInput() string {
 		focused:   m.ta.Focused(),
 		width:     m.ta.Width(),
 		height:    m.ta.Height(),
+		mode:      m.inputMode(),
 	}
 	if m.rend.inputValid && m.rend.inputKey == key {
 		return m.rend.inputView

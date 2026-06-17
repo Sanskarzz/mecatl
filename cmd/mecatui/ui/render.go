@@ -144,7 +144,8 @@ type renderer struct {
 	// freeze the input; the key compare is O(len(input)), which the large-paste
 	// placeholder staging keeps small. Single entry, refreshed on every render —
 	// see renderInput for the correctness argument covering the textarea's hidden
-	// state (internal scroll offset, cursor blink phase). Update-goroutine-only,
+	// state (internal scroll offset, cursor blink phase). The active permission mode
+	// controls the input's colour cue, so it is part of the key too. Update-goroutine-only,
 	// like the block caches; deliberately NOT dropped by resetBlockCaches (the key
 	// is self-validating — it carries no conversation index to alias).
 	inputKey   inputRenderKey
@@ -244,6 +245,7 @@ type inputRenderKey struct {
 	colOffset     int // cursor's column within that soft-wrap row (LineInfo.ColumnOffset)
 	focused       bool
 	width, height int
+	mode          string
 }
 
 // mdEntry is one memoized assistant-block render: the source text and wrap width
