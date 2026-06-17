@@ -1,7 +1,7 @@
 # Spike: A "soul" for mecatl — persistent identity + cross-session user-model
 
 > **Design record.** Captured during the soul / persona work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
 
 > **Ground-truth corrections applied during implementation** (the as-built wins over
 > the sketch below where they conflict):
@@ -426,4 +426,4 @@ derivable from the docs, not a judgement call left open.
 
 ---
 
-*Part of the [design docs](./README.md). Related: [MEMORY-TIERING.md](./MEMORY-TIERING.md), [MEMORY-TIER2.md](./MEMORY-TIER2.md), [COMPACTION.md](./COMPACTION.md).*
+*Part of the [design docs](./README.md). Related: [Genuine tiered memory (closing the tier-0 gap)](./MEMORY-TIERING.md), [Tier-2 / semantic memory recall — assessment + buildable design](./MEMORY-TIER2.md), [Conversation compaction](./COMPACTION.md).*

@@ -1,7 +1,7 @@
 # Diagnostics, audit, and the global-slog ban
 
 > **Design record.** Captured during the diagnostics work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
 
 This is a correction/reference doc, not an essay — it records the seams, the
 sink-per-binary policy, the build-once rule, and the enforcement guard.
@@ -199,4 +199,4 @@ the contributor back at this doc and the `port.Diagnostics` seam.
 
 ---
 
-*Part of the [design docs](./README.md). Related: [perf-observability.md](./perf-observability.md), [perf-tracking.md](./perf-tracking.md).*
+*Part of the [design docs](./README.md). Related: [Performance observability — problem, approaches, and the decided direction](./perf-observability.md), [Long-term performance & resource regression tracking](./perf-tracking.md).*

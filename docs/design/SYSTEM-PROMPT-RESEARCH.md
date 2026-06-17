@@ -1,7 +1,7 @@
 # System-Prompt Research & Enhancement (issue #19)
 
 > **Design record.** Captured during the system-prompt enhancement work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
 
 > Research + comparative analysis + prioritized enhancement plan for mecatl's
 > system prompt (Pattern #1 of the twelve). Grounds the audit in the **actual
@@ -600,4 +600,4 @@ Repo commits directly to `main`; sequence as commits, not a multi-issue split:
 
 ---
 
-*Part of the [design docs](./README.md). Related: [TWELVE-PATTERNS-AUDIT.md](./TWELVE-PATTERNS-AUDIT.md), [SOUL-SPIKE.md](./SOUL-SPIKE.md).*
+*Part of the [design docs](./README.md). Related: [Twelve Agentic-Harness Patterns — Pluggability Audit](./TWELVE-PATTERNS-AUDIT.md), [Spike: A "soul" for mecatl — persistent identity + cross-session user-model](./SOUL-SPIKE.md).*

@@ -1,6 +1,24 @@
 # matlatl configuration. https://github.com/stacklok/matlatl
 version: 1
 
+# Promote the graduated structure findings (under-linked, dead-end) from Info to
+# Warning, so they FAIL `matlatl check --strict` (the CI docs gate) instead of
+# only being reported (ADR 0012). This makes documentation connectivity an enforced
+# invariant: a doc that nothing links to (under-linked) or that links nowhere onward
+# (dead-end) breaks the build.
+#
+# inboundThreshold is set to 1 — the gate floor, NOT matlatl's default of 3. The
+# default (3) is a strong *discoverability* heuristic that suits the human-facing
+# report but is wrong as a hard gate here: legitimate leaf docs (the emit-excluded
+# .claude/skills reference payloads, a generated artifact reached from one index)
+# have one or two genuine inbound links and demanding three would force link-spam.
+# Threshold 1 enforces the real invariant — every doc with outbound links is
+# reachable by at least one link, and nothing is a dead-end — without gaming. NOTE:
+# `matlatl: orphan-intentional` front matter only exempts ORPHAN/UNREACHABLE
+# findings, NOT under-linked/dead-end, so the gate must be satisfied by real links.
+structureFindingsSeverity: warning
+inboundThreshold: 1
+
 # emitExclude keeps these docs IN the graph — still scanned, link-checked,
 # ranked, and gated by `check` — but hides them from the human/LLM consumption
 # surfaces (llms.txt, index.md, trails.json, and backlink clauses). It has zero

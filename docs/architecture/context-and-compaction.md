@@ -38,6 +38,12 @@ Two seams keep a long run inside the model's context window:
   compaction failure (keep the uncompacted history, WARN, continue). The aggregate
   itself backstops this: `Session.ReplaceHistory` rejects an unpaired slice.
 
+## Related
+
+- [The agent loop that triggers compaction](agent-loop.md)
+- [Providers — the per-model token counter & window](providers.md)
+- [Memory — cross-session recall](memory.md)
+
 ---
 
 [← Architecture guide](../architecture.md)

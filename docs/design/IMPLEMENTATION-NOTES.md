@@ -6,12 +6,12 @@ when `CLAUDE.md` was trimmed back to a lean correction file (~1k words).
 
 **This is reference, not a contract.** It captures decisions, invariants, and the
 SHIPPED/DEFERRED state of each subsystem as of the trim. When a subsystem has a dedicated
-spike/design doc ([MULTI-PROVIDER.md](./MULTI-PROVIDER.md),
-[OPENAI-RESPONSES-API.md](./OPENAI-RESPONSES-API.md),
-[WORKSPACE-TRUST-SPIKE.md](./WORKSPACE-TRUST-SPIKE.md), [SOUL-SPIKE.md](./SOUL-SPIKE.md),
-`MEMORY-*.md`, [AGENT-TEAMS-SPIKE.md](./AGENT-TEAMS-SPIKE.md),
-[ALLOW-ALL-POSTURE.md](./ALLOW-ALL-POSTURE.md),
-[SYSTEM-PROMPT-RESEARCH.md](./SYSTEM-PROMPT-RESEARCH.md)), that doc is the deeper
+spike/design doc ([Multi-provider / multi-model (Phase 0)](./MULTI-PROVIDER.md),
+[OpenAI Responses API for a Go Agentic Coding Harness — 2026 Implementation Brief](./OPENAI-RESPONSES-API.md),
+[Workspace Trust — implementation plan (Phases 0+1+2)](./WORKSPACE-TRUST-SPIKE.md), [Spike: A "soul" for mecatl — persistent identity + cross-session user-model](./SOUL-SPIKE.md),
+`MEMORY-*.md`, [Spike: Headless Agent Teams for mecatl](./AGENT-TEAMS-SPIKE.md),
+[Unattended / allow-all posture (the "YOLO mode" question)](./ALLOW-ALL-POSTURE.md),
+[System-Prompt Research & Enhancement (issue #19)](./SYSTEM-PROMPT-RESEARCH.md)), that doc is the deeper
 source; this file is the one-stop index of the dense detail that was crammed into CLAUDE.md.
 Prefer updating the relevant design doc + this file over re-growing CLAUDE.md.
 
@@ -3259,4 +3259,4 @@ secrets).
 
 ---
 
-*Part of the [design docs](./README.md). Related: [ARCHITECTURE.md](./ARCHITECTURE.md), [DRIVERS.md](./DRIVERS.md), [STEP-CHAIN.md](./STEP-CHAIN.md).*
+*Part of the [design docs](./README.md). Related: [mecatl — Architecture](./ARCHITECTURE.md), [Driver seams — ports, the gRPC driver protocol, and conformance](./DRIVERS.md), [mecatl — Implementation Step-Chain (v1)](./STEP-CHAIN.md).*

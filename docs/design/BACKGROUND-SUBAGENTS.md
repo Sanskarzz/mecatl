@@ -1,7 +1,7 @@
 # BACKGROUND-SUBAGENTS.md — Background Subagents + Per-Child Cancel over a Shared Child-Run Registry
 
 > **Design record.** Captured during the background-subagents work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
 
 The whole arc is on `main`: **I1** (registry + Subagent cancel, `2d0bb4f`), **I2**
 (parallel-branch + team-member cancel, `d6457ef`), **I3a** (background mechanics +
@@ -454,4 +454,4 @@ budget. The RunTeam-path `CancelTeammate` unary (D4) is done (issue #29).
 
 ---
 
-*Part of the [design docs](./README.md). Related: [AGENT-DEFINITIONS.md](./AGENT-DEFINITIONS.md), [AGENT-TEAMS-SPIKE.md](./AGENT-TEAMS-SPIKE.md), [CLOUD-NATIVE.md](./CLOUD-NATIVE.md).*
+*Part of the [design docs](./README.md). Related: [Agent definitions (Tier 1)](./AGENT-DEFINITIONS.md), [Spike: Headless Agent Teams for mecatl](./AGENT-TEAMS-SPIKE.md), [Cloud-native arc: disposable process, externalized state, durable record](./CLOUD-NATIVE.md).*

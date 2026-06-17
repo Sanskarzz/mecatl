@@ -1,7 +1,7 @@
 # MECATEQUI.md — running mecatl as a single-shot GitHub Action
 
 > **Design record.** Captured during the mecatequi (GitHub Action) work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
 
 `mecatequi` (`cmd/mecatequi/main.go`) is the headless, single-shot mecatl runner: one
 prompt, one in-process engine, one terminal state, three artifacts (a working-tree git
@@ -543,7 +543,7 @@ place alongside the other workflows is documented in `.github/workflows/README.m
 
 ---
 
-*Part of the [design docs](./README.md). Related: [CLOUD-NATIVE.md](./CLOUD-NATIVE.md)
-(the inverse — disposable process, externalized state), [DRIVERS.md](./DRIVERS.md) (the
-store seam a conversational v2 would build on), [ALLOW-ALL-POSTURE.md](./ALLOW-ALL-POSTURE.md)
+*Part of the [design docs](./README.md). Related: [Cloud-native arc: disposable process, externalized state, durable record](./CLOUD-NATIVE.md)
+(the inverse — disposable process, externalized state), [Driver seams — ports, the gRPC driver protocol, and conformance](./DRIVERS.md) (the
+store seam a conversational v2 would build on), [Unattended / allow-all posture (the "YOLO mode" question)](./ALLOW-ALL-POSTURE.md)
 (the `auto`/`yolo` posture the CI run selects).*

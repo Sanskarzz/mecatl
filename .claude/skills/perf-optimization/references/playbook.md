@@ -109,3 +109,7 @@ byte-identical micro-reduction (`fmt.Fprintf` → `WriteString`, `strings.Split`
 **Lesson.** "It allocates" is not "optimize it." Weigh the win against the real cost
 and the risk to invariants. **The wrong abstraction is worse than the allocation** —
 a clean profile-confirmed hotspot can still be a correct skip.
+
+---
+
+[← back to the skill](../SKILL.md)

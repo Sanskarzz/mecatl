@@ -1,7 +1,7 @@
 # Unattended / allow-all posture (the "YOLO mode" question)
 
 > **Design record.** Captured during the allow-all-posture work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
 
 Supersedes the abandoned `ModeYolo` spike (see "What we rejected"). Decision-support for
 issue: *"add a yolo mode."*
@@ -308,4 +308,4 @@ https://code.claude.com/docs/en/permissions.
 
 ---
 
-*Part of the [design docs](./README.md). Related: [GUARDRAILS.md](./GUARDRAILS.md), [WORKSPACE-TRUST-SPIKE.md](./WORKSPACE-TRUST-SPIKE.md).*
+*Part of the [design docs](./README.md). Related: [Guardrails — LLM-backed tool-content inspection (issue #27)](./GUARDRAILS.md), [Workspace Trust — implementation plan (Phases 0+1+2)](./WORKSPACE-TRUST-SPIKE.md).*

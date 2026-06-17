@@ -1,7 +1,7 @@
 # Cloud-native arc: disposable process, externalized state, durable record
 
 > **Design record.** Captured during the cloud-native arc work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
 
 Builds on the shipped driver-seams arc (`DRIVERS.md`) and the no-FS
 session profile (issue #55, commit `9f8ba8c`); informed by the cloud-native kit
@@ -628,4 +628,4 @@ needs a lease; the GC liveness gap rides the same mechanism for free.
 
 ---
 
-*Part of the [design docs](./README.md). Related: [BACKGROUND-SUBAGENTS.md](./BACKGROUND-SUBAGENTS.md), [COMPACTION.md](./COMPACTION.md), [ARCHITECTURE.md](./ARCHITECTURE.md).*
+*Part of the [design docs](./README.md). Related: [BACKGROUND-SUBAGENTS.md — Background Subagents + Per-Child Cancel over a Shared Child-Run Registry](./BACKGROUND-SUBAGENTS.md), [Conversation compaction](./COMPACTION.md), [mecatl — Architecture](./ARCHITECTURE.md).*

@@ -166,6 +166,16 @@ land on `Run.Approve`. The `Service` keeps a registry of in-flight `*agent.Run`
 keyed by session id so the verdict reaches the right run
 (`server/service.go`: `LookupRun`).
 
+## Related
+
+- [The ports the loop consumes](ports.md)
+- [Hooks & guardrails — the loop's lifecycle gates](hooks-and-guardrails.md)
+- [Subagents & teams — delegation from the loop](subagents-and-teams.md)
+- [Context & compaction — the loop's token management](context-and-compaction.md)
+- [Memory — the index the loop injects each run](memory.md)
+- [Extensibility — the tools & MCP the loop runs](extensibility.md)
+- [The API surface that drives the loop](api-surface.md)
+
 ---
 
 [← Architecture guide](../architecture.md)

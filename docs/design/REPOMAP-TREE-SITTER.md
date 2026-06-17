@@ -1,7 +1,3 @@
----
-matlatl: orphan-intentional
----
-
 # Repo-map tree-sitter: freeze root cause + binding evaluation
 
 > **Historical.** Retired 2026-06-06; feature removed. Preserved for rationale; not maintained.
@@ -170,4 +166,4 @@ would otherwise delete.
 
 ---
 
-*Part of the [design docs](./README.md). Related: [ARCHITECTURE.md](./ARCHITECTURE.md).*
+*Part of the [design docs](./README.md). Related: [mecatl — Architecture](./ARCHITECTURE.md).*

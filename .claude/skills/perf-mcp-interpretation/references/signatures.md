@@ -36,3 +36,7 @@ recorder is a bounded ring of the *recent past* (default ~8 MiB / 5s window) —
 too long and the slow turn ages out of the window. The summary you get back is just
 size + a one-line note; the raw trace goes to the human via the `resource_link` for
 `go tool trace`.
+
+---
+
+[← back to the skill](../SKILL.md)

@@ -30,6 +30,11 @@ drives a separate `dream.Consolidator{Prefix:"user/"}`. The user-model is a writ
 instruction FRAGMENT of FACTS, NEVER a governance scope; behaviour comes from the soul +
 system rules, not this block.
 
+## Related
+
+- [Context & compaction](context-and-compaction.md)
+- [The agent loop that injects the memory index](agent-loop.md)
+
 ---
 
 [← Architecture guide](../architecture.md)

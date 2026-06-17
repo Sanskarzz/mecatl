@@ -1,7 +1,7 @@
 # Performance observability — problem, approaches, and the decided direction
 
 > **Design record.** Captured during the perf observability work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
 
 - Date: 2026-06-03.
 - Scope: how mecatl exposes its own runtime performance for measurement —
@@ -371,4 +371,4 @@ and 2 are both committed (not "maybe later").
 
 ---
 
-*Part of the [design docs](./README.md). Related: [perf-tracking.md](./perf-tracking.md), [DIAGNOSTICS.md](./DIAGNOSTICS.md).*
+*Part of the [design docs](./README.md). Related: [Long-term performance & resource regression tracking](./perf-tracking.md), [Diagnostics, audit, and the global-slog ban](./DIAGNOSTICS.md).*

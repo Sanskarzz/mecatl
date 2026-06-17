@@ -2,7 +2,7 @@
 
 # mecatl — Agentic Coding Harness
 
-The domain of mecatl: a headless agentic coding harness. A `Session` carries a `Conversation` that a `Run` drives turn by turn against a `Provider`, invoking `Tools` under a permission model, emitting a stream of `Events`, and optionally delegating to `Subagents` and `Teams`. Pass 2 adds the invariants that must always hold and scenarios that stress-test them.
+The domain of mecatl: a headless agentic coding harness. A `Session` carries a `Conversation` that a `Run` drives turn by turn against a `Provider`, invoking `Tools` under a permission model, emitting a stream of `Events`, and optionally delegating to `Subagents` and `Teams`. Pass 2 adds the invariants that must always hold and scenarios that stress-test them. For the prose walkthrough see the [architecture guide](../architecture.md).
 
 ## Glossary
 

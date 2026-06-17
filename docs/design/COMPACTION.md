@@ -1,7 +1,7 @@
 # Conversation compaction
 
 > **Design record.** Captured during the compaction work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
 
 This is the deep reference for how mecatl compresses a
 conversation that has grown past the context window. The terse per-subsystem status
@@ -502,4 +502,4 @@ no promise about the middle, and `buildSummary` says so.
 
 ---
 
-*Part of the [design docs](./README.md). Related: [MEMORY-TIERING.md](./MEMORY-TIERING.md), [CLOUD-NATIVE.md](./CLOUD-NATIVE.md).*
+*Part of the [design docs](./README.md). Related: [Genuine tiered memory (closing the tier-0 gap)](./MEMORY-TIERING.md), [Cloud-native arc: disposable process, externalized state, durable record](./CLOUD-NATIVE.md).*

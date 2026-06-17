@@ -1,7 +1,7 @@
 # Spike: Headless Agent Teams for mecatl
 
 > **Design record.** Captured during the agent-teams work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
 
 The substrate (kernel, supervisor, coordination tools, Team tool, gRPC/HTTP surface, hook
 phases, budgets, trust gate) is live; this doc retains the spike rationale plus inline
@@ -574,4 +574,4 @@ Still deferred (intentional, not oversights):
 
 ---
 
-*Part of the [design docs](./README.md). Related: [AGENT-DEFINITIONS.md](./AGENT-DEFINITIONS.md), [BACKGROUND-SUBAGENTS.md](./BACKGROUND-SUBAGENTS.md).*
+*Part of the [design docs](./README.md). Related: [Agent definitions (Tier 1)](./AGENT-DEFINITIONS.md), [BACKGROUND-SUBAGENTS.md — Background Subagents + Per-Child Cancel over a Shared Child-Run Registry](./BACKGROUND-SUBAGENTS.md).*

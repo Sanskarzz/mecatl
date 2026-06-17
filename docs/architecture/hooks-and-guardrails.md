@@ -92,6 +92,12 @@ checker engine is built tool-less with no recursion into guardrails. The fence
 helpers it shares with the child-ask reviewer live in `engine/agent/fence.go`
 (exported, single source of truth). Full mechanics: `docs/design/GUARDRAILS.md`.
 
+## Related
+
+- [The agent loop that fires the hooks](agent-loop.md)
+- [The API surface](api-surface.md)
+- [Deployment & hardening — operator-tier config](deployment-and-hardening.md)
+
 ---
 
 [← Architecture guide](../architecture.md)

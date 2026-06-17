@@ -1,7 +1,7 @@
 # Clipboard image paste (`ctrl+v`)
 
 > **Design record.** Captured during the clipboard image paste work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
 
 `ctrl+v` in the mecatui prompt reads the OS clipboard and, when it holds an image,
 stages it as an inline media attachment that rides the existing `Prompt.parts` send
@@ -86,4 +86,4 @@ model, and the `buildMediaPart` choke point are as described.
 
 ---
 
-*Part of the [design docs](./README.md). Related: [UX-DISCOVERABILITY.md](./UX-DISCOVERABILITY.md).*
+*Part of the [design docs](./README.md). Related: [mecatui — UX discoverability design (Option C: wire capabilities)](./UX-DISCOVERABILITY.md).*

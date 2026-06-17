@@ -1,7 +1,7 @@
 # mecatui — UX discoverability design (Option C: wire capabilities)
 
 > **Design record.** Captured during the UX discoverability work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
 
 Decision: the availability seam is **Option C — a real `ServerCapabilities`
 wire channel** (authoritative for embedded AND external servers), structured as
@@ -755,4 +755,4 @@ drive at chosen caps fixtures.
 
 ---
 
-*Part of the [design docs](./README.md). Related: [CLIPBOARD-IMAGE-PASTE.md](./CLIPBOARD-IMAGE-PASTE.md).*
+*Part of the [design docs](./README.md). Related: [Clipboard image paste (`ctrl+v`)](./CLIPBOARD-IMAGE-PASTE.md).*

@@ -155,4 +155,4 @@ Context cancellation surfaces as a context error, not `*openai.Error` — handle
 
 ---
 
-*Part of the [design docs](./README.md). Related: [MULTI-PROVIDER.md](./MULTI-PROVIDER.md).*
+*Part of the [design docs](./README.md). Related: [Multi-provider / multi-model (Phase 0)](./MULTI-PROVIDER.md).*

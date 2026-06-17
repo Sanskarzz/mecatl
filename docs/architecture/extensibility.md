@@ -164,6 +164,12 @@ exist as progressive-disclosure instruction units (see above), with bundled
 served through the skill read-root allowlist. The guiding restraint still holds: build the shape, instrument it,
 and resist features before the loop, tools, permissions, hooks, and cache all work.
 
+## Related
+
+- [The agent loop that runs the tools](agent-loop.md)
+- [The API surface](api-surface.md)
+- [Subagents & teams](subagents-and-teams.md)
+
 ---
 
 [← Architecture guide](../architecture.md)

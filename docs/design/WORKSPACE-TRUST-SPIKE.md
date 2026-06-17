@@ -1,7 +1,7 @@
 # Workspace Trust — implementation plan (Phases 0+1+2)
 
 > **Design record.** Captured during the workspace trust work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
 
 Phases 0, 1, 2a, 2b, 2c all shipped. Phase 3 was cut (§11); the §11 follow-ups
 remain as later issues. Phase 0 (unify the default — mecatui resolves
@@ -745,4 +745,4 @@ agents/commands/skills, not just allows+soul — a one-line invariant update).
 
 ---
 
-*Part of the [design docs](./README.md). Related: [GUARDRAILS.md](./GUARDRAILS.md), [ALLOW-ALL-POSTURE.md](./ALLOW-ALL-POSTURE.md).*
+*Part of the [design docs](./README.md). Related: [Guardrails — LLM-backed tool-content inspection (issue #27)](./GUARDRAILS.md), [Unattended / allow-all posture (the "YOLO mode" question)](./ALLOW-ALL-POSTURE.md).*

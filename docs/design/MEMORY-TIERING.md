@@ -1,7 +1,7 @@
 # Genuine tiered memory (closing the tier-0 gap)
 
 > **Design record.** Captured during the tiered memory work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
 
 ## TL;DR / recommended increment
 
@@ -585,4 +585,4 @@ the index lives outside `prompt.Build`, so `StablePrefix` is unchanged. Assert i
 
 ---
 
-*Part of the [design docs](./README.md). Read in order: [MEMORY-DEFAULTS.md](./MEMORY-DEFAULTS.md) ← MEMORY-TIERING → [MEMORY-TIER2.md](./MEMORY-TIER2.md).*
+*Part of the [design docs](./README.md). Read in order: [Memory enabled by default on the embedded mecatui server](./MEMORY-DEFAULTS.md) ← MEMORY-TIERING → [Tier-2 / semantic memory recall — assessment + buildable design](./MEMORY-TIER2.md).*

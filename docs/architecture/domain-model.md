@@ -152,6 +152,11 @@ Gauntlet #7 still holds: none of these projections injects branch/child/member t
 into the parent conversation — only the delegation tool's final result does (plus, for
 Parallel, fork-root path handles).
 
+## Related
+
+- [The ports — the seams the loop consumes](ports.md)
+- [The agent loop — how the domain is driven](agent-loop.md)
+
 ---
 
 [← Architecture guide](../architecture.md)

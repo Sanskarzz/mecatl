@@ -1,7 +1,7 @@
 # Driver seams — ports, the gRPC driver protocol, and conformance
 
 > **Design record.** Captured during the driver seams work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
 
 This doc records the pattern, the seam inventory, the wire rules, and the
 deliberate deferrals. The operator-facing flags live in `docs/usage.md`
@@ -347,4 +347,4 @@ streaming, paging, and a sync protocol with no consumer to validate against.
 
 ---
 
-*Part of the [design docs](./README.md). Related: [ARCHITECTURE.md](./ARCHITECTURE.md), [IMPLEMENTATION-NOTES.md](./IMPLEMENTATION-NOTES.md).*
+*Part of the [design docs](./README.md). Related: [mecatl — Architecture](./ARCHITECTURE.md), [Implementation Notes](./IMPLEMENTATION-NOTES.md).*

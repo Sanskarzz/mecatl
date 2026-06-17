@@ -1,7 +1,7 @@
 # Agent definitions (Tier 1)
 
 > **Design record.** Captured during the agent-definitions work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
 
 Named subagent specialists discovered from operator-controlled markdown files
 (`<dir>/<name>.md`, YAML frontmatter + body), mirroring the skills Source seam. **One
@@ -219,4 +219,4 @@ consistent with `EnableTeams`/`EnableParallel`.
 
 ---
 
-*Part of the [design docs](./README.md). Related: [AGENT-TEAMS-SPIKE.md](./AGENT-TEAMS-SPIKE.md), [BACKGROUND-SUBAGENTS.md](./BACKGROUND-SUBAGENTS.md).*
+*Part of the [design docs](./README.md). Related: [Spike: Headless Agent Teams for mecatl](./AGENT-TEAMS-SPIKE.md), [BACKGROUND-SUBAGENTS.md — Background Subagents + Per-Child Cancel over a Shared Child-Run Registry](./BACKGROUND-SUBAGENTS.md).*

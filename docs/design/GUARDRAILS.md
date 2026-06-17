@@ -1,7 +1,7 @@
 # Guardrails — LLM-backed tool-content inspection (issue #27)
 
 > **Design record.** Captured during the guardrails work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
 
 Guardrails are an **operator-tier, LLM-backed content checker** that inspects the
 data crossing the agent's tool boundary in both directions and enforces a verdict on
@@ -268,4 +268,4 @@ asks to a human (unlike the headless-only ask reviewer).
 
 ---
 
-*Part of the [design docs](./README.md). Related: [ALLOW-ALL-POSTURE.md](./ALLOW-ALL-POSTURE.md), [WORKSPACE-TRUST-SPIKE.md](./WORKSPACE-TRUST-SPIKE.md).*
+*Part of the [design docs](./README.md). Related: [Unattended / allow-all posture (the "YOLO mode" question)](./ALLOW-ALL-POSTURE.md), [Workspace Trust — implementation plan (Phases 0+1+2)](./WORKSPACE-TRUST-SPIKE.md).*

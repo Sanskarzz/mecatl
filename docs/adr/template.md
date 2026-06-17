@@ -23,7 +23,8 @@ costs honestly — an ADR with only upsides is a sales pitch, not a record.>
 ## See also
 
 <Links to the living docs this decision is reflected in (architecture.md sections,
-the tracker), and to related ADRs.>
+the tracker), and to related ADRs — e.g. the lifecycle convention in
+[ADR 0002](./0002-documentation-lifecycle.md).>
 
 ---
 

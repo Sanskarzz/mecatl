@@ -164,6 +164,12 @@ neutrality, selection primitive, per-session engine, capability intersection,
 disclosure posture + per-client key custody, per-sub-agent provider, and the P0→P3
 phasing).
 
+## Related
+
+- [The ports — the LLMProvider seam](ports.md)
+- [Context & compaction — per-model context window](context-and-compaction.md)
+- [Observability & reliability — provider resilience](observability.md)
+
 ---
 
 [← Architecture guide](../architecture.md)

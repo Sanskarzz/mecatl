@@ -1,7 +1,7 @@
 # Multi-provider / multi-model (Phase 0)
 
 > **Design record.** Captured during the multi-provider work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
 
 mecatl serves more than one LLM provider in a single process and binds a **provider +
 model per session**, speaking a provider-agnostic `port.LLMProvider` behind a
@@ -845,4 +845,4 @@ bundled here.
 
 ---
 
-*Part of the [design docs](./README.md). Related: [OPENAI-RESPONSES-API.md](./OPENAI-RESPONSES-API.md), [ARCHITECTURE.md](./ARCHITECTURE.md).*
+*Part of the [design docs](./README.md). Related: [OpenAI Responses API for a Go Agentic Coding Harness — 2026 Implementation Brief](./OPENAI-RESPONSES-API.md), [mecatl — Architecture](./ARCHITECTURE.md).*

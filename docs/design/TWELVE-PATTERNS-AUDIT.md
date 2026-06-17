@@ -582,4 +582,4 @@ be serialized; the non-loop work of every package can proceed concurrently.
 
 ---
 
-*Part of the [design docs](./README.md). Related: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md), [SYSTEM-PROMPT-RESEARCH.md](./SYSTEM-PROMPT-RESEARCH.md).*
+*Part of the [design docs](./README.md). Related: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md), [System-Prompt Research & Enhancement (issue #19)](./SYSTEM-PROMPT-RESEARCH.md).*

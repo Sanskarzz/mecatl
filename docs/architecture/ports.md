@@ -93,6 +93,12 @@ Bash, and an OS sandbox would wrap this seam. `tool.MemoryStore` and
 `tool.WorkspaceForker` live alongside it for the same layering reason (the tools
 that need them depend on the interface, not a `port`).
 
+## Related
+
+- [The domain model — what the ports carry](domain-model.md)
+- [The agent loop — the ports' consumer](agent-loop.md)
+- [Providers — the LLMProvider port's adapters](providers.md)
+
 ---
 
 [← Architecture guide](../architecture.md)

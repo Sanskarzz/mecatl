@@ -134,6 +134,12 @@ Mutating members / Parallel branches keep their hardened force-copy shells
 (force-copy forking runs no git, so the fork-time checkout hazard the gate
 closes cannot fire there).
 
+## Related
+
+- [The agent loop the children run](agent-loop.md)
+- [Parallelism — fork-join delegation](parallelism.md)
+- [Providers — per-subagent provider routing](providers.md)
+
 ---
 
 [← Architecture guide](../architecture.md)

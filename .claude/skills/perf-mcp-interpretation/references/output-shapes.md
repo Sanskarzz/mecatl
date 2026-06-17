@@ -147,3 +147,7 @@ closed enum, not an identifier. `role` filters to one family (unknown roles →
 Plus a user-audience `resource_link` to `/debug/flightrecorder` (human downloads,
 analyzes with `go tool trace`). Returns `isError` "flight recorder not armed" if
 the recorder is off.
+
+---
+
+[← back to the skill](../SKILL.md)

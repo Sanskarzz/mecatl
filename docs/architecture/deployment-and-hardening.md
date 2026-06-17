@@ -162,6 +162,12 @@ deny-dominant in the evaluator). A missing/malformed/unparseable `settings.yaml`
 **or** `trust.yaml` fails safe to untrusted (a corrupt config never grants trust).
 See `docs/design/WORKSPACE-TRUST-SPIKE.md`.
 
+## Related
+
+- [The API surface being hardened](api-surface.md)
+- [Observability & persistence](observability.md)
+- [Hooks & guardrails — operator-tier guardrails](hooks-and-guardrails.md)
+
 ---
 
 [← Architecture guide](../architecture.md)

@@ -34,7 +34,7 @@ kind. Use exactly one of:
 
 ```
 > **Design record.** Captured during the <feature> work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
 
 > **Historical.** <superseded by X / retired on DATE>. Preserved for rationale; not maintained.
 

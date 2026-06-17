@@ -70,6 +70,11 @@ member's per-drive usage and surfacing via `TeamOutcome.BudgetExhausted` plus
 a `StopBudget` team stop. It is orthogonal to `--max-run-tokens`, which each
 member inherits per-run.
 
+## Related
+
+- [Subagents & teams — the sibling delegation families](subagents-and-teams.md)
+- [The agent loop that dispatches branches](agent-loop.md)
+
 ---
 
 [← Architecture guide](../architecture.md)

@@ -107,6 +107,14 @@ design decisions behind this adapter — framing, the per-session client MCP
 mount, fs/\* delegation, and learned permissions — are recorded in
 [ADR 0001 — the ACP adapter](../adr/0001-acp-adapter.md).
 
+## Related
+
+- [The agent loop behind the API](agent-loop.md)
+- [Hooks & guardrails](hooks-and-guardrails.md)
+- [Observability & persistence](observability.md)
+- [Extensibility — MCP & tool meta-surfaces](extensibility.md)
+- [Deployment & server hardening](deployment-and-hardening.md)
+
 ---
 
 [← Architecture guide](../architecture.md)

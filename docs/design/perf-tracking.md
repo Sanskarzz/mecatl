@@ -1,7 +1,7 @@
 # Long-term performance & resource regression tracking
 
 > **Design record.** Captured during the perf tracking work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
 
 Sibling to the [performance observability design](perf-observability.md), which
 covers the *introspection* half (pprof, flight recorder, OTel metrics, the perf
@@ -577,4 +577,4 @@ Still open:
 
 ---
 
-*Part of the [design docs](./README.md). Related: [perf-observability.md](./perf-observability.md), [DIAGNOSTICS.md](./DIAGNOSTICS.md).*
+*Part of the [design docs](./README.md). Related: [Performance observability — problem, approaches, and the decided direction](./perf-observability.md), [Diagnostics, audit, and the global-slog ban](./DIAGNOSTICS.md).*

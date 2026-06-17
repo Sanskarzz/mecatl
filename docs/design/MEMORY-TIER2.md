@@ -1,7 +1,7 @@
 # Tier-2 / semantic memory recall — assessment + buildable design
 
 > **Design record.** Captured during the semantic memory recall work; the rationale here is frozen.
-> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
+> Current behaviour: [`docs/architecture.md`](../architecture.md) · shipped/deferred state: [Production Readiness — status & roadmap](./PRODUCTION-READINESS.md). Evolve via a new [ADR](../adr/), not by editing this file.
 
 ---
 
@@ -997,4 +997,4 @@ is orthogonal), the OpenAI Responses streaming path.
 
 ---
 
-*Part of the [design docs](./README.md). Read in order: [MEMORY-DEFAULTS.md](./MEMORY-DEFAULTS.md) → [MEMORY-TIERING.md](./MEMORY-TIERING.md) ← MEMORY-TIER2. Related: [SOUL-SPIKE.md](./SOUL-SPIKE.md).*
+*Part of the [design docs](./README.md). Read in order: [Memory enabled by default on the embedded mecatui server](./MEMORY-DEFAULTS.md) → [Genuine tiered memory (closing the tier-0 gap)](./MEMORY-TIERING.md) ← MEMORY-TIER2. Related: [Spike: A "soul" for mecatl — persistent identity + cross-session user-model](./SOUL-SPIKE.md).*

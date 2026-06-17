@@ -236,6 +236,12 @@ is loadable; the in-flight *stream* itself is not resumed (the `*agent.Run` is
 in-memory), and an approve/cancel against a stored-but-runless session returns
 `ErrNoActiveRun` (HTTP 409 / gRPC `FailedPrecondition`).
 
+## Related
+
+- [The API surface it instruments](api-surface.md)
+- [Providers — provider resilience](providers.md)
+- [Deployment & server hardening](deployment-and-hardening.md)
+
 ---
 
 [← Architecture guide](../architecture.md)

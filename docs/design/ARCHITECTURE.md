@@ -675,4 +675,4 @@ post-v1 work above only extended seams that the v1 shape already exposed.
 
 ---
 
-*Part of the [design docs](./README.md). Related: [DRIVERS.md](./DRIVERS.md), [IMPLEMENTATION-NOTES.md](./IMPLEMENTATION-NOTES.md), [STEP-CHAIN.md](./STEP-CHAIN.md).*
+*Part of the [design docs](./README.md). Related: [Driver seams — ports, the gRPC driver protocol, and conformance](./DRIVERS.md), [Implementation Notes](./IMPLEMENTATION-NOTES.md), [mecatl — Implementation Step-Chain (v1)](./STEP-CHAIN.md).*
