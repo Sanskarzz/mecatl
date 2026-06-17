@@ -148,6 +148,65 @@ func TestTightenTeamTokenBudget(t *testing.T) {
 	}
 }
 
+// TestBuildSubagentRunOptionsFloor is the focused unit test for the per-call token budget
+// floor: buildSubagentRunOptions must clamp a positive value below MinSubagentRunTokens up
+// to MinSubagentRunTokens, pass through values at or above the floor unchanged, and leave
+// a zero/absent budget as zero (inherit/unlimited — never raised to the floor).
+func TestBuildSubagentRunOptionsFloor(t *testing.T) {
+	ptr := func(n int) *int { return &n }
+
+	tests := []struct {
+		name     string
+		args     subagentArgs
+		wantOpts int // want MaxRunTokensOverride; 0 = unset (inherit)
+	}{
+		{
+			name:     "below floor is raised to MinSubagentRunTokens",
+			args:     subagentArgs{Prompt: "p", MaxRunTokens: ptr(6_000)},
+			wantOpts: MinSubagentRunTokens,
+		},
+		{
+			name:     "value of 1 is raised to MinSubagentRunTokens",
+			args:     subagentArgs{Prompt: "p", MaxRunTokens: ptr(1)},
+			wantOpts: MinSubagentRunTokens,
+		},
+		{
+			name:     "exact floor value passes through unchanged",
+			args:     subagentArgs{Prompt: "p", MaxRunTokens: ptr(MinSubagentRunTokens)},
+			wantOpts: MinSubagentRunTokens,
+		},
+		{
+			name:     "above floor passes through unchanged",
+			args:     subagentArgs{Prompt: "p", MaxRunTokens: ptr(MinSubagentRunTokens + 10_000)},
+			wantOpts: MinSubagentRunTokens + 10_000,
+		},
+		{
+			name:     "zero is unset (inherit) — not raised to floor",
+			args:     subagentArgs{Prompt: "p", MaxRunTokens: ptr(0)},
+			wantOpts: 0,
+		},
+		{
+			name:     "nil is unset (inherit) — not raised to floor",
+			args:     subagentArgs{Prompt: "p"},
+			wantOpts: 0,
+		},
+		{
+			name:     "deprecated max_tokens below floor is also raised",
+			args:     subagentArgs{Prompt: "p", MaxTokens: ptr(100)},
+			wantOpts: MinSubagentRunTokens,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			opts, _, _ := buildSubagentRunOptions(tc.args, false)
+			if opts.MaxRunTokensOverride != tc.wantOpts {
+				t.Fatalf("buildSubagentRunOptions(%+v) MaxRunTokensOverride = %d, want %d",
+					tc.args, opts.MaxRunTokensOverride, tc.wantOpts)
+			}
+		})
+	}
+}
+
 // TestSubmitResultSpecCarriesRetryAffordance pins the retry affordance in the
 // SubmitResult description (Execute's own correction path tells the model to "call
 // SubmitResult again"; the description must agree, not contradict it with "exactly

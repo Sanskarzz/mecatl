@@ -1,6 +1,7 @@
 package agent_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -94,8 +95,15 @@ func TestSubagentAgentAndModelTogetherRejected(t *testing.T) {
 // token-budget terminal. StopBudget is a clean terminal, so the Subagent RESULT is a SUCCESS
 // (best-effort), annotated with the budget note. The Run-scoped override works on the
 // SHARED child engine (which carries NO operator budget of its own).
+//
+// The per-call budget is set above agent.MinSubagentRunTokens (the floor) so it is passed
+// through verbatim. Each turn spends 15 000 tokens, so the budget trips after a few turns.
 func TestSubagentPerCallMaxTokensHitsBudgetTerminal(t *testing.T) {
-	childLLM := &runawayProvider{perTurn: session.Usage{InputTokens: 60, OutputTokens: 40}}
+	// 15 000 tokens/turn; a per-call budget of MinSubagentRunTokens+1000 = 26 000 trips
+	// after turn 2 (30 000 > 26 000). Using a value above the floor so it is not silently
+	// raised — the test proves the per-call path, not the floor mechanics.
+	budget := agent.MinSubagentRunTokens + 1000
+	childLLM := &runawayProvider{perTurn: session.Usage{InputTokens: 15_000}}
 	// The shared child engine has NO MaxRunTokens; the per-call max_tokens is the only brake.
 	childEngine := agent.NewEngine(agent.Deps{
 		LLM:     childLLM,
@@ -106,7 +114,8 @@ func TestSubagentPerCallMaxTokensHitsBudgetTerminal(t *testing.T) {
 	task := agent.NewSubagentTool(childEngine)
 
 	results, _ := subagentParentResults(t, task,
-		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"run forever","max_tokens":250}`)),
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent",
+			fmt.Sprintf(`{"prompt":"run forever","max_tokens":%d}`, budget))),
 		mockllm.TextTurn("parent done"),
 	)
 	if len(results) != 1 {

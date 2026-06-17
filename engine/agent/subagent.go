@@ -18,6 +18,19 @@ import (
 // subagentToolName is the catalog name of the subagent delegation tool.
 const subagentToolName = "Subagent"
 
+// MinSubagentRunTokens is the floor applied to per-call MaxRunTokensOverride.
+// The system prompt + AGENTS.md + project instructions are replayed on every
+// turn, costing ~20k+ tokens on the very first turn of a typical workspace run.
+// A model-supplied budget below this floor would stop the child before it can
+// complete even one useful turn, which is never the model's intent. The floor is
+// safe because the operator ceiling still wins via the tighten-only fold in
+// effectiveMaxRunTokens: min(override, Deps.MaxRunTokens) — clamping the
+// override UP to 25k never raises the effective budget above the operator bound.
+//
+// Exported so tests and external callers can reference the floor value without
+// hard-coding the magic number.
+const MinSubagentRunTokens = 25_000
+
 // maxSubagentGoalLen caps the prompt-derived goal label forwarded on
 // EvSubagentStart when no explicit description is supplied. It keeps the
 // subagent card title compact and bounds how much of the (model-authored) prompt
@@ -288,13 +301,19 @@ type subagentArgs struct {
 	// summary (StopBudget is a clean terminal), not an error. It is the same budget as the
 	// deprecated `max_tokens` alias; supplying both with CONFLICTING positive values is a
 	// model-visible error (see resolveMaxRunTokens).
+	//
+	// FLOOR: the system prompt + AGENTS.md/project instructions are replayed every turn
+	// (~20k+ tokens on turn 1 alone). A positive value below minSubagentRunTokens (25 000)
+	// is silently raised to 25 000 so the child can complete at least one useful turn; the
+	// operator ceiling still wins via the tighten-only fold.
 	MaxRunTokens *int `json:"max_run_tokens,omitempty"`
 	// MaxTokens is the DEPRECATED alias for MaxRunTokens. The name is misleading: it is a
 	// cumulative input+output RUN budget (the loop-level token ceiling), NOT a provider
 	// single-response output ceiling. Retained for backward compatibility; prefer
-	// max_run_tokens. Same tighten-only + non-positive-ignored semantics. When both this
-	// and MaxRunTokens are set to DIFFERENT positive values the call is rejected with a
-	// model-visible error; same-value is accepted.
+	// max_run_tokens. Same tighten-only + non-positive-ignored semantics, including the
+	// minSubagentRunTokens floor. When both this and MaxRunTokens are set to DIFFERENT
+	// positive values the call is rejected with a model-visible error; same-value is
+	// accepted.
 	MaxTokens *int `json:"max_tokens,omitempty"`
 
 	// Background detaches this child: the call returns IMMEDIATELY with a started-
@@ -393,11 +412,11 @@ var subagentSchema = json.RawMessage(`{
     },
     "max_run_tokens": {
       "type": "integer",
-      "description": "Optional cumulative input+output token budget for this child run. Tighten-only: can lower the inherited server budget, never raise it. When reached the subagent stops cleanly and returns its best-effort summary. Default: inherited/unlimited. (The deprecated max_tokens is an alias for this same budget; don't set both to different values.)"
+      "description": "Optional CUMULATIVE input+output token budget for this child run (loop-level run budget, NOT a single-response ceiling). IMPORTANT: the system prompt + AGENTS.md + project instructions are replayed on every turn and cost ~20 000+ tokens on turn 1 alone; values below 25 000 are automatically raised to 25 000 so the child can complete at least one useful turn. The operator ceiling still wins (tighten-only). Typical useful budgets: 50 000–500 000. When reached the subagent stops cleanly and returns its best-effort summary. Default: inherited/unlimited. (The deprecated max_tokens is an alias; don't set both to different values.)"
     },
     "max_tokens": {
       "type": "integer",
-      "description": "DEPRECATED alias for max_run_tokens (same cumulative input+output run budget, not a single-response output ceiling). Prefer max_run_tokens. Setting both to different values is rejected. Default: inherited/unlimited."
+      "description": "DEPRECATED alias for max_run_tokens (same CUMULATIVE input+output run budget, NOT a single-response output ceiling). Prefer max_run_tokens. Values below 25 000 are floored to 25 000 (same as max_run_tokens). Setting both to different values is rejected. Default: inherited/unlimited."
     },
     "output_schema": {
       "type": "object",
@@ -1067,6 +1086,16 @@ func buildSubagentRunOptions(args subagentArgs, resuming bool) (RunOptions, *sub
 	// rejected earlier in run() as a model-visible error, so here we only need the
 	// resolved positive value (0 = inherit/unlimited).
 	if v, _, _, _ := resolveMaxRunTokens(args); v > 0 {
+		// Floor: protect against a model self-imposing an unusably small budget. The
+		// system prompt + AGENTS.md + project instructions are replayed every turn and
+		// cost ~20k+ tokens on turn 1 alone; a budget below MinSubagentRunTokens would
+		// stop the child before it can complete one useful turn. Raising the override to
+		// the floor is safe: the operator ceiling still wins via the tighten-only fold
+		// in effectiveMaxRunTokens (min(override, Deps.MaxRunTokens)), so this never
+		// raises the effective budget above the operator's bound.
+		if v < MinSubagentRunTokens {
+			v = MinSubagentRunTokens
+		}
 		runOpts.MaxRunTokensOverride = v
 	}
 	prompt := args.Prompt

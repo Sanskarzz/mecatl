@@ -101,10 +101,16 @@ func TestSubagentSalvageDoesNotClobberExistingSummary(t *testing.T) {
 // TestSubagentBudgetStopDoesNotSalvage proves StopBudget is deliberately EXCLUDED from
 // salvage: spending another turn would violate the token ceiling. A child that exhausts
 // its run-token budget with no summary must NOT get a wrap-up drive.
+//
+// Note: the operator-level engine budget (MaxRunTokens) is used here rather than a
+// per-call max_tokens override, because per-call values below agent.MinSubagentRunTokens
+// (25 000) are floored up to 25 000 — a 50-token per-call ceiling would be silently
+// raised and the child would never hit it with only 200 scripted tokens. The operator
+// budget bypasses the floor and stays authoritative at any value.
 func TestSubagentBudgetStopDoesNotSalvage(t *testing.T) {
-	// A child whose first turn calls a tool with usage that overshoots the per-call
-	// max_tokens budget; the boundary check trips StopBudget before turn 2, with an empty
-	// body. The second scripted turn (the salvage sentinel) must remain unconsumed.
+	// A child whose first turn calls a tool with usage that overshoots the OPERATOR budget
+	// (50 tokens); the boundary check trips StopBudget before turn 2, with an empty body.
+	// The second scripted turn (the salvage sentinel) must remain unconsumed.
 	childLLM := mockllm.New(
 		mockllm.ChunksTurn(
 			mockllm.ToolCallChunk(toolCall("k", "Read", `{"path":"a"}`)),
@@ -113,11 +119,19 @@ func TestSubagentBudgetStopDoesNotSalvage(t *testing.T) {
 		),
 		mockllm.TextTurn("SALVAGE SHOULD NOT RUN ON BUDGET"),
 	)
-	childEngine := childEngineWith(childLLM, catalogWith(t, salvageReadTool()))
+	// Tight operator budget of 50 tokens; the first turn spends 200 (100 in + 100 out),
+	// tripping StopBudget before the salvage sentinel can run.
+	childEngine := agent.NewEngine(agent.Deps{
+		LLM:          childLLM,
+		Catalog:      catalogWith(t, salvageReadTool()),
+		Policy:       allowAll(),
+		Model:        "child-model",
+		MaxRunTokens: 50,
+	})
 	task := agent.NewSubagentTool(childEngine)
 
 	results, _ := subagentParentResults(t, task,
-		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"investigate","max_tokens":50}`)),
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"investigate"}`)),
 		mockllm.TextTurn("parent done"),
 	)
 	if len(results) != 1 {
