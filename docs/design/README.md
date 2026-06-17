@@ -239,5 +239,5 @@ declares whether it is a frozen design record, historical, or research.
 
 *See also: [`docs/architecture.md`](../architecture.md) — the live implementation
 reference · [`docs/usage.md`](../usage.md) — the operator guide · [`docs/adr/`](../adr/)
-— architecture decision records · [`CLAUDE.md`](../../CLAUDE.md) — the coding-agent
+— architecture decision records · [`AGENTS.md`](../../AGENTS.md) — the coding-agent
 contract.*

@@ -160,7 +160,7 @@ the composition layer (`internal/app`, called from the `cmd/` mains).
 - **[`docs/design/PRODUCTION-READINESS.md`](./docs/design/PRODUCTION-READINESS.md)** — the live status tracker (what's done, what's deferred).
 - **[mecatui terminal-UI guide](./docs/tui.md)** — the optional `mecatui` terminal client.
 - **[`docs/design/README.md`](./docs/design/README.md)** — the indexed catalog of design rationale per feature (`MULTI-PROVIDER.md`, `AGENT-TEAMS-SPIKE.md`, `DIAGNOSTICS.md`, `DRIVERS.md`, `BACKGROUND-SUBAGENTS.md`, `MECATEQUI.md`, the dense per-subsystem `IMPLEMENTATION-NOTES.md`, and the historical spikes).
-- **[`CLAUDE.md`](./CLAUDE.md)** — the coding-agent contract for this repo (layering rules, per-package gotchas, workflow conventions). **If you're an AI agent working in this codebase, start here.**
+- **[`AGENTS.md`](./AGENTS.md)** — the coding-agent contract for this repo (layering rules, per-package gotchas, workflow conventions). **If you're an AI agent working in this codebase, start here.**
 
 ## Project layout
 
@@ -202,7 +202,7 @@ port is the seam; Bash is also fully optional, so shell-less deploys avoid the s
 
 ## Development
 
-New here? Start with [`CLAUDE.md`](./CLAUDE.md) (the layering rules, per-package gotchas,
+New here? Start with [`AGENTS.md`](./AGENTS.md) (the layering rules, per-package gotchas,
 and workflow conventions) and the [architecture guide](./docs/architecture.md) (how the
 loop, ports, and adapters fit together). Then:
 
@@ -227,7 +227,7 @@ and design decisions).
 
 - **[Research-corpus master index](./docs/harnesses/INDEX.md)** — the master router (start here if you're an agent or hunting for something specific).
 - **[`docs/harnesses/README.md`](./docs/harnesses/README.md)** — the human narrative onramp and reading orders.
-- **[`AGENTS.md`](./AGENTS.md)** — conventions for the corpus.
+- **[corpus conventions](./docs/harnesses/README.md#contributing-to-this-corpus)** — conventions for the corpus.
 
 Nine files (~37K words) cover framing and glossary, the 12 Claude Code patterns, a Claude
 Code architecture deep-dive, recreations, a comparative survey, cross-cutting architecture

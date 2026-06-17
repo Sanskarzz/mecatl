@@ -33,3 +33,7 @@ e2e/fixtures/
 # `check --strict`. The operator-facing prose lives in docs/usage.md +
 # docs/design/MECATEQUI.md, which DO stay in the corpus.
 .github/mecatequi/
+
+# CLAUDE.md is a symlink to AGENTS.md (the canonical contract) for Claude Code
+# compatibility. It is not a separate corpus document.
+CLAUDE.md

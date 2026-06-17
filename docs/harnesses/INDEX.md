@@ -18,7 +18,7 @@ keywords: [harness, agent loop, tools, plan mode, subagents, hooks, permissions,
 > were not routed to.
 >
 > Contributing to this corpus? The conventions (frontmatter, INDEX upkeep) are in
-> [AGENTS.md](../../AGENTS.md).
+> [the corpus conventions](./README.md#contributing-to-this-corpus).
 
 **Corpus:** 9 files, ~37K words, on the design of agentic *coding* harnesses as
 of **2026-05-18**. Topic: everything wrapped around a model so it can finish a
