@@ -2296,7 +2296,7 @@ does).
 | `setup-script` | composite pre-run step (not a binary flag) — runs before the binary | `""` (no hook) |
 | `workspace` | `--workspace` | `${{ github.workspace }}` |
 | `posture` | `--posture` | `auto` |
-| `timeout` | `--timeout` | `15m` |
+| `timeout` | `--timeout` | `40m` |
 | `max-run-tokens` | `--max-run-tokens` (omitted when empty) | `""` |
 | `max-turns` | `--max-turns` (omitted when empty) | `""` |
 | `model` | `--model` | `""` |
@@ -2445,7 +2445,7 @@ The minting itself happens inside the reusable workflow's `publish` job (via
 **Inputs (`with:`)** — all optional with sane defaults: `label` (default `mecatequi`),
 `mention` (default `@mecatequi`), `model`, `default-provider`, `posture` (default `auto`),
 `max-run-tokens`, `max-turns` (per-run turn cap; empty uses the deployment default),
-`timeout` (default `15m`), `openai-base-url` (for an OpenAI-compatible
+`timeout` (default `40m`), `openai-base-url` (for an OpenAI-compatible
 endpoint), `guardrails-model` (issue #27 checker model; empty disables), `setup-script`
 (multi-line shell run before the binary to install a project toolchain beyond the always-on
 `task` + golangci-lint — see the toolchain note above), `base-branch`, `pr-body-template`,

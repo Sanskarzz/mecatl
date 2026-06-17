@@ -93,7 +93,11 @@ jobs:
   implement:
     name: Run mecatequi (agent, no write token)
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # 50m job ceiling vs the 40m agent timeout (set below): the 10m envelope absorbs
+    # pre-agent setup AND the post-agent artifact upload before the hard SIGKILL. The
+    # agent timeout is graceful; the job timeout is destructive — bias the margin to
+    # the job side. Keep job > agent.
+    timeout-minutes: 50
     # Run after `acknowledge` so the issue always carries an early trace before the agent
     # starts. `needs: acknowledge` makes implement skip whenever acknowledge was skipped
     # (the gate did not match), and the `needs.acknowledge.result == 'success'` clause keeps
@@ -221,7 +225,7 @@ jobs:
           default-provider: "openrouter"
           model: "anthropic/claude-sonnet-4.6"
           max-run-tokens: "150000"
-          timeout: "15m"
+          timeout: "40m"
 
       - name: Upload run artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
