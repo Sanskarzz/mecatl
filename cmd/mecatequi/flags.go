@@ -68,6 +68,12 @@ type flags struct {
 	noBash        bool
 	maxRunTokens  int
 	maxTeamTokens int
+	// maxTurns caps the session's model calls (the StopMaxTurns terminal). 0
+	// (default/unset) inherits the composition default (internal/app build.go), so
+	// it is NOT mapped onto app.Config — it is a per-SESSION limit threaded to
+	// CreateSession via run(), not an engine-build knob. A positive value tightens
+	// (or raises) the turn cap for this single-shot run.
+	maxTurns int
 
 	// headless declares NO human approver is attached. DEFAULT true (inverted from
 	// mecated ON PURPOSE): a single-shot CI tool has nobody to answer a permission
@@ -134,6 +140,7 @@ func parseFlags(argv []string) (flags, error) {
 	fs.BoolVar(&f.noBash, "no-bash", false, "disable the Bash tool entirely (shell-less mode); overrides --shell")
 	fs.IntVar(&f.maxRunTokens, "max-run-tokens", 0, "max cumulative input+output tokens per run; a run that crosses it ends cleanly with stop=budget. 0 = unlimited")
 	fs.IntVar(&f.maxTeamTokens, "max-team-tokens", 0, "max cumulative input+output tokens per team run; 0 = unlimited")
+	fs.IntVar(&f.maxTurns, "max-turns", 0, "max model calls (turns) for the run; a run that crosses it ends cleanly with stop=max_turns. 0 (default) uses the deployment default; a positive value caps this single-shot run. Orthogonal to --max-run-tokens (turns vs tokens; both compose)")
 
 	fs.BoolVar(&f.headless, "headless", true, "run NON-interactive (DEFAULT on, inverted from mecated): a single-shot CI run has no human approver, so a child subagent/member/branch permission ask is auto-denied / routed to the opt-in --subagent-ask-reviewer rather than parked until run-end. Pass --headless=false only when driving from something that can answer asks")
 

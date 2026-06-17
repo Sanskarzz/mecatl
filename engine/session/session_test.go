@@ -1298,3 +1298,31 @@ func TestResetUsage(t *testing.T) {
 		}
 	})
 }
+
+// TestLimitsWithDefaults covers the per-field merge: an all-zero Limits inherits
+// every default, a partially-set Limits keeps its non-zero caps and inherits the
+// rest, and a fully-set Limits is returned verbatim.
+func TestLimitsWithDefaults(t *testing.T) {
+	def := Limits{MaxTurns: 1000, MaxToolCalls: 4000, MaxConsecutiveFailures: 5}
+
+	t.Run("all-zero inherits every default", func(t *testing.T) {
+		if got := (Limits{}).WithDefaults(def); got != def {
+			t.Fatalf("got %+v, want the full default %+v", got, def)
+		}
+	})
+
+	t.Run("only MaxTurns pinned keeps the rest", func(t *testing.T) {
+		got := Limits{MaxTurns: 7}.WithDefaults(def)
+		want := Limits{MaxTurns: 7, MaxToolCalls: 4000, MaxConsecutiveFailures: 5}
+		if got != want {
+			t.Fatalf("got %+v, want %+v (MaxTurns pinned, the rest inherited — never zeroed)", got, want)
+		}
+	})
+
+	t.Run("fully-set is returned verbatim", func(t *testing.T) {
+		full := Limits{MaxTurns: 1, MaxToolCalls: 2, MaxConsecutiveFailures: 3}
+		if got := full.WithDefaults(def); got != full {
+			t.Fatalf("got %+v, want the verbatim %+v", got, full)
+		}
+	})
+}

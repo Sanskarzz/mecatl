@@ -50,17 +50,36 @@ func TestCreateSessionAppliesDefaultLimits(t *testing.T) {
 	}
 }
 
-// Explicit limits supplied by the caller must NOT be overridden by the defaults.
-func TestCreateSessionKeepsExplicitLimits(t *testing.T) {
+// A fully-set explicit Limits must be kept verbatim — no field is zero, so nothing
+// is defaulted.
+func TestCreateSessionKeepsFullyExplicitLimits(t *testing.T) {
 	def := session.Limits{MaxTurns: 50, MaxToolCalls: 200, MaxConsecutiveFailures: 5}
 	svc := newLimitsService(t, def)
 
-	explicit := session.Limits{MaxTurns: 3}
+	explicit := session.Limits{MaxTurns: 3, MaxToolCalls: 9, MaxConsecutiveFailures: 2}
 	sess, err := svc.CreateSession(context.Background(), "/ws", "", explicit)
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
 	if sess.Limits != explicit {
-		t.Fatalf("explicit limits overridden: got %+v, want %+v", sess.Limits, explicit)
+		t.Fatalf("fully-set explicit limits overridden: got %+v, want %+v", sess.Limits, explicit)
+	}
+}
+
+// A PARTIALLY-set Limits keeps its non-zero caps and inherits the rest per-field
+// from DefaultLimits. This is the trap the --max-turns flag must not fall into:
+// pinning ONLY MaxTurns must NOT silently disable the tool-call / failure caps (a
+// zero field means "unset", not "unlimited", once a default is supplied).
+func TestCreateSessionPerFieldDefaultsPreserveOtherCaps(t *testing.T) {
+	def := session.Limits{MaxTurns: 50, MaxToolCalls: 200, MaxConsecutiveFailures: 5}
+	svc := newLimitsService(t, def)
+
+	sess, err := svc.CreateSession(context.Background(), "/ws", "", session.Limits{MaxTurns: 3})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	want := session.Limits{MaxTurns: 3, MaxToolCalls: 200, MaxConsecutiveFailures: 5}
+	if sess.Limits != want {
+		t.Fatalf("per-field defaulting wrong: got %+v, want %+v (MaxTurns pinned, the rest inherited — the other caps must NOT become 0/unlimited)", sess.Limits, want)
 	}
 }

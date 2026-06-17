@@ -139,8 +139,13 @@ type runOutcome struct {
 // workspace is threaded explicitly because the Service does not expose its configured
 // default and CreateSession needs a concrete root — this keeps run self-contained for
 // the adversarial tests (which pass a memfs root like "/ws").
-func run(ctx context.Context, svc *server.Service, workspace, prompt string, w io.Writer) (runOutcome, error) {
-	sess, err := svc.CreateSession(ctx, workspace, session.ModeDefault, session.Limits{})
+//
+// limits is the per-session stop-limit override (from --max-turns). Any zero field is
+// filled from the Service's DefaultLimits inside CreateSession, so passing the zero
+// value preserves the deployment defaults, and passing only MaxTurns caps turns while
+// the tool-call / failure caps stay at their defaults (never silently disabled).
+func run(ctx context.Context, svc *server.Service, workspace string, limits session.Limits, prompt string, w io.Writer) (runOutcome, error) {
+	sess, err := svc.CreateSession(ctx, workspace, session.ModeDefault, limits)
 	if err != nil {
 		return runOutcome{}, fmt.Errorf("create session: %w", err)
 	}

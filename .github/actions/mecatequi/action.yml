@@ -142,6 +142,13 @@ inputs:
       on crossing it. Empty (default) omits the flag (unlimited).
     required: false
     default: ""
+  max-turns:
+    description: >-
+      Max model calls (turns) for the run; the run ends cleanly with stop=max_turns on
+      crossing it. Empty (default) omits the flag, so the binary's deployment default
+      applies. Orthogonal to max-run-tokens (turns vs tokens; both compose).
+    required: false
+    default: ""
   model:
     description: >-
       Model identifier sent to the provider (empty -> provider-appropriate default). This
@@ -356,6 +363,7 @@ runs:
         MQ_POSTURE: ${{ inputs.posture }}
         MQ_TIMEOUT: ${{ inputs.timeout }}
         MQ_MAX_RUN_TOKENS: ${{ inputs.max-run-tokens }}
+        MQ_MAX_TURNS: ${{ inputs.max-turns }}
         MQ_MODEL: ${{ inputs.model }}
         MQ_DEFAULT_PROVIDER: ${{ inputs.default-provider }}
         MQ_DEFAULT_MODEL: ${{ inputs.default-model }}
@@ -407,6 +415,7 @@ runs:
         [ "${fence_on}" = "true" ] && args+=( --untrusted-prompt )
         [ -n "${MQ_INSTRUCTIONS}" ] && args+=( --instructions "${MQ_INSTRUCTIONS}" )
         [ -n "${MQ_MAX_RUN_TOKENS}" ] && args+=( --max-run-tokens "${MQ_MAX_RUN_TOKENS}" )
+        [ -n "${MQ_MAX_TURNS}" ] && args+=( --max-turns "${MQ_MAX_TURNS}" )
         [ -n "${MQ_MODEL}" ] && args+=( --model "${MQ_MODEL}" )
         [ -n "${MQ_DEFAULT_PROVIDER}" ] && args+=( --default-provider "${MQ_DEFAULT_PROVIDER}" )
         [ -n "${MQ_DEFAULT_MODEL}" ] && args+=( --default-model "${MQ_DEFAULT_MODEL}" )

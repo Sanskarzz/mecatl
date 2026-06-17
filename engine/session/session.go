@@ -145,6 +145,25 @@ type Limits struct {
 	MaxConsecutiveFailures int
 }
 
+// WithDefaults returns l with each zero field filled from d. A caller that pins
+// only some caps (say MaxTurns) keeps the rest from d rather than disabling them:
+// a zero field means "unset", not "unlimited", once a default is supplied. An
+// all-zero l yields d unchanged; a fully-set l is returned verbatim. This mirrors
+// the per-field merge the subagent and team layers already use (defLimits,
+// mergeLimits), so a partial Limits behaves the same wherever defaults apply.
+func (l Limits) WithDefaults(d Limits) Limits {
+	if l.MaxTurns == 0 {
+		l.MaxTurns = d.MaxTurns
+	}
+	if l.MaxToolCalls == 0 {
+		l.MaxToolCalls = d.MaxToolCalls
+	}
+	if l.MaxConsecutiveFailures == 0 {
+		l.MaxConsecutiveFailures = d.MaxConsecutiveFailures
+	}
+	return l
+}
+
 // Counters track running totals used to evaluate stop conditions.
 type Counters struct {
 	// Turns is the number of model calls begun.

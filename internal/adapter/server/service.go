@@ -718,11 +718,12 @@ func (s *Service) createSession(ctx context.Context, workspace string, mode sess
 	if mode == "" {
 		mode = s.cfg.DefaultMode
 	}
-	if limits == (session.Limits{}) {
-		// An all-zero Limits disables every stop condition; substitute the
-		// injected defaults so a default session cannot run unbounded.
-		limits = s.cfg.DefaultLimits
-	}
+	// Fill any UNSET (zero) limit field from the injected defaults, per-field. An
+	// all-zero Limits inherits every default (so a default session cannot run
+	// unbounded); a Limits that pins only some caps keeps those and inherits the
+	// rest, rather than the old all-or-nothing substitution that silently disabled
+	// the unset caps. A zero field means "unset", not "explicitly unlimited".
+	limits = limits.WithDefaults(s.cfg.DefaultLimits)
 
 	needPerSession := sel != (ProviderSelector{}) || len(specs) > 0 || profile == ProfileNoFS
 	if !needPerSession {
