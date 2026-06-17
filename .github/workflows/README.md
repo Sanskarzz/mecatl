@@ -5,7 +5,7 @@ Seven workflows live here. Every **third-party** action is **SHA-pinned** with a
 silently change what runs. Pins track the Stacklok house set used in
 `a downstream consumer`. The lone exception is documented and deliberate: the reusable
 `mecatequi-reusable.yml` references its **first-party same-repo** sibling actions
-by **version tag** (`@v0.0.3`), not a SHA — see that section.
+by **version tag** (`@v0.0.4`), not a SHA — see that section.
 
 ## `ci.yml` — push to `main` + every pull request
 
@@ -234,7 +234,7 @@ It calls three **sibling composite actions** by **full path** —
 `uses: ./.github/actions/…` (and any `run:` script) resolves to the **caller's**
 checkout, not mecatl's; a full-path `uses:` is auto-fetched from mecatl instead.
 Expressions are illegal in `uses:`, so those refs are **hardcoded version tags**
-(`@v0.0.3`). These are first-party same-repo actions released together, so a tag —
+(`@v0.0.4`). These are first-party same-repo actions released together, so a tag —
 not a SHA — is correct (the SHA-pin rule defends against third-party tag
 re-pointing; we control both ends). **The release-process cost:** every tag must
 bump these pins in the same tagged commit, or the tag ships pins pointing at the
