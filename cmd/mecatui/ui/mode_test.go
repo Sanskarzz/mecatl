@@ -27,14 +27,18 @@ func modeTestModel(t *testing.T, conv *fakeConv) Model {
 	)
 }
 
+func modeKey() tea.KeyPressMsg {
+	return tea.KeyPressMsg{Code: 'm', Mod: tea.ModAlt}
+}
+
 func TestModeSwitchUpdatesServerAndHeader(t *testing.T) {
 	conv := &fakeConv{recv: &fakeRecver{}, send: &fakeSender{}, mode: "default"}
 	m := modeTestModel(t, conv)
 
-	mm, cmd := m.Update(ctrlKey('m'))
+	mm, cmd := m.Update(modeKey())
 	m = mm.(Model)
 	if cmd == nil {
-		t.Fatal("ctrl+m should issue SetMode command")
+		t.Fatal("alt+m should issue SetMode command")
 	}
 	m = applyAll(m, cmd())
 
@@ -54,10 +58,10 @@ func TestModeSwitchFailureDefersToNextPrompt(t *testing.T) {
 	m := modeTestModel(t, conv)
 	m.phase = phaseRunning
 
-	mm, cmd := m.Update(ctrlKey('m'))
+	mm, cmd := m.Update(modeKey())
 	m = mm.(Model)
 	if cmd == nil {
-		t.Fatal("ctrl+m while running should attempt SetMode")
+		t.Fatal("alt+m while running should attempt SetMode")
 	}
 	m = applyAll(m, cmd())
 

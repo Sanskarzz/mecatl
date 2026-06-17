@@ -21,7 +21,7 @@
 ┃    ctrl+r        MCP resources  [not enabled]                                                                                                              ┃
 ┃    ctrl+p        MCP prompts  [not enabled]                                                                                                                ┃
 ┃    ctrl+a        agents overlay (subagents / parallel / teams · tab to switch)                                                                             ┃
-┃    ctrl+m        cycle permission mode (default / plan / accept-edits)                                                                                     ┃
+┃    alt+m         cycle permission mode (default / plan / accept-edits)                                                                                     ┃
 ┃    ctrl+t        expand/collapse details                                                                                                                   ┃
 ┃                                                                                                                                                            ┃
 ┃  General                                                                                                                                                   ┃

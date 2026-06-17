@@ -957,10 +957,9 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.onClipboardPaste()
 	}
 
-	// ctrl+m cycles permission mode. It is handled here — before the phase switch —
-	// for idle + running so the key never feeds the textarea. When the session is
-	// awaiting approval the permission modal owns the keyboard and the switch is
-	// intentionally inert.
+	// alt+m cycles permission mode. It is handled here — before the phase switch —
+	// for idle + running so the key never feeds the textarea. Ctrl+M collides with
+	// Enter on real terminals, so the binding deliberately uses Alt+M.
 	if key.Matches(msg, m.keys.ModeSwitch) && (m.phase == phaseIdle || m.phase == phaseRunning) {
 		return m.switchMode(client.NextMode(m.desiredMode()))
 	}

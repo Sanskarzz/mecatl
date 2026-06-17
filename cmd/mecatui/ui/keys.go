@@ -32,10 +32,9 @@ type keyMap struct {
 	ScrollTop    key.Binding
 	ScrollBottom key.Binding
 
-	// ModeSwitch (ctrl+m) cycles the session permission mode: default → plan →
-	// accept-edits → default. It is control-modified so it never collides with prose
-	// input, and it is live while idle or running; a mid-turn server rejection defers
-	// the selected mode to the next prompt boundary.
+	// ModeSwitch (alt+m) cycles the session permission mode: default → plan →
+	// accept-edits → default. Alt-modified so it never collides with prose input;
+	// ctrl+m is avoided because terminals commonly encode it as Enter.
 	ModeSwitch key.Binding
 
 	// MCP overlay bindings. MCPPanel toggles the read-only inventory panel;
@@ -178,11 +177,12 @@ func defaultKeys() keyMap {
 			key.WithKeys("end"),
 			key.WithHelp("end", "scroll to bottom"),
 		),
-		// ctrl+m: cycle permission mode. Control-modified so it never collides with
-		// textarea prose; handled globally for idle/running.
+		// alt+m: cycle permission mode. ctrl+m is indistinguishable from Enter
+		// on common terminals (both encode carriage return), so bind this to Alt+M
+		// instead: still modified, but it cannot be swallowed by the submit path.
 		ModeSwitch: key.NewBinding(
-			key.WithKeys("ctrl+m"),
-			key.WithHelp("ctrl+m", "switch mode"),
+			key.WithKeys("alt+m"),
+			key.WithHelp("alt+m", "switch mode"),
 		),
 		// ctrl+o / ctrl+r / ctrl+p: control-modified so they never collide with
 		// the textarea's printable input (a bare letter must still type into the
