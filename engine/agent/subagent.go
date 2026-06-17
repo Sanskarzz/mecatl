@@ -293,12 +293,16 @@ type subagentArgs struct {
 
 	// MaxRunTokens is the PREFERRED per-call TIGHTEN-ONLY cumulative TOKEN budget for this
 	// child run (input+output — the loop-level run budget, NOT a single-response output
-	// ceiling). It rides a Run-scoped override on the SHARED child engine (no fresh engine
-	// needed), folded tighten-only with the operator default: the lower non-zero value
-	// wins, so a per-call budget can make the child stricter than the operator's bound,
-	// never looser. A non-positive value is ignored (inherit the engine's budget — DEFAULT
-	// is the inherited/unlimited budget). A budget-stopped child returns its best-effort
-	// summary (StopBudget is a clean terminal), not an error. It is the same budget as the
+	// ceiling). OMIT IT in almost all cases: the default is the inherited, usually-unlimited
+	// budget, which is the right choice; set a budget ONLY to specifically cap this child's
+	// cost. A budget set too low mostly just stops the child early. When set it rides a
+	// Run-scoped override on the SHARED child engine (no fresh engine needed), folded
+	// tighten-only with the operator default: the lower non-zero value wins, so a per-call
+	// budget can make the child stricter than the operator's bound, never looser. A
+	// non-positive value is ignored (inherit the engine's budget — DEFAULT is the
+	// inherited/unlimited budget). A budget-stopped child returns its best-effort summary
+	// (StopBudget is a clean terminal — salvaged even when the budget tripped before any
+	// text, see salvageEmptyLimitStop), not an error. It is the same budget as the
 	// deprecated `max_tokens` alias; supplying both with CONFLICTING positive values is a
 	// model-visible error (see resolveMaxRunTokens).
 	//
@@ -307,10 +311,11 @@ type subagentArgs struct {
 	// is silently raised to 25 000 so the child can complete at least one useful turn; the
 	// operator ceiling still wins via the tighten-only fold.
 	MaxRunTokens *int `json:"max_run_tokens,omitempty"`
-	// MaxTokens is the DEPRECATED alias for MaxRunTokens. The name is misleading: it is a
-	// cumulative input+output RUN budget (the loop-level token ceiling), NOT a provider
-	// single-response output ceiling. Retained for backward compatibility; prefer
-	// max_run_tokens. Same tighten-only + non-positive-ignored semantics, including the
+	// MaxTokens is the DEPRECATED alias for MaxRunTokens — prefer max_run_tokens, and prefer
+	// to OMIT it entirely (the default is the inherited, usually-unlimited budget). The name
+	// is misleading: it is a cumulative input+output RUN budget (the loop-level token
+	// ceiling), NOT a provider single-response output ceiling. Retained for backward
+	// compatibility. Same tighten-only + non-positive-ignored semantics, including the
 	// minSubagentRunTokens floor. When both this and MaxRunTokens are set to DIFFERENT
 	// positive values the call is rejected with a model-visible error; same-value is
 	// accepted.
@@ -412,11 +417,11 @@ var subagentSchema = json.RawMessage(`{
     },
     "max_run_tokens": {
       "type": "integer",
-      "description": "Optional CUMULATIVE input+output token budget for this child run (loop-level run budget, NOT a single-response ceiling). IMPORTANT: the system prompt + AGENTS.md + project instructions are replayed on every turn and cost ~20 000+ tokens on turn 1 alone; values below 25 000 are automatically raised to 25 000 so the child can complete at least one useful turn. The operator ceiling still wins (tighten-only). Typical useful budgets: 50 000–500 000. When reached the subagent stops cleanly and returns its best-effort summary. Default: inherited/unlimited. (The deprecated max_tokens is an alias; don't set both to different values.)"
+      "description": "Optional CUMULATIVE input+output token budget for this child run (a loop-level run budget, NOT a single-response output ceiling). OMIT IT in almost all cases — the default is the inherited, usually-unlimited budget, which is the right choice; set a budget ONLY when you specifically need to cap this child's cost. A budget set too low mostly just stops the child early. If you do set one: it is cumulative and the system prompt + project instructions (~20 000+ tokens) are replayed every turn, so values below 25 000 are automatically raised to 25 000; it is tighten-only (the operator ceiling still wins); when reached the child stops cleanly and returns its best-effort summary. (The deprecated max_tokens is an alias; don't set both to different values.)"
     },
     "max_tokens": {
       "type": "integer",
-      "description": "DEPRECATED alias for max_run_tokens (same CUMULATIVE input+output run budget, NOT a single-response output ceiling). Prefer max_run_tokens. Values below 25 000 are floored to 25 000 (same as max_run_tokens). Setting both to different values is rejected. Default: inherited/unlimited."
+      "description": "DEPRECATED — prefer max_run_tokens, and prefer to OMIT it entirely (default unlimited). Alias for max_run_tokens (same CUMULATIVE input+output run budget, NOT a single-response output ceiling). Values below 25 000 are floored to 25 000 (same as max_run_tokens). Setting both to different values is rejected."
     },
     "output_schema": {
       "type": "object",
@@ -607,15 +612,16 @@ type SubagentTool struct {
 const defaultStructuredOutputRetries = 2
 
 // salvageWrapUpPrompt is the model-visible re-injection driving ONE bounded wrap-up
-// turn when a FREE-TEXT child exhausts its turn/tool-call limit WITHOUT producing any
-// summary (issue #48). Without it the parent receives "(subagent produced no summary)"
-// after the child spent its whole budget fetching/reading and never reached its
-// conclusion. The salvage asks the child to stop and summarize its partial findings; it
-// explicitly forbids further tool use because the salvage drive is hard-bound to a
-// single turn (see salvageEmptyLimitStop). It is NOT a token-budget salvage: a budget
-// stop (StopBudget) is deliberately NOT salvaged — spending another turn would violate
-// the ceiling the operator set.
-const salvageWrapUpPrompt = "You have reached your step budget and must stop now. " +
+// turn when a FREE-TEXT child exhausts its turn/tool-call limit OR its token budget
+// WITHOUT producing any summary (issue #48). Without it the parent receives
+// "(subagent produced no summary)" after the child spent its whole budget
+// fetching/reading and never reached its conclusion. The salvage asks the child to
+// stop and summarize its partial findings; it explicitly forbids further tool use
+// because the salvage drive is hard-bound to a single turn (see
+// salvageEmptyLimitStop). For a token-budget stop the salvage drive uses a
+// ResetUsage call (mirroring the Supervisor.synthesise precedent) so the one wrap-up
+// turn is not immediately re-blocked by the working run's cumulative spend.
+const salvageWrapUpPrompt = "You have reached your budget and must stop now. " +
 	"Do not call any more tools. Summarize concisely what you found so far and give " +
 	"your best partial answer as your final response."
 
@@ -1864,15 +1870,19 @@ func driveChild(ctx context.Context, engine *Engine, child *session.Session, run
 }
 
 // salvageEmptyLimitStop drives ONE bounded wrap-up turn to recover a partial summary
-// from a FREE-TEXT child that exhausted its TURN or TOOL-CALL limit without producing
-// any text (issue #48) — so the parent gets a usable (if partial) deliverable instead
-// of "(subagent produced no summary)". It returns the (possibly salvaged) final text
-// and the cumulative usage (the salvage turn's usage ADDED, never double-counted).
+// from a FREE-TEXT child that exhausted its TURN or TOOL-CALL limit (or its TOKEN
+// budget — StopBudget) without producing any text (issue #48) — so the parent gets a
+// usable (if partial) deliverable instead of "(subagent produced no summary)". It
+// returns the (possibly salvaged) final text and the cumulative usage (the salvage
+// turn's usage ADDED, never double-counted).
 //
 // It is strictly best-effort and bounded:
-//   - Triggers ONLY on StopMaxTurns / StopMaxToolCalls with a blank finalText. A token
-//     budget stop (StopBudget) is DELIBERATELY excluded — spending another turn would
-//     violate the operator's token ceiling. Every other stop falls straight through.
+//   - Triggers on StopMaxTurns / StopMaxToolCalls / StopBudget with a blank finalText.
+//     Every other stop falls straight through.
+//   - For StopBudget, calls child.ResetUsage() AFTER child.Reopen() (mirroring the
+//     Supervisor.synthesise precedent in engine/agent/teamsupervisor.go) so the one
+//     wrap-up turn is not immediately re-blocked by the working run's cumulative spend.
+//     The salvage turn's own spend is still folded into the returned usage accumulator.
 //   - Reuses the SAME child session via Reopen() (which resets Counters), mirroring the
 //     structured-output retry seam. A non-recoverable session (failed/cancelled) simply
 //     keeps the empty result.
@@ -1887,10 +1897,10 @@ func driveChild(ctx context.Context, engine *Engine, child *session.Session, run
 //
 // The ORIGINAL stop reason is preserved by the caller: the salvage only fills in a
 // body; renderSubagentResult still stamps the honest "[subagent stopped: reached its
-// max-turns limit]" note. If the wrap-up errors or yields nothing, the prior empty
-// behaviour stands.
+// max-turns limit]" / "[subagent stopped: reached its token budget]" note. If the
+// wrap-up errors or yields nothing, the prior empty behaviour stands.
 func salvageEmptyLimitStop(ctx context.Context, engine *Engine, child *session.Session, runWS tool.Workspace, finalText string, stop session.StopReason, usage session.Usage, runOpts RunOptions, emit func(session.Event), call session.ToolCall, childID session.SessionID, posture childPosture) (string, session.Usage) {
-	if stop != session.StopMaxTurns && stop != session.StopMaxToolCalls {
+	if stop != session.StopMaxTurns && stop != session.StopMaxToolCalls && stop != session.StopBudget {
 		return finalText, usage
 	}
 	if strings.TrimSpace(finalText) != "" {
@@ -1899,10 +1909,31 @@ func salvageEmptyLimitStop(ctx context.Context, engine *Engine, child *session.S
 	if ctx.Err() != nil {
 		return finalText, usage
 	}
-	// Reopen requires StateCompleted; a limit stop terminates via terminateComplete, so
-	// the child is completed here. A failed/cancelled session is not recoverable — bail.
+	// For a budget stop, only salvage if the child actually spent tokens in THIS run
+	// (usage.TotalTokens() > 0, where usage is the per-run EvResult.Usage — the
+	// loop-local accumulator, NOT session.Usage). A resumed child whose cumulative
+	// session.Usage already exceeds the ceiling trips StopBudget at the FIRST boundary
+	// before any model call, producing zero per-run spend — there is nothing to salvage,
+	// and running the wrap-up drive would incorrectly grant an extra turn (the ResetUsage
+	// below would clear the prior-run spend, undermining the cloud-native Phase 1 budget
+	// carry guarantee). By contrast a normal budget stop always has per-run spend > 0
+	// because the child made at least one model call before crossing the ceiling.
+	if stop == session.StopBudget && usage.TotalTokens() == 0 {
+		return finalText, usage
+	}
+	// Reopen requires StateCompleted; a limit/budget stop terminates via terminateComplete,
+	// so the child is completed here. A failed/cancelled session is not recoverable — bail.
 	if err := child.Reopen(); err != nil {
 		return finalText, usage
+	}
+	// For a token-budget stop, the cumulative session.Usage survives Reopen (cloud-native
+	// Phase 1), so the working run's spend would immediately re-trip the budget ceiling on
+	// the salvage turn's first boundary check. Reset the accumulator so the ONE wrap-up
+	// turn is allowed to run — mirroring Supervisor.synthesise. A reset error is impossible
+	// on this idle path (Reopen just transitioned to idle) but is non-fatal: at worst the
+	// salvage turn re-trips the budget and we fall back to the empty placeholder.
+	if stop == session.StopBudget {
+		_ = child.ResetUsage()
 	}
 	// Pin the salvage to exactly ONE turn, restoring the real limits afterwards.
 	savedLimits := child.Limits
