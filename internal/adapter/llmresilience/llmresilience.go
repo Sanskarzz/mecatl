@@ -44,6 +44,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -404,39 +405,103 @@ func (p *resilientProvider) Stream(ctx context.Context, req port.LLMRequest) (it
 	return nil, &ExhaustedError{Attempts: p.cfg.MaxAttempts, Err: lastErr, PerAttempt: p.cfg.PerAttemptTimeout}
 }
 
-// establish performs a single attempt: it applies the per-attempt timeout,
-// calls the inner Stream, and pulls exactly the first chunk so that a pre-chunk
-// error is observed here (and thus retryable). On success it returns the inner
-// iterator, the buffered head, and a nil error. On failure it returns the error
-// and cancels the per-attempt context.
+// establish performs a single attempt: it bounds ESTABLISHMENT (connect + the
+// first chunk) by PerAttemptTimeout, calls the inner Stream, and pulls exactly
+// the first chunk so that a pre-chunk error is observed here (and thus retryable).
+// On success it returns the inner iterator, the buffered head, and a nil error.
+// On failure it returns the error and cancels the per-attempt context.
 //
-// The per-attempt context is intentionally left live on success: it is cancelled
+// The per-attempt budget is enforced by a SEPARATE establishment time.Timer, NOT
+// by an absolute context deadline: the inner stream rides a deadline-free
+// context.WithCancel(ctx), and the timer's goroutine calls cancel() ONLY if the
+// first chunk has not been pulled by PerAttemptTimeout. The timer is stopped and
+// its goroutine fully joined the instant the first chunk is in hand (and on every
+// failure exit). After that the streaming phase is governed solely by the idle
+// watchdog (StreamIdleTimeout, run in restSeq on the same cancel handle) plus the
+// parent ctx — so an actively-streaming long turn is NEVER cut at the per-attempt
+// deadline (the bug an absolute deadline used to cause: the deadline stayed live
+// through the whole stream and silently truncated a slow reasoning turn).
+//
+// The deadline-free ctx is intentionally left live on success: it is cancelled
 // when the returned iterator finishes or the caller stops early (handled in
-// wrap), so the timeout no longer applies once streaming proper has begun.
+// wrap/restSeq).
 func (p *resilientProvider) establish(ctx context.Context, req port.LLMRequest) (*firstChunk, error) {
 	attemptCtx := ctx
 	var cancel context.CancelFunc
-	switch {
-	case p.cfg.PerAttemptTimeout > 0:
-		attemptCtx, cancel = context.WithTimeout(ctx, p.cfg.PerAttemptTimeout)
-	case p.cfg.StreamIdleTimeout > 0:
-		// No establishment timeout, but the idle watchdog needs a cancel handle to
-		// unblock the inner stream.Next() when a mid-stream read stalls. Derive a
-		// cancellable context so the rest-loop can fire it; without a per-attempt
-		// timeout there is no establishment deadline (unchanged behaviour there).
+	if p.cfg.PerAttemptTimeout > 0 || p.cfg.StreamIdleTimeout > 0 {
+		// A cancel handle is needed when EITHER bound is active: the establishment
+		// timer fires it to abort a stalled first-chunk read, and the idle watchdog
+		// fires it to abort a stalled mid-stream read. With BOTH disabled, keep the
+		// plain ctx (cancel == nil) so the no-watchdog path is byte-identical.
 		attemptCtx, cancel = context.WithCancel(ctx)
+	}
+
+	// Establishment timer: bounds connect + first chunk ONLY. It fires cancel()
+	// (after setting estTimedOut) if the first chunk has not been pulled in time.
+	// CRITICAL: the goroutine is stopped AND joined on every exit path of establish
+	// (success after the first chunk, and all failure exits) so it cannot leak
+	// (goleak in leakmain_test.go) and is gone before restSeq runs (sampled by
+	// TestStreamIdleDisabledSpawnsNoWatchdogGoroutine).
+	var estTimedOut atomic.Bool
+	var estTimer *time.Timer
+	estDone := make(chan struct{})
+	estStop := make(chan struct{})
+	// stopEstTimer stops the establishment timer, joins its goroutine, and reports
+	// whether the timer had ALREADY fired (cancel() already called or in flight)
+	// before it was stopped. The estTimedOut.Load() is ordered AFTER the join
+	// (<-estDone): the goroutine's estTimedOut.Store(true) happens-before
+	// close(estDone), which happens-before this receive — so a true here means
+	// cancel() has run (or is guaranteed to before the goroutine exits) and
+	// attemptCtx is dead.
+	stopEstTimer := func() (fired bool) {
+		if estTimer == nil {
+			return false
+		}
+		estTimer.Stop()
+		close(estStop) // wake the goroutine if it is still parked on the timer
+		<-estDone      // join it before returning (no leak, gone before restSeq)
+		estTimer = nil
+		return estTimedOut.Load()
+	}
+	if p.cfg.PerAttemptTimeout > 0 {
+		estTimer = time.NewTimer(p.cfg.PerAttemptTimeout)
+		go func() {
+			defer close(estDone)
+			select {
+			case <-estTimer.C:
+				estTimedOut.Store(true)
+				if cancel != nil {
+					cancel()
+				}
+			case <-estStop:
+			}
+		}()
+	}
+
+	// establishmentFailure maps a failed first-chunk read to the error the
+	// downstream classifier/breaker/diagnostics expect. When the establishment timer
+	// fired (estTimedOut) the failure must look EXACTLY like the old absolute-deadline
+	// path — `DeadlineExceeded: errFirstChunkTimeout` — regardless of what the inner
+	// surfaced once cancelled (the inner ctx is a CANCEL context now, so on cancel an
+	// adapter reports context.Canceled, which would otherwise be classified
+	// non-retryable). This keeps the retry, the breaker-count, and the "per-attempt
+	// timeout fired" debug line identical to today. Otherwise it annotates the inner
+	// error with the per-attempt cause (a genuine parent cancel) read BEFORE cancel().
+	establishmentFailure := func(innerErr error) error {
+		if estTimedOut.Load() {
+			return attemptError(context.DeadlineExceeded, errFirstChunkTimeout)
+		}
+		return attemptError(ctx.Err(), innerErr)
 	}
 
 	seq, err := p.inner.Stream(attemptCtx, req)
 	if err != nil {
-		// Capture the TRUE per-attempt cause BEFORE cancel() runs: once cancel()
-		// fires, attemptCtx.Err() becomes context.Canceled and would mask the real
-		// error (e.g. a 400) as a cancellation.
-		cause := attemptCtx.Err()
+		failure := establishmentFailure(err)
+		stopEstTimer()
 		if cancel != nil {
 			cancel()
 		}
-		return nil, attemptError(cause, err)
+		return nil, failure
 	}
 
 	// Pull the first chunk using a pull iterator so we can stop after one.
@@ -444,41 +509,56 @@ func (p *resilientProvider) establish(ctx context.Context, req port.LLMRequest) 
 	chunk, cerr, ok := next()
 	if !ok {
 		// next() returned ok=false: either a genuinely empty stream (the inner
-		// yielded zero chunks and finished) OR the per-attempt deadline fired
-		// during the first-chunk read and the adapter swallowed the ctx error
-		// (it yields nothing on cancel). Disambiguate by the per-attempt cause,
-		// captured BEFORE cleanup cancel() runs (same discipline as attemptError):
-		// a DeadlineExceeded that is NOT a caller cancel is a retryable
-		// establishment timeout — surface it as a real failure so the retry/
-		// breaker path engages and an exhausted attempt becomes a *ExhaustedError
-		// (→ StopError), NOT a phantom clean-done empty completion. A genuinely
-		// empty stream (cause == nil) stays the empty-success path unchanged.
-		// We are still PRE-first-chunk here, so no-replay-after-first-chunk holds.
-		cause := attemptCtx.Err()
+		// yielded zero chunks and finished) OR the establishment timer fired during
+		// the first-chunk read and the adapter swallowed the ctx error (it yields
+		// nothing on cancel). A fired timer (estTimedOut) is a retryable
+		// establishment timeout — surface it as a real failure so the retry/breaker
+		// path engages and an exhausted attempt becomes a *ExhaustedError (→
+		// StopError), NOT a phantom clean-done empty completion. A genuinely empty
+		// stream (timer never fired, parent live) stays the empty-success path. We
+		// are still PRE-first-chunk here, so no-replay-after-first-chunk holds.
+		timedOut := estTimedOut.Load()
+		stopEstTimer()
 		stop()
 		if cancel != nil {
 			cancel()
 		}
-		if errors.Is(cause, context.DeadlineExceeded) && ctx.Err() == nil {
-			return nil, attemptError(cause, errFirstChunkTimeout)
+		if timedOut && ctx.Err() == nil {
+			return nil, attemptError(context.DeadlineExceeded, errFirstChunkTimeout)
 		}
 		// Empty stream: not a failure — treat as a successful (empty) stream.
 		return &firstChunk{empty: true}, nil
 	}
 	if cerr != nil {
-		// Error before any real chunk: retryable establishment failure. Capture the
-		// TRUE per-attempt cause BEFORE cancel() so the real error is not masked as a
-		// cancellation (see attemptError).
-		cause := attemptCtx.Err()
+		// Error before any real chunk: retryable establishment failure.
+		failure := establishmentFailure(cerr)
+		stopEstTimer()
 		stop()
 		if cancel != nil {
 			cancel()
 		}
-		return nil, attemptError(cause, cerr)
+		return nil, failure
 	}
 
-	// We have a real first chunk. Build a continuation iterator that yields the
-	// remainder and cleans up the pull iterator and per-attempt ctx.
+	// We have a real first chunk. The establishment budget is over: stop and JOIN
+	// the timer goroutine NOW (before building rest) so it cannot fire mid-stream
+	// and cannot leak. The streaming phase is governed by restSeq's idle watchdog
+	// (StreamIdleTimeout) + the parent ctx only — the deadline-free ctx means a
+	// long actively-streaming turn runs to completion.
+	if stopEstTimer() {
+		// Late-fire race: the timer fired in the narrow window between pulling the
+		// first chunk and stopping the timer. It has already called cancel(), so
+		// attemptCtx is dead and the streaming phase cannot proceed — restSeq's first
+		// read would yield nothing and return silently (the exact truncation this
+		// change exists to prevent). Treat it as a retryable establishment timeout
+		// instead. SAFE: the first chunk has NOT been yielded to the caller yet
+		// (we only buffered it here), so no-replay-after-first-chunk still holds.
+		stop()
+		if cancel != nil {
+			cancel()
+		}
+		return nil, attemptError(context.DeadlineExceeded, errFirstChunkTimeout)
+	}
 	rest := p.restSeq(next, stop, cancel)
 	return &firstChunk{chunk: chunk, restSeq: rest}, nil
 }

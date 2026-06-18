@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/stacklok/mecatl/internal/app"
 	"github.com/stacklok/mecatl/internal/cliconfig"
@@ -120,6 +121,16 @@ type config struct {
 	anthropicKey  string
 	mock          bool
 	noBash        bool
+
+	// Embedded-server LLM resilience timeouts (used only when hosting an
+	// in-process server; ignored when dialling an external --server). They mirror
+	// mecated's --llm-per-attempt-timeout / --llm-stream-idle-timeout and are
+	// mapped onto app.Config.LLMPerAttemptTimeout / app.Config.LLMStreamIdleTimeout
+	// in main.go. llmPerAttemptTimeout bounds ESTABLISHMENT (connect + first chunk)
+	// only — it never cuts an actively-streaming turn; llmStreamIdleTimeout bounds
+	// the idle gap between chunks after the first.
+	llmPerAttemptTimeout time.Duration
+	llmStreamIdleTimeout time.Duration
 
 	// trustProject controls whether a discovered PROJECT's permission ALLOW rules
 	// and its project-scoped soul (.mecatl/soul.md) are honoured for the EMBEDDED
@@ -286,6 +297,8 @@ func parseFlags(args []string) (config, error) {
 	})
 	fs.BoolVar(&cfg.mock, "mock", false, "embedded server only: use the canned offline mock provider instead of OpenAI (no network)")
 	fs.BoolVar(&cfg.noBash, "no-bash", false, "embedded server only: disable the Bash tool (shell-less mode)")
+	fs.DurationVar(&cfg.llmPerAttemptTimeout, "llm-per-attempt-timeout", 300*time.Second, "embedded server only: per-attempt timeout for ESTABLISHING an LLM stream (connect + first chunk only; never cuts an actively-streaming turn). 0 disables; large-context reasoning models can take a long time to first token")
+	fs.DurationVar(&cfg.llmStreamIdleTimeout, "llm-stream-idle-timeout", 180*time.Second, "embedded server only: max idle gap between LLM stream chunks after the first chunk; a longer stall terminates the turn (0 disables)")
 	fs.BoolVar(&cfg.trustProject, "trust-project", false, "embedded server only: honour a discovered PROJECT's ALLOW rules AND its project-scoped soul (.mecatl/soul.md) (its deny/ask rules are always honoured regardless). Default OFF (the safe stance, unified with mecated): an untrusted repo's permission grants and project soul are ignored. TRUST BOUNDARY: enabling this lets a checked-in .mecatl/settings.yaml auto-approve tool calls and a checked-in project soul steer the model — only pass it for a repo you trust")
 	fs.BoolVar(&cfg.allowAllTools, "yolo", false,
 		"embedded server only; ALIAS for --posture yolo (dangerous): allow-all AND loosen the CHILD substitution floor (a subagent's $()/backtick/heredoc AUTO-RUNS — prompt-injection defense OFF). Deny in any scope and configured Ask still apply. Isolated/single-tenant ONLY. Refused as root unless MECATL_SANDBOX=1 (or IS_SANDBOX=1).")

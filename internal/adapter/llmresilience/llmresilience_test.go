@@ -54,6 +54,21 @@ type step struct {
 	// zero-based chunk index. Used to sample runtime state (e.g. goroutine count)
 	// at a deterministic point mid-stream.
 	onChunk func(idx int)
+	// chunkInterval, if > 0, sleeps this long BEFORE yielding each chunk after the
+	// first (the first chunk is yielded immediately). The sleep aborts early on
+	// ctx.Done() (mirroring a real adapter whose read unblocks on cancel). This lets
+	// a fake yield chunk 0 immediately then space subsequent chunks across a wall-
+	// clock deadline — to prove an actively-streaming turn is NOT cut at the
+	// per-attempt deadline. Spacing under StreamIdleTimeout keeps the idle watchdog
+	// from firing.
+	chunkInterval time.Duration
+	// firstChunkAfterCancel, if true, makes the fake wait for ctx.Done() BEFORE
+	// yielding the FIRST chunk, then yield it anyway. This DETERMINISTICALLY
+	// reproduces the establishment-timer late-fire window: the timer fires (calls
+	// cancel → ctx.Done), and only THEN does the first chunk become available to
+	// the establish() pull — so stopEstTimer() observes fired==true with a real
+	// first chunk in hand. Used by TestEstablishmentTimerLateFireDoesNotTruncate.
+	firstChunkAfterCancel bool
 }
 
 func (f *fakeProvider) Capabilities() port.ProviderCapabilities { return f.caps }
@@ -88,6 +103,22 @@ func (f *fakeProvider) Stream(ctx context.Context, _ port.LLMRequest) (iter.Seq2
 	}
 	return func(yield func(port.Chunk, error) bool) {
 		for i, c := range s.chunks {
+			if i == 0 && s.firstChunkAfterCancel {
+				// Block until the establishment timer fires cancel(), then yield the
+				// first chunk anyway — reproducing the late-fire race window.
+				<-ctx.Done()
+			}
+			if i > 0 && s.chunkInterval > 0 {
+				// Space chunks after the first by chunkInterval, aborting early if the
+				// caller cancels (a real adapter's blocked read unblocks on cancel).
+				t := time.NewTimer(s.chunkInterval)
+				select {
+				case <-t.C:
+				case <-ctx.Done():
+					t.Stop()
+					return
+				}
+			}
 			if s.onChunk != nil {
 				s.onChunk(i)
 			}
@@ -1299,4 +1330,204 @@ func TestCapabilitiesForwarded(t *testing.T) {
 	if got := wrapped.Capabilities(); got != want {
 		t.Fatalf("Capabilities() = %+v, want %+v", got, want)
 	}
+}
+
+// multiTurnChunks returns n ChunkText chunks followed by a usage + ChunkDone, so
+// a fake can stream n+2 chunks total. Used by the deadline-detach regression tests.
+func multiTurnChunks(n int) []port.Chunk {
+	cs := make([]port.Chunk, 0, n+2)
+	for i := 0; i < n; i++ {
+		cs = append(cs, port.Chunk{Kind: port.ChunkText, Text: "tok"})
+	}
+	cs = append(cs,
+		port.Chunk{Kind: port.ChunkUsage, Usage: &session.Usage{}},
+		port.Chunk{Kind: port.ChunkDone, Stop: session.StopEndTurn},
+	)
+	return cs
+}
+
+// TestStreamNotTruncatedAtPerAttemptDeadline is the core regression guard: with a
+// short PerAttemptTimeout, an actively-streaming turn whose chunks cross that wall-
+// clock deadline must run to completion (the per-attempt budget bounds ONLY
+// establishment + the first chunk, enforced by a separate timer stopped at the
+// first chunk — never an absolute ctx deadline live through the whole stream).
+//
+// On the OLD code (context.WithTimeout) the inner reads ride an absolute deadline
+// that fires mid-stream; the adapter swallows the ctx error and restSeq returns on
+// !ok → the turn is silently truncated (no ChunkDone). This test FAILS there and
+// passes after the fix.
+func TestStreamNotTruncatedAtPerAttemptDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		idle time.Duration
+	}{
+		{"idle-disabled", 0},
+		{"idle-large", 5 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// First chunk immediately, then ~6 more spaced 15ms apart (~90ms total),
+			// well past the 40ms per-attempt budget but each gap under the idle budget.
+			f := &fakeProvider{steps: []step{{
+				chunks:        multiTurnChunks(6),
+				chunkInterval: 15 * time.Millisecond,
+			}}}
+			cfg := Config{
+				MaxAttempts:       1,
+				PerAttemptTimeout: 40 * time.Millisecond,
+				StreamIdleTimeout: tc.idle,
+			}
+			p := Wrap(f, cfg)
+
+			seq, err := p.Stream(context.Background(), port.LLMRequest{})
+			if err != nil {
+				t.Fatalf("Stream returned error: %v", err)
+			}
+			got, derr := drain(t, seq)
+			if derr != nil {
+				t.Fatalf("drain error: %v — an actively-streaming turn was cut at the per-attempt deadline (regression)", derr)
+			}
+			// 6 text + usage + done = 8 chunks; the turn must be complete (ends in Done).
+			if len(got) != 8 {
+				t.Fatalf("got %d chunks, want 8 (turn truncated at the per-attempt deadline)", len(got))
+			}
+			if last := got[len(got)-1]; last.Kind != port.ChunkDone {
+				t.Fatalf("last chunk kind = %v, want ChunkDone (turn did not complete)", last.Kind)
+			}
+		})
+	}
+}
+
+// TestEstablishmentTimeoutStillFiresAndRetryable asserts the per-attempt budget
+// still bounds ESTABLISHMENT: an attempt that never produces a first chunk times
+// out, is retried, and surfaces as a retryable DeadlineExceeded wrapping
+// errFirstChunkTimeout (classification identical to the old absolute-deadline path).
+func TestEstablishmentTimeoutStillFiresAndRetryable(t *testing.T) {
+	// Both attempts block forever (until their establishment timer cancels them).
+	f := &fakeProvider{steps: []step{{block: true}, {block: true}}}
+	cfg := Config{
+		MaxAttempts:       2,
+		BaseBackoff:       time.Nanosecond,
+		MaxBackoff:        time.Nanosecond,
+		PerAttemptTimeout: 30 * time.Millisecond,
+	}
+	p := Wrap(f, cfg)
+
+	_, err := p.Stream(context.Background(), port.LLMRequest{})
+	if err == nil {
+		t.Fatal("Stream should fail when establishment never produces a first chunk")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err is not DeadlineExceeded: %v", err)
+	}
+	if !errors.Is(err, errFirstChunkTimeout) {
+		t.Errorf("err does not wrap errFirstChunkTimeout: %v", err)
+	}
+	if f.Calls() != 2 {
+		t.Errorf("inner called %d times, want 2 (establishment timeout must be retried)", f.Calls())
+	}
+}
+
+// TestEstablishmentTimerStoppedAfterFirstChunk proves the establishment timer is
+// stopped the instant the first chunk is in hand: the first chunk arrives at t=0,
+// the second ~80ms later (past the 30ms per-attempt budget). If the timer were not
+// stopped it would fire at 30ms and cancel the stream mid-flight; instead the turn
+// completes cleanly.
+func TestEstablishmentTimerStoppedAfterFirstChunk(t *testing.T) {
+	f := &fakeProvider{steps: []step{{
+		chunks:        multiTurnChunks(2), // first immediate, second after the interval
+		chunkInterval: 80 * time.Millisecond,
+	}}}
+	cfg := Config{
+		MaxAttempts:       1,
+		PerAttemptTimeout: 30 * time.Millisecond,
+	}
+	p := Wrap(f, cfg)
+
+	seq, err := p.Stream(context.Background(), port.LLMRequest{})
+	if err != nil {
+		t.Fatalf("Stream returned error: %v", err)
+	}
+	got, derr := drain(t, seq)
+	if derr != nil {
+		t.Fatalf("drain error: %v — establishment timer fired after the first chunk (not stopped)", derr)
+	}
+	if len(got) != 4 { // 2 text + usage + done
+		t.Fatalf("got %d chunks, want 4 (turn truncated — timer fired post-first-chunk)", len(got))
+	}
+	if last := got[len(got)-1]; last.Kind != port.ChunkDone {
+		t.Fatalf("last chunk kind = %v, want ChunkDone", last.Kind)
+	}
+}
+
+// (The genuinely-empty-stream-with-a-generous-per-attempt-budget success path —
+// zero chunks, timer never fires, parent live, no misclassification — is covered by
+// the sibling TestGenuinelyEmptyStreamStaysSuccessAfterFix above; no separate test
+// is duplicated for it here.)
+
+// TestEstablishmentTimerLateFireDoesNotTruncate is the DETERMINISTIC guard for the
+// late-fire race on the success path: the establishment timer can fire in the
+// narrow window between pulling the first chunk and stopping the timer. When it
+// does, it has already called cancel() — so attemptCtx is dead and the streaming
+// phase (restSeq) cannot proceed; a naive success path would build restSeq on the
+// dead context and the first rest-read would yield nothing → SILENT TRUNCATION (a
+// partial chunk list with no ChunkDone and no error). establish() must instead
+// detect the fired timer (stopEstTimer reporting fired==true) and treat it as a
+// retryable establishment timeout.
+//
+// Determinism: firstChunkAfterCancel makes the fake wait for ctx.Done() BEFORE
+// yielding the first chunk, so the timer is GUARANTEED to have fired (and called
+// cancel) before establish() ever has a first chunk in hand — exercising exactly
+// the window. With MaxAttempts:2 the second attempt streams normally and the call
+// completes cleanly; the assertion is the disjunction the finding requires: EITHER
+// a clean complete turn OR a surfaced errFirstChunkTimeout — but NEVER a truncated
+// stream (chunks without a terminal ChunkDone and without an error).
+//
+// Against the pre-fix code (success path that ignored a late fire) the first
+// attempt would build restSeq on the cancelled ctx and drain would return zero
+// chunks with no error and no Done — failing the "never truncated" assertion below.
+func TestEstablishmentTimerLateFireDoesNotTruncate(t *testing.T) {
+	f := &fakeProvider{steps: []step{
+		// Attempt 1: first chunk only becomes available AFTER the timer fires cancel;
+		// chunkInterval makes every SUBSEQUENT read observe ctx.Done() (a real adapter
+		// unblocks on cancel and yields nothing), so on the dead post-cancel ctx the
+		// stream truncates after the buffered first chunk — the regression shape.
+		{chunks: multiTurnChunks(2), firstChunkAfterCancel: true, chunkInterval: time.Millisecond},
+		// Attempt 2 (the retry): streams normally to completion.
+		{chunks: multiTurnChunks(2)},
+	}}
+	cfg := Config{
+		MaxAttempts:       2,
+		BaseBackoff:       time.Nanosecond,
+		MaxBackoff:        time.Nanosecond,
+		PerAttemptTimeout: 20 * time.Millisecond, // fires while attempt 1 is parked
+	}
+	p := Wrap(f, cfg)
+
+	seq, err := p.Stream(context.Background(), port.LLMRequest{})
+	if err != nil {
+		// Acceptable outcome: surfaced as a retryable establishment timeout.
+		if !errors.Is(err, errFirstChunkTimeout) {
+			t.Fatalf("Stream error = %v, want nil or errFirstChunkTimeout", err)
+		}
+		return
+	}
+	// Otherwise it must be a COMPLETE turn — never a truncated one.
+	got, derr := drain(t, seq)
+	if derr != nil {
+		if !errors.Is(derr, errFirstChunkTimeout) {
+			t.Fatalf("drain error = %v, want nil or errFirstChunkTimeout", derr)
+		}
+		return
+	}
+	if len(got) == 0 || got[len(got)-1].Kind != port.ChunkDone {
+		t.Fatalf("got %d chunks ending in %v — late-fire produced a TRUNCATED stream (no ChunkDone, no error)",
+			len(got), lastKind(got))
+	}
+}
+
+func lastKind(cs []port.Chunk) any {
+	if len(cs) == 0 {
+		return "<none>"
+	}
+	return cs[len(cs)-1].Kind
 }

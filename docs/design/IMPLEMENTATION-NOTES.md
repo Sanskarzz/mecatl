@@ -2004,12 +2004,31 @@ trial after cooldown. **Motivating incident:** a burst of permanent 404s (OpenRo
 policy-blocked / unavailable models) was counting toward the shared breaker via an unconditional
 `recordFailure`, tripping it and then blocking unrelated WORKING models for the cooldown.
 
-**Post-first-chunk idle bound (`StreamIdleTimeout`).** `PerAttemptTimeout` bounds only
-establishment and the FIRST chunk; once streaming proper begins the per-attempt context is left
-live and there is no per-chunk deadline. A real upstream SSE connection can stall mid-stream —
+**Establishment bound (`PerAttemptTimeout`) is a SEPARATE timer, not an absolute deadline.**
+`PerAttemptTimeout` bounds only establishment (connect + the FIRST chunk). It is enforced by a
+standalone `time.Timer` in `establish`, NOT by a `context.WithTimeout` whose absolute deadline
+would stay live throughout streaming. The inner stream rides a deadline-free `context.WithCancel(ctx)`;
+the establishment timer's goroutine sets an `estTimedOut atomic.Bool` and calls `cancel()` ONLY if
+the first chunk has not been pulled by the budget. The timer is stopped and its goroutine fully
+JOINED the instant the first chunk is in hand (and on every failure exit — one `done`-channel join,
+so goleak stays green and the goroutine is gone before `restSeq` runs). After the first chunk the
+streaming phase is governed solely by the idle watchdog (`StreamIdleTimeout`, on the SAME `cancel`
+handle) plus the parent ctx — so an actively-streaming long turn (a slow reasoning model) is NEVER
+cut at the per-attempt deadline. **Motivating incident:** a `context.WithTimeout` whose deadline
+stayed live through the whole stream silently truncated a GLM-5.2 reasoning turn at exactly the
+per-attempt budget (the adapter swallows the ctx error on cancel, `restSeq` hits `!ok` → a phantom
+clean-done with no `ChunkDone` → no-progress run death). A fired establishment timer is mapped to
+`attemptError(context.DeadlineExceeded, errFirstChunkTimeout)` so its classification (retryable,
+breaker-counted, the "per-attempt timeout fired" debug line) is byte-identical to the old path; a
+genuine parent cancel still surfaces as a cancel, and a genuinely-empty stream stays the
+empty-success path.
+
+**Post-first-chunk idle bound (`StreamIdleTimeout`).** Once streaming proper begins the
+deadline-free per-attempt context is left live and there is no per-chunk deadline. A real upstream
+SSE connection can stall mid-stream —
 the openai/anthropic adapters' `stream.Next()` then blocks forever, the loop never sees
-`ChunkDone`, and the turn hangs in "thinking" permanently. `StreamIdleTimeout` (default 120s; 0
-disables) closes this: in `restSeq`'s continuation loop each `next()` runs on a helper goroutine
+`ChunkDone`, and the turn hangs in "thinking" permanently. `StreamIdleTimeout` (default 180s on
+both `cmd/` roots; 0 disables) closes this: in `restSeq`'s continuation loop each `next()` runs on a helper goroutine
 and a `time.NewTimer` (real time, NOT `cfg.Clock` — that drives breaker math only) is reset to the
 idle budget per iteration. On a timeout the wrapper `cancel()`s the per-attempt context (to
 unblock the inner `stream.Next()`), DRAINS the in-flight helper (so neither it nor the pull

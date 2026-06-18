@@ -429,8 +429,15 @@ window (retryable) and the **post-first-chunk** stream (terminal).
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--llm-max-attempts` | `3` | max stream-establish attempts (initial call plus retries). Retries apply ONLY before the first chunk — no-replay-after-first-chunk. |
-| `--llm-per-attempt-timeout` | `30s` | per-attempt timeout for **establishing** an LLM stream (connect + first chunk). A timeout here is **retryable**. 0 disables. |
-| `--llm-stream-idle-timeout` | `120s` | max idle gap between LLM stream chunks **after the first chunk**. A longer stall **ends the turn as an error** (it is terminal, never retried — replay is unsafe mid-stream). Guards against an upstream SSE connection that stalls mid-stream and would otherwise hang the turn forever. 0 disables. |
+| `--llm-per-attempt-timeout` | `300s` | per-attempt timeout for **establishing** an LLM stream (connect + first chunk only; **never cuts an actively-streaming turn** — enforced by a separate timer stopped at the first chunk, not an absolute deadline that lingers through the stream). A timeout here is **retryable**. 0 disables. Generous by default so a slow large-context reasoning model has time to first token. `mecatui` accepts the same flag for its embedded server. |
+
+> **Note — the per-attempt-timeout default was raised from 60s to 300s.** It now bounds
+> establishment (time-to-first-token) ONLY, so the old 60s value starved slow reasoning
+> models that legitimately take longer than a minute before their first chunk. If you
+> prefer faster failover (e.g. quick retry/breaker engagement against a flaky provider),
+> lower `--llm-per-attempt-timeout` — it no longer risks cutting a long actively-streaming
+> turn, which the `--llm-stream-idle-timeout` watchdog now governs instead.
+| `--llm-stream-idle-timeout` | `180s` | max idle gap between LLM stream chunks **after the first chunk**. A longer stall **ends the turn as an error** (it is terminal, never retried — replay is unsafe mid-stream). Guards against an upstream SSE connection that stalls mid-stream and would otherwise hang the turn forever. 0 disables. `mecatui` accepts the same flag for its embedded server. |
 | `--llm-breaker-threshold` | `5` | consecutive **transient** establishment failures that open the per-provider circuit breaker (0 disables). |
 | `--llm-breaker-cooldown` | `30s` | how long the breaker stays open before admitting a half-open trial. |
 
