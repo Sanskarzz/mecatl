@@ -2,7 +2,9 @@ package server_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -696,4 +698,636 @@ func TestModeRebuildCrossSessionConcurrentNoRace(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// TestEngineAndWorkspaceForResolutionMatrix is the explicit decision-table test for
+// Service.engineAndWorkspaceFor (internal/adapter/server/service.go). It names and
+// pins every resolution branch so a regression changes an assertion rather than
+// silently disappearing into incidental coverage.
+//
+// Actual resolution outcomes (5) + error exits (2) — note: the issue asked for a
+// "four-way" matrix, but the current code has 5 named outcomes plus 2 error paths:
+//
+//	REUSE         — hasEngine && (builtForMode=="" || ==sess.Mode): returns the
+//	               existing per-session engine unchanged; factory call count does NOT
+//	               increase.
+//	REBUILD       — hasEngine && builtForMode != "" && != sess.Mode (CASE 1): the
+//	               per-session engine is stale; rebuilt through the factory (calls++).
+//	PROMOTE       — !hasEngine && !needsRehydration && ModeNeedsEngine(mode) (CASE 2):
+//	               a default-FS session promoted to a per-session engine (calls==1).
+//	REHYDRATE     — !hasEngine && needsRehydration: rebuilt via rehydrateSession after
+//	               a process restart (factory called once on the new service).
+//	SHARED-DEFAULT — none of the above: the session rides the shared engine (calls==0).
+//	ERROR mid-run  — CASE 1 with a live run → ErrInvalidArgument.
+//	ERROR at-cap   — CASE 2/REHYDRATE when MaxSessionEngines is full →
+//	               ErrTooManySessionEngines.
+//
+// The defensive ws=nofs.New() arm inside the DEFAULT block (~service.go:1438-1446) is
+// normally unreachable (create and rehydration both register the workspace override
+// first); it is left to implicit coverage rather than forced here.
+func TestEngineAndWorkspaceForResolutionMatrix(t *testing.T) {
+	// matrixRow describes one row of the decision table.
+	type matrixRow struct {
+		name string
+		// run executes the row; it returns (assertFn, wantErr).
+		// wantErr is the expected error (nil = success expected). For error rows the
+		// returned error IS the assertion (it carries the errors.Is mismatch description).
+		// assertFn (called only when wantErr==nil) reads each row's own captured closures
+		// — it takes no params; the per-row factory counters/replies live in the closure.
+		run func(t *testing.T) (assertFn func(), wantErr error)
+	}
+
+	rows := []matrixRow{
+		// ── REUSE (matching builtForMode) ─────────────────────────────────────────
+		{
+			name: "reuse/matching-mode-per-session-engine",
+			// A selector session created in plan mode has a per-session engine with
+			// builtForMode=plan. Running again in plan mode must REUSE the engine —
+			// the factory is NOT called a second time (calls stays at 1, set at create).
+			run: func(t *testing.T) (func(), error) {
+				t.Helper()
+				ctx := context.Background()
+				store := memstore.New()
+				var modes []session.PermissionMode
+				var calls atomic.Int32
+				svc := modeServiceOverStore(t, store,
+					modeRecordingFactory("gpt-5", "opus-plan", &modes, &calls),
+					func(m session.PermissionMode) bool { return m == session.ModePlan })
+				sess, err := svc.CreateSessionWithProvider(ctx, "/ws", session.ModePlan, session.Limits{},
+					server.ProviderSelector{ProviderID: "openai", ModelID: "gpt-5"})
+				if err != nil {
+					t.Fatalf("CreateSession: %v", err)
+				}
+				callsAtCreate := calls.Load() // should be 1 (the create-time factory call)
+				reply := drainAndFinish(t, svc, sess.ID, mustStart(t, svc, sess.ID, "plan turn"))
+				return func() {
+					// REUSE: no additional factory call since create.
+					if got := calls.Load() - callsAtCreate; got != 0 {
+						t.Errorf("reuse/matching-mode: factory called %d extra times (want 0 — REUSE must not rebuild when mode matches)", got)
+					}
+					// REUSE also routes to the PER-SESSION engine (the plan-model reply), not
+					// the shared engine: a regression that left the per-session engine
+					// registered (calls delta still 0) but silently ran the shared engine would
+					// flip this reply to "SHARED-ENGINE-REPLY".
+					if reply != "reply-opus-plan" {
+						t.Errorf("reuse/matching-mode: reply = %q, want reply-opus-plan (REUSE must route to the per-session engine, not the shared one)", reply)
+					}
+				}, nil
+			},
+		},
+		// ── REUSE (empty builtForMode — pre-Phase-3 factory compat) ──────────────
+		{
+			name: "reuse/empty-builtForMode-no-rebuild",
+			// A pre-Phase-3 factory returns BuiltForMode="" for a selector session.
+			// Even after a mode change the engine must NOT rebuild (the != "" guard).
+			run: func(t *testing.T) (func(), error) {
+				t.Helper()
+				ctx := context.Background()
+				store := memstore.New()
+				var calls atomic.Int32
+				preP3 := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile, _ string, _ session.PermissionMode) (server.SessionEngineResult, error) {
+					calls.Add(1)
+					eng := agent.NewEngine(agent.Deps{
+						LLM:     mockllm.New(mockllm.TextTurn("pre-p3"), mockllm.TextTurn("pre-p3")),
+						Catalog: tool.NewCatalog(), Policy: permpolicy.NewPolicy(nil, nil), Model: "gpt-5",
+					})
+					// BuiltForMode deliberately left "" (pre-Phase-3 shape).
+					return server.SessionEngineResult{Engine: eng, ModelID: "gpt-5", ProviderID: "openai", Close: func() error { return nil }}, nil
+				}
+				svc := modeServiceOverStore(t, store, preP3,
+					func(m session.PermissionMode) bool { return m == session.ModePlan })
+				sess, err := svc.CreateSessionWithProvider(ctx, "/ws", session.ModeDefault, session.Limits{},
+					server.ProviderSelector{ProviderID: "openai", ModelID: "gpt-5"})
+				if err != nil {
+					t.Fatalf("CreateSession: %v", err)
+				}
+				_ = drainAndFinish(t, svc, sess.ID, mustStart(t, svc, sess.ID, "t1"))
+				if _, err := svc.SetMode(ctx, sess.ID, session.ModePlan); err != nil {
+					t.Fatalf("SetMode: %v", err)
+				}
+				_ = drainAndFinish(t, svc, sess.ID, mustStart(t, svc, sess.ID, "t2"))
+				return func() {
+					// REUSE via empty-builtForMode: create + no rebuilds = 1 call total.
+					if calls.Load() != 1 {
+						t.Errorf("reuse/empty-builtForMode: factory calls = %d, want 1 (the != \"\" guard must prevent rebuild)", calls.Load())
+					}
+				}, nil
+			},
+		},
+		// ── REBUILD (CASE 1 — stale per-session engine) ───────────────────────────
+		{
+			name: "rebuild/stale-mode-case1",
+			// A selector session built for ModeDefault; switch to plan → next StartRun
+			// REBUILDS the engine (calls goes from 1 to 2; last recorded mode is plan).
+			run: func(t *testing.T) (func(), error) {
+				t.Helper()
+				ctx := context.Background()
+				store := memstore.New()
+				var modes []session.PermissionMode
+				var calls atomic.Int32
+				svc := modeServiceOverStore(t, store,
+					modeRecordingFactory("gpt-5", "opus-plan", &modes, &calls),
+					func(m session.PermissionMode) bool { return m == session.ModePlan })
+				sess, err := svc.CreateSessionWithProvider(ctx, "/ws", session.ModeDefault, session.Limits{},
+					server.ProviderSelector{ProviderID: "openai", ModelID: "gpt-5"})
+				if err != nil {
+					t.Fatalf("CreateSession: %v", err)
+				}
+				_ = drainAndFinish(t, svc, sess.ID, mustStart(t, svc, sess.ID, "exec turn"))
+				if _, err := svc.SetMode(ctx, sess.ID, session.ModePlan); err != nil {
+					t.Fatalf("SetMode: %v", err)
+				}
+				reply := drainAndFinish(t, svc, sess.ID, mustStart(t, svc, sess.ID, "plan turn"))
+				return func() {
+					// REBUILD: factory called twice (create + rebuild) and last mode is plan.
+					if calls.Load() != 2 {
+						t.Errorf("rebuild/stale-mode: factory calls = %d, want 2 (create + CASE-1 rebuild)", calls.Load())
+					}
+					if len(modes) < 2 || modes[len(modes)-1] != session.ModePlan {
+						t.Errorf("rebuild/stale-mode: last recorded factory mode = %v, want plan; all: %v", modes, modes)
+					}
+					// The plan-turn reply comes from the rebuilt plan-model engine.
+					if reply != "reply-opus-plan" {
+						t.Errorf("rebuild/stale-mode: plan-turn reply = %q, want reply-opus-plan", reply)
+					}
+				}, nil
+			},
+		},
+		// ── REBUILD (CASE 1 — mid-run reject → ErrInvalidArgument) ──────────────
+		// This is the NET-NEW row: the CHEAP liveness pre-check at ~service.go:1384.
+		// (A redundant AUTHORITATIVE guard also fires at ~1618 under the lock in
+		// buildAndRegisterSessionEngine — the BACKSTOP PAIR. The two return identical
+		// ErrInvalidArgument, so errors.Is alone cannot tell which fired. They differ in
+		// ONE observable: the cheap pre-check short-circuits BEFORE any factory build,
+		// while the authoritative guard fires only AFTER a factory call. Asserting the
+		// factory was called EXACTLY ONCE (create only, no rebuild attempt) therefore
+		// pins the cheap pre-check — the branch this row's comment names.) Only
+		// incidentally covered today.
+		//
+		// Trigger sequence (deterministic, no sleeps, no blocking provider):
+		//  1. Selector session created → builtForMode=ModeDefault (factory call #1).
+		//  2. Run1 executes to completion (session→StateCompleted); FinishRun is
+		//     deliberately NOT called, so run1 stays in s.runs[id].
+		//  3. SetMode(plan) — StateCompleted allows mode changes — makes the engine
+		//     stale: builtForMode=ModeDefault, sess.Mode=plan.
+		//  4. Run2 tries StartRun → loadAndReopen reopens (StateCompleted→idle) →
+		//     engineAndWorkspaceFor → CASE 1 (builtForMode != sess.Mode) → liveness
+		//     pre-check: s.runs[id] still has run1 → ErrInvalidArgument, no factory build.
+		//  5. Cleanup: FinishRun(run1) so the registry is clean for goroutine-leak gate.
+		{
+			name: "rebuild/mid-run-rejected",
+			run: func(t *testing.T) (func(), error) {
+				t.Helper()
+				ctx := context.Background()
+				store := memstore.New()
+				var modes []session.PermissionMode
+				var calls atomic.Int32
+				svc := modeServiceOverStore(t, store,
+					modeRecordingFactory("gpt-5", "opus-plan", &modes, &calls),
+					func(m session.PermissionMode) bool { return m == session.ModePlan })
+
+				// Selector session: has a per-session engine with builtForMode=ModeDefault.
+				sess, err := svc.CreateSessionWithProvider(ctx, "/ws", session.ModeDefault, session.Limits{},
+					server.ProviderSelector{ProviderID: "openai", ModelID: "gpt-5"})
+				if err != nil {
+					t.Fatalf("CreateSessionWithProvider: %v", err)
+				}
+
+				// Step 2: run1 completes cleanly. Do NOT call FinishRun — the run stays in
+				// s.runs[id] (simulating a slow wire-drain that has not yet deregistered).
+				run1, err := svc.StartRun(ctx, sess.ID, "run1")
+				if err != nil {
+					t.Fatalf("StartRun run1: %v", err)
+				}
+				drainServerRun(run1) // drain events but skip FinishRun
+
+				// Step 3: the aggregate is now StateCompleted; SetMode is legal.
+				if _, err := svc.SetMode(ctx, sess.ID, session.ModePlan); err != nil {
+					t.Fatalf("SetMode(plan) after run1 completed: %v", err)
+				}
+				// builtForMode=ModeDefault, sess.Mode=plan → CASE 1 will fire on next StartRun.
+
+				// Step 4: run2 must hit the liveness guard and be rejected.
+				_, midRunErr := svc.StartRun(ctx, sess.ID, "run2")
+				// Capture the factory count at the moment of rejection (before cleanup; cleanup
+				// triggers no factory calls). Exactly 1 = create only ⇒ the CHEAP pre-check
+				// short-circuited before any rebuild build.
+				callsAtReject := calls.Load()
+
+				// Step 5: clean up the lingering run1 registration.
+				svc.FinishRun(sess.ID, run1)
+
+				if !errors.Is(midRunErr, server.ErrInvalidArgument) {
+					return nil, fmt.Errorf("mid-run-rejected: want ErrInvalidArgument (CASE 1 liveness guard), got %v", midRunErr)
+				}
+				return func() {
+					// The cheap pre-check rejected BEFORE building: factory called exactly once
+					// (the create-time build), no rebuild attempt. The authoritative under-lock
+					// guard would instead show 2 (it rejects only after a factory build).
+					if callsAtReject != 1 {
+						t.Errorf("mid-run-rejected: factory calls = %d at rejection, want 1 (the cheap pre-check must reject before any rebuild build)", callsAtReject)
+					}
+				}, nil
+			},
+		},
+		// ── PROMOTE (CASE 2 — default-FS session gets a plan slot) ───────────────
+		{
+			name: "promote/default-fs-plan-slot-case2",
+			// A default-FS session created in plan mode with ModeNeedsEngine active:
+			// the first StartRun promotes it to a per-session engine. calls==1, mode==plan.
+			run: func(t *testing.T) (func(), error) {
+				t.Helper()
+				ctx := context.Background()
+				store := memstore.New()
+				var modes []session.PermissionMode
+				var calls atomic.Int32
+				svc := modeServiceOverStore(t, store,
+					modeRecordingFactory("gpt-5", "opus-plan", &modes, &calls),
+					func(m session.PermissionMode) bool { return m == session.ModePlan })
+				// Default-FS (no selector) but plan mode.
+				sess, err := svc.CreateSession(ctx, "/ws", session.ModePlan, session.Limits{})
+				if err != nil {
+					t.Fatalf("CreateSession: %v", err)
+				}
+				if calls.Load() != 0 {
+					t.Fatalf("factory should not be called at create for default-FS; got %d calls", calls.Load())
+				}
+				reply := drainAndFinish(t, svc, sess.ID, mustStart(t, svc, sess.ID, "plan prompt"))
+				return func() {
+					// PROMOTE: factory called exactly once (on the first StartRun).
+					if calls.Load() != 1 {
+						t.Errorf("promote/case2: factory calls = %d, want 1 (the CASE-2 promotion)", calls.Load())
+					}
+					if len(modes) != 1 || modes[0] != session.ModePlan {
+						t.Errorf("promote/case2: factory modes = %v, want [plan]", modes)
+					}
+					if reply != "reply-opus-plan" {
+						t.Errorf("promote/case2: reply = %q, want reply-opus-plan", reply)
+					}
+				}, nil
+			},
+		},
+		// ── PROMOTE (CASE 2 — at-cap → ErrTooManySessionEngines) ─────────────────
+		// The at-cap rejection is also a BACKSTOP PAIR: a cheap pre-check
+		// (~service.go:1578) and an authoritative re-check under the lock (~1604) both
+		// return ErrTooManySessionEngines. Either alone backstops the cap invariant, so
+		// this row pins the OUTCOME (graceful ErrTooManySessionEngines, never a panic or a
+		// silent shared-engine fallback that would run plan mode on the wrong model)
+		// rather than trying to distinguish which member fired.
+		{
+			name: "promote/at-cap-error",
+			run: func(t *testing.T) (func(), error) {
+				t.Helper()
+				ctx := context.Background()
+				store := memstore.New()
+				var modes []session.PermissionMode
+				var calls atomic.Int32
+				// MaxSessionEngines = 1: one selector session saturates the cap.
+				svc, err := server.NewService(server.Config{
+					Engine: agent.NewEngine(agent.Deps{
+						LLM:     mockllm.New(mockllm.TextTurn("SHARED"), mockllm.TextTurn("SHARED")),
+						Catalog: tool.NewCatalog(), Policy: permpolicy.NewPolicy(nil, nil), Model: "shared-model",
+					}),
+					Store:             store,
+					Workspaces:        func(root string) tool.Workspace { return memfs.NewWorkspace(root) },
+					DefaultLimits:     session.Limits{MaxTurns: 5},
+					Now:               func() time.Time { return time.Unix(0, 0) },
+					SessionEngine:     modeRecordingFactory("gpt-5", "opus-plan", &modes, &calls),
+					ModeNeedsEngine:   func(m session.PermissionMode) bool { return m == session.ModePlan },
+					MaxSessionEngines: 1,
+					DefaultResolvedModel: server.ResolvedModel{
+						ProviderID: "openai", ModelID: "shared-model",
+					},
+				})
+				if err != nil {
+					t.Fatalf("NewService: %v", err)
+				}
+				// Saturate the cap.
+				if _, err := svc.CreateSessionWithProvider(ctx, "/hog", session.ModeDefault, session.Limits{},
+					server.ProviderSelector{ProviderID: "openai", ModelID: "gpt-5"}); err != nil {
+					t.Fatalf("CreateSessionWithProvider (cap hog): %v", err)
+				}
+				// Default-FS plan session would PROMOTE but cap is full.
+				planSess, err := svc.CreateSession(ctx, "/ws", session.ModePlan, session.Limits{})
+				if err != nil {
+					t.Fatalf("CreateSession (default-FS plan): %v", err)
+				}
+				_, runErr := svc.StartRun(ctx, planSess.ID, "promote me")
+				if !errors.Is(runErr, server.ErrTooManySessionEngines) {
+					return nil, fmt.Errorf("at-cap promote: want ErrTooManySessionEngines, got %v", runErr)
+				}
+				return func() {}, nil
+			},
+		},
+		// ── REHYDRATE (selector session after restart) ────────────────────────────
+		{
+			name: "rehydrate/selector-after-restart",
+			// A selector session created on svc1; svc2 simulates a restart (same
+			// store, empty in-memory registries). The first StartRun on svc2 must
+			// call the factory once (rehydration).
+			run: func(t *testing.T) (func(), error) {
+				t.Helper()
+				ctx := context.Background()
+				store := memstore.New()
+				const sessionModel, planModel = "gpt-5", "opus-plan"
+
+				var modes1 []session.PermissionMode
+				var calls1 atomic.Int32
+				svc1 := modeServiceOverStore(t, store,
+					modeRecordingFactory(sessionModel, planModel, &modes1, &calls1),
+					func(m session.PermissionMode) bool { return m == session.ModePlan })
+				sess, err := svc1.CreateSessionWithProvider(ctx, "/ws", session.ModeDefault, session.Limits{},
+					server.ProviderSelector{ProviderID: "openai", ModelID: sessionModel})
+				if err != nil {
+					t.Fatalf("CreateSessionWithProvider: %v", err)
+				}
+				_ = drainAndFinish(t, svc1, sess.ID, mustStart(t, svc1, sess.ID, "pre-restart"))
+
+				// Simulate restart: new service over same store.
+				var modes2 []session.PermissionMode
+				var calls2 atomic.Int32
+				svc2 := modeServiceOverStore(t, store,
+					modeRecordingFactory(sessionModel, planModel, &modes2, &calls2),
+					func(m session.PermissionMode) bool { return m == session.ModePlan })
+				reply := drainAndFinish(t, svc2, sess.ID, mustStart(t, svc2, sess.ID, "post-restart"))
+				return func() {
+					// REHYDRATE: factory called once on svc2 (rehydration), reply from session model.
+					if calls2.Load() != 1 {
+						t.Errorf("rehydrate/selector: svc2 factory calls = %d, want 1", calls2.Load())
+					}
+					if reply != "reply-"+sessionModel {
+						t.Errorf("rehydrate/selector: reply = %q, want reply-%s", reply, sessionModel)
+					}
+					if !svc2.HasSessionEngineForTest(sess.ID) {
+						t.Errorf("rehydrate/selector: svc2 HasSessionEngine = false, want true (rehydrated)")
+					}
+				}, nil
+			},
+		},
+		// ── REHYDRATE (no-fs session after restart → nofs workspace preserved) ────
+		{
+			name: "rehydrate/no-fs-restart-sets-nofs-workspace",
+			// A no-fs session created on svc1; svc2 starts fresh. After the first
+			// post-restart StartRun the session must ride a per-session engine (the
+			// factory was invoked and the profile is preserved as ProfileNoFS).
+			run: func(t *testing.T) (func(), error) {
+				t.Helper()
+				ctx := context.Background()
+				store := memstore.New()
+
+				var calls1 atomic.Int32
+				// Profile-recording factory for svc1.
+				var gotProfile1 atomic.Value
+				pfactory1 := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, profile server.SessionProfile, _ string, mode session.PermissionMode) (server.SessionEngineResult, error) {
+					calls1.Add(1)
+					gotProfile1.Store(profile)
+					eng := agent.NewEngine(agent.Deps{
+						LLM:     mockllm.New(mockllm.TextTurn("nofs-pre")),
+						Catalog: tool.NewCatalog(), Policy: permpolicy.NewPolicy(nil, nil), Model: "nofs-model",
+					})
+					return server.SessionEngineResult{Engine: eng, ModelID: "nofs-model", ProviderID: "openai", BuiltForMode: mode, Close: func() error { return nil }}, nil
+				}
+				svc1 := modeServiceOverStore(t, store, pfactory1, nil /* no plan slot */)
+				sess, err := svc1.CreateSessionWithProfile(ctx, "", session.ModeDefault, session.Limits{},
+					server.ProviderSelector{}, server.ProfileNoFS)
+				if err != nil {
+					t.Fatalf("CreateSessionWithProfile: %v", err)
+				}
+				_ = drainAndFinish(t, svc1, sess.ID, mustStart(t, svc1, sess.ID, "pre-restart"))
+
+				// Simulate restart: new service over same store.
+				var calls2 atomic.Int32
+				var gotProfile2 atomic.Value
+				pfactory2 := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, profile server.SessionProfile, _ string, mode session.PermissionMode) (server.SessionEngineResult, error) {
+					calls2.Add(1)
+					gotProfile2.Store(profile)
+					eng := agent.NewEngine(agent.Deps{
+						LLM:     mockllm.New(mockllm.TextTurn("nofs-post")),
+						Catalog: tool.NewCatalog(), Policy: permpolicy.NewPolicy(nil, nil), Model: "nofs-model",
+					})
+					return server.SessionEngineResult{Engine: eng, ModelID: "nofs-model", ProviderID: "openai", BuiltForMode: mode, Close: func() error { return nil }}, nil
+				}
+				svc2 := modeServiceOverStore(t, store, pfactory2, nil)
+				reply := drainAndFinish(t, svc2, sess.ID, mustStart(t, svc2, sess.ID, "post-restart"))
+				return func() {
+					// REHYDRATE: factory called once on svc2 with ProfileNoFS.
+					if calls2.Load() != 1 {
+						t.Errorf("rehydrate/no-fs: svc2 factory calls = %d, want 1", calls2.Load())
+					}
+					if p, ok := gotProfile2.Load().(server.SessionProfile); !ok || p != server.ProfileNoFS {
+						t.Errorf("rehydrate/no-fs: factory profile = %v, want ProfileNoFS", gotProfile2.Load())
+					}
+					// NeedsRehydrationForTest still returns true for a no-fs session (the
+					// profile label is permanent on the persisted aggregate); HasSessionEngine
+					// is the meaningful post-rehydration check.
+					if !svc2.HasSessionEngineForTest(sess.ID) {
+						t.Errorf("rehydrate/no-fs: svc2 HasSessionEngine = false, want true (rehydrated)")
+					}
+					if reply != "nofs-post" {
+						t.Errorf("rehydrate/no-fs: reply = %q, want nofs-post", reply)
+					}
+				}, nil
+			},
+		},
+		// ── SHARED-DEFAULT (no per-session engine, no promotion, no rehydration) ──
+		{
+			name: "default/shared-engine-no-plan-slot",
+			// A default-FS session with ModeNeedsEngine=nil: the session always rides
+			// the shared engine. Factory calls must be 0.
+			run: func(t *testing.T) (func(), error) {
+				t.Helper()
+				ctx := context.Background()
+				store := memstore.New()
+				var modes []session.PermissionMode
+				var calls atomic.Int32
+				// needsEngine=nil ⇒ CASE 2 never fires.
+				svc := modeServiceOverStore(t, store, modeRecordingFactory("gpt-5", "opus-plan", &modes, &calls), nil)
+				sess, err := svc.CreateSession(ctx, "/ws", session.ModeDefault, session.Limits{})
+				if err != nil {
+					t.Fatalf("CreateSession: %v", err)
+				}
+				reply := drainAndFinish(t, svc, sess.ID, mustStart(t, svc, sess.ID, "t1"))
+				return func() {
+					// SHARED-DEFAULT: factory never invoked; reply comes from the shared engine.
+					if calls.Load() != 0 {
+						t.Errorf("default/shared-no-plan: factory calls = %d, want 0", calls.Load())
+					}
+					if reply != "SHARED-ENGINE-REPLY" {
+						t.Errorf("default/shared-no-plan: reply = %q, want SHARED-ENGINE-REPLY", reply)
+					}
+					if svc.HasSessionEngineForTest(sess.ID) {
+						t.Errorf("default/shared-no-plan: HasSessionEngine = true, want false (shared engine)")
+					}
+				}, nil
+			},
+		},
+		// ── SHARED-DEFAULT (mode flip without a plan slot — byte-identical guard) ─
+		{
+			name: "default/shared-engine-mode-flip-no-promotion",
+			// Same as above but a SetMode(plan) fires between turns. With ModeNeedsEngine
+			// nil CASE 2 never fires: the session stays on the shared engine (byte-identical
+			// regression guard from TestModeFlipByteIdenticalWithoutPlanSlot).
+			run: func(t *testing.T) (func(), error) {
+				t.Helper()
+				ctx := context.Background()
+				store := memstore.New()
+				var modes []session.PermissionMode
+				var calls atomic.Int32
+				svc := modeServiceOverStore(t, store, modeRecordingFactory("gpt-5", "opus-plan", &modes, &calls), nil)
+				sess, err := svc.CreateSession(ctx, "/ws", session.ModeDefault, session.Limits{})
+				if err != nil {
+					t.Fatalf("CreateSession: %v", err)
+				}
+				_ = drainAndFinish(t, svc, sess.ID, mustStart(t, svc, sess.ID, "t1"))
+				if _, err := svc.SetMode(ctx, sess.ID, session.ModePlan); err != nil {
+					t.Fatalf("SetMode: %v", err)
+				}
+				reply := drainAndFinish(t, svc, sess.ID, mustStart(t, svc, sess.ID, "t2"))
+				return func() {
+					// SHARED-DEFAULT: no promotion despite mode change (no plan slot).
+					if calls.Load() != 0 {
+						t.Errorf("default/shared-mode-flip: factory calls = %d, want 0 (no plan slot ⇒ no promotion)", calls.Load())
+					}
+					if reply != "SHARED-ENGINE-REPLY" {
+						t.Errorf("default/shared-mode-flip: reply = %q, want SHARED-ENGINE-REPLY", reply)
+					}
+					if svc.HasSessionEngineForTest(sess.ID) {
+						t.Errorf("default/shared-mode-flip: HasSessionEngine = true, want false (no promotion without plan slot)")
+					}
+				}, nil
+			},
+		},
+		// ── REHYDRATE via the AWAITING-RESUME caller (cross-caller drift guard) ────
+		// engineAndWorkspaceFor is the SHARED resolution point for BOTH StartRunContent
+		// AND resumeFromAwaiting (its doc comment, ~service.go:1338-1342). Every row
+		// above drives the StartRun caller; this row drives the OTHER caller so the two
+		// cannot drift unnoticed — the exact risk the shared function exists to prevent.
+		//
+		// Which branch does the resume caller reach? The CASE 1 mode-rebuild branch is a
+		// documented NO-OP on the resume path (SetMode is rejected from StateAwaiting, so
+		// se.builtForMode==sess.Mode always holds; ~service.go:1875-1883). But the
+		// REHYDRATE branch IS live and DISTINCT: a SELECTOR session that parked awaiting
+		// and whose process died has no per-session engine after a restart, so the resume
+		// caller must rehydrate it through engineAndWorkspaceFor — the same branch the
+		// StartRun rehydrate row exercises, but reached via Approve→resumeFromAwaiting.
+		//
+		// Sequence (offline, two-Build restart — the resume_awaiting_test.go convention):
+		//  1. svc1: a SELECTOR session whose per-session engine emits a Write ask; drive
+		//     it to StateAwaiting, Persist the awaiting snapshot, then Cancel (the parked
+		//     run "dies"). The factory engine has NO Store so the cancel terminal does not
+		//     overwrite the awaiting snapshot (the parking-service discipline).
+		//  2. svc2 over the SAME store (restart: empty in-memory registries). Its factory
+		//     returns a CONTINUATION engine. Approve → no live run → resumeFromAwaiting →
+		//     engineAndWorkspaceFor → REHYDRATE (selector, no engine) → factory called ONCE.
+		//  3. Assert: svc2 factory called exactly once (REHYDRATE via the resume caller),
+		//     HasSessionEngine true, the pending Write executed exactly once, run completes.
+		{
+			name: "rehydrate/awaiting-resume-caller",
+			run: func(t *testing.T) (func(), error) {
+				ctx := context.Background()
+				store := memstore.New()
+				sel := server.ProviderSelector{ProviderID: "openai", ModelID: "gpt-5"}
+
+				// askingSelectorFactory builds a per-session engine over a writeAskTool
+				// catalog. `ran` counts Write executions; `llm` is the engine's provider
+				// turn; `store` (nil for the parking svc) controls engine auto-save. calls
+				// counts factory invocations for the rehydration assertion.
+				askingSelectorFactory := func(ran *atomic.Int64, llm port.LLMProvider, engineStore port.SessionStore, calls *atomic.Int32) server.SessionEngineFactory {
+					return func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile, _ string, mode session.PermissionMode) (server.SessionEngineResult, error) {
+						if calls != nil {
+							calls.Add(1)
+						}
+						cat := tool.NewCatalog()
+						cat.MustRegister(&writeAskTool{ran: ran})
+						eng := agent.NewEngine(agent.Deps{
+							LLM:     llm,
+							Catalog: cat,
+							Policy:  permpolicy.NewPolicy(nil, nil),
+							Model:   "gpt-5",
+							Store:   engineStore,
+						})
+						return server.SessionEngineResult{
+							Engine: eng, ModelID: "gpt-5", ProviderID: "openai",
+							BuiltForMode: mode, Close: func() error { return nil },
+						}, nil
+					}
+				}
+
+				// Step 1: svc1 — selector session parks awaiting. engineStore nil so the
+				// cancel terminal does not clobber the awaiting snapshot.
+				var ran1 atomic.Int64
+				var calls1 atomic.Int32
+				svc1 := modeServiceOverStore(t, store,
+					askingSelectorFactory(&ran1,
+						mockllm.New(mockllm.ToolCallTurn(session.NewToolCall("w1", "Write", json.RawMessage(`{"path":"a.go"}`)))),
+						nil, &calls1),
+					nil /* no plan slot — REHYDRATE, not PROMOTE */)
+				sess, err := svc1.CreateSessionWithProvider(ctx, "/ws", session.ModeDefault, session.Limits{}, sel)
+				if err != nil {
+					t.Fatalf("CreateSessionWithProvider: %v", err)
+				}
+				askID := driveServiceToAwaiting(t, svc1, sess.ID)
+				if ran1.Load() != 0 {
+					t.Fatalf("Write executed %d time(s) pre-approval, want 0 (parked at the ask)", ran1.Load())
+				}
+
+				// Step 2: svc2 over the SAME store — the restart. Continuation engine.
+				var ran2 atomic.Int64
+				var calls2 atomic.Int32
+				svc2 := modeServiceOverStore(t, store,
+					askingSelectorFactory(&ran2, mockllm.New(mockllm.TextTurn("done after approval")), store, &calls2),
+					nil)
+
+				run, err := svc2.ApproveRun(ctx, sess.ID, askID, session.VerdictAllowOnce)
+				if err != nil {
+					return nil, fmt.Errorf("awaiting-resume-caller: ApproveRun after restart: %w", err)
+				}
+				if run == nil {
+					return nil, fmt.Errorf("awaiting-resume-caller: ApproveRun returned nil run — the resumeFromAwaiting rehydrate path did not fire")
+				}
+				var stop session.StopReason
+				for ev := range run.Events() {
+					if ev.Type == session.EvResult && ev.Result != nil {
+						stop = ev.Result.Stop
+					}
+				}
+				svc2.FinishRun(sess.ID, run)
+
+				return func() {
+					// REHYDRATE reached via the resume caller: svc2 factory called exactly once.
+					if calls2.Load() != 1 {
+						t.Errorf("awaiting-resume-caller: svc2 factory calls = %d, want 1 (engineAndWorkspaceFor REHYDRATE via resumeFromAwaiting)", calls2.Load())
+					}
+					if !svc2.HasSessionEngineForTest(sess.ID) {
+						t.Errorf("awaiting-resume-caller: svc2 HasSessionEngine = false, want true (rehydrated on resume)")
+					}
+					// The pending Write executed exactly once on the rehydrated engine, and the
+					// resumed run reached a clean terminal — proof the resolved engine is the
+					// real per-session (asking) engine, not the shared one.
+					if ran2.Load() != 1 {
+						t.Errorf("awaiting-resume-caller: pending Write executed %d time(s) on resume, want exactly 1", ran2.Load())
+					}
+					if stop != session.StopEndTurn {
+						t.Errorf("awaiting-resume-caller: resumed run stop = %q, want %q", stop, session.StopEndTurn)
+					}
+				}, nil
+			},
+		},
+	}
+
+	for _, row := range rows {
+		row := row
+		t.Run(row.name, func(t *testing.T) {
+			assertFn, wantErr := row.run(t)
+			if wantErr != nil {
+				// For error rows the wantErr IS the assertion: it contains the mismatch
+				// description from errors.Is checks within the row closure.
+				t.Fatal(wantErr)
+			}
+			if assertFn != nil {
+				// Each row reads its own captured factory counters/replies from closures.
+				assertFn()
+			}
+		})
+	}
 }
