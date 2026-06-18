@@ -1792,7 +1792,7 @@ func baseEngineDeps(
 	// BEFORE the live model refresh populates the live store — yet because the resolver
 	// is read LIVE on every maybeCompact / Engine.ContextWindow, a DEFAULT session whose
 	// model is live-only (in the live listing, absent from the curated catalog — e.g.
-	// OpenRouter openai/gpt-5.5) self-corrects to its true window on the next turn after
+	// OpenRouter openai/gpt-5.4) self-corrects to its true window on the next turn after
 	// the live Swap, with NO rehydration and NO defaultSessionNeedsLiveWindow trigger
 	// (both removed). An operator --context-window-override still WINS (inside the
 	// resolver).

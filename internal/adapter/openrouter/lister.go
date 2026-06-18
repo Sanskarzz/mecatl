@@ -23,7 +23,7 @@
 //	supported_parameters ∋ "reasoning"       → Reasoning
 //	supported_parameters ∋ "tools"           → ToolCall
 //
-// Wire shape verified against a live capture pinned 2026-06-05 (344 models). A
+// Wire shape verified against a live capture pinned 2026-06-17 (336 models). A
 // trimmed sample lives in testdata/ for the offline tests; the live endpoint is
 // NEVER contacted in a test.
 //
@@ -55,7 +55,7 @@ const (
 
 	// maxResponseBytes caps the response body read so a hostile or pathological
 	// body cannot OOM the process (CWE-770). 4 MiB comfortably holds the live
-	// catalog (~344 models, well under 1 MiB) with ample headroom.
+	// catalog (336 models, well under 1 MiB) with ample headroom.
 	maxResponseBytes = 4 << 20
 
 	// defaultTimeout bounds the whole fetch when no client timeout is otherwise

@@ -358,7 +358,7 @@ func TestSessionEngineFactoryContextWindowFromCatalog(t *testing.T) {
 // at the 128k floor — this fails.
 func TestSelectorEngineWindowSelfCorrectsAtUse(t *testing.T) {
 	const (
-		liveModel  = "openai/gpt-5.5" // live-only: NOT in the embedded catalog
+		liveModel  = "openai/gpt-5.4" // live-only: NOT in the embedded catalog
 		liveWindow = 1_050_000
 	)
 	cfg := Config{Model: "default-model"}
@@ -402,7 +402,7 @@ func TestSelectorEngineWindowSelfCorrectsAtUse(t *testing.T) {
 // live one would diverge here.
 func TestSharedAndSelectorEngineResolveSameSource(t *testing.T) {
 	const (
-		model      = "openai/gpt-5.5"
+		model      = "openai/gpt-5.4"
 		liveWindow = 900_000
 	)
 	cfg := Config{Model: model} // the DEFAULT model is the same live-only model

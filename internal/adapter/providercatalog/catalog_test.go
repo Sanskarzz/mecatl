@@ -62,9 +62,9 @@ func TestCuratedModelCounts(t *testing.T) {
 		exact    int  // exact count when nonzero (curated allowlist)
 		isCurate bool // openrouter: count is exact-by-design
 	}{
-		{id: "openai", floor: 52, ceiling: 200},
-		{id: "anthropic", floor: 24, ceiling: 200},
-		{id: "openrouter", exact: 19, isCurate: true},
+		{id: "openai", floor: 50, ceiling: 200},
+		{id: "anthropic", floor: 25, ceiling: 200},
+		{id: "openrouter", exact: 27, isCurate: true},
 	}
 	for _, tc := range cases {
 		p, ok := c.Provider(tc.id)
@@ -90,19 +90,23 @@ func TestCuratedModelCounts(t *testing.T) {
 
 // TestOpenRouterAllowlistExact binds the jq-recipe comment (the --argjson
 // orModels array in catalog.go) to the vendored JSON: it asserts the EXACT
-// sorted set of the 19 curated openrouter model ids. A botched re-pin that swaps
-// a model while staying at 19 trips here even though the count guard would not.
+// sorted set of the 27 curated openrouter model ids. A botched re-pin that swaps
+// a model while staying at 27 trips here even though the count guard would not.
 func TestOpenRouterAllowlistExact(t *testing.T) {
 	want := []string{
 		"anthropic/claude-3.5-haiku",
 		"anthropic/claude-haiku-4.5",
 		"anthropic/claude-opus-4.1",
 		"anthropic/claude-opus-4.5",
+		"anthropic/claude-opus-4.8",
 		"anthropic/claude-sonnet-4",
 		"anthropic/claude-sonnet-4.5",
+		"anthropic/claude-sonnet-4.6",
+		"deepseek/deepseek-v3.2",
 		"google/gemini-2.5-flash",
 		"google/gemini-2.5-pro",
 		"google/gemini-3.5-flash",
+		"moonshotai/kimi-k2.7-code",
 		"openai/gpt-4.1",
 		"openai/gpt-4.1-mini",
 		"openai/gpt-4o",
@@ -111,8 +115,12 @@ func TestOpenRouterAllowlistExact(t *testing.T) {
 		"openai/gpt-5-codex",
 		"openai/gpt-5-mini",
 		"openai/gpt-5.1",
+		"openai/gpt-5.5",
 		"openai/o3",
 		"openai/o4-mini",
+		"qwen/qwen3.7-max",
+		"x-ai/grok-build-0.1",
+		"z-ai/glm-5.2",
 	}
 	p, ok := Default().Provider("openrouter")
 	if !ok {
@@ -204,6 +212,39 @@ func TestModelMetadata(t *testing.T) {
 	}
 	if mods := gpt5.InputModalities(); len(mods) == 0 {
 		t.Error("InputModalities() empty, want at least text")
+	}
+}
+
+func TestOpenRouterGLM52Metadata(t *testing.T) {
+	p, ok := Default().Provider("openrouter")
+	if !ok {
+		t.Fatal("openrouter missing")
+	}
+	var glm52 *Model
+	for _, m := range p.Models() {
+		if m.ID() == "z-ai/glm-5.2" {
+			mm := m
+			glm52 = &mm
+			break
+		}
+	}
+	if glm52 == nil {
+		t.Fatal("z-ai/glm-5.2 not found in curated OpenRouter allowlist")
+	}
+	if glm52.Name() != "GLM-5.2" {
+		t.Errorf("Name() = %q, want GLM-5.2", glm52.Name())
+	}
+	if glm52.ContextLimit() != 262144 {
+		t.Errorf("ContextLimit() = %d, want 262144", glm52.ContextLimit())
+	}
+	if !glm52.SupportsReasoning() {
+		t.Error("SupportsReasoning() = false, want true")
+	}
+	if !glm52.SupportsToolCall() {
+		t.Error("SupportsToolCall() = false, want true")
+	}
+	if glm52.SupportsImageInput() {
+		t.Error("SupportsImageInput() = true, want false (GLM 5.2 is text-only in OpenRouter)")
 	}
 }
 

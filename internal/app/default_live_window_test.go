@@ -32,7 +32,7 @@ func countingSessionEngineFactory(inner server.SessionEngineFactory, calls *int)
 // LIVE-ONLY: uncatalogued (catalog floor 0 ⇒ contextWindowFor returns 0 pre-swap),
 // with an attached meta store the test can Swap to simulate the live model-catalog
 // refresh populating a real window. It is the offline analogue of the OpenRouter
-// openai/gpt-5.5 case — a default model present in the live listing but absent from
+// openai/gpt-5.4 case — a default model present in the live listing but absent from
 // the embedded catalog, whose build-time baked window WOULD be the 128k compaction
 // floor under the old freeze-at-construction scheme.
 func liveWindowReg(provider *mockllm.Provider, id, model string) *providerRegistry {
@@ -103,7 +103,7 @@ func defaultLiveWindowServiceCfg(t *testing.T, reg *providerRegistry, provider *
 func TestDefaultLiveOnlyModelSelfCorrectsAtUse(t *testing.T) {
 	ctx := context.Background()
 	const (
-		liveModel  = "openai/gpt-5.5" // live-only: NOT in the embedded catalog
+		liveModel  = "openai/gpt-5.4" // live-only: NOT in the embedded catalog
 		liveWindow = 1_050_000
 	)
 	provider := mockllm.New(mockllm.TextTurn("PRE-SWAP"), mockllm.TextTurn("POST-SWAP"))
@@ -225,7 +225,7 @@ func TestCataloguedDefaultModelEchoesCatalogWindow(t *testing.T) {
 func TestContextWindowOverrideReachesEcho(t *testing.T) {
 	ctx := context.Background()
 	const (
-		model     = "openai/gpt-5.5" // live-only; the live store reports a DIFFERENT window
+		model     = "openai/gpt-5.4" // live-only; the live store reports a DIFFERENT window
 		liveWin   = 1_050_000        // what the live store says — the override must beat this
 		overrideW = 64_000           // the operator escape-hatch value
 	)

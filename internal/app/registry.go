@@ -244,7 +244,7 @@ func buildProviderRegistry(cfg Config, detect envDetector) (*providerRegistry, e
 		}
 		entry := newOpenAIEntry(cfg, providerOpenRouter, key, baseURL)
 		// OpenRouter opts into LIVE model listing: its public /models endpoint
-		// enumerates the real catalog (~344 models) vs the curated embedded subset.
+		// enumerates the real catalog (336 models) vs the curated embedded subset.
 		// The lister rides on the entry (NOT the shared openai.Provider) so openai —
 		// which uses the same adapter — does NOT advertise live listing. The HTTP
 		// client is the composition test seam (nil => default timeout client; tests

@@ -52,7 +52,7 @@ This document is the design rationale. The runtime overview is `docs/architectur
 - **Live model listing (SHIPPED).** A one-shot **per-provider** live catalog fetch via an
   optional, composition-local `modelLister` capability (§11). OpenRouter is the first
   implementer: its public, **unauthenticated** `/models` endpoint enumerates the real
-  catalog (~344 models) and **replaces** the curated embedded subset for that provider on
+  catalog (336 models) and **replaces** the curated embedded subset for that provider on
   success; the embedded catalog is the **fallback floor** on any error/empty/timeout. The
   embedded snapshot is seeded synchronously at `Build` (the `ModelSelection` cap is honest
   from t=0) and the live set is swapped in by a background goroutine — `Build` never
@@ -113,8 +113,8 @@ attribution is vendored in `MODELS_DEV_LICENSE`). It is a stdlib-only LEAF data 
 `Catalog`/`Provider`/`Model` are package-own value types and must never leak into the
 domain or port — only the composition layer reads them.
 
-Curation is explicit and reviewable (no silent caps, no regex sweep): openai (all 52),
-anthropic (all 24, made ready for P1), openrouter (a 19-route flagship allowlist). An
+Curation is explicit and reviewable (no silent caps, no regex sweep): openai (all 50),
+anthropic (all 25, made ready for P1), openrouter (a 27-route flagship allowlist). An
 unknown provider/model id is an honest `(_, false)` lookup miss, never a substitution.
 Regeneration is one deterministic `jq -S` filter (recorded in the package doc-comment)
 so a re-pin diff shows only real model changes.
@@ -122,8 +122,8 @@ so a re-pin diff shows only real model changes.
 The embedded catalog is now the **FALLBACK FLOOR**, not the only source: a provider with
 a live `modelLister` (OpenRouter — §11) has its real catalog fetched and **replaces** the
 curated subset for that provider; on any fetch error/empty the embedded subset is shown
-unchanged. So a keyed OpenRouter picker shows ~344 live models, but offline (or on an
-upstream blip) it still shows the curated 19. SSRF hardening for the live fetch shipped
+unchanged. So a keyed OpenRouter picker shows 336 live models, but offline (or on an
+upstream blip) it still shows the curated 27. SSRF hardening for the live fetch shipped
 with the lister (fixed-host const URL, keyless, size cap); the SSRF/async-refresh items
 formerly parked at P2 are partly delivered (one-shot OpenRouter refresh) — periodic/disk
 refresh remains P2.
@@ -706,7 +706,7 @@ Decisions recorded with the feature:
 ## 11. Live model listing (SHIPPED — OpenRouter)
 
 The picker used to show only the curated embedded subset (`providercatalog`, §3) — for
-OpenRouter, a hand-pinned 19 of ~344. Live model listing makes a provider whose API can
+OpenRouter, a hand-pinned 27 of 336. Live model listing makes a provider whose API can
 enumerate its real catalog do so, behind a clean **optional capability** so a future
 provider opts in trivially.
 
@@ -738,7 +738,7 @@ reasoning/toolCall.
 
 **Merge + fail-safe.** Per available provider: a SUCCESSFUL, non-empty live result
 **REPLACES** the embedded subset for that provider (the point: the real catalog, not the
-curated 19 union'd with their live duplicates); ANY error/timeout/empty (or no lister)
+curated 27 union'd with their live duplicates); ANY error/timeout/empty (or no lister)
 falls back to the embedded subset, with one `slog.Warn`. Since every in-scope provider
 has an embedded subset, an available provider always contributes ≥ its curated subset —
 the picker is **never blanked** by an upstream blip. Availability gating is free:

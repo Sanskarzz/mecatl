@@ -240,7 +240,7 @@ func regForResolver(s *liveMetaStore) *providerRegistry {
 }
 
 const (
-	liveOnlyModel = "openai/gpt-5.5" // in the live listing, NOT the curated catalog
+	liveOnlyModel = "openai/gpt-5.4" // in the live listing, NOT the curated catalog
 	liveOnlyCtx   = 1_050_000        // below maxLiveContextLimit, so unclamped
 )
 

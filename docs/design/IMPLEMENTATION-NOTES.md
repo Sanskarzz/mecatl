@@ -1716,8 +1716,8 @@ read-only `Catalog`/`Provider`/`Model` value types parsed once in `Default()` wi
 **panic-on-parse** posture — compiled-in data ⇒ a parse failure is a build bug, not a runtime
 fail-safe; composition reads per-provider `EnvVars()` for availability + exposes
 `Models()`/`ContextLimit()`/modalities/`SupportsImageInput`/`SupportsReasoning` for S3
-ListModels + S5 cap-intersection. Curation is documented + count-guard-tested — all openai (52)
-+ all anthropic (24) + a hand-pinned 19-id openrouter flagship allowlist, with the deterministic
+ListModels + S5 cap-intersection. Curation is documented + count-guard-tested — all openai (50)
++ all anthropic (25) + a hand-pinned 27-id openrouter flagship allowlist, with the deterministic
 `jq -S` regen recipe + MIT attribution (`MODELS_DEV_LICENSE`) vendored alongside; it is now the
 **FALLBACK FLOOR**, not the only source — a provider with a live `modelLister` (openrouter) has
 its real catalog fetched and REPLACES the curated subset, with the embedded subset shown on any

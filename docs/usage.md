@@ -607,7 +607,7 @@ still forces a fixed window when you need it, and now moves BOTH the compaction 
 and the client footer denominator together.
 
 For a provider with **live model listing** (currently **OpenRouter**), the picker
-reflects the provider's **real, live catalog** (~344 models) rather than the curated
+reflects the provider's **real, live catalog** (336 models) rather than the curated
 embedded subset, when that provider is keyed. The live list is fetched once in the
 background just after startup and swapped in — `/models` shows the embedded subset at
 first and the full live set a moment later (and offline, or on an upstream blip, it

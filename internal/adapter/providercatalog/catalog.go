@@ -17,24 +17,24 @@
 // the MIT license requires when redistributing portions of the work.
 //
 // The catalog API exposes NO version field (the upstream endpoint has none), so
-// the fetch date IS the pin. Pinned 2026-06-05.
+// the fetch date IS the pin. Pinned 2026-06-17.
 //
 // # Curation policy (NO silent caps)
 //
-// The full catalog has 139 providers and thousands of models. We vendor only the
+// The full catalog has 145 providers and thousands of models. We vendor only the
 // three providers in scope for multi-provider Phase 0/1, and within openrouter a
 // hand-pinned flagship allowlist (a regex was rejected: it sweeps in dated pins,
 // :free/-fast variants, and audio/image noise — curation's value is reviewability
 // + determinism). The DROPPED surface, stated plainly:
 //
-//   - 136 providers dropped wholesale (out of P0/P1 scope: Chat-Completions
+//   - 142 providers dropped wholesale (out of P0/P1 scope: Chat-Completions
 //     providers like Gemini-native / Together are P2 and need their own adapter,
 //     so their catalog entries are not useful yet).
-//   - openai: ALL 52 vendored (modest, P0 native via the Responses adapter).
-//   - anthropic: ALL 24 vendored (P1 native Messages adapter; its model list is
+//   - openai: ALL 50 vendored (modest, P0 native via the Responses adapter).
+//   - anthropic: ALL 25 vendored (P1 native Messages adapter; its model list is
 //     made READY now).
-//   - openrouter: 19 of 346 vendored — an EXPLICIT flagship allowlist of
-//     anthropic/* + openai/* + google/* routes; 327 openrouter models dropped.
+//   - openrouter: 27 of 336 vendored — an EXPLICIT flagship allowlist of
+//     anthropic/* + openai/* + google/* + leading agent/coding routes; 309 openrouter models dropped.
 //
 // An unknown provider/model id is an honest (_, false) lookup miss, never a
 // silent substitution. The Go structs deliberately do NOT parse cost /
@@ -53,13 +53,15 @@
 //
 //	# 2. Regenerate the curated subset deterministically:
 //	jq -S --argjson orModels '[
-//	  "anthropic/claude-opus-4.5","anthropic/claude-opus-4.1",
-//	  "anthropic/claude-sonnet-4.5","anthropic/claude-sonnet-4",
+//	  "anthropic/claude-opus-4.8","anthropic/claude-opus-4.5","anthropic/claude-opus-4.1",
+//	  "anthropic/claude-sonnet-4.6","anthropic/claude-sonnet-4.5","anthropic/claude-sonnet-4",
 //	  "anthropic/claude-haiku-4.5","anthropic/claude-3.5-haiku",
-//	  "openai/gpt-5.1","openai/gpt-5","openai/gpt-5-mini","openai/gpt-5-codex",
+//	  "openai/gpt-5.5","openai/gpt-5.1","openai/gpt-5","openai/gpt-5-mini","openai/gpt-5-codex",
 //	  "openai/gpt-4.1","openai/gpt-4.1-mini","openai/gpt-4o","openai/gpt-4o-mini",
 //	  "openai/o3","openai/o4-mini",
-//	  "google/gemini-2.5-pro","google/gemini-2.5-flash","google/gemini-3.5-flash"
+//	  "google/gemini-2.5-pro","google/gemini-2.5-flash","google/gemini-3.5-flash",
+//	  "z-ai/glm-5.2","moonshotai/kimi-k2.7-code","qwen/qwen3.7-max",
+//	  "deepseek/deepseek-v3.2","x-ai/grok-build-0.1"
 //	]' '
 //	{
 //	  openai:     ( .openai     | {id, env, npm, api, name, doc, models} ),
