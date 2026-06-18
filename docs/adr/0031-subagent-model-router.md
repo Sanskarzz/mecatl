@@ -33,7 +33,8 @@ Constraints that shaped it (inherited from the sibling features it mirrors):
 - **No `port.LLMRequest` widening** — the classifier is a composition-built engine; the
   chosen model rides the existing per-call engine-factory path, not a request field.
 - **The loop emits exactly THREE diagnostic lines** — router diagnostics are Build-once
-  + the existing child chokepoint, never a fourth loop line.
+  + the dispatch-time `routeTask` closure (like the policy-deny INFO), never a fourth
+  loop line.
 - **gauntlet #7** — no child content (the task prompt, the classifier's reasoning) may
   cross into observability; only bare metadata (a category label, a model id).
 
@@ -98,8 +99,9 @@ path (it picks a model before the child runs; it does not adjudicate a permissio
 
 **Observability.** `session.SubagentPayload` gains `RoutedCategory`/`RoutedModel`, set on
 `EvSubagentStart` only when routed — bare metadata, gauntlet-#7 safe. This slice scopes
-them to the session struct + a per-classification INFO at the child diagnostic
-chokepoint + a Build-once "router ACTIVE" fact; the **proto/client wire** for the two
+them to the session struct + a per-classification INFO emitted from the **dispatch-path
+`routeTask` closure** (like the policy-deny INFO, NOT the `resolveChildAsk` child
+chokepoint) + a Build-once "router ACTIVE" fact; the **proto/client wire** for the two
 fields is a deliberate follow-up (no proto field is added — `buf` is not part of this
 slice, and the engine-layer routing + diagnostics carry the feature without it).
 
@@ -119,20 +121,30 @@ The `RoutedCategory`/`RoutedModel` observability is session-struct + diagnostics
 until the proto/client wire follow-up lands. One deviation from ADR 0030's sketch (a
 category taxonomy rather than a bare slot label) — recorded here so the two read together.
 
-**Cost-amplification residual (CWE-770, accepted-and-bounded).** A malicious or
-peer-injected `Subagent` task prompt can STEER the classifier toward the operator's
-most-expensive category — the per-run breaker only counts MISSES (it cannot tell a
-"steered but valid" classification from an honest one, and a steered success resets it),
-so it is not a defense against steering. This is **bounded and accepted**: the router can
-only ever pick from the operator's OWN taxonomy (the operator chose every category's
-model), the provider is fixed per session, and the REAL spend ceiling is the token budget
-— `--max-run-tokens` (per-run), `--max-team-tokens` (per-team), and the per-call
-`max_run_tokens` tighten-only override — which caps a routed child exactly as it caps any
-child, regardless of which model the router picked. Operator guidance: a taxonomy spanning
-a WIDE cost range is steerable by untrusted task prompts, so size the category models to
-the deployment's acceptable per-delegation cost and rely on `--max-run-tokens` as the hard
-ceiling. No code mitigation is added (a steering detector would be a heuristic with its
-own failure modes, and the token budget already bounds the worst case).
+**Cost-amplification residual (CWE-770, bounded by #92).** A malicious or peer-injected
+`Subagent` task prompt can STEER the classifier toward the operator's most-expensive
+category — the per-run breaker only counts MISSES (it cannot tell a "steered but valid"
+classification from an honest one, and a steered success resets it), so it is not a
+defense against steering. This is **bounded**: the router can only ever pick from the
+operator's OWN taxonomy (the operator chose every category's model), the provider is
+fixed per session, and the REAL spend ceiling is the token budget — `--max-run-tokens`
+(per-run), `--max-team-tokens` (per-team), and the per-call `max_run_tokens`
+tighten-only override. As of #92, `--max-run-tokens` bounds BOTH the routed child AND
+the cumulative classifier spend: the classifier's `session.Usage` is folded into the
+parent `sess.Usage` by the dispatch-path `routeTask` closure
+(`Engine.parentCaps`/`dispatch.go`) UNCONDITIONALLY on every classification (hit OR
+miss), so `budgetExhausted` (which reads `sess.Usage.TotalTokens()`) covers the
+classifier. The per-run breaker bounds the CALL COUNT; the parent budget now bounds the
+TOKEN spend of both the classifier and the routed child. Like the main loop's
+`StopBudget`, the brake is a TURN-BOUNDARY terminal: a single in-flight classifier turn
+(itself capped at one turn / 30s) may complete and push cumulative spend past the ceiling
+before the budget trips on the next boundary — the same bounded-overshoot model as the
+main loop, not a leak. Operator guidance: rely on
+`--max-run-tokens` as the hard ceiling; a taxonomy spanning a WIDE cost range is
+steerable by untrusted task prompts, so size the category models to the deployment's
+acceptable per-delegation cost. No steering-detection mitigation is added (a steering
+detector would be a heuristic with its own failure modes, and the token budget already
+bounds the worst case).
 
 ## See also
 

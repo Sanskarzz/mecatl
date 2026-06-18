@@ -816,8 +816,24 @@ func (e *Engine) parentCaps(r *Run, sess *session.Session, turnIdx int) parentCa
 	// is belt-and-braces for a Run built outside it (unit tests). FAIL-SOFT throughout:
 	// any miss (classifier failure, unknown category, breaker open) returns ok=false and
 	// the caller inherits the default explorer model.
+	//
+	// CLASSIFIER SPEND ACCOUNTING (#92 fix): after every route() call — hit OR miss —
+	// the classifier's usage is folded into sess.Usage UNCONDITIONALLY before the
+	// miss/hit branches. This makes the single budget brake authority (budgetExhausted
+	// reads sess.Usage.TotalTokens()) cover classifier spend, preventing CWE-770
+	// unbounded accumulation. The fold is SYNCHRONOUS on this dispatch goroutine
+	// (sess is StateRunning here; RecordUsage is legal). The error is swallowed (`_ =`)
+	// as defense-in-depth: a guard error means a best-effort undercount (tolerable),
+	// never a correctness fault — mirroring loop.go's own `_ = sess.RecordUsage(usage)`.
+	// The two diagnostics below (breaker-OPEN INFO and "subagent routed" INFO) are
+	// emitted from THIS dispatch-path closure, NOT the resolveChildAsk child chokepoint
+	// (the loop still emits exactly THREE lines; the router INFOs are dispatch-time
+	// lines, like the policy-deny INFO).
 	if e.deps.SubagentModelRouter != nil && r.router != nil {
 		route, breaker, hardAbort, diag := e.deps.SubagentModelRouter, r.router, r.hardAbort, r.diag
+		// Pre-build a nil-safe usage-fold func to keep the closure branch-free (#92 fix,
+		// avoids +1 cyclomatic complexity inside the already-branchy closure).
+		foldUsage := foldClassifierUsage(sess)
 		caps.routeTask = func(ctx context.Context, taskPrompt string) (string, string, bool) {
 			breaker.mu.Lock()
 			defer breaker.mu.Unlock()
@@ -838,7 +854,11 @@ func (e *Engine) parentCaps(r *Run, sess *session.Session, turnIdx int) parentCa
 			// (issue #94). The hardAbort check above is a fast-path skip; ctx is the
 			// race-closing bound. Fail-soft holds: a cancelled ctx → StopCancelled →
 			// ok=false → inherit the default model, the existing miss path.
-			category, model, ok := route(ctx, taskPrompt)
+			category, model, classifierUsage, ok := route(ctx, taskPrompt)
+			// Fold classifier spend into the parent session's cumulative Usage
+			// UNCONDITIONALLY (on both miss and hit paths) so --max-run-tokens bounds
+			// the classifier cost (#92 fix). foldUsage is nil-safe (nop when sess==nil).
+			foldUsage(classifierUsage)
 			if !ok || strings.TrimSpace(model) == "" {
 				if justOpened := noteRouterMiss(breaker); justOpened && diag != nil {
 					diag.Log(ctx, port.LevelInfo,
@@ -900,6 +920,22 @@ func (e *Engine) parentCaps(r *Run, sess *session.Session, turnIdx int) parentCa
 		}
 	}
 	return caps
+}
+
+// foldClassifierUsage returns a nil-safe fold function that accumulates a classifier's
+// session.Usage into sess (#92 fix, CWE-770): the returned func calls sess.RecordUsage
+// unconditionally, swallowing the error as defense-in-depth (a guard error is a
+// best-effort undercount, never a correctness fault — mirroring loop.go's own
+// `_ = sess.RecordUsage(usage)`). When sess is nil (plain Execute with no parent
+// session threaded), the returned func is a no-op, keeping the parentCaps closure
+// branch-free (no `if sess != nil` inside the hot routeTask loop).
+func foldClassifierUsage(sess *session.Session) func(session.Usage) {
+	if sess == nil {
+		return func(session.Usage) {} // nil-safe nop: plain Execute, no parent session.
+	}
+	return func(u session.Usage) {
+		_ = sess.RecordUsage(u)
+	}
 }
 
 // surfacedCommandPreview returns the human-facing preview of a surfaced child ask: for

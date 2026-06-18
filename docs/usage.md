@@ -1163,9 +1163,11 @@ models:
   classifier toward your most-expensive category (the breaker only counts *misses*, not
   steered-but-valid classifications). It is **bounded** — the router can only pick from
   *your* taxonomy, the provider is fixed, and **`--max-run-tokens`** (plus
-  `--max-team-tokens` and the per-call `max_run_tokens`) is the actual spend ceiling that
-  caps a routed child regardless of the chosen model. Keep the category cost range modest
-  and rely on the token budget as the hard ceiling.
+  `--max-team-tokens` and the per-call `max_run_tokens`) is the actual spend ceiling. The
+  budget caps a routed child regardless of the chosen model **and** (since #92) folds each
+  classifier call's own token spend into the parent run's cumulative `--max-run-tokens`, so
+  repeated classifications cannot run up unbounded classifier cost either. Keep the category
+  cost range modest and rely on the token budget as the hard ceiling.
 
 #### Authoring skills & agent definitions for model selection
 

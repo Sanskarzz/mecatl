@@ -3907,7 +3907,7 @@ func attachAskAdjudicator(deps agent.Deps, cfg Config, provReg *providerRegistry
 // provider-fixed-per-session hazard the rest of this file avoids. The per-session
 // closure already closes over the right (provider, parentModel), so each call re-derives
 // the contamination-safe deps for the classifier model.
-func buildModelRouterTask(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string) func(ctx context.Context, taskPrompt string) (category, model string, ok bool) {
+func buildModelRouterTask(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string) func(ctx context.Context, taskPrompt string) (category, model string, usage session.Usage, ok bool) {
 	if !cfg.SubagentModelRouter || len(cfg.RouterCategories) == 0 {
 		return nil // OFF: no router, byte-identical.
 	}
@@ -3925,7 +3925,7 @@ func buildModelRouterTask(cfg Config, provReg *providerRegistry, provider port.L
 		selectorByName[c.Name] = c.Model
 	}
 	defaultCat := cfg.RouterDefaultCategory
-	return func(ctx context.Context, taskPrompt string) (string, string, bool) {
+	return func(ctx context.Context, taskPrompt string) (string, string, session.Usage, bool) {
 		// Build a fresh tool-less classifier engine (the askAdjudicatorDeps recipe): it
 		// compacts/counts/prompts on ITS model, fires no hooks, and carries no nested
 		// caps (childEngineDepsForProvider forces ChildAskReviewer + SubagentModelRouter
@@ -3940,26 +3940,29 @@ func buildModelRouterTask(cfg Config, provReg *providerRegistry, provider port.L
 		// RunModelRouter and the classifier turn dies with the run instead of running out
 		// its 30s clock (issue #94). Fail-soft holds: a cancelled ctx → StopCancelled →
 		// ok=false → inherit the default model.
-		category, ok := agent.RunModelRouter(ctx, eng, agent.ModelRouteRequest{
+		//
+		// Usage is returned on ALL paths (including misses) so the dispatch-path
+		// routeTask can fold it into the parent session's cumulative Usage (#92 fix).
+		category, classifierUsage, ok := agent.RunModelRouter(ctx, eng, agent.ModelRouteRequest{
 			TaskPrompt: taskPrompt,
 			Categories: cats,
 			Default:    defaultCat,
 		})
 		if !ok {
-			return "", "", false // classifier miss: fail-soft inherit.
+			return "", "", classifierUsage, false // classifier miss: fail-soft inherit; still return spent usage.
 		}
 		sel := strings.TrimSpace(selectorByName[category])
 		if sel == "" {
-			return "", "", false
+			return "", "", classifierUsage, false
 		}
 		// Operator taxonomy targets are UNCAPPED: resolve through the operator-merged
 		// alias map with no allowlist membership test (the operator is authoritative — a
 		// category mapping is the operator's own binding, like models.default).
 		id, known := lookupModelAlias(cfg, sel)
 		if !known || id == "" {
-			return "", "", false // unresolvable target: fail-soft inherit.
+			return "", "", classifierUsage, false // unresolvable target: fail-soft inherit.
 		}
-		return category, id, true
+		return category, id, classifierUsage, true
 	}
 }
 

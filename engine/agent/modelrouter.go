@@ -117,22 +117,27 @@ type routerVerdict struct {
 }
 
 // RunModelRouter drives a dedicated, tool-less one-turn classifier Engine over a fenced
-// classification prompt and returns the chosen CATEGORY NAME. It mirrors
-// RunGuardrailCheck: bounded by modelRouterTimeout, drained under a zero-capability
-// child posture (role "model-router"), and FAIL-SOFT — any failure, cancellation,
-// unparseable verdict, or hallucinated category returns ("", false) so the caller
-// inherits the default model. It never returns an error: the router is never
-// load-bearing, so a miss is just a soft fall-through, not a condition the caller
-// branches on.
+// classification prompt and returns the chosen CATEGORY NAME plus the classifier's
+// accumulated session.Usage (so the caller can fold it into a parent session's budget
+// brake — the #92 CWE-770 fix). It mirrors RunGuardrailCheck: bounded by
+// modelRouterTimeout, drained under a zero-capability child posture (role
+// "model-router"), and FAIL-SOFT — any failure, cancellation, unparseable verdict, or
+// hallucinated category returns ("", zero, false) so the caller inherits the default
+// model. It never returns an error: the router is never load-bearing, so a miss is just
+// a soft fall-through, not a condition the caller branches on.
+//
+// Usage is returned on EVERY path including early-return degenerate inputs (zero usage)
+// and fail-soft miss paths (whatever was spent before the failure) so the caller can
+// always fold it unconditionally.
 //
 // engine must be a tool-less classifier Engine that fires no hooks and carries no
 // nested reviewer/router (built via the composition's childEngineDepsForProvider
 // recipe), so a classification can never recurse or call a tool. A nil engine, an
 // empty category list, or a blank task prompt is a fail-soft miss (ok=false), never a
 // panic — it is a leaf helper on the fast path.
-func RunModelRouter(ctx context.Context, engine *Engine, req ModelRouteRequest) (category string, ok bool) {
+func RunModelRouter(ctx context.Context, engine *Engine, req ModelRouteRequest) (category string, usage session.Usage, ok bool) {
 	if engine == nil || len(req.Categories) == 0 || strings.TrimSpace(req.TaskPrompt) == "" {
-		return "", false
+		return "", session.Usage{}, false
 	}
 	ctx, cancel := context.WithTimeout(ctx, modelRouterTimeout)
 	defer cancel()
@@ -150,9 +155,13 @@ func RunModelRouter(ctx context.Context, engine *Engine, req ModelRouteRequest) 
 	run := engine.Run(ctx, sess, judgeWorkspace{}, buildModelRoutePrompt(req))
 	final, stop := drainChild(run, childPosture{role: "model-router"})
 	if stop == session.StopError || stop == session.StopCancelled {
-		return "", false // run did not complete: fail-soft, inherit the default model.
+		// Run did not complete: fail-soft, inherit the default model. Return whatever
+		// was spent so far (the fail-soft path may have still consumed tokens before
+		// the failure/cancel).
+		return "", sess.Usage, false
 	}
-	return parseRouterVerdict(final, req.Categories)
+	cat, catOK := parseRouterVerdict(final, req.Categories)
+	return cat, sess.Usage, catOK
 }
 
 // parseRouterVerdict requires the classifier's WHOLE trimmed output to be a single JSON

@@ -178,6 +178,100 @@ func TestSubagentChildInheritsBudgetAndReturnsCleanResult(t *testing.T) {
 	}
 }
 
+// subagentSpammerProvider is an ADVERSARIAL parent provider: every turn it emits ONE
+// Subagent tool call (so the loop keeps delegating) carrying ZERO parent-turn usage and a
+// benign StopEndTurn, and it NEVER stops on its own. Zero parent usage is deliberate: it
+// isolates the CLASSIFIER's folded spend as the ONLY thing that can move the parent
+// budget, so a run that trips StopBudget proves the router-fold (#92) is the cause.
+type subagentSpammerProvider struct{ calls atomic.Int64 }
+
+func (*subagentSpammerProvider) Capabilities() port.ProviderCapabilities {
+	return port.ProviderCapabilities{}
+}
+
+func (p *subagentSpammerProvider) Stream(ctx context.Context, _ port.LLMRequest) (iter.Seq2[port.Chunk, error], error) {
+	n := p.calls.Add(1)
+	id := session.ToolCallID("sub" + string(rune('A'+(n%26))))
+	return func(yield func(port.Chunk, error) bool) {
+		if ctx.Err() != nil {
+			return
+		}
+		tc := session.NewToolCall(id, "Subagent", []byte(`{"prompt":"explore something"}`))
+		if !yield(port.Chunk{Kind: port.ChunkToolCall, ToolCall: &tc}, nil) {
+			return
+		}
+		// ZERO parent-turn usage: only the classifier fold may move the parent budget.
+		zero := session.Usage{}
+		if !yield(port.Chunk{Kind: port.ChunkUsage, Usage: &zero}, nil) {
+			return
+		}
+		yield(port.Chunk{Kind: port.ChunkDone, Stop: session.StopEndTurn}, nil)
+	}, nil
+}
+
+// TestClassifierSpendTripsStopBudgetE2E is the REAL-LOOP companion to the unit-level
+// TestClassifierSpendTripsMaxRunTokens (#92, CWE-770): it drives an actual e.Run to a
+// terminal StopBudget asserted off the event stream, mirroring TestBudgetTerminatesRunawayCleanly.
+// The parent provider delegates a plain Subagent every turn with ZERO parent usage; a wired
+// SubagentModelRouter (the Deps closure the composition builds) classifies each delegation,
+// returning a fixed non-zero classifier usage that the dispatch-path routeTask folds into the
+// parent sess.Usage. With no other parent spend, the run must terminate StopBudget purely from
+// accumulated classifier cost — COMPLETED + Reopen-recoverable, the clean-terminal contract.
+//
+// A regression that dropped the fold (routeTask not folding, or RunModelRouter/
+// buildModelRouterTask returning zero usage) would leave the parent budget at zero forever and
+// this run would never terminate — the test would hang then fail the harness timeout, the
+// honest signal that classifier spend escaped the budget.
+func TestClassifierSpendTripsStopBudgetE2E(t *testing.T) {
+	const classifierPerCall = 120                                       // tokens the router reports per classification
+	const budget = 350                                                  // crossed after 3 classifications (3*120=360 >= 350)
+	classifierUsage := session.Usage{InputTokens: 80, OutputTokens: 40} // TotalTokens()==classifierPerCall
+
+	// The routed child completes immediately (a one-turn summary), so each delegation
+	// returns cleanly and the parent loop takes another turn → another classification.
+	childEngine := childEngineWith(mockllm.New(mockllm.TextTurn("child summary")), tool.NewCatalog())
+	subagentTool := agent.NewSubagentTool(childEngine)
+
+	parentLLM := &subagentSpammerProvider{}
+	var routeCalls atomic.Int64
+	e := newEngine(agent.Deps{
+		LLM:          parentLLM,
+		Catalog:      catalogWith(t, subagentTool),
+		MaxRunTokens: budget,
+		// The composition-built router closure stand-in: classify (hit) and report spend.
+		SubagentModelRouter: func(context.Context, string) (string, string, session.Usage, bool) {
+			routeCalls.Add(1)
+			return "large", "", classifierUsage, true // empty model → inherit default child; the FOLD is what matters
+		},
+	})
+	sess := newSession(t, session.Limits{}) // no turn/tool limits: the budget is the only brake
+	ws := memfs.NewWorkspace("/ws")
+
+	evs := drain(e.Run(context.Background(), sess, ws, "delegate forever"))
+
+	res := lastResult(t, evs)
+	if res.Stop != session.StopBudget {
+		t.Fatalf("terminal stop = %q, want %q (folded classifier spend must trip the budget)", res.Stop, session.StopBudget)
+	}
+	// Clean terminal: COMPLETED + Reopen-recoverable (StopBudget is never failed).
+	if sess.State != session.StateCompleted {
+		t.Fatalf("session state = %q, want completed (StopBudget is a clean terminal)", sess.State)
+	}
+	if err := sess.Reopen(); err != nil {
+		t.Fatalf("Reopen after StopBudget: %v (a budget-stopped session must stay recoverable)", err)
+	}
+	// The router must have actually classified more than once (proving repeated folds, not a
+	// single overshoot) — and the cumulative parent usage must have crossed the ceiling from
+	// classifier spend alone (parent turns contributed zero).
+	if got := routeCalls.Load(); got < 3 {
+		t.Fatalf("router classified %d time(s), want >= 3 (the budget should trip after repeated folds)", got)
+	}
+	if got := sess.Usage.TotalTokens(); got < budget {
+		t.Fatalf("cumulative parent usage = %d, want >= budget %d (folded classifier spend only)", got, budget)
+	}
+	_ = classifierPerCall
+}
+
 // countingProvider records how many Stream calls it received, then delegates to a
 // scripted mockllm. It proves whether the loop reached a model call at all.
 type countingProvider struct {

@@ -525,15 +525,17 @@ delegation's model PER task from an operator category taxonomy. It is a sibling 
 ask reviewer — the same composition-built one-turn-engine pattern.
 
 ENGINE half (`engine/agent/modelrouter.go`): `RunModelRouter(ctx, engine, ModelRouteRequest)
-(category, ok)` drives a tool-less ONE-turn classifier (role `model-router`, `modelRouterLimits`
+(category, usage, ok)` drives a tool-less ONE-turn classifier (role `model-router`, `modelRouterLimits`
 = 1 turn / 1 tool / 1 failure, 30s timeout, no-progress nudge disabled) over `buildModelRoutePrompt`
 (category names+descriptions in the clear; the untrusted task prompt inside `WriteUntrustedBlock`;
 the `category:`/`categories:`/`task to classify:` headers added to `framingHeader`). `parseRouterVerdict`
 is the issue-#31 hardened parse — the WHOLE trimmed output (after `StripLoneCodeFence`) must BE a
 single `{"category":"<name>"}` object, and the category is VALIDATED against the offered list (a
 hallucinated category is a miss). The engine stays MODEL-STRING-ONLY: it returns a category NAME;
-composition owns the mapping. FAIL-SOFT: a `StopError`/`StopCancelled`, an unparseable verdict, or a
-degenerate input (nil engine / no categories / blank prompt) → `("", false)`.
+composition owns the mapping. `usage` is the classifier's `sess.Usage`, returned on EVERY path
+(including early-return degenerate inputs and fail-soft misses) so the caller can fold it
+unconditionally (#92 fix). FAIL-SOFT: a `StopError`/`StopCancelled`, an unparseable verdict, or a
+degenerate input (nil engine / no categories / blank prompt) → `("", zero, false)`.
 
 The per-RUN breaker `modelRouterBreaker` (default `defaultModelRouterMaxMisses`=3) mirrors
 `askReviewBreaker` exactly: its mutex serialises classifications within a run AND guards the
@@ -541,7 +543,12 @@ consecutive-miss count; armed in `RunContentWith` iff `Deps.SubagentModelRouter 
 `Deps` field + `Run.router`). The closure lives in `Engine.parentCaps` (next to `adjudicate`): it
 holds the mutex across the whole classification, skips on an open breaker or a fired `hardAbort`,
 notes misses (one-time breaker-opened INFO via `r.diag`), resets on a success, and emits the
-per-classification INFO — all at the child diagnostic chokepoint, never a fourth loop line.
+per-classification INFO — all at the **dispatch-time `routeTask` closure** (like the
+policy-deny INFO), never the `resolveChildAsk` child chokepoint, never a fourth loop line.
+The closure also folds the classifier's `session.Usage` into the parent `sess.Usage`
+UNCONDITIONALLY (hit OR miss) via `_ = sess.RecordUsage(classifierUsage)` BEFORE the
+miss/hit branch (#92 fix): classifier spend is now visible to `budgetExhausted` (which
+reads `sess.Usage.TotalTokens()`), bounding CWE-770 unbounded accumulation.
 
 The RUN() HOOK (`maybeRouteModel`, `engine/agent/subagent.go`): for a PLAIN default delegation
 (gated — returns empty unless `!resuming && !args.Fork && args.Model=="" && args.Agent=="" &&

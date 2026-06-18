@@ -57,21 +57,58 @@ func TestBuildModelRouterTaskOffWhenDisabled(t *testing.T) {
 	}
 }
 
-// The closure classifies and maps the chosen category to its resolved concrete model.
+// The closure classifies and maps the chosen category to its resolved concrete model,
+// and propagates the classifier's token spend as its 3rd return (the #92 seam this layer
+// widened): buildModelRouterTask must pass RunModelRouter's session.Usage through to the
+// dispatch-path routeTask fold on BOTH the hit and the miss path (see the sibling miss
+// test below). A regression that zeroed the hit return (return category, id,
+// session.Usage{}, true) would drop classifier spend from the parent budget — CWE-770.
 func TestBuildModelRouterTaskMapsCategoryToModel(t *testing.T) {
-	prov := mockllm.New(mockllm.TextTurn(`{"category":"large"}`))
+	const inputTok, outputTok = 200, 100
+	prov := mockllm.New(mockllm.ChunksTurn(
+		mockllm.TextChunk(`{"category":"large"}`),
+		mockllm.UsageChunk(session.Usage{InputTokens: inputTok, OutputTokens: outputTok}),
+		mockllm.DoneChunk(session.StopEndTurn),
+	))
 	reg := regForTest(prov, providerAnthropic, "session-model")
 
 	fn := buildModelRouterTask(routerTaxonomyCfg(), reg, prov, providerAnthropic, "session-model")
 	if fn == nil {
 		t.Fatal("router task must be non-nil when enabled with a taxonomy")
 	}
-	cat, model, ok := fn(context.Background(), "redesign the storage layer")
+	cat, model, usage, ok := fn(context.Background(), "redesign the storage layer")
 	if !ok {
 		t.Fatal("a valid classification must resolve")
 	}
 	if cat != "large" || model != routerLarge {
 		t.Fatalf("routed (category, model) = (%q, %q), want (large, %q)", cat, model, routerLarge)
+	}
+	if usage.TotalTokens() != inputTok+outputTok {
+		t.Fatalf("hit usage.TotalTokens() = %d, want %d (classifier spend must propagate through the composition closure)", usage.TotalTokens(), inputTok+outputTok)
+	}
+}
+
+// MISS-path usage propagation (the #92 seam, sibling of the hit assertion above): even a
+// fail-soft miss (garbage verdict → ok=false) must surface the classifier's actual spend
+// as the 3rd return so the dispatch-path routeTask folds it unconditionally. A regression
+// that returned session.Usage{} on the miss branch of buildModelRouterTask would leak
+// classifier spend on every misclassified delegation — CWE-770.
+func TestBuildModelRouterTaskPropagatesUsageOnMiss(t *testing.T) {
+	const inputTok, outputTok = 150, 90
+	prov := mockllm.New(mockllm.ChunksTurn(
+		mockllm.TextChunk("I am not sure, sorry — just prose."),
+		mockllm.UsageChunk(session.Usage{InputTokens: inputTok, OutputTokens: outputTok}),
+		mockllm.DoneChunk(session.StopEndTurn),
+	))
+	reg := regForTest(prov, providerAnthropic, "session-model")
+
+	fn := buildModelRouterTask(routerTaxonomyCfg(), reg, prov, providerAnthropic, "session-model")
+	cat, model, usage, ok := fn(context.Background(), "x")
+	if ok || cat != "" || model != "" {
+		t.Fatalf("a garbage verdict must be a fail-soft miss; got (cat=%q, model=%q, ok=%v)", cat, model, ok)
+	}
+	if usage.TotalTokens() != inputTok+outputTok {
+		t.Fatalf("miss usage.TotalTokens() = %d, want %d (miss path must still propagate spent usage)", usage.TotalTokens(), inputTok+outputTok)
 	}
 }
 
@@ -87,7 +124,7 @@ func TestBuildModelRouterTaskResolvesCategoryAlias(t *testing.T) {
 	cfg.ModelAliases = map[string]string{"tiny": "resolved-tiny-1.0"} // alias → concrete id
 
 	fn := buildModelRouterTask(cfg, reg, prov, providerAnthropic, "session-model")
-	_, model, ok := fn(context.Background(), "rename a var")
+	_, model, _, ok := fn(context.Background(), "rename a var")
 	if !ok || model != "resolved-tiny-1.0" {
 		t.Fatalf("aliased category routed to (%q, %v), want resolved-tiny-1.0 true", model, ok)
 	}
@@ -100,7 +137,7 @@ func TestBuildModelRouterTaskFailSoftOnMiss(t *testing.T) {
 	reg := regForTest(prov, providerAnthropic, "session-model")
 
 	fn := buildModelRouterTask(routerTaxonomyCfg(), reg, prov, providerAnthropic, "session-model")
-	if _, _, ok := fn(context.Background(), "x"); ok {
+	if _, _, _, ok := fn(context.Background(), "x"); ok {
 		t.Fatal("a classifier miss must be fail-soft (ok=false), never a fabricated route")
 	}
 }
@@ -113,7 +150,7 @@ func TestBuildModelRouterTaskFailSoftOnUnresolvableTarget(t *testing.T) {
 	cfg := routerTaxonomyCfg()
 	cfg.RouterCategories[0].Model = "sonnet" // a built-in alias meaning inherit → unresolvable
 	fn := buildModelRouterTask(cfg, reg, prov, providerAnthropic, "session-model")
-	if _, _, ok := fn(context.Background(), "x"); ok {
+	if _, _, _, ok := fn(context.Background(), "x"); ok {
 		t.Fatal("an unresolvable category target must be fail-soft (ok=false)")
 	}
 }
@@ -250,7 +287,7 @@ func TestRouterClassifierRunsOnSlotModel(t *testing.T) {
 	if fn == nil {
 		t.Fatal("router task must be non-nil")
 	}
-	cat, _, ok := fn(context.Background(), "classify this")
+	cat, _, _, ok := fn(context.Background(), "classify this")
 	if !ok || cat != "large" {
 		t.Fatalf("classification failed: cat=%q ok=%v", cat, ok)
 	}

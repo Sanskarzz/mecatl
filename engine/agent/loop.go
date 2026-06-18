@@ -232,21 +232,23 @@ type Deps struct {
 	// SubagentModelRouter, when non-nil, is the OPT-IN semantic model router (ADR
 	// 0031, the Phase 5 headline feature): given a Subagent call's (model-authored,
 	// untrusted) task prompt it returns the ALREADY-RESOLVED concrete model id to mint
-	// the child on, plus the category label it classified into. It is a composition
-	// closure — the engine layer is model-string-only (the layering rule): composition
-	// owns the classifier engine, the category taxonomy, and the category→model mapping
-	// (aliases/slots/the allowlist cap), and hands the engine only func(ctx,
-	// string)(string, string, bool). It is consulted by the Subagent run() hook ONLY
-	// for a plain default delegation (no per-call model, no agent, no fork, no resume)
-	// and is FAIL-SOFT throughout: ok=false (any classifier failure, an unknown
-	// category, the breaker open) → the call falls through to the inherited default
-	// explorer model, byte-identically to a deployment with no router. DEFAULT nil: no
-	// router, the long-standing behaviour. Set on the MAIN engine only (a child has no
-	// Subagent tool, so structurally no router); childEngineDepsForProvider forces it
-	// nil (the no-nesting recursion guard). Like ChildAskReviewer, the router is built
-	// into the per-call parentCaps.routeTask closure in Engine.parentCaps, never called
-	// directly by the loop, so it is NOT a port.LLMRequest field and never reaches a
-	// request.
+	// the child on, plus the category label it classified into, plus the classifier's
+	// session.Usage (which the dispatch-path routeTask closure folds into the parent
+	// sess.Usage so classifier spend counts against --max-run-tokens — the #92 fix).
+	// It is a composition closure — the engine layer is model-string-only (the layering
+	// rule): composition owns the classifier engine, the category taxonomy, and the
+	// category→model mapping (aliases/slots/the allowlist cap), and hands the engine
+	// only func(ctx, string)(string, string, session.Usage, bool). It is consulted by
+	// the Subagent run() hook ONLY for a plain default delegation (no per-call model,
+	// no agent, no fork, no resume) and is FAIL-SOFT throughout: ok=false (any
+	// classifier failure, an unknown category, the breaker open) → the call falls
+	// through to the inherited default explorer model, byte-identically to a deployment
+	// with no router. DEFAULT nil: no router, the long-standing behaviour. Set on the
+	// MAIN engine only (a child has no Subagent tool, so structurally no router);
+	// childEngineDepsForProvider forces it nil (the no-nesting recursion guard). Like
+	// ChildAskReviewer, the router is built into the per-call parentCaps.routeTask
+	// closure in Engine.parentCaps, never called directly by the loop, so it is NOT a
+	// port.LLMRequest field and never reaches a request.
 	//
 	// The ctx is the RUN's ctx (threaded down via parentCaps.routeTask), NOT
 	// context.Background(): a Run.Cancel between the breaker's hardAbort check and the
@@ -255,7 +257,7 @@ type Deps struct {
 	// cancellation-propagation gap the hardAbort TOCTOU otherwise leaves). Fail-soft
 	// holds regardless: a cancelled ctx yields StopCancelled → ok=false → inherit the
 	// default model, exactly the existing miss path.
-	SubagentModelRouter func(ctx context.Context, taskPrompt string) (category, model string, ok bool)
+	SubagentModelRouter func(ctx context.Context, taskPrompt string) (category, model string, usage session.Usage, ok bool)
 
 	// ProgressiveTools, when true, enables progressive tool disclosure
 	// (pattern 9): the per-turn request advertises lightweight specs for tools

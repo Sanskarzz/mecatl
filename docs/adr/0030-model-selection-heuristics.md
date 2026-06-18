@@ -32,7 +32,10 @@ Adopt **aliases as the spine** and layer three mechanisms on top, all in composi
 
 **Config — project-overridable, operator caps.** A new `OperatorModelPolicy()` accessor mirrors `OperatorPosture()`/`OperatorGuardrails()`, except project-**merge-within-cap** rather than project-ignored: the `allowlist` is operator-tier and non-wideable; a trust-gated project `.mecatl/settings.yaml` may re-bind `default`/`slots`/`aliases` only to allowlisted entries (anything else → WARN + ignored, fail-closed).
 
-Resolution stays in the one resolver `resolveProviderModel`, extended (not forked); no `port.LLMRequest` field is added.
+Resolution for agent-def and session model stays in `resolveProviderModel`
+(`internal/app/agentdefs.go`), unchanged. Slot/router resolution uses the sibling
+`resolveSlotModel` (`internal/app/slots.go`); both share `lookupModelAlias`
+(`internal/app/agentdefs.go`) as the alias spine. No `port.LLMRequest` field is added.
 
 ### Implementation status
 
