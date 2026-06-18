@@ -1008,6 +1008,61 @@ value; an unknown value fails closed to `strict` with a WARN.
 
 ### Per-slot models (`models:`, ADR 0030)
 
+#### Quickstart: pick a model per job
+
+Model selection is a stack of independent mechanisms. Pick the one(s) you need:
+
+| You want… | Use |
+|---|---|
+| Short names for models you reference often | `models.aliases:` |
+| Cheaper compaction / guardrail / ask-reviewer calls | `models.slots:` (`compaction`/`guardrail`/`ask-reviewer`) |
+| Plan on a strong model, execute on a cheaper one | `models.slots: plan:` (the opusplan pattern) |
+| Pick a subagent's model per task automatically | `--subagent-model-router` + `models.router:` |
+| Let a trusted repo re-bind models within your cap | `models.allowlist:` + a project `.mecatl/settings.yaml` |
+
+A complete tiered setup on one provider (here, OpenRouter — model selection only
+swaps the model within a session's provider, never the provider itself):
+
+```yaml
+# ~/.config/mecatl/settings.yaml
+models:
+  aliases:                 # short names → concrete ids (the spine everything else references)
+    heavy: z-ai/glm-5.2
+    coder: deepseek/deepseek-v4-flash
+    quick: google/gemini-3.5-flash
+  default: z-ai/glm-5.2    # the session model
+  slots:                   # route housekeeping + plan-mode to a cheaper/stronger model
+    compaction: quick
+    guardrail: quick
+    ask-reviewer: quick
+    plan: heavy            # plan-mode turns swap to the heavy model
+    router: quick          # the classifier itself
+  router:                  # pick a subagent's model per task (needs --subagent-model-router)
+    default-category: medium
+    categories:
+      - name: large
+        description: deep multi-step reasoning, architecture, subtle bugs
+        model: heavy
+      - name: medium
+        description: standard implementation, bug fixes, writing and reviewing tests
+        model: coder
+      - name: small
+        description: trivial mechanical tasks, single-file edits, quick lookups
+        model: quick
+```
+
+Launch with `mecated --subagent-model-router` (the flag is the router's enable gate).
+With nothing configured, every call keeps the session model — the default is
+byte-identical.
+
+**Verifying it's wired.** On startup mecated logs one build-once fact per active slot
+(`model slot ACTIVE`) and, when the router is enabled, `subagent model router ACTIVE`.
+Check the mecated log (stderr, or `$XDG_STATE_HOME/mecatl/mecatui.log` under mecatui)
+for those lines. A slot that failed to resolve WARNs and degrades to the session model,
+so a missing `ACTIVE` line is the signal something didn't bind.
+
+#### How it works
+
 The internal **lightweight** LLM calls — the compaction summary, the headless
 ask-reviewer, and the guardrail checker — can run on a **cheaper model** than the
 session via a **model slot** (the `--model-slot` flag, above, or the user-global
@@ -1111,6 +1166,31 @@ models:
   `--max-team-tokens` and the per-call `max_run_tokens`) is the actual spend ceiling that
   caps a routed child regardless of the chosen model. Keep the category cost range modest
   and rely on the token budget as the hard ceiling.
+
+#### Authoring skills & agent definitions for model selection
+
+The router steers a delegation's model from the **operator's** config; a skill or
+agent definition does not need to — and should not — name provider-specific model
+ids. Two ways a delegation's model is chosen, and how to author for each:
+
+- **Let the router pick (preferred).** Write the skill to describe the *capability*
+  needed ("on a high-reasoning model") rather than a slug. A plain `Subagent`
+  delegation with no `model`/`agent`/`fork`/`resume` is classified by the router
+  into your category taxonomy, so the operator's `models.router:` config — not the
+  skill text — decides the model. This keeps the skill provider-agnostic and
+  portable across deployments.
+- **Pin via an alias.** If a skill needs to force a tier, it can pass
+  `Subagent(model="<alias>")`, where `<alias>` is a name the operator bound in
+  `models.aliases:`. The alias is the only model vocabulary the model can usefully
+  reference; mecatl does **not** inject the alias map into the prompt, so the skill
+  must name the alias itself. Note this bypasses the router (an explicit per-call
+  `model` wins by precedence), and the alias only resolves to a real model if the
+  operator bound it — an unbound alias fail-softs to the inherited default.
+
+The built-in aliases `sonnet`/`opus`/`haiku` default to "inherit the parent model"
+until an operator overrides them, so a skill that names them is portable but inert
+until configured. For a clean deployment-neutral posture, describe capabilities and
+let the router own the mapping.
 
 #### Project-overridable model config, capped by an operator allowlist (Phase 4)
 
