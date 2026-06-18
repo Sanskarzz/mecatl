@@ -22,9 +22,9 @@ import (
 // *calls on each invocation — the does-it-rehydrate probe (mirrors
 // rehydrate_selector_test.go's recording factory).
 func countingSessionEngineFactory(inner server.SessionEngineFactory, calls *int) server.SessionEngineFactory {
-	return func(ctx context.Context, sel server.ProviderSelector, specs []mcp.ServerConfig, profile server.SessionProfile, ws string) (server.SessionEngineResult, error) {
+	return func(ctx context.Context, sel server.ProviderSelector, specs []mcp.ServerConfig, profile server.SessionProfile, ws string, mode session.PermissionMode) (server.SessionEngineResult, error) {
 		*calls++
-		return inner(ctx, sel, specs, profile, ws)
+		return inner(ctx, sel, specs, profile, ws, mode)
 	}
 }
 

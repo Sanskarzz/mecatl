@@ -352,6 +352,237 @@ case (c) — the same-provider window rule), `app.TestNormalizeSubagentModelUnre
 `app.TestSubagentModelRoutesChildToCheapModel` (mutation-verified: reverting the explorer wiring
 fails the deps test, the prompt test, AND the e2e).
 
+**Per-slot models (`models.slots`, ADR 0030 Phase 1+2).** Three internal LIGHTWEIGHT LLM calls
+route to a named **slot** model so housekeeping runs on a cheaper model than the session, all in
+composition (`internal/app/slots.go`). The ONE choke point is **`resolveSlotModel(cfg, slot,
+parentModel) (model, configured)`**: an explicit `cfg.ModelSlots[slot]` binding wins, else the
+slot's default TIER (`slotDefaultTier` — `compaction`/`ask-reviewer`/`guardrail` all default to
+`cheap`) when THAT tier is bound, else `("", false)`. A chosen selector is resolved THROUGH the
+existing `lookupModelAlias` grammar (the alias SPINE — a slot value is itself an alias or a literal
+id, the same resolution `resolveAlias`/`normalizeSubagentModel` use), so the two never drift. The
+three routed call sites:
+- **compaction** — `engineDepsForProvider` resolves the slot and, when set, builds the
+  `CascadeCompactor` (`buildCompactor`) over a slot-model `compactorCfg`+`compactorCounter` while
+  the engine's own `Model`/`TokenCounter`/`PromptConfig`/`ContextWindow` stay on the session model.
+  **O5 (validated against `engine/agent/cascade.go`):** the `CascadeCompactor` uses `Counter` only
+  to SIZE history between tiers against `BudgetTokens`, and `BudgetTokens` is WINDOW-derived
+  (`defaultContextWindowTokens × ratio` in `buildCompactor`), NOT keyed to the live conversation —
+  so keying the compactor's `Counter` to the compaction model cannot break the cascade budget math;
+  the load-bearing swap is the tier-4 summary call's `Model`. The `HeuristicCompactor` has no
+  `Model`/`Counter`, so it is unaffected.
+- **ask-reviewer** — `askAdjudicatorDeps`: the `--subagent-ask-reviewer` flag STAYS the enable gate
+  (empty ⇒ reviewer off); when enabled, a configured `ask-reviewer` slot SUPERSEDES the flag's
+  model (a slot alone does NOT enable the reviewer).
+- **guardrail** — `buildGuardrailsChecker` (its parent-model arg is now NAMED `parentModel`):
+  `GuardrailsModel` STAYS the enable gate; a configured `guardrail` slot supersedes the checker
+  model.
+
+**Byte-identical default + fail-soft.** With no slot configured `resolveSlotModel` returns
+`("", false)` for every slot and each site keeps its EXACT pre-feature behaviour (the session
+model). A typo'd slot key, an unknown alias, or an alias meaning inherit WARNs and degrades to the
+session model — a broken housekeeping slot NEVER wedges the call (no fail-fast normalize, unlike
+`--subagent-model`). `foldOperatorModelSlots` merges the OPERATOR-TIER `models.slots`+`models.aliases`
+YAML (user-global + CLI only, CLI winning per key) onto `cfg`; a project-tier `models:` block is
+ignored with a WARN by default (`permconfig.Resolver.OperatorModelSlots()`, the
+`captureModels`/strict-`ModelsSection.UnmarshalYAML` pair mirroring guardrails/posture) — Phase 4
+below makes it project-overridable WITHIN an operator allowlist.
+`logSlotConfigFacts` narrates each routed slot ONCE in `Build` (the build-once-facts discipline —
+never per-engine; the loop's THREE-lines invariant holds). NO `port.LLMRequest` widening (the slot
+is a composition model-string choice). Team synthesis is DEFERRED (no clean seam — the lead
+synthesis runs on the lead member's whole engine); the subagent router is a later ADR-0030 layer.
+Guards: `app.TestSlotsByteIdenticalDefault` (G1), `app.TestResolveSlotModelTable`
++ `TestCompactionSlotRoutesSummaryOnly` + `TestAskReviewerSlotSupersedesFlag` +
+`TestGuardrailSlotRoutesChecker` (G2), `app.TestCompactionSlotE2ESummaryModel` +
+`TestGuardrailSlotE2ECheckerModel` (G4, mock-observer per-request `Model` capture),
+`permconfig.TestOperatorModelsFromCLIHonoured` + `TestProjectModelsIgnoredWithWarn` +
+`TestModelsStrictUnknownKeyRejected`, and the live `e2e` `model slots` spec.
+
+**Mode→model: the `plan` slot (ADR 0030 Phase 3 / Layer 3, the opusplan pattern).** A fourth slot,
+`plan` (`slotPlan`), reuses `resolveSlotModel` UNCHANGED but is wired on the MODE axis, not the
+internal-call axis. Two divergences from the call-slots: `slotDefaultTier[slotPlan] = slotReasoning`
+(a plan model is a strong-reasoning model, NOT cheap — the one default-tier divergence); and its
+consumer is the per-session engine FACTORY (`sessionEngineFactory` in `internal/app/build.go`), not a
+per-call deps builder. After `resolvedProvider, resolvedModel` are resolved and BEFORE
+`windowFn`/`sessionCaps`/`engineDepsForProvider`, the factory does: `if mode == session.ModePlan { if
+planModel, configured := resolveSlotModel(cfg, slotPlan, resolvedModel); configured && planModel !=
+"" { resolvedModel = planModel } }` — within the SAME provider (the provider is NEVER switched;
+"provider FIXED per session" holds). Everything downstream already keys on `resolvedModel`, so the
+swap is total. The factory echoes back the mode as `SessionEngineResult.BuiltForMode`.
+
+The **run-entry trigger** lives in the server (`internal/adapter/server/service.go`). The
+`sessionEngine` struct gains `builtForMode session.PermissionMode`, stamped from
+`SessionEngineResult.BuiltForMode` at EVERY construction site (create, `LoadSessionWithMCP`,
+rehydrate, mode-rebuild). `engineAndWorkspaceFor` (the SINGLE engine/workspace resolution point, shared
+by `StartRunContent` and `resumeFromAwaiting`) gains two cases, both routed through the ONE shared
+`buildAndRegisterSessionEngine(ctx, sess, sel, profile, mode, replace)` helper extracted from
+`rehydrateSession`:
+- **CASE 1** — `hasEngine && se.builtForMode != "" && se.builtForMode != sess.Mode`: the registered
+  per-session engine was built for a different mode; rebuild it (`replace=true` tears the prior engine
+  down). Guarded by a no-live-run assertion (SetMode is rejected mid-turn, so this only ever fires at a
+  turn boundary). The `!= ""` skip treats a zero `builtForMode` (a test/legacy factory) as "no pin".
+- **CASE 2** — `!hasEngine && !needsRehydration(sess) && cfg.ModeNeedsEngine != nil &&
+  cfg.ModeNeedsEngine(sess.Mode)`: a DEFAULT-FS session that would ride the shared engine, but its mode
+  resolves a different model; PROMOTE it to a per-session factory engine (`replace=false`).
+
+`server.Config.ModeNeedsEngine func(mode session.PermissionMode) bool` is the composition-injected
+predicate (`internal/app/slots.go` `modeNeedsEngine`): NIL unless a plan slot resolves to a model
+differing from the shared-engine model (`cfg.Model`) — so a deployment with no plan slot is
+**BYTE-IDENTICAL** to pre-Phase-3 (no promotion, a mode flip changes nothing). `rehydrateSession` and
+`LoadSessionWithMCP` pass `sess.Mode` (the PERSISTED mode), so a restart-into-plan rehydrates on the
+plan model. `ResolvedModel`/`SessionCapabilities` re-emit automatically after the rebuild swaps the
+registered engine (no recompute — they read `se`); the ORDERING is deliberate: a `SetMode` response
+echoes the pre-rebuild model (fixed per turn), the new model appears on `GetSession`/the next turn.
+`resumeFromAwaiting` is a CASE 1 no-op (SetMode is rejected from `StateAwaiting`, so
+`se.builtForMode == sess.Mode` always holds). NO proto/port/domain change beyond the modelith doc and
+the server-adapter factory signature (`mode` param + `BuiltForMode` field). Guards:
+`app.TestPlanSlotDefaultTierIsReasoning` + `TestPlanSlotResolves` + `TestPlanSlotByteIdenticalWhenUnconfigured`
++ `TestModeNeedsEngine` + `TestSessionEngineFactoryPlanVsExecute` + `TestSessionEngineFactoryNoPlanSlotByteIdentical`,
+`server.TestModeFlipRebuildsOnPlanSlot` + `TestModeFlipRebuildsBackToExecute` +
+`TestModeFlipByteIdenticalWithoutPlanSlot` + `TestSetModeRejectedMidTurn` + `TestPlanModeSessionRehydratesOnPlanModel`
++ `TestModeFlipEndToEndModelObserved` + `TestModeRebuildReEmitsCapabilities`, and the live `e2e`
+`mode model (plan slot)` spec (slot-wiring half; the flip is the offline end-to-end's authoritative job
+until the harness driver gains a SetMode verb).
+
+**Project-overridable model config, capped by an operator allowlist (ADR 0030 Phase 4).** A TRUSTED
+project's `.mecatl/settings.yaml` may re-bind `models.default`/`models.slots`/`models.aliases`, but
+ONLY within a non-wideable operator allowlist. The layering is
+`CLI(operator flags) > project-YAML(capped) > operator-YAML(settings.yaml) > built-in`.
+
+`ModelsSection` gains `Default string` and `Allowlist []string` (both added to the strict
+`decodeStrictMapping` key map so a typo like `allowlistt:` still errors). The `permconfig` half:
+`OperatorModelPolicy() *ModelsSection` mirrors `OperatorModelSlots()` (the SAME `operatorModels`
+backing field — allowlist+default ride the same operator `models:` block, captured once via
+`captureModels` from `loadUserRules`; NO second capture path). `loadProjectRules` REPLACES the
+unconditional WARN-ignore with `captureProjectModels`: it strips a project `allowlist:` key (+WARN —
+a project cannot widen its own cap), then honours the rest ONLY when an operator allowlist EXISTS (the
+opt-in) AND the workspace is trusted (`r.opts.TrustProject` — the SAME gate as project allow rules),
+distinguishing the not-honoured reason (no operator allowlist vs untrusted). The sanitized block
+(slots/aliases/default; allowlist always stripped) rides a new `cacheEntry.projectModels` field so it
+invalidates with the project rules on the SAME mtime/size fingerprint; `ProjectModelBindings(ws)` is a
+pure resolve-if-cold read of it.
+
+The COMPOSITION half is `foldProjectModelBindings(cfg, cliKeys)` (`internal/app/slots.go`), run in
+`Build` ONCE: AFTER `foldOperatorModelSlots` (so it overrides the operator-YAML layer), AFTER
+`cfg.Model = reg.ResolvedDefaultModel()` (so a project `default` can re-bind `cfg.Model` and the cap
+resolves through the operator-merged alias map), and BEFORE `modeNeedsEngine(cfg)`/`logSlotConfigFacts(cfg)`
+(so the plan slot, the predicate, and the narration see the final maps). No-op fast paths keep it
+byte-identical: nil `permResolver`; empty operator allowlist (the opt-in); `!cfg.TrustProject`; nil
+project block. It canonicalizes the allowlist to a concrete-id SET (`canonicalAllowlist` — each entry
+`lookupModelAlias`'d against the operator-merged alias map; an unresolvable entry contributes nothing,
+fail-closed), then for each project binding does **resolve-then-check** (`capResolve`): resolve the
+value to a concrete id, test membership, accept (merge) or DROP (keep the operator/default value) with
+ONE build-once WARN per dropped binding (emitted INSIDE the fold — it runs once in `Build`, NOT
+per-engine; `resolveSlotModel` stays silent by contract). Slots are also validated against
+`knownSlotNames`. `default` re-binds `cfg.Model`; slots/aliases re-bind their keys (the two maps share
+`capMergeProjectBindings`).
+
+**The session `default` precedence (`CLI --model > project-YAML default (capped) > operator-YAML
+default > registry default`).** The operator-YAML rung is `foldOperatorModelDefault(cfg, cliKeys)`,
+run in `Build` AFTER the `cfg.Model = reg.ResolvedDefaultModel()` assignment (so it overrides the
+registry default) and BEFORE `foldProjectModelBindings` (so a capped project `default` overrides it in
+turn). It is UNCAPPED — the operator's OWN default resolves through `lookupModelAlias` with NO allowlist
+membership test (the allowlist caps PROJECT bindings only; the operator is authoritative) — and gated by
+`cliKeys.modelSet` (a CLI `--model` SKIPS it). Fail-soft: an unknown/inherit selector keeps the registry
+default. Without this rung an operator's `models.default:` was dead config (only the project default
+ever reached `cfg.Model`) — the review must-fix that closed the chain.
+
+**Per-slot scoping (deliberate non-goal this slice).** The allowlist is a FLAT set with no per-slot
+dimension: a model allowlisted as a cheap default may also be bound by a trusted project to the
+`guardrail`/`ask-reviewer` safety-checker slots. Acceptable (the operator approved the model) but
+coarser than "approved models" implies — documented in usage.md + ADR 0030 as an operator caveat;
+per-slot scoping is a future follow-up.
+
+**CLI-key survival (the precedence mechanism).** `captureCLIModelKeys(cfg)` snapshots which model keys
+the operator set on the CLI, taken in `Build` IMMEDIATELY BEFORE `foldOperatorModelSlots` — at that
+point `cfg.ModelSlots`/`cfg.ModelAliases` hold ONLY the CLI bindings (the operator-YAML fold has not
+run) and `cfg.Model` is the bare CLI `--model` (the registry default is applied LATER), so the
+snapshot cleanly distinguishes CLI from YAML. `foldProjectModelBindings` overrides operator-YAML-set
+keys but SKIPS any key in the snapshot, so an operator's explicit `--model-slot`/`--model-alias`/`--model`
+wins over a project override. The allowlist + its canonicalization are ALWAYS operator-only.
+
+OUT OF SCOPE (this slice, capped only when added later): an `AgentDef.Model` literal and the
+per-session API `CreateSessionRequest.model_id`. The operator's OWN bindings are never capped. No
+`port.LLMRequest` widening; composition + permconfig only. Guards:
+`permconfig.TestProjectModelsHonouredWithinAllowlist` + `TestProjectModelsByteIdenticalNoAllowlist` +
+`TestProjectModelsIgnoredUntrusted` + `TestProjectAllowlistKeyStripped` +
+`TestModelsStrictParseRejectsTypoWithNewKeys`; `app.TestFoldProjectModelBindingsWithinCap` +
+`TestFoldProjectModelBindingsDroppedOutsideCap` + `TestFoldProjectDefaultRebindAndDrop` +
+`TestFoldProjectPlanSlotEnablesModeNeedsEngine` + `TestFoldProjectModelBindingsByteIdenticalNoAllowlist` +
+`TestPrecedenceProjectOverridesOperatorYAML` + `TestPrecedenceCLIBeatsProject` +
+`TestPrecedenceCLIModelBeatsProjectDefault` + `TestProjectModelBindingsE2E` +
+`TestProjectModelBindingsE2EByteIdenticalNoAllowlist`; the operator-default rung
+`TestOperatorYAMLDefaultApplied` + `TestOperatorYAMLDefaultUncapped` +
+`TestProjectDefaultOverridesOperatorYAMLDefaultWithinCap` +
+`TestProjectDefaultOutsideCapKeepsOperatorYAMLDefault` + `TestCLIModelBeatsOperatorYAMLDefault` +
+`TestOperatorYAMLDefaultByteIdenticalWhenAbsent`; the alias-laundering guard
+`TestProjectAliasLaunderingDropped`; the all-three-tiers seam guards
+`TestPrecedenceCombinedTiersSameSlotCLIWins` + `TestPrecedenceCombinedTiersOperatorYAMLAndProject`;
+the composition trust-gate + multi-accept `TestFoldProjectModelBindingsTrustGateIndependent` +
+`TestFoldProjectModelBindingsMultiAccept`; and the fail-closed cap `TestCanonicalAllowlistFailClosedEntry`.
+
+**The semantic subagent model router (ADR 0031, Phase 5).** The OPT-IN router picks a `Subagent`
+delegation's model PER task from an operator category taxonomy. It is a sibling of the headless
+ask reviewer — the same composition-built one-turn-engine pattern.
+
+ENGINE half (`engine/agent/modelrouter.go`): `RunModelRouter(ctx, engine, ModelRouteRequest)
+(category, ok)` drives a tool-less ONE-turn classifier (role `model-router`, `modelRouterLimits`
+= 1 turn / 1 tool / 1 failure, 30s timeout, no-progress nudge disabled) over `buildModelRoutePrompt`
+(category names+descriptions in the clear; the untrusted task prompt inside `WriteUntrustedBlock`;
+the `category:`/`categories:`/`task to classify:` headers added to `framingHeader`). `parseRouterVerdict`
+is the issue-#31 hardened parse — the WHOLE trimmed output (after `StripLoneCodeFence`) must BE a
+single `{"category":"<name>"}` object, and the category is VALIDATED against the offered list (a
+hallucinated category is a miss). The engine stays MODEL-STRING-ONLY: it returns a category NAME;
+composition owns the mapping. FAIL-SOFT: a `StopError`/`StopCancelled`, an unparseable verdict, or a
+degenerate input (nil engine / no categories / blank prompt) → `("", false)`.
+
+The per-RUN breaker `modelRouterBreaker` (default `defaultModelRouterMaxMisses`=3) mirrors
+`askReviewBreaker` exactly: its mutex serialises classifications within a run AND guards the
+consecutive-miss count; armed in `RunContentWith` iff `Deps.SubagentModelRouter != nil` (the new
+`Deps` field + `Run.router`). The closure lives in `Engine.parentCaps` (next to `adjudicate`): it
+holds the mutex across the whole classification, skips on an open breaker or a fired `hardAbort`,
+notes misses (one-time breaker-opened INFO via `r.diag`), resets on a success, and emits the
+per-classification INFO — all at the child diagnostic chokepoint, never a fourth loop line.
+
+The RUN() HOOK (`maybeRouteModel`, `engine/agent/subagent.go`): for a PLAIN default delegation
+(gated — returns empty unless `!resuming && !args.Fork && args.Model=="" && args.Agent=="" &&
+caps.routeTask != nil`), it calls `caps.routeTask(args.Prompt)` BETWEEN `validateFork` and
+`resolveEngineAndLimits`, threading the routed model into `selectChildEngine` via the EXISTING
+per-call `model` factory path (`t.engineFactory(routedModel)` — decide-once, contamination-safe,
+same-provider). PRECEDENCE by gating: per-call `model` > agent-def `Model` > fork/resume > router >
+inherited default. Both foreground and background route (the decision is threaded into
+`backgroundChild`). `EvSubagentStart` carries `RoutedCategory`/`RoutedModel` (session-struct +
+diagnostics only this slice; proto/client wire is a follow-up — no `buf`/`task generate` needed).
+
+COMPOSITION half: `buildModelRouterTask` (`internal/app/build.go`, sibling of `buildAskAdjudicator`)
+returns the `Deps.SubagentModelRouter` closure — nil when OFF (`!cfg.SubagentModelRouter ||
+len(cfg.RouterCategories)==0`, byte-identical). It resolves the classifier model via the SHARED
+`resolveRouterClassifierModel(cfg, parentModel)` (classifier-slot wins; else the `router` slot,
+default cheap; else parentModel) — the SAME helper `logModelRouterFacts` calls so the logged
+classifier matches what a session classifies on. ENGINE LIFETIME deviation from the ask-adjudicator:
+the reviewer engine is stashed once per session, but the classifier engine is rebuilt PER
+CLASSIFICATION CALL inside the closure (cheap, tool-less, one turn) via the `askAdjudicatorDeps`
+recipe (`childEngineDepsForProvider` + `MaxNoProgressNudges=-1`) — DELIBERATELY not cached: a stashed
+engine would pin one provider+model and reintroduce the clone-and-swap / provider-fixed hazard. It
+calls `RunModelRouter`, then maps the category's `Model` selector through `lookupModelAlias`
+(operator targets UNCAPPED). Wired at BOTH main-engine sites (`buildEngine` + `sessionEngineFactory`)
+like `attachAskAdjudicator`;
+`childEngineDepsForProvider` forces `Deps.SubagentModelRouter` nil (no nesting — the classifier is
+built through that path). `foldOperatorModelRouter` (`internal/app/slots.go`) folds the operator-tier
+`models.router:` (categories/default/classifier-slot) onto cfg, WARN-dropping a malformed category;
+the `slotRouter` slot is added to `knownSlotNames`/`slotDefaultTier`(cheap)/`logSlotConfigFacts`;
+`logModelRouterFacts` is the Build-once ACTIVE/inert narration. CONFIG: `permconfig.ModelsSection`
+gains `Router *RouterSection` (strict-parsed; `RouterSection`/`RouterCategory` strict too); a
+PROJECT-tier `router:` is stripped with a WARN in `captureProjectModels` (operator-tier only). The
+`--subagent-model-router` FLAG (both mains) is the enable gate, deliberately NOT a permconfig key.
+Guards: `engine/agent` `TestRunModelRouter*` + `TestRun(RouteTask|ExplicitModel|Fork|NilRouteTask)*`
++ `TestRunNamedAgentBeatsRouter` + `TestRunResumeDoesNotRoute` (the precedence-gate guards) +
+`TestRouterBreaker*` (incl. `TestRouterBreakerSerializesConcurrentCalls` under -race); `app`
+`TestBuildModelRouterTask*` + `TestFoldOperatorModelRouterDropsMalformed` + `TestLogModelRouterFacts`
++ `TestRouterClassifierRunsOnSlotModel` + `TestRouterRoutesChildToClassifiedModelE2E` (asserts the
+parent→classifier→child→parent request POSITIONS) + `TestRouterOffIsByteIdenticalE2E`; `permconfig`
+`TestOperatorRouterParsed` + `TestProjectRouterStrippedWithWarn` + `TestRouterStrictUnknownKeyRejected`;
+flag parse `TestParseFlagsSubagentModelRouter` (mecated) + the mecatequi router subtest.
+
 **Subagent structured output (`output_schema` + `SubmitResult` + bounded validation-retry).** When
 `subagentArgs.OutputSchema` (a model-authored JSON schema) is present, the child is given a synthetic
 `SubmitResult` tool (`engine/agent/structuredoutput.go`) whose PARAMETERS ARE that schema,

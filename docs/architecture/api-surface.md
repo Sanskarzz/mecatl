@@ -34,7 +34,14 @@ reach the right run.
 - `SetMode(SetModeRequest) → SetModeResponse` — changes an existing session's
   permission posture through `Service.SetMode`; mid-turn changes are rejected by
   the session aggregate as `InvalidArgument`, so clients that want "next prompt"
-  semantics defer and retry once idle.
+  semantics defer and retry once idle. **`resolved_model` is fixed per TURN, not
+  per session**: when an operator has bound a `plan` model slot ([ADR 0030](../adr/0030-model-selection-heuristics.md)
+  Layer 3, the opusplan pattern), a plan↔execute mode switch re-resolves the
+  effective model **between turns** at the run-entry seam (within the same
+  provider). The `SetMode` response still echoes the pre-rebuild model (the model
+  is fixed for the current turn); a client re-reads the new model from `GetSession`
+  (or the next run's echo) **after** the mode change. With no plan slot a mode flip
+  changes nothing.
 - `ListModels(ListModelsRequest) → ListModelsResponse` — the selectable-model
   inventory: every AVAILABLE provider's catalog models projected to public metadata
   (`ModelInfo{id, provider_id, display_name, image, reasoning, context_limit}`), no

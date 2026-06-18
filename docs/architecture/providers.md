@@ -164,6 +164,161 @@ neutrality, selection primitive, per-session engine, capability intersection,
 disclosure posture + per-client key custody, per-sub-agent provider, and the P0→P3
 phasing).
 
+## Model resolution — aliases + per-slot models
+
+Model selection layers **on top of** the provider routing above, all in composition
+(the domain/agent only ever sees a concrete model string).
+
+**Aliases are the spine ([ADR 0030](../adr/0030-model-selection-heuristics.md)).** A
+short semantic name (`cheap`/`fast`/`reasoning`, or the Claude-Code-style
+`sonnet`/`opus`/`haiku`) maps to a concrete provider model id through the operator's
+`ModelAliases` map (`--model-alias name=id`, or the `models.aliases` YAML map), then the
+built-in aliases. The ONE grammar is `lookupModelAlias` in
+`internal/app/agentdefs.go` — shared by the forgiving agent-def `model:` path
+(`resolveAlias`) and the fail-fast flag path (`normalizeSubagentModel`), so they never
+drift.
+
+**Per-slot models (`models.slots`, Phase 1+2).** A **slot** is a named internal
+lightweight LLM call. Three are routed to a slot so housekeeping can run on a cheaper
+model than the session:
+
+| Slot | Routed call | Resolution choke point |
+|------|-------------|------------------------|
+| `compaction` | the `CascadeCompactor` tier-4 summary call | `engineDepsForProvider` → `buildCompactor` |
+| `ask-reviewer` | the headless child-ask reviewer (issue #31) | `askAdjudicatorDeps` |
+| `guardrail` | the LLM content checker (issue #27) | `buildGuardrailsChecker` |
+
+The single choke point is **`resolveSlotModel`** (`internal/app/slots.go`): an explicit
+`models.slots[<slot>]` binding wins, else the slot's default **tier** (`compaction`,
+`ask-reviewer`, and `guardrail` all default to `cheap`), else `("", false)`. A resolved
+selector is mapped THROUGH `lookupModelAlias`, so a slot value is itself an alias or a
+literal id. For the compaction slot, ONLY the summary LLM call's model (and its
+token-counter) is swapped — the engine's own Model / TokenCounter / PromptConfig /
+ContextWindow stay on the session model. For `ask-reviewer` and `guardrail` the slot
+**supersedes the model** of `--subagent-ask-reviewer` / `--guardrails-model`, but those
+flags stay the **on/off gate** (a slot alone never enables them).
+
+Posture is **fail-soft** and the default is **byte-identical**: with no slot configured
+every routed call keeps the session model; a typo'd slot key or an alias meaning inherit
+WARNs and degrades to the session model — a broken housekeeping slot never wedges the
+call. `models.slots` / `models.aliases` come from the operator tier (user-global
+`settings.yaml` + `--model-slot` / `--model-alias`); a project tier may also bind them
+**within an operator allowlist** (see below). Team synthesis is **deferred** (it runs on
+the lead member's whole engine); the subagent router shipped in Phase 5 (see below).
+
+**Mode→model: the `plan` slot (Phase 3, the opusplan pattern).** A fourth slot, `plan`,
+is wired on the **mode axis** rather than the internal-call axis. It does **not** route a
+housekeeping call — it re-resolves the **session** model when the session's
+`PermissionMode` is plan, so a planning turn runs on a strong-reasoning model and an
+executing turn on the session model. Two divergences from the call-slots: its default
+**tier** is `reasoning`, not `cheap` (a plan model is a strong-reasoning model); and its
+consumer is the **per-session engine factory** (`sessionEngineFactory`), not a per-call
+deps builder. It reuses `resolveSlotModel` unchanged — same grammar, different consumer.
+
+The re-resolution is **fixed per turn, re-resolved between turns**: the model is fixed
+for the duration of a turn; a mode switch (`SetMode`, rejected mid-turn) takes effect at
+the next **run-entry seam** — the SAME seam `rehydrateSession` already rebuilds a
+per-session engine on. The provider stays **fixed per session**: the plan slot only
+swaps the **model** within the session provider, never the provider. Two rebuild triggers
+live in the server (`engineAndWorkspaceFor`): a registered per-session engine whose
+`builtForMode` no longer matches the session's `Mode` is **rebuilt** (CASE 1), and a
+default-FS session whose mode would change the model — gated by the composition predicate
+`server.Config.ModeNeedsEngine` (nil unless a plan slot is active, the **byte-identical**
+guard) — is **promoted** to a per-session engine (CASE 2). Both go through the one shared
+`buildAndRegisterSessionEngine` helper. `resolved_model` re-emits the new model on the
+next `GetSession`/turn echo after the rebuild (a `SetMode` response still carries the
+pre-rebuild model — the model is fixed per turn). With no plan slot, a mode flip changes
+nothing. See [ADR 0030](../adr/0030-model-selection-heuristics.md) Layer 3.
+
+**Project-overridable model config, capped by an operator allowlist (Phase 4).** A
+**trusted** project's `.mecatl/settings.yaml` may re-bind `models.default` / `models.slots`
+/ `models.aliases` — but only to entries the operator vetted. The whole layering chain is:
+
+```text
+CLI (operator flags) > project-YAML (capped) > operator-YAML (settings.yaml) > built-in
+```
+
+The operator's `models.allowlist` (a list of alias names and/or concrete ids) is the
+**non-wideable cap**. It is the **opt-in**: with no operator allowlist, a project `models:`
+block stays WARN-ignored — byte-identical to before Phase 4. A project-tier
+`models.allowlist:` key is always ignored with a WARN (a project cannot widen its own cap).
+
+Two halves enforce it:
+
+- **`permconfig`** (`OperatorModelPolicy()` / `ProjectModelBindings(ws)`) captures the
+  project bindings within the **trust gate** (the SAME `TrustProject` gate as project allow
+  rules — an untrusted repo's `models:` is dropped) and the opt-in (an operator allowlist
+  must exist). The allowlist: key is stripped at capture; the membership cap is left to
+  composition (it needs the operator-merged alias map to canonicalize).
+- **Composition** (`foldProjectModelBindings`, `internal/app/slots.go`) canonicalizes the
+  allowlist to a concrete-id **set** (each entry resolved through the operator-merged alias
+  map), then for each project binding does **resolve-then-check**: resolve the value to a
+  concrete id, test membership, **accept** (merge) or **drop** (keep the operator/default
+  value) with one build-once WARN. Slot bindings are also validated against the known slot
+  names. The allowlist applies to **every** config-file binding consumer — the session
+  `default`, all slots (including the Phase-3 `plan` slot), and aliases.
+
+Precedence within the cap: a project binding **overrides** the operator-YAML value for the
+same key but **skips** any key the operator set on the **CLI** (the CLI flag is a deliberate
+per-run override that still wins). The mechanism is a snapshot of the CLI-set keys taken in
+`Build` **before** the operator-YAML fold runs (`captureCLIModelKeys`); the project fold
+overrides operator-YAML keys yet skips the snapshotted CLI keys. The allowlist and its
+canonicalization are always operator-only.
+
+**Out of scope (this slice):** the allowlist caps **config-file** bindings only — a per-def
+`AgentDef.Model` literal and the per-session API selector
+(`CreateSessionRequest.model_id`) are not capped here. The operator's OWN bindings are
+never capped (the operator is authoritative). See
+[ADR 0030](../adr/0030-model-selection-heuristics.md).
+
+## The semantic subagent model router (Phase 5)
+
+The **OPT-IN semantic model router** ([ADR 0031](../adr/0031-subagent-model-router.md))
+picks which model a `Subagent` delegation runs on, **per task**, from an operator-defined
+menu. It is the Phase-5 realisation of ADR 0030's deferred "Layer 3b" — built as a sibling
+of the headless ask reviewer and the guardrail checker, not as new architecture.
+
+**Taxonomy + enable gate.** The operator defines categories in the user-global
+`settings.yaml` `models.router:` subtree — each a `name`, a one-line `description` the
+classifier reads, and a `model` selector (alias / slot / concrete id). A
+`--subagent-model-router` **flag** is the enable gate (deliberately NOT a permconfig key —
+autonomous per-delegation model selection is an operator deployment decision, the same
+posture as `--subagent-ask-reviewer`). A project-tier `models.router:` is **stripped with a
+WARN** (operator-tier only). The classifier itself runs on the `router` model slot
+(default `cheap` tier; an operator `classifier-slot` overrides) — a tiny one-turn call.
+
+**How it fires.** For a **plain** default delegation only (no per-call `model`, no `agent`,
+no `fork`, no `resume` — those already pin the engine), the `Subagent` `run()` hook calls a
+composition-built classifier (`RunModelRouter`, role `model-router`, tool-less, one turn,
+no-progress nudge disabled). The classifier reads the category descriptions in the clear
+and the (untrusted) task prompt inside the `UntrustedFence`, and returns a category by the
+**whole-output-single-JSON-object** parse (the hardened parse the ask reviewer uses); a
+hallucinated category is a miss. Composition maps the chosen category to its model selector
+through the alias machinery (operator targets are **uncapped**) and mints the child via the
+**existing per-call engine factory** — **decide-once, commit-for-child-lifetime,
+same-provider** (the engine layer stays model-string-only; the chosen model is never a
+`port.LLMRequest` field). Both the foreground and background paths route.
+
+**Precedence** (by gating): explicit per-call `model` > agent-def `Model` > fork/resume >
+**router** > inherited default. The router fills the gap; it never overrides pinned intent.
+
+**Fail-soft + breaker.** The router is **never load-bearing**. Any classifier failure,
+cancellation, unparseable verdict, unknown category, or unresolvable target → the
+delegation inherits the default explorer model. A per-run circuit breaker (default 3
+consecutive misses, mirroring the ask-reviewer breaker) opens after repeated misses and
+skips the classifier for the rest of the run; a success resets it. Its mutex serialises
+classifications within a run, so a Subagent fan-out cannot multiply classifier spend.
+**OFF (no flag / no taxonomy) is byte-identical** — no classifier call, the inherited
+model. **No nesting:** a child has no `Subagent` tool, and `childEngineDepsForProvider`
+forces `Deps.SubagentModelRouter` nil. It runs in **both** interactive and headless
+deployments (it is orthogonal to the ask-review path).
+
+**Observability.** `EvSubagentStart` carries `RoutedCategory`/`RoutedModel` (bare metadata,
+gauntlet-#7 safe) when routed; a per-classification INFO rides the existing child
+diagnostic chokepoint and a Build-once "router ACTIVE" fact narrates the config. This slice
+scopes the routed fields to the session struct + diagnostics; the proto/client wire is a
+follow-up.
+
 ## Related
 
 - [The ports — the LLMProvider seam](ports.md)

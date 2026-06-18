@@ -21,7 +21,7 @@ import (
 // provider selector it was called with and serves a fresh per-session engine
 // replying with reply. The cloud-native Phase 1 sibling of profileRecordingFactory.
 func selectorRecordingFactory(reply string, got *atomic.Value, calls *atomic.Int32) server.SessionEngineFactory {
-	return func(_ context.Context, sel server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile, _ string) (server.SessionEngineResult, error) {
+	return func(_ context.Context, sel server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile, _ string, _ session.PermissionMode) (server.SessionEngineResult, error) {
 		calls.Add(1)
 		got.Store(sel)
 		eng := agent.NewEngine(agent.Deps{

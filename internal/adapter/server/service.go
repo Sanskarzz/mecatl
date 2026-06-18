@@ -80,6 +80,15 @@ type SessionEngineResult struct {
 	// echo and the running engine agree after a live-catalog swap with no rebuild.
 	ProviderID string
 	ModelID    string
+	// BuiltForMode is the session PermissionMode the factory RESOLVED THE MODEL FOR
+	// (ADR 0030 Layer 3, the mode→model re-resolution). The factory echoes back the
+	// mode it was handed — the SAME single-source discipline as ProviderID/ModelID —
+	// so the Service can stamp sessionEngine.builtForMode from this one value and later
+	// detect a stale engine (sess.Mode != se.builtForMode) without re-resolving any
+	// model itself. The empty value (a factory that predates the mode axis) is
+	// session.ModeDefault-equivalent: the Service treats "" as "no mode pin" and the
+	// stale check degrades to never-rebuild-on-mode (byte-identical to pre-Phase-3).
+	BuiltForMode session.PermissionMode
 	// Close tears down the session's MCP manager. Never nil (a no-op when no specs).
 	Close func() error
 }
@@ -125,7 +134,17 @@ type ResolvedModel struct {
 // THEIR session's pre-fork base root — never the server flag's root, and never
 // a fork root. Empty (a no-fs session, or a resume that persisted none) pins no
 // project root (user/CLI rules only).
-type SessionEngineFactory func(ctx context.Context, sel ProviderSelector, specs []mcp.ServerConfig, profile SessionProfile, workspace string) (SessionEngineResult, error)
+//
+// mode is the session's PermissionMode (ADR 0030 Layer 3, the mode→model
+// re-resolution): when it is session.ModePlan the composition factory re-resolves
+// the engine's model through the `plan` slot (within the SAME provider — the
+// provider stays fixed per session), so a planning turn runs on a strong-reasoning
+// model and an executing turn on the session model (the opusplan pattern).
+// ModeDefault/ModeAccept keep the session-selected model (byte-identical). The
+// factory echoes the mode back as SessionEngineResult.BuiltForMode so the Service
+// can detect a stale engine across a mode change and rebuild via THIS same path
+// (the run-entry/rehydration seam), never resolving a model itself.
+type SessionEngineFactory func(ctx context.Context, sel ProviderSelector, specs []mcp.ServerConfig, profile SessionProfile, workspace string, mode session.PermissionMode) (SessionEngineResult, error)
 
 // Config wires the server adapter to the WP8 engine and its collaborators.
 type Config struct {
@@ -262,6 +281,19 @@ type Config struct {
 	// uses the shared Engine (zero overhead). The composition root (internal/app)
 	// supplies it.
 	SessionEngine SessionEngineFactory
+
+	// ModeNeedsEngine reports whether a given session PermissionMode resolves a model
+	// that DIFFERS from the shared engine's model (ADR 0030 Layer 3) — i.e. whether a
+	// plan slot is configured and active. It is the composition-injected predicate that
+	// lets a DEFAULT-FS session (which normally rides the shared engine, zero overhead)
+	// be PROMOTED to a per-session factory engine when its mode would change the model.
+	// The Service never resolves a model itself; it asks this predicate.
+	//
+	// When nil (no plan slot configured, or a deployment that predates Phase 3) a
+	// default-FS session is NEVER promoted — BYTE-IDENTICAL to pre-Phase-3 behaviour
+	// (a mode flip changes nothing, the shared engine is unchanged). This is the
+	// regression-guard seam: composition wires it ONLY when a plan slot is active.
+	ModeNeedsEngine func(mode session.PermissionMode) bool
 
 	// MemberEngine builds a team member's Engine from the shared team and the
 	// member spec (see engine/agent.MemberEngine). It is the seam that wires
@@ -462,6 +494,21 @@ type Service struct {
 	// unbounded.
 	resumeMu keyedMutex
 
+	// runEntryMu serializes the per-session RUN-ENTRY critical section (ADR 0030
+	// Layer 3, the use-after-close guard): the engine-resolve (engineAndWorkspaceFor,
+	// which may REBUILD/promote a per-session engine) + run launch + register sequence
+	// is taken under this per-session lock by BOTH StartRunContent and (nested inside
+	// resumeMu) resumeFromAwaiting. It guarantees a mode→model rebuild that displaces a
+	// prior engine cannot run concurrently with another run-entry for the SAME id, so
+	// the under-lock s.runs[id] re-check in buildAndRegisterSessionEngine is
+	// AUTHORITATIVE: any racing run that obtained the prior engine has already completed
+	// its register() (the lock is held until then), so the rebuild reliably observes it
+	// live and ABORTS rather than closing an in-use engine's MCP transport. Per-session
+	// (a keyedMutex, freed when no caller holds a key) so unrelated sessions never
+	// serialize; lock order is resumeMu → runEntryMu (resumeFromAwaiting takes both;
+	// StartRunContent takes only runEntryMu) so the two never deadlock.
+	runEntryMu keyedMutex
+
 	// replayedApprovals tracks the session ids whose learned-rule store has already
 	// been repopulated from the durable EventLog this process lifetime (cloud-native
 	// Phase 3b). loadAndReopen replays a session's allow-always verdicts AT MOST ONCE
@@ -491,7 +538,17 @@ type sessionEngine struct {
 	// can never diverge after a live-catalog swap. Same single-source discipline as caps.
 	providerID string
 	modelID    string
-	close      func() error
+	// builtForMode is the session PermissionMode this engine's model was RESOLVED FOR
+	// (ADR 0030 Layer 3). Stamped from SessionEngineResult.BuiltForMode at every
+	// construction site (create, rehydrate, mode-rebuild) — the SAME single source the
+	// composition factory echoes. engineAndWorkspaceFor compares it against the loaded
+	// session's current Mode: a mismatch means the session switched plan↔execute since
+	// the engine was built, so the model is stale and the engine is rebuilt through the
+	// shared buildAndRegisterSessionEngine path (the run-entry seam, between turns). The
+	// empty value means "no mode pin" (a pre-Phase-3 factory) and never triggers a
+	// rebuild — byte-identical to the old behaviour.
+	builtForMode session.PermissionMode
+	close        func() error
 }
 
 // runState couples an in-flight *agent.Run with the live *session.Session the
@@ -754,7 +811,7 @@ func (s *Service) createSession(ctx context.Context, workspace string, mode sess
 		return nil, fmt.Errorf("%w: %d", ErrTooManySessionEngines, s.cfg.MaxSessionEngines)
 	}
 
-	res, err := s.cfg.SessionEngine(ctx, sel, specs, profile, workspace)
+	res, err := s.cfg.SessionEngine(ctx, sel, specs, profile, workspace, mode)
 	if err != nil {
 		// Factory maps an unknown/unavailable provider to ErrInvalidArgument; any
 		// error is propagated as-is for the caller to map to a status.
@@ -784,11 +841,12 @@ func (s *Service) createSession(ctx context.Context, workspace string, mode sess
 	// then persist OUTSIDE the lock (no I/O under the mutex). If the persist fails,
 	// evict the reservation and tear the engine down.
 	s.sessionEngines[sess.ID] = &sessionEngine{
-		engine:     eng,
-		caps:       res.Capabilities,
-		providerID: res.ProviderID,
-		modelID:    res.ModelID,
-		close:      closeFn,
+		engine:       eng,
+		caps:         res.Capabilities,
+		providerID:   res.ProviderID,
+		modelID:      res.ModelID,
+		builtForMode: res.BuiltForMode,
+		close:        closeFn,
 	}
 	if profile == ProfileNoFS {
 		// Register the no-FS Workspace as this session's per-session workspace
@@ -1150,16 +1208,15 @@ func (s *Service) LoadSessionWithMCP(ctx context.Context, id session.SessionID, 
 	// keeps the empty-workspace inference as the second defense for a pre-label
 	// snapshot.
 	sel := ProviderSelector{ProviderID: sess.ProviderID, ModelID: sess.ModelID}
-	profile := ProfileDefault
-	switch {
-	case sess.Profile == string(ProfileNoFS):
-		profile = ProfileNoFS
-	case sess.Profile == "" && sess.Workspace == "":
-		profile = ProfileNoFS
-	}
+	// The profile derivation keeps the empty-workspace inference as the second defense
+	// for a pre-label snapshot (profileForSession).
+	profile := profileForSession(sess)
 	// The persisted workspace is the session's base root: the rebuilt engine's
-	// child permission resolver pins to IT (issue #32) — "" for no-fs.
-	res, err := s.cfg.SessionEngine(ctx, sel, specs, profile, sess.Workspace)
+	// child permission resolver pins to IT (issue #32) — "" for no-fs. The MODE is the
+	// loaded session's persisted Mode (ADR 0030 Layer 3), so a session loaded into plan
+	// mode mounts the plan model; builtForMode is stamped from the result so a later
+	// in-process mode switch on this reloaded session triggers the CASE 1 rebuild.
+	res, err := s.cfg.SessionEngine(ctx, sel, specs, profile, sess.Workspace, sess.Mode)
 	if err != nil {
 		// The session was loaded + (if needed) reopened and re-persisted, but the
 		// per-session engine could not be built. We deliberately do NOT roll that
@@ -1177,11 +1234,12 @@ func (s *Service) LoadSessionWithMCP(ctx context.Context, id session.SessionID, 
 		_ = prior.close()
 	}
 	s.sessionEngines[id] = &sessionEngine{
-		engine:     res.Engine,
-		caps:       res.Capabilities,
-		providerID: res.ProviderID,
-		modelID:    res.ModelID,
-		close:      res.Close,
+		engine:       res.Engine,
+		caps:         res.Capabilities,
+		providerID:   res.ProviderID,
+		modelID:      res.ModelID,
+		builtForMode: res.BuiltForMode,
+		close:        res.Close,
 	}
 	if profile == ProfileNoFS {
 		// A no-fs session's workspace override is re-registered with the engine
@@ -1231,6 +1289,14 @@ func (s *Service) StartRunContent(ctx context.Context, id session.SessionID, tex
 	if err != nil {
 		return nil, err
 	}
+	// Hold the per-session run-entry lock across engine-resolve (which may REBUILD a
+	// per-session engine for a mode→model change, ADR 0030 Layer 3) + run launch +
+	// register: this makes the rebuild's under-lock no-live-run check authoritative
+	// (no concurrent run-entry for this id can be between its engine-read and its
+	// register), so a displaced prior engine is never closed while in use. Per-session,
+	// so unrelated sessions run concurrently.
+	unlock := s.runEntryMu.lock(id)
+	defer unlock()
 	engine, ws, err := s.engineAndWorkspaceFor(ctx, sess)
 	if err != nil {
 		return nil, err
@@ -1253,6 +1319,20 @@ func (s *Service) StartRunContent(ctx context.Context, id session.SessionID, tex
 // else built from the shared factory; a per-session engine (client MCP, selector, or
 // no-fs) is preferred, else the shared engine. The empty-workspace inference stays as
 // the SECOND defense after the profile/selector trigger.
+//
+// MODE→MODEL RE-RESOLUTION (ADR 0030 Layer 3) widens the rebuild trigger between
+// turns, never mid-stream (this runs at the run-entry funnel, after loadAndReopen
+// drove the session idle; SetMode is rejected mid-turn, so the model is fixed per
+// turn). Two cases beyond restart-rehydration:
+//   - CASE 1 — a per-session engine is registered but its builtForMode no longer
+//     matches the session's current Mode (the session switched plan↔execute since the
+//     engine was built): REBUILD it through the shared factory path so the new turn
+//     runs on the re-resolved model.
+//   - CASE 2 — no per-session engine, a DEFAULT-FS session (no restart-rehydration
+//     trigger), but ModeNeedsEngine reports this mode resolves a different model (a
+//     plan slot is active): PROMOTE the default-FS session to a per-session factory
+//     engine. ModeNeedsEngine is nil (no plan slot) ⇒ this never fires and the session
+//     keeps the shared engine — BYTE-IDENTICAL to pre-Phase-3.
 func (s *Service) engineAndWorkspaceFor(ctx context.Context, sess *session.Session) (*agent.Engine, tool.Workspace, error) {
 	id := sess.ID
 	engine := s.cfg.Engine
@@ -1260,6 +1340,47 @@ func (s *Service) engineAndWorkspaceFor(ctx context.Context, sess *session.Sessi
 	se, hasEngine := s.sessionEngines[id]
 	ws := s.sessionWorkspaces[id]
 	s.mu.Unlock()
+	switch {
+	case hasEngine && se.builtForMode != "" && se.builtForMode != sess.Mode:
+		// CASE 1 (ADR 0030 Layer 3): the registered per-session engine was built for a
+		// DIFFERENT mode than the session now holds — a plan↔execute switch re-resolved
+		// the model. Rebuild through the shared factory path, REPLACING the prior engine.
+		// This runs only between turns (loadAndReopen drove the session idle and SetMode
+		// is rejected mid-turn). The whole engineAndWorkspaceFor call is under the caller's
+		// per-session runEntryMu, and buildAndRegisterSessionEngine re-checks s.runs[id]
+		// UNDER s.mu before closing the displaced engine — that downstream check is the
+		// AUTHORITATIVE use-after-close guard. This cheap pre-check is only an early-out so
+		// an obviously-live session does not pay a wasted factory build.
+		s.mu.Lock()
+		_, live := s.runs[id]
+		s.mu.Unlock()
+		if live {
+			return nil, nil, fmt.Errorf("%w: cannot rebuild engine for session %q mid-run (mode change must be deferred to a turn boundary)", ErrInvalidArgument, id)
+		}
+		sel := ProviderSelector{ProviderID: sess.ProviderID, ModelID: sess.ModelID}
+		profile := profileForSession(sess)
+		rebuilt, err := s.buildAndRegisterSessionEngine(ctx, sess, sel, profile, sess.Mode, true)
+		if err != nil {
+			return nil, nil, err
+		}
+		se, hasEngine = rebuilt, true
+		// The workspace override may have been (re-)registered by the rebuild (no-fs).
+		s.mu.Lock()
+		ws = s.sessionWorkspaces[id]
+		s.mu.Unlock()
+	case !hasEngine && !needsRehydration(sess) && s.cfg.ModeNeedsEngine != nil && s.cfg.SessionEngine != nil && s.cfg.ModeNeedsEngine(sess.Mode):
+		// CASE 2 (ADR 0030 Layer 3): a DEFAULT-FS session that would otherwise ride the
+		// shared engine, but its mode (plan) resolves a DIFFERENT model — promote it to a
+		// per-session factory engine. A default-FS session has the empty selector + a real
+		// workspace, so no workspace override is registered (the run-entry seam builds it
+		// from the shared factory below, unchanged).
+		sel := ProviderSelector{ProviderID: sess.ProviderID, ModelID: sess.ModelID}
+		promoted, err := s.buildAndRegisterSessionEngine(ctx, sess, sel, ProfileDefault, sess.Mode, false)
+		if err != nil {
+			return nil, nil, err
+		}
+		se, hasEngine = promoted, true
+	}
 	if !hasEngine && needsRehydration(sess) {
 		// RESTART REHYDRATION (issue #55, widened in the cloud-native Phase 1): a
 		// PERSISTED session that needed a PER-SESSION engine — a non-default
@@ -1320,76 +1441,137 @@ func needsRehydration(sess *session.Session) bool {
 		sess.Workspace == ""
 }
 
+// profileForSession reconstructs the SessionProfile from a loaded session's persisted
+// inert labels (the SAME mapping rehydrateSession uses): the explicit no-fs label, or
+// the second-defense empty-workspace inference. It is the shared profile source for the
+// mode→model rebuild (CASE 1) so a no-fs session that switches mode rebuilds the no-FS
+// catalog, never silently escalating onto the FS tools.
+func profileForSession(sess *session.Session) SessionProfile {
+	switch {
+	case sess.Profile == string(ProfileNoFS):
+		return ProfileNoFS
+	case sess.Profile == "" && sess.Workspace == "":
+		return ProfileNoFS
+	default:
+		return ProfileDefault
+	}
+}
+
 // rehydrateSession rebuilds and registers the per-session engine for a persisted
 // session whose in-memory registrations did not survive a process restart. It is
 // called from the run-entry seam (StartRunContent) when needsRehydration is true
 // and no per-session engine is registered.
 //
 // The rehydrated engine is built through the SAME SessionEngineFactory create
-// used, reading the PERSISTED selector+profile back off the loaded session — so a
-// selector session rebuilds on the SAME provider/model (not the default floor)
-// and a no-fs session rebuilds the no-FS catalog. No client MCP is re-mounted
-// (the client re-mounts via LoadSessionWithMCP; the server never stored the
-// specs). The cap/lock discipline mirrors createSession: cheap pre-check, build
-// outside the lock, authoritative re-check + register under the lock. A
-// concurrent rehydration losing the race keeps the winner's engine and tears its
-// own down (first registration wins).
+// used, reading the PERSISTED selector+profile+MODE back off the loaded session —
+// so a selector session rebuilds on the SAME provider/model (not the default
+// floor), a no-fs session rebuilds the no-FS catalog, and a session persisted with
+// Mode=plan rebuilds on the PLAN model (ADR 0030 Layer 3 — restart-into-plan picks
+// the plan slot, not the default). No client MCP is re-mounted (the client
+// re-mounts via LoadSessionWithMCP; the server never stored the specs). It
+// delegates the cap/lock/factory/register discipline to buildAndRegisterSessionEngine
+// in FIRST-REGISTRATION-WINS mode (a concurrent rehydration losing the race keeps
+// the winner's engine and tears its own down).
 func (s *Service) rehydrateSession(ctx context.Context, sess *session.Session) (*sessionEngine, error) {
-	id := sess.ID
 	if s.cfg.SessionEngine == nil {
 		// NEVER fall back to the shared engine: that is exactly the degradation
 		// (no-fs escalation / wrong-model) this seam exists to prevent. A session
 		// needing a per-session engine could only have been created with a factory
 		// configured, so this is a deployment mis-wire.
-		return nil, fmt.Errorf("%w: persisted session %q cannot be rehydrated (no session-engine factory configured)", ErrInvalidArgument, id)
+		return nil, fmt.Errorf("%w: persisted session %q cannot be rehydrated (no session-engine factory configured)", ErrInvalidArgument, sess.ID)
 	}
 	// Reconstruct the selector + profile from the persisted inert labels. The
 	// ProviderSelector type stays server-adapter-owned; the aggregate only carried
 	// the two opaque strings.
 	sel := ProviderSelector{ProviderID: sess.ProviderID, ModelID: sess.ModelID}
-	profile := ProfileDefault
-	switch {
-	case sess.Profile == string(ProfileNoFS):
-		profile = ProfileNoFS
-	case sess.Profile == "" && sess.Workspace == "":
-		// Second-defense inference: an empty persisted workspace can only be a no-fs
-		// session (every FS path requires a non-empty workspace), so a snapshot that
-		// predates the profile label still rehydrates as no-fs.
-		profile = ProfileNoFS
+	// Second-defense inference inside profileForSession: an empty persisted workspace
+	// can only be a no-fs session (every FS path requires a non-empty workspace), so a
+	// snapshot that predates the profile label still rehydrates as no-fs.
+	profile := profileForSession(sess)
+	// Rehydration reads the PERSISTED mode (sess.Mode) so a session that switched to
+	// plan before the restart rebuilds on the plan model — surface-agnostic, the same
+	// path a mid-session mode change uses.
+	return s.buildAndRegisterSessionEngine(ctx, sess, sel, profile, sess.Mode, false)
+}
+
+// buildAndRegisterSessionEngine is the ONE shared build+cap-check+register+teardown
+// path for a per-session engine — used by BOTH rehydrateSession (restart, issue #55 /
+// cloud-native Phase 1) and the mode→model rebuild (ADR 0030 Layer 3). It calls the
+// SessionEngineFactory with the resolved selector/profile/MODE, stamps the result's
+// BuiltForMode, and registers it under the same cap/lock discipline as createSession
+// (cheap pre-check, build outside the lock, authoritative re-check + register under
+// the lock). It never resolves a model itself — the factory owns that (composition).
+//
+// replace selects the registration semantics:
+//   - replace=false (rehydration): FIRST-REGISTRATION-WINS. If a prior engine is
+//     already registered for id (a concurrent rehydration won the race), keep it and
+//     tear the freshly-built loser down so no MCP manager leaks.
+//   - replace=true (mode-rebuild): REPLACE the prior engine. The authoritative
+//     no-live-run check (CWE-362/416 use-after-close guard) is taken UNDER s.mu in the
+//     SAME critical section as the swap: if a run became live for id between the cheap
+//     pre-check and here (a concurrent StartRunContent racing the rebuild), the swap is
+//     ABORTED and the freshly-built engine torn down — the in-use prior engine is NEVER
+//     closed. Only on a clean swap (no live run) is the displaced prior engine's Close
+//     invoked, and only AFTER it is unregistered, so no other goroutine can still read it.
+//
+// On ProfileNoFS it (re-)registers the no-fs workspace override under the SAME lock as
+// the engine, the create-time discipline.
+func (s *Service) buildAndRegisterSessionEngine(ctx context.Context, sess *session.Session, sel ProviderSelector, profile SessionProfile, mode session.PermissionMode, replace bool) (*sessionEngine, error) {
+	id := sess.ID
+	// On replace we are swapping an existing registration, so the cap is not exceeded
+	// (the slot is already counted); on a first build the pre-check rejects when full.
+	if !replace {
+		s.mu.Lock()
+		full := len(s.sessionEngines) >= s.cfg.MaxSessionEngines
+		s.mu.Unlock()
+		if full {
+			return nil, fmt.Errorf("%w: %d", ErrTooManySessionEngines, s.cfg.MaxSessionEngines)
+		}
 	}
-	s.mu.Lock()
-	full := len(s.sessionEngines) >= s.cfg.MaxSessionEngines
-	s.mu.Unlock()
-	if full {
-		return nil, fmt.Errorf("%w: %d", ErrTooManySessionEngines, s.cfg.MaxSessionEngines)
-	}
-	res, err := s.cfg.SessionEngine(ctx, sel, nil, profile, sess.Workspace)
+	res, err := s.cfg.SessionEngine(ctx, sel, nil, profile, sess.Workspace, mode)
 	if err != nil {
-		return nil, fmt.Errorf("server: rehydrate session %q: %w", id, err)
+		return nil, fmt.Errorf("server: build session engine %q: %w", id, err)
 	}
 	se := &sessionEngine{
-		engine:     res.Engine,
-		caps:       res.Capabilities,
-		providerID: res.ProviderID,
-		modelID:    res.ModelID,
-		close:      res.Close,
+		engine:       res.Engine,
+		caps:         res.Capabilities,
+		providerID:   res.ProviderID,
+		modelID:      res.ModelID,
+		builtForMode: res.BuiltForMode,
+		close:        res.Close,
 	}
 	s.mu.Lock()
-	if prior, ok := s.sessionEngines[id]; ok {
-		// A concurrent rehydration (or load) won the race: keep its engine, tear
-		// ours down so the loser leaks no MCP manager.
+	prior, hadPrior := s.sessionEngines[id]
+	if hadPrior && !replace {
+		// FIRST-REGISTRATION-WINS: a concurrent rehydration (or load) won the race;
+		// keep its engine, tear ours down so the loser leaks no MCP manager.
 		s.mu.Unlock()
 		if se.close != nil {
 			_ = se.close()
 		}
 		return prior, nil
 	}
-	if len(s.sessionEngines) >= s.cfg.MaxSessionEngines {
+	if !replace && len(s.sessionEngines) >= s.cfg.MaxSessionEngines {
 		s.mu.Unlock()
 		if se.close != nil {
 			_ = se.close()
 		}
 		return nil, fmt.Errorf("%w: %d", ErrTooManySessionEngines, s.cfg.MaxSessionEngines)
+	}
+	if replace {
+		// AUTHORITATIVE no-live-run check (use-after-close guard): a run that became
+		// live for id since the cheap pre-check would still be reading the prior engine
+		// (and its client MCP transport). Closing it now would tear that transport out
+		// from under the in-flight run. Re-check UNDER the lock that owns both s.runs and
+		// the swap, and ABORT if a run is live — never close an in-use engine. The
+		// freshly-built engine is discarded (its MCP torn down) so the abort leaks nothing.
+		if _, live := s.runs[id]; live {
+			s.mu.Unlock()
+			if se.close != nil {
+				_ = se.close()
+			}
+			return nil, fmt.Errorf("%w: cannot rebuild engine for session %q mid-run (mode change must be deferred to a turn boundary)", ErrInvalidArgument, id)
+		}
 	}
 	s.sessionEngines[id] = se
 	if profile == ProfileNoFS {
@@ -1401,6 +1583,12 @@ func (s *Service) rehydrateSession(ctx context.Context, sess *session.Session) (
 		s.sessionWorkspaces[id] = nofs.New()
 	}
 	s.mu.Unlock()
+	// On a clean replace, free the displaced prior engine's MCP manager OUTSIDE the lock
+	// (no I/O under the mutex). The under-lock check above proved no run was live AND the
+	// new engine is now registered, so no goroutine can still read prior after this point.
+	if replace && hadPrior && prior.close != nil {
+		_ = prior.close()
+	}
 	return se, nil
 }
 
@@ -1446,10 +1634,20 @@ func (s *Service) SessionCapabilities(id session.SessionID) port.ProviderCapabil
 // backs the CreateSessionResponse.resolved_model echo. Mirrors SessionCapabilities
 // verbatim.
 //
-// The provider/model IDENTITY never recomputes (the per-session-engine value was
-// computed ONCE in composition; the default-path ids are the baked
-// DefaultResolvedModel ids), so the wire echo cannot drift from the engine the
-// session actually runs on. The ContextWindow SCALAR is resolved LIVE-FIRST at call
+// MODE→MODEL RE-EMIT (ADR 0030 Layer 3): the identity is read from the REGISTERED
+// per-session engine (se.providerID/se.modelID). After a plan↔execute switch
+// triggers the run-entry rebuild (engineAndWorkspaceFor swaps the registered engine
+// on the next StartRun), ResolvedModel AUTOMATICALLY returns the re-resolved model —
+// no change here. The ORDERING is deliberate: a SetMode response echoes the
+// still-CURRENT (pre-rebuild) model (the model is fixed per turn; the rebuild happens
+// at the NEXT run-entry, not on the SetMode call itself), so a client reads the new
+// model from GetSession or the next CreateSession-style echo AFTER the mode-changed
+// turn begins — never mid-turn.
+//
+// The provider/model IDENTITY never recomputes within a single engine generation (the
+// per-session-engine value was computed ONCE in composition; the default-path ids are
+// the baked DefaultResolvedModel ids), so the wire echo cannot drift from the engine
+// the session actually runs on. The ContextWindow SCALAR is resolved LIVE-FIRST at call
 // time for BOTH branches via the injected Config.ResolveContextWindow (so a
 // GetSession after the live model-catalog swap reflects the live window, not the
 // curated-catalog floor a live-only model lacks) — mirroring the live-first modality
@@ -1624,6 +1822,18 @@ func (s *Service) resumeFromAwaiting(ctx context.Context, id session.SessionID, 
 		// stranded-for-Approve as before (last-write-wins / nothing to resume).
 		return nil, ErrNoActiveRun
 	}
+	// ADR 0030 Layer 3 note: engineAndWorkspaceFor's mode→model rebuild (CASE 1) is a
+	// NO-OP here. SetMode is rejected from StateAwaiting by the aggregate, so a parked
+	// session's Mode cannot have changed since its engine was built — se.builtForMode ==
+	// sess.Mode always holds, and the stale-mode branch never fires. (A restart-parked
+	// awaiting session is rehydrated on its persisted Mode first, so the rebuilt engine's
+	// builtForMode matches too.) The model is fixed for the resumed turn. We still take
+	// runEntryMu (nested inside resumeMu, the resumeMu→runEntryMu order) around the
+	// engine-resolve+register so the run-entry critical section is uniform with
+	// StartRunContent — the rebuild's under-lock liveness check stays authoritative even
+	// though it cannot fire on this path.
+	entryUnlock := s.runEntryMu.lock(id)
+	defer entryUnlock()
 	engine, ws, err := s.engineAndWorkspaceFor(ctx, sess)
 	if err != nil {
 		return nil, err

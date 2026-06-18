@@ -423,7 +423,7 @@ type TurnEndPayload struct {
 // sent to the LLM.
 //
 // Which fields are set depends on the event kind:
-//   - EvSubagentStart: ParentCallID, ChildID, Goal.
+//   - EvSubagentStart: ParentCallID, ChildID, Goal, [RoutedCategory, RoutedModel].
 //   - EvSubagentTool:  ParentCallID, ChildID, ToolName, IsError, ToolCount.
 //   - EvSubagentEnd:   ParentCallID, ChildID, ToolCount, Usage, Stop, DurationMs.
 type SubagentPayload struct {
@@ -442,6 +442,17 @@ type SubagentPayload struct {
 	// SubagentStatus. Set on EvSubagentStart only. NOT a fourth delegation family —
 	// one boolean on subagent.* (the ChildActivity trip-wire stands).
 	Background bool
+	// RoutedCategory / RoutedModel are the OPT-IN semantic model router's classification
+	// for this child (ADR 0031): the chosen CATEGORY label and the concrete MODEL id the
+	// child was minted on. Set on EvSubagentStart ONLY when the router was wired AND
+	// classified this delegation (both empty otherwise — no router, or a fail-soft miss
+	// that inherited the default model). They are BARE METADATA — a category label and a
+	// model id, never the task prompt or the classifier's reasoning — so they are
+	// gauntlet-#7 safe (no child content, no model-influenced free text crosses). They
+	// are session-struct + diagnostics only this slice; the proto/client wire for them is
+	// a deliberate follow-up (no proto field, so no `task generate` needed — see ADR 0031).
+	RoutedCategory string
+	RoutedModel    string
 	// ToolName is the name of a child tool that just ran. Set on EvSubagentTool
 	// only. It is the tool NAME alone — never the child's tool args or result.
 	ToolName string

@@ -135,6 +135,20 @@ func (d *capturingDiag) has(sub string) bool {
 	return false
 }
 
+// count reports how many captured lines contain sub (for the build-once
+// exactly-N-facts assertions).
+func (d *capturingDiag) count(sub string) int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	n := 0
+	for _, l := range d.lines {
+		if strings.Contains(l, sub) {
+			n++
+		}
+	}
+	return n
+}
+
 // TestAskAdjudicatorDepsShape pins the reviewer engine's deps literal — the
 // per-session re-derivation seam (childExplorerDeps precedent): the SESSION's
 // provider, the ALIAS-RESOLVED reviewer model, the "ask-reviewer" role (the

@@ -249,9 +249,15 @@ func (l *Local) start() error {
 		// Budgets: the shared runaway brakes. Reality check (run 1): a single
 		// turn's input with the full catalog is ~5-6k tokens, so the originally
 		// planned 4000 tripped at the FIRST turn boundary and forced every
-		// multi-turn scenario to stop=budget. 20k/60k keep the brake while
-		// letting the 2-3-turn scenarios end naturally.
-		"--max-run-tokens", envOr("MECATL_E2E_MAX_RUN_TOKENS", "20000"),
+		// multi-turn scenario to stop=budget. Raised 20k→50k after live haiku
+		// drifted verbose enough (incl. occasional wasted no-progress turns) that
+		// multi-turn + cross-restart scenarios (approve-after-kill accumulates
+		// usage across the SIGKILL) intermittently tripped the 20k rail. 50k/60k
+		// keep a meaningful runaway brake (~8-9 full-catalog turns) while letting
+		// the 2-3-turn scenarios end naturally. This value is a safety rail, not a
+		// cost control — the scenarios are bounded by their turn count, not the
+		// budget, so raising it bills nothing extra.
+		"--max-run-tokens", envOr("MECATL_E2E_MAX_RUN_TOKENS", "50000"),
 		"--max-team-tokens", envOr("MECATL_E2E_MAX_TEAM_TOKENS", "60000"),
 		// Hermeticity: never adopt MCP servers from the developer's running
 		// ToolHive workloads.

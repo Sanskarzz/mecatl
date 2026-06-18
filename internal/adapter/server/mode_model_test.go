@@ -1,0 +1,699 @@
+package server_test
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/stacklok/mecatl/engine/adapter/memfs"
+	"github.com/stacklok/mecatl/engine/adapter/memstore"
+	"github.com/stacklok/mecatl/engine/adapter/mockllm"
+	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
+	"github.com/stacklok/mecatl/engine/agent"
+	"github.com/stacklok/mecatl/engine/port"
+	"github.com/stacklok/mecatl/engine/session"
+	"github.com/stacklok/mecatl/engine/tool"
+	"github.com/stacklok/mecatl/internal/adapter/mcp"
+	"github.com/stacklok/mecatl/internal/adapter/server"
+)
+
+// modeRecordingFactory returns a SessionEngineFactory that records every mode it was
+// called with and resolves a per-mode MODEL (planModel for ModePlan, sessionModel
+// otherwise), echoing it back as ModelID + BuiltForMode — the composition factory's
+// Phase 3 contract, faked. It builds a fresh engine each call so a rebuild is observable.
+func modeRecordingFactory(sessionModel, planModel string, modes *[]session.PermissionMode, calls *atomic.Int32) server.SessionEngineFactory {
+	return func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile, _ string, mode session.PermissionMode) (server.SessionEngineResult, error) {
+		calls.Add(1)
+		model := sessionModel
+		if mode == session.ModePlan && planModel != "" {
+			model = planModel
+		}
+		*modes = append(*modes, mode)
+		eng := agent.NewEngine(agent.Deps{
+			LLM:     mockllm.New(mockllm.TextTurn("reply-" + model)),
+			Catalog: tool.NewCatalog(),
+			Policy:  permpolicy.NewPolicy(nil, nil),
+			Model:   model,
+		})
+		return server.SessionEngineResult{
+			Engine:       eng,
+			ModelID:      model,
+			ProviderID:   "openai",
+			BuiltForMode: mode,
+			Close:        func() error { return nil },
+		}, nil
+	}
+}
+
+// modeServiceOverStore builds a Service over store with the mode-aware factory and a
+// ModeNeedsEngine predicate (so a DEFAULT-FS session is PROMOTED on a plan switch).
+// needsEngine nil ⇒ the byte-identical (no-promotion) deployment.
+func modeServiceOverStore(t *testing.T, store *memstore.Store, factory server.SessionEngineFactory, needsEngine func(session.PermissionMode) bool) *server.Service {
+	t.Helper()
+	svc, err := server.NewService(server.Config{
+		Engine: agent.NewEngine(agent.Deps{
+			// Script several identical turns so a multi-turn shared-engine session does
+			// not exhaust the mock (the byte-identical test runs two turns on it).
+			LLM:     mockllm.New(mockllm.TextTurn("SHARED-ENGINE-REPLY"), mockllm.TextTurn("SHARED-ENGINE-REPLY"), mockllm.TextTurn("SHARED-ENGINE-REPLY")),
+			Catalog: tool.NewCatalog(),
+			Policy:  permpolicy.NewPolicy(nil, nil),
+			Model:   "shared-model",
+		}),
+		Store:           store,
+		Workspaces:      func(root string) tool.Workspace { return memfs.NewWorkspace(root) },
+		DefaultLimits:   session.Limits{MaxTurns: 5},
+		Now:             func() time.Time { return time.Unix(0, 0) },
+		SessionEngine:   factory,
+		ModeNeedsEngine: needsEngine,
+		DefaultResolvedModel: server.ResolvedModel{
+			ProviderID: "openai", ModelID: "shared-model",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	return svc
+}
+
+// TestModeFlipRebuildsOnPlanSlot is the core Phase 3 guard (ADR 0030 Layer 3): a
+// DEFAULT-FS session run in default mode rides the shared engine; after SetMode(plan)
+// the next StartRun PROMOTES it to a per-session factory engine resolved on the PLAN
+// model. ResolvedModel reflects the plan model, and the factory was invoked with
+// mode=plan.
+func TestModeFlipRebuildsOnPlanSlot(t *testing.T) {
+	ctx := context.Background()
+	store := memstore.New()
+	const sessionModel, planModel = "gpt-5", "opus-plan"
+	var (
+		modes []session.PermissionMode
+		calls atomic.Int32
+	)
+	needsEngine := func(m session.PermissionMode) bool { return m == session.ModePlan }
+	svc := modeServiceOverStore(t, store, modeRecordingFactory(sessionModel, planModel, &modes, &calls), needsEngine)
+
+	sess, err := svc.CreateSession(ctx, "/ws", session.ModeDefault, session.Limits{})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	// Turn 1 (default mode): shared engine, factory NOT consulted.
+	if got := drainAndFinish(t, svc, sess.ID, mustStart(t, svc, sess.ID, "turn one")); got != "SHARED-ENGINE-REPLY" {
+		t.Fatalf("turn-1 reply = %q, want SHARED-ENGINE-REPLY (default mode rides the shared engine)", got)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("factory called %d times in default mode, want 0 (no promotion)", calls.Load())
+	}
+
+	// Switch to plan mode (deferred to next prompt; the run already completed).
+	if _, err := svc.SetMode(ctx, sess.ID, session.ModePlan); err != nil {
+		t.Fatalf("SetMode(plan): %v", err)
+	}
+
+	// Turn 2 (plan mode): the session is PROMOTED to a factory engine on the plan model.
+	if got := drainAndFinish(t, svc, sess.ID, mustStart(t, svc, sess.ID, "turn two")); got != "reply-"+planModel {
+		t.Fatalf("turn-2 reply = %q, want reply-%s (plan mode runs the plan model)", got, planModel)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("factory called %d times after the plan switch, want exactly 1 (the promotion)", calls.Load())
+	}
+	if len(modes) != 1 || modes[0] != session.ModePlan {
+		t.Fatalf("factory saw modes %v, want exactly [plan]", modes)
+	}
+	// ResolvedModel re-emits the plan model after the rebuild (no recompute — it reads
+	// the freshly-registered per-session engine's ids).
+	if rm := svc.ResolvedModel(sess.ID); rm.ModelID != planModel {
+		t.Fatalf("ResolvedModel.ModelID = %q after the plan rebuild, want %q", rm.ModelID, planModel)
+	}
+}
+
+// TestModeRebuildReEmitsCapabilities pins that SessionCapabilities re-emits the
+// rebuilt engine's per-session caps after a mode→model rebuild (ADR 0030 Layer 3) — the
+// capability echo reads the freshly-registered se.caps, so a plan model with different
+// modalities re-advertises correctly.
+func TestModeRebuildReEmitsCapabilities(t *testing.T) {
+	ctx := context.Background()
+	store := memstore.New()
+	const sessionModel, planModel = "gpt-5", "opus-plan"
+	// A factory returning DISTINCT caps per mode (the plan model is image-capable here).
+	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile, _ string, mode session.PermissionMode) (server.SessionEngineResult, error) {
+		model, caps := sessionModel, port.ProviderCapabilities{}
+		if mode == session.ModePlan {
+			model, caps = planModel, port.ProviderCapabilities{Image: true}
+		}
+		eng := agent.NewEngine(agent.Deps{
+			LLM: mockllm.New(mockllm.TextTurn("ok")), Catalog: tool.NewCatalog(),
+			Policy: permpolicy.NewPolicy(nil, nil), Model: model,
+		})
+		return server.SessionEngineResult{Engine: eng, ModelID: model, ProviderID: "openai", Capabilities: caps, BuiltForMode: mode, Close: func() error { return nil }}, nil
+	}
+	svc := modeServiceOverStore(t, store, factory, func(m session.PermissionMode) bool { return m == session.ModePlan })
+	sess, err := svc.CreateSessionWithProvider(ctx, "/ws", session.ModeDefault, session.Limits{},
+		server.ProviderSelector{ProviderID: "openai", ModelID: "gpt-5"})
+	if err != nil {
+		t.Fatalf("CreateSessionWithProvider: %v", err)
+	}
+	if caps := svc.SessionCapabilities(sess.ID); caps.Image {
+		t.Fatalf("default-mode SessionCapabilities.Image = true, want false (the session model is text-only)")
+	}
+	_ = drainAndFinish(t, svc, sess.ID, mustStart(t, svc, sess.ID, "t1"))
+	if _, err := svc.SetMode(ctx, sess.ID, session.ModePlan); err != nil {
+		t.Fatalf("SetMode(plan): %v", err)
+	}
+	_ = drainAndFinish(t, svc, sess.ID, mustStart(t, svc, sess.ID, "t2"))
+	if caps := svc.SessionCapabilities(sess.ID); !caps.Image {
+		t.Fatalf("plan-mode SessionCapabilities.Image = false, want true (the rebuild re-emits the plan model's caps)")
+	}
+}
+
+// TestModeFlipRebuildsBackToExecute pins the round trip: plan→default rebuilds back to
+// the SESSION model (the engine is stale again once builtForMode != the new mode). Here
+// the session is a SELECTOR session so it always has a per-session engine, exercising
+// CASE 1 (rebuild a registered engine) rather than CASE 2 (promote a default session).
+func TestModeFlipRebuildsBackToExecute(t *testing.T) {
+	ctx := context.Background()
+	store := memstore.New()
+	const sessionModel, planModel = "gpt-5", "opus-plan"
+	var (
+		modes []session.PermissionMode
+		calls atomic.Int32
+	)
+	svc := modeServiceOverStore(t, store, modeRecordingFactory(sessionModel, planModel, &modes, &calls),
+		func(m session.PermissionMode) bool { return m == session.ModePlan })
+
+	// A selector session: always per-session, created in plan mode.
+	sess, err := svc.CreateSessionWithProvider(ctx, "/ws", session.ModePlan, session.Limits{},
+		server.ProviderSelector{ProviderID: "openai", ModelID: "gpt-5"})
+	if err != nil {
+		t.Fatalf("CreateSessionWithProvider: %v", err)
+	}
+	if rm := svc.ResolvedModel(sess.ID); rm.ModelID != planModel {
+		t.Fatalf("created plan-mode selector ResolvedModel = %q, want %q", rm.ModelID, planModel)
+	}
+	// Create built the engine once (mode=plan).
+	if calls.Load() != 1 {
+		t.Fatalf("after create, factory calls = %d, want 1", calls.Load())
+	}
+	// Run once in plan, then switch to default and run: CASE 1 rebuild back to the model.
+	if got := drainAndFinish(t, svc, sess.ID, mustStart(t, svc, sess.ID, "plan turn")); got != "reply-"+planModel {
+		t.Fatalf("plan turn reply = %q, want reply-%s", got, planModel)
+	}
+	// MATCHING-MODE NO-OP (the builtForMode == sess.Mode short-circuit): a plan turn on a
+	// plan-built engine must NOT rebuild — the factory call count is unchanged.
+	if calls.Load() != 1 {
+		t.Fatalf("after the matching-mode plan turn, factory calls = %d, want 1 (no rebuild when mode matches)", calls.Load())
+	}
+	if _, err := svc.SetMode(ctx, sess.ID, session.ModeDefault); err != nil {
+		t.Fatalf("SetMode(default): %v", err)
+	}
+	if got := drainAndFinish(t, svc, sess.ID, mustStart(t, svc, sess.ID, "exec turn")); got != "reply-"+sessionModel {
+		t.Fatalf("exec turn reply = %q, want reply-%s (rebuilt back to the session model)", got, sessionModel)
+	}
+	if rm := svc.ResolvedModel(sess.ID); rm.ModelID != sessionModel {
+		t.Fatalf("ResolvedModel after switch-back = %q, want %q", rm.ModelID, sessionModel)
+	}
+}
+
+// TestModeFlipByteIdenticalWithoutPlanSlot is the regression guard: with ModeNeedsEngine
+// NIL (no plan slot configured), a default-FS session NEVER promotes on a mode switch —
+// it keeps the shared engine, byte-identical to pre-Phase-3. The factory is never
+// consulted and the engine pointer (reply) is unchanged across the flip.
+func TestModeFlipByteIdenticalWithoutPlanSlot(t *testing.T) {
+	ctx := context.Background()
+	store := memstore.New()
+	var (
+		modes []session.PermissionMode
+		calls atomic.Int32
+	)
+	// needsEngine NIL ⇒ no promotion.
+	svc := modeServiceOverStore(t, store, modeRecordingFactory("gpt-5", "opus-plan", &modes, &calls), nil)
+
+	sess, err := svc.CreateSession(ctx, "/ws", session.ModeDefault, session.Limits{})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if got := drainAndFinish(t, svc, sess.ID, mustStart(t, svc, sess.ID, "t1")); got != "SHARED-ENGINE-REPLY" {
+		t.Fatalf("t1 reply = %q, want SHARED-ENGINE-REPLY", got)
+	}
+	if _, err := svc.SetMode(ctx, sess.ID, session.ModePlan); err != nil {
+		t.Fatalf("SetMode(plan): %v", err)
+	}
+	if got := drainAndFinish(t, svc, sess.ID, mustStart(t, svc, sess.ID, "t2")); got != "SHARED-ENGINE-REPLY" {
+		t.Fatalf("t2 reply = %q, want SHARED-ENGINE-REPLY (no plan slot ⇒ no rebuild, shared engine unchanged)", got)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("factory called %d times with ModeNeedsEngine nil, want 0 (byte-identical default)", calls.Load())
+	}
+}
+
+// TestSetModeRejectedMidTurn pins that a mode switch is rejected while a run is in
+// flight (the aggregate's StateRunning/StateAwaiting guard), so the model stays fixed
+// per turn — the mode→model rebuild only ever fires at a turn boundary.
+func TestSetModeRejectedMidTurn(t *testing.T) {
+	ctx := context.Background()
+	store := memstore.New()
+	// A factory whose engine blocks INSIDE the provider call until released, so the run
+	// is observably mid-turn (StateRunning) when SetMode is attempted. The observer
+	// signals `entered` so the test does not race the goroutine into the provider call.
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	blocking := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile, _ string, mode session.PermissionMode) (server.SessionEngineResult, error) {
+		eng := agent.NewEngine(agent.Deps{
+			LLM: mockllm.NewWith([]mockllm.Option{mockllm.WithRequestObserver(func(port.LLMRequest) {
+				close(entered)
+				<-release
+			})}, mockllm.TextTurn("late")),
+			Catalog: tool.NewCatalog(),
+			Policy:  permpolicy.NewPolicy(nil, nil),
+			Model:   "gpt-5",
+		})
+		return server.SessionEngineResult{Engine: eng, ModelID: "gpt-5", ProviderID: "openai", BuiltForMode: mode, Close: func() error { return nil }}, nil
+	}
+	svc := modeServiceOverStore(t, store, blocking, func(m session.PermissionMode) bool { return m == session.ModePlan })
+
+	sess, err := svc.CreateSessionWithProvider(ctx, "/ws", session.ModeDefault, session.Limits{},
+		server.ProviderSelector{ProviderID: "openai", ModelID: "gpt-5"})
+	if err != nil {
+		t.Fatalf("CreateSessionWithProvider: %v", err)
+	}
+	run, err := svc.StartRun(ctx, sess.ID, "go")
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	<-entered // the run is now blocked inside the provider call: StateRunning.
+	// SetMode must be rejected as a mid-turn transition.
+	_, modeErr := svc.SetMode(ctx, sess.ID, session.ModePlan)
+	close(release)
+	_ = drainServerRun(run)
+	svc.FinishRun(sess.ID, run)
+	if modeErr == nil {
+		t.Fatal("SetMode mid-turn must be rejected (the model is fixed per turn), got nil")
+	}
+}
+
+// drainAndFinish drains a run to its terminal text and removes it from the in-flight
+// registry (the wire-adapter defer FinishRun contract), so a follow-up StartRun on the
+// same session sees no live run — the precondition the mode→model rebuild asserts.
+func drainAndFinish(t *testing.T, svc *server.Service, id session.SessionID, run *agent.Run) string {
+	t.Helper()
+	got := drainServerRun(run)
+	svc.FinishRun(id, run)
+	return got
+}
+
+// TestPlanModeSessionRehydratesOnPlanModel pins the restart path (ADR 0030 Layer 3 +
+// cloud-native Phase 1): a session persisted with Mode=plan, whose per-session engine
+// died with the process, is REHYDRATED at the run-entry seam on the PLAN model — the
+// factory is invoked with mode=plan read off the persisted aggregate, never the default.
+func TestPlanModeSessionRehydratesOnPlanModel(t *testing.T) {
+	ctx := context.Background()
+	store := memstore.New()
+	const sessionModel, planModel = "gpt-5", "opus-plan"
+
+	// "Before the restart": a selector session created in plan mode (so it persists a
+	// selector AND Mode=plan).
+	var modes1 []session.PermissionMode
+	var calls1 atomic.Int32
+	svc1 := modeServiceOverStore(t, store, modeRecordingFactory(sessionModel, planModel, &modes1, &calls1),
+		func(m session.PermissionMode) bool { return m == session.ModePlan })
+	sess, err := svc1.CreateSessionWithProvider(ctx, "/ws", session.ModePlan, session.Limits{},
+		server.ProviderSelector{ProviderID: "openai", ModelID: "gpt-5"})
+	if err != nil {
+		t.Fatalf("CreateSessionWithProvider: %v", err)
+	}
+	if sess.Mode != session.ModePlan {
+		t.Fatalf("persisted Mode = %q, want plan", sess.Mode)
+	}
+
+	// "After the restart": a NEW Service over the SAME store, empty in-memory registries.
+	var modes2 []session.PermissionMode
+	var calls2 atomic.Int32
+	svc2 := modeServiceOverStore(t, store, modeRecordingFactory(sessionModel, planModel, &modes2, &calls2),
+		func(m session.PermissionMode) bool { return m == session.ModePlan })
+
+	if got := drainAndFinish(t, svc2, sess.ID, mustStart(t, svc2, sess.ID, "post-restart")); got != "reply-"+planModel {
+		t.Fatalf("post-restart reply = %q, want reply-%s (rehydrated on the plan model)", got, planModel)
+	}
+	if calls2.Load() != 1 {
+		t.Fatalf("post-restart factory calls = %d, want 1 (rehydration)", calls2.Load())
+	}
+	if len(modes2) != 1 || modes2[0] != session.ModePlan {
+		t.Fatalf("rehydration factory saw modes %v, want [plan] (the persisted mode, not the default)", modes2)
+	}
+	if rm := svc2.ResolvedModel(sess.ID); rm.ModelID != planModel {
+		t.Fatalf("post-restart ResolvedModel = %q, want the plan model %q", rm.ModelID, planModel)
+	}
+}
+
+// TestModeFlipEndToEndModelObserved is the authoritative offline end-to-end (ADR 0030
+// Layer 3): CreateSession → Run(default) → SetMode(plan) → Run(plan), asserting via the
+// mockllm request observer that the LLM saw the SESSION model on turn 1 and the PLAN
+// model on turn 2 — the model the provider actually received, not just the echoed id.
+func TestModeFlipEndToEndModelObserved(t *testing.T) {
+	ctx := context.Background()
+	store := memstore.New()
+	const sessionModel, planModel = "gpt-5", "opus-plan"
+
+	var observedModels []string
+	// A mode-aware factory whose engine records the model the provider received.
+	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile, _ string, mode session.PermissionMode) (server.SessionEngineResult, error) {
+		model := sessionModel
+		if mode == session.ModePlan {
+			model = planModel
+		}
+		eng := agent.NewEngine(agent.Deps{
+			LLM: mockllm.NewWith([]mockllm.Option{mockllm.WithRequestObserver(func(req port.LLMRequest) {
+				observedModels = append(observedModels, req.Model)
+			})}, mockllm.TextTurn("ok")),
+			Catalog: tool.NewCatalog(),
+			Policy:  permpolicy.NewPolicy(nil, nil),
+			Model:   model,
+		})
+		return server.SessionEngineResult{Engine: eng, ModelID: model, ProviderID: "openai", BuiltForMode: mode, Close: func() error { return nil }}, nil
+	}
+	// Selector session so a per-session engine exists from turn 1 (CASE 1 rebuild on the
+	// flip); ModeNeedsEngine active.
+	svc := modeServiceOverStore(t, store, factory, func(m session.PermissionMode) bool { return m == session.ModePlan })
+
+	sess, err := svc.CreateSessionWithProvider(ctx, "/ws", session.ModeDefault, session.Limits{},
+		server.ProviderSelector{ProviderID: "openai", ModelID: "gpt-5"})
+	if err != nil {
+		t.Fatalf("CreateSessionWithProvider: %v", err)
+	}
+	_ = drainAndFinish(t, svc, sess.ID, mustStart(t, svc, sess.ID, "turn 1"))
+	if _, err := svc.SetMode(ctx, sess.ID, session.ModePlan); err != nil {
+		t.Fatalf("SetMode(plan): %v", err)
+	}
+	_ = drainAndFinish(t, svc, sess.ID, mustStart(t, svc, sess.ID, "turn 2"))
+
+	if len(observedModels) != 2 {
+		t.Fatalf("provider saw %d requests, want 2 (one per turn): %v", len(observedModels), observedModels)
+	}
+	if observedModels[0] != sessionModel {
+		t.Fatalf("turn-1 provider model = %q, want the session model %q", observedModels[0], sessionModel)
+	}
+	if observedModels[1] != planModel {
+		t.Fatalf("turn-2 provider model = %q, want the plan model %q (re-resolved between turns)", observedModels[1], planModel)
+	}
+}
+
+func mustStart(t *testing.T, svc *server.Service, id session.SessionID, text string) *agent.Run {
+	t.Helper()
+	run, err := svc.StartRun(context.Background(), id, text)
+	if err != nil {
+		t.Fatalf("StartRun(%q): %v", text, err)
+	}
+	return run
+}
+
+// TestPreP3FactoryBuiltForModeEmptyNoRebuild pins the `se.builtForMode != ""` skip
+// (MUST-FIX #2): a per-session engine registered by a factory that returns an EMPTY
+// BuiltForMode (a pre-Phase-3 factory, or an old in-flight shape) is treated as
+// "no mode pin" — a later mode change must NOT trigger a rebuild. Dropping the `!= ""`
+// guard would make every pre-Phase-3 selector session rebuild on its first mode touch.
+func TestPreP3FactoryBuiltForModeEmptyNoRebuild(t *testing.T) {
+	ctx := context.Background()
+	store := memstore.New()
+	var calls atomic.Int32
+	// A pre-Phase-3 factory: builds a per-session engine but leaves BuiltForMode "".
+	preP3 := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile, _ string, _ session.PermissionMode) (server.SessionEngineResult, error) {
+		calls.Add(1)
+		eng := agent.NewEngine(agent.Deps{
+			LLM:     mockllm.New(mockllm.TextTurn("pre-p3"), mockllm.TextTurn("pre-p3")),
+			Catalog: tool.NewCatalog(), Policy: permpolicy.NewPolicy(nil, nil), Model: "gpt-5",
+		})
+		// BuiltForMode deliberately left "" (the pre-Phase-3 shape).
+		return server.SessionEngineResult{Engine: eng, ModelID: "gpt-5", ProviderID: "openai", Close: func() error { return nil }}, nil
+	}
+	// ModeNeedsEngine active (a plan slot exists), so only the `!= ""` skip prevents a rebuild.
+	svc := modeServiceOverStore(t, store, preP3, func(m session.PermissionMode) bool { return m == session.ModePlan })
+
+	sess, err := svc.CreateSessionWithProvider(ctx, "/ws", session.ModeDefault, session.Limits{},
+		server.ProviderSelector{ProviderID: "openai", ModelID: "gpt-5"})
+	if err != nil {
+		t.Fatalf("CreateSessionWithProvider: %v", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("after create, factory calls = %d, want 1", calls.Load())
+	}
+	_ = drainAndFinish(t, svc, sess.ID, mustStart(t, svc, sess.ID, "t1"))
+	if _, err := svc.SetMode(ctx, sess.ID, session.ModePlan); err != nil {
+		t.Fatalf("SetMode(plan): %v", err)
+	}
+	_ = drainAndFinish(t, svc, sess.ID, mustStart(t, svc, sess.ID, "t2"))
+	// The empty builtForMode is treated as "no pin": no rebuild despite the mode change.
+	if calls.Load() != 1 {
+		t.Fatalf("factory calls = %d after a mode change on a builtForMode=\"\" engine, want 1 "+
+			"(the != \"\" skip must treat an empty mode as no-pin — dropping it would rebuild)", calls.Load())
+	}
+}
+
+// TestModePromotionUnderFullCap pins the at-cap failure mode for CASE-2 promotion
+// (SHOULD-FIX #3): when MaxSessionEngines is saturated, a default-FS session that would
+// be PROMOTED on a plan switch fails gracefully with ErrTooManySessionEngines — never a
+// panic, never a silent shared-engine fallback (which would run plan mode on the wrong
+// model).
+func TestModePromotionUnderFullCap(t *testing.T) {
+	ctx := context.Background()
+	store := memstore.New()
+	const sessionModel, planModel = "gpt-5", "opus-plan"
+	var modes []session.PermissionMode
+	var calls atomic.Int32
+	// Build a Service with MaxSessionEngines = 1 (so one selector session saturates it).
+	svc, err := server.NewService(server.Config{
+		Engine: agent.NewEngine(agent.Deps{
+			LLM:     mockllm.New(mockllm.TextTurn("SHARED"), mockllm.TextTurn("SHARED")),
+			Catalog: tool.NewCatalog(), Policy: permpolicy.NewPolicy(nil, nil), Model: "shared-model",
+		}),
+		Store:             store,
+		Workspaces:        func(root string) tool.Workspace { return memfs.NewWorkspace(root) },
+		DefaultLimits:     session.Limits{MaxTurns: 5},
+		Now:               func() time.Time { return time.Unix(0, 0) },
+		SessionEngine:     modeRecordingFactory(sessionModel, planModel, &modes, &calls),
+		ModeNeedsEngine:   func(m session.PermissionMode) bool { return m == session.ModePlan },
+		MaxSessionEngines: 1,
+	})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	// Saturate the cap with a selector session (one per-session engine registered).
+	if _, err := svc.CreateSessionWithProvider(ctx, "/hog", session.ModeDefault, session.Limits{},
+		server.ProviderSelector{ProviderID: "openai", ModelID: "gpt-5"}); err != nil {
+		t.Fatalf("CreateSessionWithProvider (cap hog): %v", err)
+	}
+
+	// A default-FS session (shared engine, no per-session slot used at create).
+	planSess, err := svc.CreateSession(ctx, "/ws", session.ModePlan, session.Limits{})
+	if err != nil {
+		t.Fatalf("CreateSession (default-FS plan): %v", err)
+	}
+	// Its first StartRun would PROMOTE it — but the cap is full, so it must fail with
+	// ErrTooManySessionEngines (graceful), not panic and not fall back to the shared engine.
+	_, runErr := svc.StartRun(ctx, planSess.ID, "promote me")
+	if !errors.Is(runErr, server.ErrTooManySessionEngines) {
+		t.Fatalf("StartRun on an at-cap promotion = %v, want ErrTooManySessionEngines (graceful, no silent shared-engine fallback)", runErr)
+	}
+}
+
+// TestNoFSModeRebuildKeepsProfile pins that a CASE-1 rebuild of a NO-FS session keeps
+// ProfileNoFS (via profileForSession) and does not escalate onto the FS catalog
+// (SHOULD-FIX #5, security-adjacent). The factory records the profile it was rebuilt
+// with; a rebuild that passed ProfileDefault would be a real no-fs escalation.
+func TestNoFSModeRebuildKeepsProfile(t *testing.T) {
+	ctx := context.Background()
+	store := memstore.New()
+	const sessionModel, planModel = "gpt-5", "opus-plan"
+	var (
+		mu             sync.Mutex
+		profilesSeen   []server.SessionProfile
+		modesSeen      []session.PermissionMode
+		factoryCallCnt atomic.Int32
+	)
+	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, profile server.SessionProfile, _ string, mode session.PermissionMode) (server.SessionEngineResult, error) {
+		factoryCallCnt.Add(1)
+		mu.Lock()
+		profilesSeen = append(profilesSeen, profile)
+		modesSeen = append(modesSeen, mode)
+		mu.Unlock()
+		model := sessionModel
+		if mode == session.ModePlan {
+			model = planModel
+		}
+		eng := agent.NewEngine(agent.Deps{
+			LLM: mockllm.New(mockllm.TextTurn("ok")), Catalog: tool.NewCatalog(),
+			Policy: permpolicy.NewPolicy(nil, nil), Model: model,
+		})
+		return server.SessionEngineResult{Engine: eng, ModelID: model, ProviderID: "openai", BuiltForMode: mode, Close: func() error { return nil }}, nil
+	}
+	svc := modeServiceOverStore(t, store, factory, func(m session.PermissionMode) bool { return m == session.ModePlan })
+
+	// A no-fs session is created with an EMPTY workspace + the no-fs profile.
+	sess, err := svc.CreateSessionWithProfile(ctx, "", session.ModeDefault, session.Limits{},
+		server.ProviderSelector{}, server.ProfileNoFS)
+	if err != nil {
+		t.Fatalf("CreateSessionWithProfile(no-fs): %v", err)
+	}
+	_ = drainAndFinish(t, svc, sess.ID, mustStart(t, svc, sess.ID, "t1"))
+	if _, err := svc.SetMode(ctx, sess.ID, session.ModePlan); err != nil {
+		t.Fatalf("SetMode(plan): %v", err)
+	}
+	_ = drainAndFinish(t, svc, sess.ID, mustStart(t, svc, sess.ID, "t2"))
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(profilesSeen) == 0 {
+		t.Fatal("factory was never called for the no-fs session")
+	}
+	if factoryCallCnt.Load() < 2 {
+		t.Fatalf("factory called %d times, want >= 2 (create + the mode rebuild)", factoryCallCnt.Load())
+	}
+	for i, p := range profilesSeen {
+		if p != server.ProfileNoFS {
+			t.Fatalf("factory call %d (mode=%q) saw profile %q, want ProfileNoFS — a mode rebuild must NOT escalate a no-fs session onto the FS catalog", i, modesSeen[i], p)
+		}
+	}
+}
+
+// TestModeRebuildSerializedByRunEntryMu is the use-after-close guard (MUST-FIX #1),
+// deterministic under -race: after a SetMode (while idle) makes the engine stale, TWO
+// StartRuns race for the SAME id. runEntryMu serializes the run-entry critical section
+// (engine-resolve → launch → register), so the FIRST rebuilds the engine and registers
+// its run BEFORE the second resolves — the second therefore never reads the stale prior
+// engine concurrently with the rebuild's Close, and the prior engine is closed exactly
+// once and only after no run can still hold it. Both runs complete cleanly (each fully
+// drained before reuse, so the aggregate is not driven concurrently); the assertion is:
+// no panic, no spurious transport error, and the prior engine closed exactly once.
+func TestModeRebuildSerializedByRunEntryMu(t *testing.T) {
+	ctx := context.Background()
+	store := memstore.New()
+	const sessionModel, planModel = "gpt-5", "opus-plan"
+
+	var closes atomic.Int32
+	turns := make([]mockllm.Turn, 8)
+	for i := range turns {
+		turns[i] = mockllm.TextTurn("ok")
+	}
+	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile, _ string, mode session.PermissionMode) (server.SessionEngineResult, error) {
+		model := sessionModel
+		if mode == session.ModePlan {
+			model = planModel
+		}
+		eng := agent.NewEngine(agent.Deps{
+			LLM: mockllm.New(turns...), Catalog: tool.NewCatalog(),
+			Policy: permpolicy.NewPolicy(nil, nil), Model: model,
+		})
+		return server.SessionEngineResult{
+			Engine: eng, ModelID: model, ProviderID: "openai", BuiltForMode: mode,
+			Close: func() error { closes.Add(1); return nil },
+		}, nil
+	}
+	svc := modeServiceOverStore(t, store, factory, func(m session.PermissionMode) bool { return m == session.ModePlan })
+
+	sess, err := svc.CreateSessionWithProvider(ctx, "/ws", session.ModeDefault, session.Limits{},
+		server.ProviderSelector{ProviderID: "openai", ModelID: "gpt-5"})
+	if err != nil {
+		t.Fatalf("CreateSessionWithProvider: %v", err)
+	}
+	// Make the engine stale while IDLE (no run): the next run-entry will rebuild.
+	if _, err := svc.SetMode(ctx, sess.ID, session.ModePlan); err != nil {
+		t.Fatalf("SetMode(plan): %v", err)
+	}
+	closesBefore := closes.Load()
+
+	// Two run-entries race; runEntryMu serializes them. The first rebuilds (closing the
+	// prior engine), the second runs on the registered (rebuilt) engine. Each is fully
+	// drained before FinishRun so the second never overlaps the first on the aggregate;
+	// the point is that the rebuild's Close never races a concurrent stale-engine read.
+	var wg sync.WaitGroup
+	wg.Add(2)
+	runOnce := func(label string) {
+		defer wg.Done()
+		run, rerr := svc.StartRun(ctx, sess.ID, label)
+		if rerr != nil {
+			// A clean rejection (the other entry holds the run) is acceptable; a transport
+			// error would point at a close-during-use.
+			if !errors.Is(rerr, server.ErrInvalidArgument) {
+				t.Errorf("%s: unexpected StartRun error %v", label, rerr)
+			}
+			return
+		}
+		drainServerRun(run)
+		svc.FinishRun(sess.ID, run)
+	}
+	go runOnce("entry-A")
+	go runOnce("entry-B")
+	wg.Wait()
+
+	// The stale prior engine was displaced and closed (exactly once — the rebuild path,
+	// never double-closed, never closed while a run held it).
+	if got := closes.Load() - closesBefore; got != 1 {
+		t.Fatalf("prior engine Close count = %d across the rebuild, want exactly 1 (closed once on the clean swap, never while in use)", got)
+	}
+	if rm := svc.ResolvedModel(sess.ID); rm.ModelID != planModel {
+		t.Fatalf("ResolvedModel after the rebuild = %q, want the plan model %q", rm.ModelID, planModel)
+	}
+}
+
+// TestModeRebuildCrossSessionConcurrentNoRace is the -race guard over the rebuild path's
+// shared state (MUST-FIX #1): many sessions concurrently drive full SetMode→StartRun→
+// drain→FinishRun rebuild cycles over the SAME Service, stressing s.mu / sessionEngines /
+// buildAndRegisterSessionEngine under the detector. Each goroutine owns its OWN session
+// (so no two goroutines drive the same *session.Session aggregate — that orthogonal race
+// is not what this phase touched), and serializes its own cycle (drain+FinishRun before
+// the next SetMode), so every rebuild runs only when its session has no live run.
+func TestModeRebuildCrossSessionConcurrentNoRace(t *testing.T) {
+	ctx := context.Background()
+	store := memstore.New()
+	const sessionModel, planModel = "gpt-5", "opus-plan"
+	turns := make([]mockllm.Turn, 8)
+	for i := range turns {
+		turns[i] = mockllm.TextTurn("ok")
+	}
+	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile, _ string, mode session.PermissionMode) (server.SessionEngineResult, error) {
+		model := sessionModel
+		if mode == session.ModePlan {
+			model = planModel
+		}
+		eng := agent.NewEngine(agent.Deps{
+			LLM: mockllm.New(turns...), Catalog: tool.NewCatalog(),
+			Policy: permpolicy.NewPolicy(nil, nil), Model: model,
+		})
+		return server.SessionEngineResult{Engine: eng, ModelID: model, ProviderID: "openai", BuiltForMode: mode, Close: func() error { return nil }}, nil
+	}
+	svc := modeServiceOverStore(t, store, factory, func(m session.PermissionMode) bool { return m == session.ModePlan })
+
+	var wg sync.WaitGroup
+	const workers, cycles = 6, 6
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sess, err := svc.CreateSessionWithProvider(ctx, "/ws", session.ModeDefault, session.Limits{},
+				server.ProviderSelector{ProviderID: "openai", ModelID: "gpt-5"})
+			if err != nil {
+				t.Errorf("CreateSessionWithProvider: %v", err)
+				return
+			}
+			for i := 0; i < cycles; i++ {
+				mode := session.ModeDefault
+				if i%2 == 0 {
+					mode = session.ModePlan
+				}
+				if _, err := svc.SetMode(ctx, sess.ID, mode); err != nil {
+					t.Errorf("SetMode: %v", err)
+					return
+				}
+				run, rerr := svc.StartRun(ctx, sess.ID, "turn")
+				if rerr != nil {
+					t.Errorf("StartRun: %v", rerr)
+					return
+				}
+				drainServerRun(run)
+				svc.FinishRun(sess.ID, run)
+			}
+		}()
+	}
+	wg.Wait()
+}

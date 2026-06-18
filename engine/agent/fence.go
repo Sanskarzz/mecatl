@@ -81,6 +81,15 @@ func framingHeader(trimmed string) bool {
 		trimmed == "policy:",
 		trimmed == "tool:",
 		trimmed == "requested command:",
+		// Model-router prompt headers (buildModelRoutePrompt, ADR 0031): defense-in-depth
+		// on top of the load-bearing UntrustedFence — the fenced task prompt cannot forge
+		// a fresh trusted section or a verdict-shaped "category:" line that the classifier
+		// might echo. parseRouterVerdict's whole-output-single-object rule is the primary
+		// guard; this neutralises a leading forged header inside the fence.
+		trimmed == "categories:",
+		trimmed == "task to classify:",
+		strings.HasPrefix(trimmed, "category:"),
+		strings.HasPrefix(trimmed, "if no category clearly fits"),
 		strings.HasPrefix(trimmed, "respond with only "),
 		strings.HasPrefix(trimmed, "execution context:"),
 		strings.HasPrefix(trimmed, "why the static policy could not resolve it:"),

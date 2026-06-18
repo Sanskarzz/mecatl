@@ -227,6 +227,11 @@ type config struct {
 	agentsConventional bool
 	subagentModel      string
 	modelAliases       keyValueList
+	// modelSlots binds a named internal lightweight call (compaction/ask-reviewer/
+	// guardrail) — or a tier (cheap/fast/reasoning) a slot falls through to — to a
+	// model selector (an alias or a concrete id), via the repeatable --model-slot
+	// flag. Resolved THROUGH modelAliases in the composition layer (ADR 0030).
+	modelSlots keyValueList
 
 	// Headless ask reviewer (issue #31): subagentAskReviewer names the model (or
 	// --model-alias) of the OPT-IN one-turn reviewer that adjudicates a HEADLESS
@@ -239,6 +244,15 @@ type config struct {
 	subagentAskReviewerMaxDenies  int
 	subagentAskReviewerPolicyFile string
 	subagentAskReviewerPolicy     string
+
+	// Subagent model router (ADR 0031): subagentModelRouter is the OPT-IN enable gate
+	// for the semantic model router — a tiny classifier picks which model a plain
+	// Subagent delegation runs on, from an operator taxonomy in the user-global
+	// settings.yaml `models.router:` subtree. DEFAULT off (byte-identical to no router).
+	// Deliberately a FLAG, not a permission-config key: autonomous per-delegation model
+	// selection (spend/capability) is an operator deployment decision, the same posture
+	// as --subagent-ask-reviewer.
+	subagentModelRouter bool
 
 	// Guardrails (issue #27): guardrailsModel names the tool-less checker model that
 	// inspects PreToolUse (outbound-args exfil) and PostToolUse (inbound-result
@@ -805,6 +819,9 @@ func appConfig(cfg config, sink port.EventSink, recorder port.ToolCallRecorder, 
 		SubagentAskReviewerModel:     cfg.subagentAskReviewer,
 		SubagentAskReviewerMaxDenies: cfg.subagentAskReviewerMaxDenies,
 		SubagentAskReviewerPolicy:    cfg.subagentAskReviewerPolicy,
+		// Subagent model router (ADR 0031): the enable gate only; the taxonomy comes
+		// from the operator-tier models.router: YAML (folded by foldOperatorModelRouter).
+		SubagentModelRouter: cfg.subagentModelRouter,
 		// Guardrails (issue #27): the checker model + master kill-switch. The rule list
 		// and cost knobs are operator-tier YAML only (the `guardrails:` subtree of the
 		// user-global settings.yaml), folded onto Config by foldOperatorGuardrails — a
@@ -812,6 +829,7 @@ func appConfig(cfg config, sink port.EventSink, recorder port.ToolCallRecorder, 
 		GuardrailsModel:         cfg.guardrailsModel,
 		GuardrailsDisabled:      cfg.guardrailsOff,
 		ModelAliases:            cfg.modelAliases,
+		ModelSlots:              cfg.modelSlots,
 		CommandsDir:             cfg.commandsDir,
 		EnableCommands:          cfg.enableCommands,
 		EnableParallel:          cfg.enableParallel,
@@ -1046,9 +1064,11 @@ func parseFlags(argv []string) (config, error) {
 	fs.StringVar(&cfg.agentSourceURL, "agent-source-url", "", "host:port of a remote agent-definition gRPC driver (mecatl.driver.v1.AgentSourceService); the definition set is SNAPSHOTTED at startup (fatal if unreachable). Mutually exclusive with --agents-dir; the default-on conventional discovery is SUPERSEDED (not an error) — the driver becomes the only definition source. TRUST BOUNDARY: stronger than model steering — a def's hooks execute as UNGATED shell on the harness host (hookexec, every lifecycle phase, no permission ask); a compromised agent-source driver executes arbitrary shell on the harness host via def hooks, so treat it as harness-equivalent infrastructure. Same auth/TLS posture as --session-store-url (equal URLs share one connection)")
 	fs.StringVar(&cfg.subagentModel, "subagent-model", "", "global default model for every Subagent / Parallel-branch / team-member child that does not pin its own model (via an agent definition or a per-call override) — the analogue of CLAUDE_CODE_SUBAGENT_MODEL; the Parallel judge stays on the session model. May be a concrete id or an alias from --model-alias; resolved on the session's provider (same-provider only). Empty inherits the parent --model; a non-empty value that does not resolve to a usable model id (unknown alias, or an alias meaning inherit) FAILS STARTUP")
 	fs.Var(&cfg.modelAliases, "model-alias", "model alias mapping as name=model-id (repeatable), e.g. --model-alias fast=gpt-4o-mini. Aliases are resolved only in the composition layer; an agent def's `model: <alias>` resolves through this map (then the built-in sonnet/opus/haiku aliases)")
+	fs.Var(&cfg.modelSlots, "model-slot", "per-slot model binding as slot=selector (repeatable), e.g. --model-slot compaction=cheap --model-slot cheap=gpt-4o-mini (ADR 0030). A SLOT routes an internal lightweight LLM call to its own model: the wired slots are `compaction` (the compaction summary call), `ask-reviewer` (the headless child-ask reviewer), and `guardrail` (the content checker); a TIER key (`cheap`/`fast`/`reasoning`) gives a default a slot falls through to (each routed slot defaults to `cheap`). The selector is an alias (resolved through --model-alias / the built-ins) or a concrete id. Empty (no --model-slot) keeps every call on the session model (byte-identical default). FAIL-SOFT: a typo'd slot or an alias meaning inherit WARNs and keeps the session model. For ask-reviewer/guardrail the slot supersedes the model of --subagent-ask-reviewer/--guardrails-model but does NOT enable them (those flags stay the on/off gate). Operator-tier only; the YAML twin is the user-global settings.yaml `models.slots:` subtree")
 	fs.StringVar(&cfg.subagentAskReviewer, "subagent-ask-reviewer", "", "OPT-IN headless ask reviewer (issue #31): model id or --model-alias of a tool-less ONE-TURN reviewer that adjudicates a HEADLESS subagent/member/branch permission ask the 4-step model would otherwise blanket auto-deny. Allow = this call only (never learned); deny/error keeps the call denied (fail-safe). Configured Deny/Ask rules and an interactive approver always win; resolved on the session's provider (same-provider only). Empty (default) disables it; a value that does not resolve to a usable model id FAILS STARTUP. Deliberately a server flag, NOT a permission-config key: it grants an autonomous approval capability, an operator deployment decision")
 	fs.IntVar(&cfg.subagentAskReviewerMaxDenies, "subagent-ask-reviewer-max-denies", 3, "circuit breaker for --subagent-ask-reviewer: after this many CONSECUTIVE non-allow reviewer outcomes (denies/errors/timeouts) in one run, further asks skip the reviewer and fall through to the plain auto-deny; an allow resets the count. <=0 uses the default (3)")
 	fs.StringVar(&cfg.subagentAskReviewerPolicyFile, "subagent-ask-reviewer-policy", "", "path to a TRUSTED policy rubric file for --subagent-ask-reviewer; its CONTENT replaces the built-in read-only/verification rubric the reviewer applies. Empty keeps the built-in rubric. Read once at startup; an unreadable file FAILS STARTUP")
+	fs.BoolVar(&cfg.subagentModelRouter, "subagent-model-router", false, "OPT-IN semantic model router (ADR 0031): when set, a tiny one-turn classifier (on the `router` model slot) reads each plain Subagent delegation's task prompt and the operator's category taxonomy and picks which model the child runs on. The taxonomy (categories + per-category model + default) lives in the OPERATOR-TIER `models.router:` subtree of the user-global settings.yaml; this flag is only the ENABLE gate. It fires BEFORE the child is minted (decide-once, commit-for-lifetime, same-provider) and only for a plain delegation (no per-call model/agent, no fork/resume — those already pin the engine). FAIL-SOFT: any classifier failure, an unknown category, or a per-run circuit breaker (3 consecutive misses) falls through to the inherited default model. Empty/false (default) = OFF, byte-identical to no router. Deliberately a server flag, NOT a permission-config key: autonomous per-delegation model selection is an operator deployment decision")
 	fs.BoolVar(&cfg.headless, "headless", false, "run NON-interactive: declare that clients drive sessions but never answer permission prompts (autonomous / CI deployments). A child subagent/member/branch permission ask is then NOT surfaced to the client (nobody would answer it — it would park until run-end) but resolved by the auto-deny path / the opt-in --subagent-ask-reviewer. DEFAULT off: a normal mecated serving an interactive client (mecatui, an IDE) surfaces asks for a human. Setting --subagent-ask-reviewer WITHOUT --headless has no effect (asks surface to the client instead) — a startup WARNING says so")
 	fs.StringVar(&cfg.guardrailsModel, "guardrails-model", "", "GUARDRAILS (issue #27): model id or --model-alias of a tool-less checker that inspects OUTBOUND tool-call args (PreToolUse, data exfil) and INBOUND tool results (PostToolUse, prompt injection) and enforces a verdict per the operator-tier `guardrails:` rule list. Empty (default) disables guardrails. A value that does not resolve to a usable model id FAILS STARTUP. The RULE LIST + cost knobs live in the user-global settings.yaml `guardrails:` subtree (operator-tier ONLY — a project repo cannot configure or weaken a checker); --guardrails-model overrides the YAML model")
 	fs.StringVar(&cfg.guardrailsMode, "guardrails", "", "GUARDRAILS master switch: pass `--guardrails=off` to force the issue-#27 content checker OFF regardless of --guardrails-model / the guardrails: YAML config (the kill-switch). Any other value (or unset) leaves guardrails governed by the model + rule config")

@@ -50,6 +50,15 @@ entities:
         cardinality: "n:1"
         ownership: referenced
         role: runs against
+      - entity: PermissionMode
+        cardinality: "1:1"
+        ownership: owned
+        role: posture is
+        note: >
+          The `Session`'s `PermissionMode` governs its toolset and — via ADR 0030
+          Layer 3 — its effective `Model`: switching to plan mode re-resolves the
+          plan slot to a strong-reasoning `Model` within the same `Provider`,
+          between turns.
       - entity: Memory
         cardinality: "n:n"
         ownership: referenced
@@ -272,12 +281,48 @@ entities:
     definition: >
       A specific model exposed by a `Provider`, with its own context window and
       capabilities (text, image, reasoning). A `Session` runs against one `Model`;
-      a `Subagent` or `TeamMember` may override it within the same `Provider`.
+      a `Subagent` or `TeamMember` may override it within the same `Provider`, and
+      a `PermissionMode` change may re-resolve it within the same `Provider`
+      (plan mode → a strong-reasoning model, ADR 0030 Layer 3).
     invariants:
       - id: model-override-stays-in-provider
         statement: >
           A `Subagent` or `TeamMember` may override the `Model` only within the
           `Session`'s bound `Provider`.
+
+  PermissionMode:
+    definition: >
+      A `Session`'s permission posture — default, plan, or acceptEdits — governing
+      which `Tools` may run (plan mode is read-only; acceptEdits auto-allows edits)
+      and, via ADR 0030 Layer 3, the effective `Model`: in plan mode the `Session`
+      re-resolves the plan slot to a strong-reasoning `Model` within the same
+      `Provider`. It is a value object owned by exactly one `Session`; a control
+      surface switches it out of band (e.g. ACP session/set_mode).
+    relationships:
+      - entity: Session
+        cardinality: "1:1"
+        ownership: referenced
+        role: posture of
+      - entity: Model
+        cardinality: "n:1"
+        ownership: referenced
+        role: selects via slot
+        note: >
+          Plan mode re-resolves the plan slot to a `Model` within the `Session`'s
+          bound `Provider`; default/acceptEdits keep the session `Model`.
+    invariants:
+      - id: mode-switch-rejected-mid-turn
+        statement: >
+          A `PermissionMode` change is rejected while a turn is in flight (running
+          or awaiting); a control surface defers it to the next turn boundary.
+      - id: mode-model-same-provider
+        statement: >
+          A mode-driven `Model` re-resolution stays within the `Session`'s bound
+          `Provider`; the provider is fixed per session.
+      - id: mode-model-fixed-per-turn
+        statement: >
+          The effective `Model` is fixed for the duration of a turn; a mode change
+          re-resolves it only between turns, at the run-entry seam, never mid-stream.
 
   PermissionRule:
     definition: >
@@ -602,6 +647,15 @@ scenarios:
       - "The read-only `ToolCalls` dispatch concurrently while the mutating one runs alone."
       - "Each `ToolCall` yields exactly one `ToolResult`."
     invariants_touched: [tool-readonly-or-mutating, mutating-toolcalls-serial, toolcall-exactly-one-result]
+
+  - name: Switching to plan mode re-resolves the model between turns
+    actors: [Principal, Client]
+    steps:
+      - "`Principal` runs a turn in default mode; the `Session` runs against its session `Model`."
+      - "`Client` switches the `Session`'s `PermissionMode` to plan; the change is rejected if a turn is in flight and otherwise deferred to the next turn."
+      - "At the next run entry the `Session` re-resolves the plan slot to a strong-reasoning `Model` within the same `Provider`, and `resolved_model` re-emits it."
+    invariants_touched:
+      [mode-switch-rejected-mid-turn, mode-model-same-provider, mode-model-fixed-per-turn, fixed-provider-per-session]
 
   - name: The conversation is compacted without losing the task
     actors: [Principal]

@@ -229,6 +229,25 @@ type Deps struct {
 	// per-call override may only TIGHTEN it.
 	MaxRunTokens int
 
+	// SubagentModelRouter, when non-nil, is the OPT-IN semantic model router (ADR
+	// 0031, the Phase 5 headline feature): given a Subagent call's (model-authored,
+	// untrusted) task prompt it returns the ALREADY-RESOLVED concrete model id to mint
+	// the child on, plus the category label it classified into. It is a composition
+	// closure — the engine layer is model-string-only (the layering rule): composition
+	// owns the classifier engine, the category taxonomy, and the category→model mapping
+	// (aliases/slots/the allowlist cap), and hands the engine only func(string)(string,
+	// string, bool). It is consulted by the Subagent run() hook ONLY for a plain default
+	// delegation (no per-call model, no agent, no fork, no resume) and is FAIL-SOFT
+	// throughout: ok=false (any classifier failure, an unknown category, the breaker
+	// open) → the call falls through to the inherited default explorer model,
+	// byte-identically to a deployment with no router. DEFAULT nil: no router, the
+	// long-standing behaviour. Set on the MAIN engine only (a child has no Subagent
+	// tool, so structurally no router); childEngineDepsForProvider forces it nil (the
+	// no-nesting recursion guard). Like ChildAskReviewer, the router is built into the
+	// per-call parentCaps.routeTask closure in Engine.parentCaps, never called directly
+	// by the loop, so it is NOT a port.LLMRequest field and never reaches a request.
+	SubagentModelRouter func(taskPrompt string) (category, model string, ok bool)
+
 	// ProgressiveTools, when true, enables progressive tool disclosure
 	// (pattern 9): the per-turn request advertises lightweight specs for tools
 	// implementing tool.Disclosable plus a built-in ToolSearch tool the model
@@ -420,6 +439,14 @@ type Run struct {
 	// reviewer spend). nil on the default (no-reviewer) engine and on child runs.
 	// Set before the run goroutine starts and only read after.
 	askReview *askReviewBreaker
+	// router is this run's model-router circuit breaker (ADR 0031), created in
+	// RunContentWith only when the engine carries a SubagentModelRouter — the
+	// router-non-nil ⇔ router-wired pairing the parentCaps closure keys on. Its mutex
+	// SERIALIZES classifications within the run (deterministic consecutive-miss
+	// semantics; bounded concurrent classifier spend under a Subagent fan-out). nil on
+	// the default (no-router) engine and on child runs. Set before the run goroutine
+	// starts and only read after.
+	router *modelRouterBreaker
 	// children registers every child run spawned under this run (all three
 	// delegation families: Subagent children, Parallel branches, team members),
 	// keyed by child session id.
@@ -700,6 +727,14 @@ func (e *Engine) startRun(ctx context.Context, sess *session.Session, opts RunOp
 	// non-allow outcomes. nil otherwise (the no-reviewer posture, unchanged).
 	if e.deps.ChildAskReviewer != nil {
 		r.askReview = &askReviewBreaker{max: e.deps.ChildAskReviewMaxDenies}
+	}
+	// An engine carrying the OPT-IN model router (ADR 0031) arms this run's router
+	// breaker, mirroring the ask-review breaker: the parentCaps.routeTask closure
+	// consults it before every classification, so a run whose Subagent tasks keep
+	// failing to classify stops spending classifier turns after the threshold of
+	// consecutive misses. nil otherwise (the no-router posture, byte-identical).
+	if e.deps.SubagentModelRouter != nil {
+		r.router = &modelRouterBreaker{max: defaultModelRouterMaxMisses}
 	}
 	// The child-run registry is created UNCONDITIONALLY (cancel is interactive-only
 	// but the registry's bookkeeping is not), with its emit bound to this run's

@@ -227,6 +227,25 @@ func TestAppConfigMapping(t *testing.T) {
 		}
 	})
 
+	t.Run("subagent-model-router flag", func(t *testing.T) {
+		// Default OFF.
+		f, err := parseFlags([]string{"--prompt", "x"})
+		if err != nil {
+			t.Fatalf("parseFlags: %v", err)
+		}
+		if appConfig(f, newDiagnostics()).SubagentModelRouter {
+			t.Error("SubagentModelRouter must default OFF")
+		}
+		// Set ON.
+		f, err = parseFlags([]string{"--prompt", "x", "--subagent-model-router"})
+		if err != nil {
+			t.Fatalf("parseFlags: %v", err)
+		}
+		if !appConfig(f, newDiagnostics()).SubagentModelRouter {
+			t.Error("--subagent-model-router must set SubagentModelRouter true")
+		}
+	})
+
 	t.Run("core knobs pass through", func(t *testing.T) {
 		f, err := parseFlags([]string{
 			"--prompt", "x",

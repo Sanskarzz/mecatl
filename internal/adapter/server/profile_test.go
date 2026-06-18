@@ -27,7 +27,7 @@ import (
 // profile it was called with and serves a fresh per-session engine replying
 // with reply.
 func profileRecordingFactory(reply string, got *atomic.Value, calls *atomic.Int32) server.SessionEngineFactory {
-	return func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, profile server.SessionProfile, _ string) (server.SessionEngineResult, error) {
+	return func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, profile server.SessionProfile, _ string, _ session.PermissionMode) (server.SessionEngineResult, error) {
 		calls.Add(1)
 		got.Store(profile)
 		eng := agent.NewEngine(agent.Deps{
@@ -195,7 +195,7 @@ func TestNoFSSessionUsesWorkspaceOverride(t *testing.T) {
 		},
 		DefaultLimits: session.Limits{MaxTurns: 5},
 		Now:           func() time.Time { return time.Unix(0, 0) },
-		SessionEngine: func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile, _ string) (server.SessionEngineResult, error) {
+		SessionEngine: func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile, _ string, _ session.PermissionMode) (server.SessionEngineResult, error) {
 			return server.SessionEngineResult{Engine: perSession, Close: func() error { return nil }}, nil
 		},
 	})

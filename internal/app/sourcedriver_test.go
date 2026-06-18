@@ -728,7 +728,7 @@ func TestSessionEngineCommandExpanderUsesStashedDriverSource(t *testing.T) {
 		prompt.RootAssembler{}, catalogAssets{})
 
 	for i := range 2 {
-		res, ferr := factory(ctx, server.ProviderSelector{ProviderID: providerMock}, nil, server.ProfileDefault, "")
+		res, ferr := factory(ctx, server.ProviderSelector{ProviderID: providerMock}, nil, server.ProfileDefault, "", session.ModeDefault)
 		if ferr != nil {
 			t.Fatalf("factory #%d: %v", i, ferr)
 		}

@@ -98,12 +98,17 @@ func compactionSpecs() {
 				// --max-run-tokens here overrides the harness default (20000) — a 6-turn
 				// reused session accumulates ~5-6k billed input per turn on the cumulative
 				// session usage the budget reads, so a tight budget would trip stop=budget
-				// before the scenario completes. 100000 leaves comfortable headroom; this
-				// spec does not test the budget (assertion B's end_turn check guards a budget
-				// stop). --context-window-override forces the small compaction window.
+				// before the scenario completes. This budget is a SAFETY RAIL, not the
+				// test's cost/length control (the small window + fixed turn count bound
+				// that) — it only has to sit above the scenario's natural usage. 150000
+				// leaves comfortable headroom; raised from 100000 after live haiku drifted
+				// verbose enough that the ~110k 6-turn session crossed the old rail at the
+				// final GO turn (stop=budget). This spec does not test the budget (assertion
+				// B's end_turn check guards a budget stop). --context-window-override forces
+				// the small compaction window.
 				spawn, err := harness.NewLocalWith(
 					"--context-window-override", window,
-					"--max-run-tokens", envOrDefault("MECATL_E2E_COMPACTION_MAX_RUN_TOKENS", "100000"),
+					"--max-run-tokens", envOrDefault("MECATL_E2E_COMPACTION_MAX_RUN_TOKENS", "150000"),
 				)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred(), "spawn local mecated with --context-window-override")
 				defer func() { _ = spawn.Close() }()

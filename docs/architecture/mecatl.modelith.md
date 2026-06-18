@@ -126,7 +126,7 @@ One entry in a `Conversation`, attributed to a role (user, assistant, or tool). 
 
 ### `Model`
 
-A specific model exposed by a `Provider`, with its own context window and capabilities (text, image, reasoning). A `Session` runs against one `Model`; a `Subagent` or `TeamMember` may override it within the same `Provider`.
+A specific model exposed by a `Provider`, with its own context window and capabilities (text, image, reasoning). A `Session` runs against one `Model`; a `Subagent` or `TeamMember` may override it within the same `Provider`, and a `PermissionMode` change may re-resolve it within the same `Provider` (plan mode → a strong-reasoning model, ADR 0030 Layer 3).
 
 **Invariants**
 
@@ -149,6 +149,25 @@ A suspension of a `Run` when a `ToolCall` resolves to "ask": the loop pauses and
 - **child-ask-redacts-raw-args** — A child `PermissionAsk` surfaced to a parent or reviewer never carries the child's raw `ToolCall` arguments.
 
 - **ask-resolves-to-verdict** — A `PermissionAsk` resolves to exactly one verdict — allow-once, allow-always, or deny.
+
+
+### `PermissionMode`
+
+A `Session`'s permission posture — default, plan, or acceptEdits — governing which `Tools` may run (plan mode is read-only; acceptEdits auto-allows edits) and, via ADR 0030 Layer 3, the effective `Model`: in plan mode the `Session` re-resolves the plan slot to a strong-reasoning `Model` within the same `Provider`. It is a value object owned by exactly one `Session`; a control surface switches it out of band (e.g. ACP session/set_mode).
+
+**Relationships**
+
+- `Session` — 1:1 — referenced — posture of
+- `Model` — n:1 — referenced — selects via slot — Plan mode re-resolves the plan slot to a `Model` within the `Session`'s bound `Provider`; default/acceptEdits keep the session `Model`.
+
+
+**Invariants**
+
+- **mode-switch-rejected-mid-turn** — A `PermissionMode` change is rejected while a turn is in flight (running or awaiting); a control surface defers it to the next turn boundary.
+
+- **mode-model-same-provider** — A mode-driven `Model` re-resolution stays within the `Session`'s bound `Provider`; the provider is fixed per session.
+
+- **mode-model-fixed-per-turn** — The effective `Model` is fixed for the duration of a turn; a mode change re-resolves it only between turns, at the run-entry seam, never mid-stream.
 
 
 ### `PermissionRule`
@@ -223,6 +242,8 @@ The central aggregate and unit of work: a stateful conversation between a princi
 - `Workspace` — 1:1 — owned — scoped to
 - `Provider` — n:1 — referenced — bound to — A `Session`'s `Provider` is fixed for its lifetime
 - `Model` — n:1 — referenced — runs against
+- `PermissionMode` — 1:1 — owned — posture is — The `Session`'s `PermissionMode` governs its toolset and — via ADR 0030 Layer 3 — its effective `Model`: switching to plan mode re-resolves the plan slot to a strong-reasoning `Model` within the same `Provider`, between turns.
+
 - `Memory` — n:n — referenced — remembers into
 - `Skill` — n:n — referenced — activates
 - `EventLog` — 1:1 — referenced — is logged to — The `Session` aggregate is also persisted as a point-in-time snapshot (state, `Conversation`, usage, pending `PermissionAsk`); the snapshot plus the `EventLog` together rehydrate it after a restart.
@@ -399,6 +420,7 @@ erDiagram
     Message {}
     Model {}
     PermissionAsk {}
+    PermissionMode {}
     PermissionRule {}
     Process {}
     Provider {}
@@ -423,6 +445,8 @@ erDiagram
     Message ||--o{ ToolCall : "requests"
     PermissionAsk ||--|| ToolCall : "suspends"
     PermissionAsk }o--|| Run : "pauses"
+    PermissionMode ||--|| Session : "posture of"
+    PermissionMode }o--|| Model : "selects via slot"
     PermissionRule }o--o{ ToolCall : "authorizes"
     Process ||--o{ Run : "executes"
     Process ||--o{ SessionLease : "holds"
@@ -434,6 +458,7 @@ erDiagram
     Session ||--|| Workspace : "scoped to"
     Session }o--|| Provider : "bound to"
     Session }o--|| Model : "runs against"
+    Session ||--|| PermissionMode : "posture is"
     Session }o--o{ Memory : "remembers into"
     Session }o--o{ Skill : "activates"
     Session ||--|| EventLog : "is logged to"
@@ -502,6 +527,27 @@ erDiagram
 - **mutating-toolcalls-serial** — Two mutating `ToolCalls` never execute concurrently; read-only `ToolCalls` may run in parallel.
 
 - **toolcall-exactly-one-result** — A `ToolCall` produces exactly one `ToolResult`.
+
+### Switching to plan mode re-resolves the model between turns
+
+**Actors:** Principal, Client
+
+**Steps**
+
+1. `Principal` runs a turn in default mode; the `Session` runs against its session `Model`.
+2. `Client` switches the `Session`'s `PermissionMode` to plan; the change is rejected if a turn is in flight and otherwise deferred to the next turn.
+3. At the next run entry the `Session` re-resolves the plan slot to a strong-reasoning `Model` within the same `Provider`, and `resolved_model` re-emits it.
+
+**Invariants touched**
+
+- **mode-switch-rejected-mid-turn** — A `PermissionMode` change is rejected while a turn is in flight (running or awaiting); a control surface defers it to the next turn boundary.
+
+- **mode-model-same-provider** — A mode-driven `Model` re-resolution stays within the `Session`'s bound `Provider`; the provider is fixed per session.
+
+- **mode-model-fixed-per-turn** — The effective `Model` is fixed for the duration of a turn; a mode change re-resolves it only between turns, at the run-entry seam, never mid-stream.
+
+- **fixed-provider-per-session** — A `Session` is bound to one `Provider` and one `Model` for its entire lifetime; they are re-derived together, never swapped individually.
+
 
 ### The conversation is compacted without losing the task
 

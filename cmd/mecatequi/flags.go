@@ -95,6 +95,11 @@ type flags struct {
 	subagentAskReviewerPolicyFile string
 	subagentAskReviewerPolicy     string
 
+	// Subagent model router (ADR 0031): OPT-IN enable gate for the semantic model
+	// router. The category taxonomy is operator-tier YAML (models.router:); this flag
+	// only turns it on. DEFAULT off (byte-identical to no router).
+	subagentModelRouter bool
+
 	// Posture ladder (strict < trusted < auto < yolo). postureFlagSet records an
 	// explicit --posture so composition lets CLI out-rank the settings.yaml key.
 	posture        string
@@ -148,6 +153,7 @@ func parseFlags(argv []string) (flags, error) {
 	fs.StringVar(&f.guardrailsMode, "guardrails", "", "GUARDRAILS master switch: pass --guardrails=off to force the checker OFF regardless of --guardrails-model / the YAML config")
 
 	fs.StringVar(&f.subagentAskReviewer, "subagent-ask-reviewer", "", "OPT-IN headless ask reviewer (issue #31): model id / alias of a tool-less one-turn reviewer adjudicating a child permission ask the headless auto-deny would otherwise reject. Empty disables it")
+	fs.BoolVar(&f.subagentModelRouter, "subagent-model-router", false, "OPT-IN semantic model router (ADR 0031): a tiny classifier on the `router` slot picks the child model per plain Subagent delegation from the operator-tier models.router: taxonomy. Fires before the child is minted (decide-once, same-provider); fail-soft to the inherited model on any miss. This flag is the ENABLE gate only; the taxonomy is operator-tier YAML. Default off (byte-identical to no router)")
 	fs.IntVar(&f.subagentAskReviewerMaxDenies, "subagent-ask-reviewer-max-denies", 3, "circuit breaker for --subagent-ask-reviewer: consecutive non-allow outcomes that disable the reviewer for the rest of the run; <=0 uses the default (3)")
 	fs.StringVar(&f.subagentAskReviewerPolicyFile, "subagent-ask-reviewer-policy", "", "path to a TRUSTED policy rubric file for --subagent-ask-reviewer; its CONTENT replaces the built-in rubric. Read once at startup; an unreadable file fails startup")
 
@@ -296,6 +302,7 @@ func appConfig(f flags, diag port.Diagnostics) app.Config {
 		GuardrailsDisabled: f.guardrailsOff,
 
 		SubagentAskReviewerModel:     f.subagentAskReviewer,
+		SubagentModelRouter:          f.subagentModelRouter,
 		SubagentAskReviewerMaxDenies: f.subagentAskReviewerMaxDenies,
 		SubagentAskReviewerPolicy:    f.subagentAskReviewerPolicy,
 

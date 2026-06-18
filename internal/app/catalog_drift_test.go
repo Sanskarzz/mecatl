@@ -12,6 +12,7 @@ import (
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/prompt"
+	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/agents"
 	"github.com/stacklok/mecatl/internal/adapter/hookexec"
@@ -202,7 +203,7 @@ func TestPerSessionCatalogMatchesSharedCatalog(t *testing.T) {
 	t.Run("factory engine carries every shared tool", func(t *testing.T) {
 		factory := sessionEngineFactory(cfg, reg, oa, memstore.New(),
 			permpolicy.NewPolicy(defaultRules(), nil), hooks, nil, prompt.RootAssembler{}, assets)
-		res, err := factory(ctx, server.ProviderSelector{ProviderID: providerOpenRouter}, nil, server.ProfileDefault, "")
+		res, err := factory(ctx, server.ProviderSelector{ProviderID: providerOpenRouter}, nil, server.ProfileDefault, "", session.ModeDefault)
 		if err != nil {
 			t.Fatalf("factory: %v", err)
 		}

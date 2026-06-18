@@ -140,6 +140,18 @@ type parentCaps struct {
 	// plain Execute path (no parent session threaded) — a fork:true call then errors
 	// with an honest "not supported on this run", never a silent fresh-context child.
 	forkHistory func() []session.Message
+	// routeTask, when non-nil, is the OPT-IN semantic model router (ADR 0031): given a
+	// Subagent call's (model-authored, untrusted) task prompt it returns the chosen
+	// CATEGORY label and the ALREADY-RESOLVED concrete model id to mint the child on,
+	// plus ok. It is bound by the dispatcher (Engine.parentCaps) over the engine's
+	// SubagentModelRouter closure + this run's router breaker, so a fan-out's classifier
+	// spend is serialised and circuit-broken per run. The Subagent run() hook consults it
+	// ONLY for a plain default delegation (no per-call model/agent/fork/resume) and is
+	// FAIL-SOFT: ok=false → the call inherits the default explorer model unchanged. nil
+	// when no router is wired (the default) or on a child run (no nesting). The returned
+	// model is an opaque model string — engine/agent stays model-string-only (the layering
+	// rule); composition owns aliases/slots/the cap.
+	routeTask func(taskPrompt string) (category, model string, ok bool)
 }
 
 // registerChildRun is the nil-safe registration wrapper a spawning tool calls: a
@@ -1001,7 +1013,7 @@ func (t *SubagentTool) ExecuteWithParent(ctx context.Context, call session.ToolC
 // together, an unknown agent, an unwired/unroutable model), and the chosen engine +
 // limits on success. The default explorer + the Subagent tool's default limits is the
 // no-arg case.
-func (t *SubagentTool) selectChildEngine(callID session.ToolCallID, args subagentArgs) (engine *Engine, limits session.Limits, errResult session.ToolResult, ok bool) {
+func (t *SubagentTool) selectChildEngine(callID session.ToolCallID, args subagentArgs, routedModel string) (engine *Engine, limits session.Limits, errResult session.ToolResult, ok bool) {
 	// `agent` and `model` are mutually exclusive: a named specialist already pins its
 	// own engine/model/prompt/scope, so layering a call-time model over it would
 	// silently break the def's contract. Reject the combination with a clear error.
@@ -1044,6 +1056,20 @@ func (t *SubagentTool) selectChildEngine(callID session.ToolCallID, args subagen
 				fmt.Sprintf("Subagent: unknown or unroutable model %q; omit `model` to inherit the parent's model", wantModel)), false
 		}
 		engine = eng
+		return engine, limits, session.ToolResult{}, true
+	}
+
+	// OPT-IN model router (ADR 0031): a plain default delegation the router classified
+	// (routedModel set only when wantAgent=="" && wantModel=="" — gated in run()) mints
+	// the child on the routed model through the SAME contamination-safe factory path. It
+	// is FAIL-SOFT: an unwired factory or an unroutable routed id falls through to the
+	// inherited default explorer engine (never an error — the router is never load-
+	// bearing). routedModel is the ALREADY-RESOLVED concrete id (composition owns the
+	// alias/slot/cap resolution), so no further resolution happens here.
+	if routedModel != "" && t.engineFactory != nil {
+		if eng, found := t.engineFactory(routedModel); found && eng != nil {
+			engine = eng
+		}
 	}
 	return engine, limits, session.ToolResult{}, true
 }
@@ -1188,6 +1214,26 @@ func validateFork(callID session.ToolCallID, args subagentArgs, caps parentCaps)
 	return caps.forkHistory(), session.ToolResult{}, true
 }
 
+// maybeRouteModel consults the OPT-IN semantic model router (ADR 0031) for a PLAIN
+// default delegation and returns the classified category + the ALREADY-RESOLVED concrete
+// model id to mint the child on (both empty when not routed). PRECEDENCE is enforced by
+// GATING: an explicit per-call `model`, a named `agent`, a `fork`, or a `resume` already
+// pins the child's engine/conversation, so the router fires only when NONE of them did —
+// it fills the gap, never overrides an explicit choice. caps.routeTask is nil when no
+// router is wired (the byte-identical default) or on a child run (no nesting — a child
+// has no Subagent tool, so structurally no parentCaps.routeTask). FAIL-SOFT: a router
+// miss (ok=false) returns empty strings and the caller inherits the default explorer.
+func maybeRouteModel(args subagentArgs, resuming bool, caps parentCaps) (category, model string) {
+	if resuming || args.Fork || caps.routeTask == nil ||
+		strings.TrimSpace(args.Model) != "" || strings.TrimSpace(args.Agent) != "" {
+		return "", ""
+	}
+	if cat, m, ok := caps.routeTask(args.Prompt); ok {
+		return cat, strings.TrimSpace(m)
+	}
+	return "", ""
+}
+
 // resolveEngineAndLimits resolves one Subagent call's child engine and base
 // session limits, then applies the per-call tighten-only overrides.
 //
@@ -1203,7 +1249,14 @@ func validateFork(callID session.ToolCallID, args subagentArgs, caps parentCaps)
 // The tighten-only discipline: the model may make THIS child stricter than the
 // inherited bound, never looser, so a per-call arg can't escape the operator's
 // ceiling (tightenLimit ignores nil / non-positive values and only lowers).
-func (t *SubagentTool) resolveEngineAndLimits(callID session.ToolCallID, args subagentArgs, resuming bool) (engine *Engine, limits session.Limits, errResult session.ToolResult, ok bool) {
+// routedModel, when non-empty, is the ALREADY-RESOLVED concrete model id the OPT-IN
+// model router (ADR 0031) classified this plain default delegation into. It is threaded
+// to selectChildEngine, which mints the child on it through the SAME per-call factory
+// path args.Model uses (decide-once, contamination-safe). It is only ever non-empty on a
+// plain default delegation (the run() hook gates it on no model/agent/fork/resume), so it
+// never collides with an explicit args.Model/args.Agent — and a resume ignores it (a
+// resumed child runs on the default explorer engine only).
+func (t *SubagentTool) resolveEngineAndLimits(callID session.ToolCallID, args subagentArgs, resuming bool, routedModel string) (engine *Engine, limits session.Limits, errResult session.ToolResult, ok bool) {
 	if resuming {
 		eng, errRes, vok := t.validateResume(callID, args)
 		if !vok {
@@ -1211,7 +1264,7 @@ func (t *SubagentTool) resolveEngineAndLimits(callID session.ToolCallID, args su
 		}
 		engine = eng
 	} else {
-		eng, lim, errRes, sok := t.selectChildEngine(callID, args)
+		eng, lim, errRes, sok := t.selectChildEngine(callID, args, routedModel)
 		if !sok {
 			return nil, session.Limits{}, errRes, false
 		}
@@ -1298,7 +1351,14 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.W
 	}
 
 	resuming := strings.TrimSpace(args.Resume) != ""
-	engine, limits, errResult, ok := t.resolveEngineAndLimits(call.ID, args, resuming)
+
+	// OPT-IN semantic model router (ADR 0031): for a PLAIN default delegation, classify
+	// the task and mint the child on the routed model via the per-call factory path. The
+	// gating + fail-soft live in maybeRouteModel; an empty routedModel inherits the
+	// default explorer.
+	routedCategory, routedModel := maybeRouteModel(args, resuming, caps)
+
+	engine, limits, errResult, ok := t.resolveEngineAndLimits(call.ID, args, resuming, routedModel)
 	if !ok {
 		return errResult, nil
 	}
@@ -1365,8 +1425,9 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.W
 		return t.startBackground(ctx, backgroundChild{
 			call: call, ws: ws, emit: emit, caps: caps, args: args,
 			engine: engine, limits: limits, resuming: resuming, childID: childID,
-			forkHistory: forkHistory,
-			timeoutCtx:  timeoutCtx, cancelCall: cancelCall, cancelTimeout: cancelTimeout,
+			forkHistory:    forkHistory,
+			routedCategory: routedCategory, routedModel: routedModel,
+			timeoutCtx: timeoutCtx, cancelCall: cancelCall, cancelTimeout: cancelTimeout,
 		}), nil
 	}
 
@@ -1425,9 +1486,11 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.W
 	// UI). No child content.
 	if emit != nil {
 		emit(session.Event{Type: session.EvSubagentStart, Subagent: &session.SubagentPayload{
-			ParentCallID: string(call.ID),
-			ChildID:      string(childID),
-			Goal:         subagentGoal(args),
+			ParentCallID:   string(call.ID),
+			ChildID:        string(childID),
+			Goal:           subagentGoal(args),
+			RoutedCategory: routedCategory,
+			RoutedModel:    routedModel,
 		}})
 	}
 
@@ -1525,7 +1588,15 @@ type backgroundChild struct {
 	// the detach (the parent keeps appending after detach, so the snapshot must not
 	// be taken in driveBackground). nil on a non-fork call.
 	forkHistory []session.Message
-	childID     session.SessionID
+	// routedCategory / routedModel are the OPT-IN model router's classification (ADR
+	// 0031) for this background child, captured SYNCHRONOUSLY in run() (the routeTask
+	// closure must fire on the dispatch goroutine, not the detached one). They ride the
+	// synchronous EvSubagentStart so the routed metadata is observable; empty when the
+	// child was not routed (no router, or a fail-soft miss). The engine field already
+	// carries the routed engine — these are the LABELS only.
+	routedCategory string
+	routedModel    string
+	childID        session.SessionID
 	// timeoutCtx is non-nil iff a per-call timeout_ms deadline applies (the
 	// DeadlineExceeded disambiguation read, same as the foreground path).
 	timeoutCtx    context.Context //nolint:containedctx // deadline-disambiguation handle, mirrors run()'s timeoutCtx local
@@ -1579,10 +1650,12 @@ func (t *SubagentTool) startBackground(ctx context.Context, b backgroundChild) s
 	// subagent.start always precedes the started-result on the stream.
 	if b.emit != nil {
 		b.emit(session.Event{Type: session.EvSubagentStart, Subagent: &session.SubagentPayload{
-			ParentCallID: string(b.call.ID),
-			ChildID:      string(b.childID),
-			Goal:         subagentGoal(b.args),
-			Background:   true,
+			ParentCallID:   string(b.call.ID),
+			ChildID:        string(b.childID),
+			Goal:           subagentGoal(b.args),
+			Background:     true,
+			RoutedCategory: b.routedCategory,
+			RoutedModel:    b.routedModel,
 		}})
 	}
 	go t.driveBackground(ctx, b)

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -803,6 +804,49 @@ func (e *Engine) parentCaps(r *Run, sess *session.Session, turnIdx int) parentCa
 					breakerJustOpened: noteBreakerFailure(breaker)}
 				return out
 			}
+		}
+	}
+	// The OPT-IN semantic model router (ADR 0031): bind the engine's router closure +
+	// THIS run's router breaker into a routeTask the Subagent run() hook consults for a
+	// plain default delegation. The breaker mutex is held across the whole
+	// classification, SERIALIZING classifications within the run (deterministic
+	// consecutive-miss semantics; a concurrent Subagent fan-out cannot multiply
+	// classifier spend). The router-non-nil ⇔ breaker pairing is guaranteed by
+	// RunContentWith (the breaker is created iff the router is wired); the double check
+	// is belt-and-braces for a Run built outside it (unit tests). FAIL-SOFT throughout:
+	// any miss (classifier failure, unknown category, breaker open) returns ok=false and
+	// the caller inherits the default explorer model.
+	if e.deps.SubagentModelRouter != nil && r.router != nil {
+		route, breaker, hardAbort, diag := e.deps.SubagentModelRouter, r.router, r.hardAbort, r.diag
+		caps.routeTask = func(taskPrompt string) (string, string, bool) {
+			breaker.mu.Lock()
+			defer breaker.mu.Unlock()
+			if breaker.consecutiveMiss >= breaker.max {
+				return "", "", false // breaker open: skip the classifier, inherit the default model.
+			}
+			// A run already past Cancel+grace is tearing down: skip the classifier turn
+			// rather than spend one whose child is about to be unwound. A nil channel
+			// never selects — correct no-route behaviour for a zero-caps construction.
+			select {
+			case <-hardAbort:
+				return "", "", false
+			default:
+			}
+			category, model, ok := route(taskPrompt)
+			if !ok || strings.TrimSpace(model) == "" {
+				if justOpened := noteRouterMiss(breaker); justOpened && diag != nil {
+					diag.Log(context.Background(), port.LevelInfo,
+						"subagent model router: breaker OPEN after consecutive misses; remaining subagents this run inherit the default model",
+						"threshold", breaker.max)
+				}
+				return "", "", false
+			}
+			breaker.consecutiveMiss = 0 // a successful classification resets the breaker.
+			if diag != nil {
+				diag.Log(context.Background(), port.LevelInfo,
+					"subagent routed", "category", category, "model", model)
+			}
+			return category, model, true
 		}
 	}
 	if interactive {

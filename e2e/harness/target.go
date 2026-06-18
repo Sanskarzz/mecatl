@@ -76,7 +76,7 @@ func NewTarget() (Target, error) {
 //	MECATL_E2E_TARGET           host:port of an existing mecated (skips Local spawn)
 //	MECATL_E2E_MODEL            default-lane model id (default anthropic/claude-3.5-haiku)
 //	MECATL_E2E_MODEL_SECONDARY  second-lane model id (default openai/gpt-4.1-mini; "skip" disables)
-//	MECATL_E2E_MAX_RUN_TOKENS   --max-run-tokens for the local server (default 20000)
+//	MECATL_E2E_MAX_RUN_TOKENS   --max-run-tokens for the local server (default 50000)
 //	MECATL_E2E_MAX_TEAM_TOKENS  --max-team-tokens for the local server (default 60000)
 //	MECATL_E2E_WORKSPACE        remote-target session workspace root (required for Remote)
 //	MECATL_E2E_METRICS_URL      remote-target /metrics URL (optional)

@@ -229,12 +229,21 @@ func guardrailsConfigured(cfg Config) bool {
 // new metrics label), the no-progress nudge disabled. Returns nil when the model
 // does not resolve (defensive — Build already failed fast via
 // normalizeGuardrailsModel).
-func buildGuardrailsChecker(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, _ string) modelhook.VerdictChecker {
+func buildGuardrailsChecker(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string) modelhook.VerdictChecker {
 	sel := strings.TrimSpace(cfg.GuardrailsModel)
 	if sel == "" {
+		// GuardrailsModel STAYS the enable gate: empty ⇒ no checker, byte-identical.
 		return nil
 	}
-	resolved, _ := lookupModelAlias(cfg, sel)
+	// GUARDRAIL SLOT (ADR 0030, Phase 2): a configured `guardrail` slot SUPERSEDES the
+	// --guardrails-model value (the model field still gates ON/OFF). Otherwise resolve
+	// the configured model through the alias machinery exactly as before.
+	var resolved string
+	if gm, ok := resolveSlotModel(cfg, slotGuardrail, parentModel); ok {
+		resolved = gm
+	} else {
+		resolved, _ = lookupModelAlias(cfg, sel)
+	}
 	if resolved == "" {
 		// UseMock passes the literal through; an empty resolve here is the defensive
 		// unreachable path (Build normalized the value fail-fast).

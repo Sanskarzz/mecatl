@@ -372,7 +372,10 @@ type Config struct {
 	// engines force it nil (no nesting). It is deliberately a server FLAG, not a
 	// permconfig key: it grants an autonomous approval capability, which must be an
 	// operator deployment decision — never something a (project-tier) settings file
-	// can switch on. Configured Deny/Ask rules always win over the reviewer.
+	// can switch on. Configured Deny/Ask rules always win over the reviewer. A
+	// configured `ask-reviewer` model slot (ModelSlots / ADR 0030) SUPERSEDES this
+	// field's model when the reviewer is enabled — but the FLAG stays the enable gate
+	// (a slot alone does NOT turn the reviewer on).
 	SubagentAskReviewerModel string
 	// SubagentAskReviewerMaxDenies is the per-run adjudication circuit-breaker
 	// threshold (agent.Deps.ChildAskReviewMaxDenies): after this many CONSECUTIVE
@@ -384,6 +387,37 @@ type Config struct {
 	// mains may use os — and passes the content). Empty keeps the built-in default
 	// rubric (agent.WithAskReviewPolicy is applied only when non-empty).
 	SubagentAskReviewerPolicy string
+
+	// --- Subagent model router (ADR 0031, Phase 5): the OPT-IN semantic model router.
+	// A tiny one-turn classifier (on the `router` slot) reads a plain Subagent
+	// delegation's task prompt + an operator-defined category taxonomy and picks which
+	// CATEGORY of model should run it; composition maps the category to a concrete model
+	// and mints the child on it. OFF by default (SubagentModelRouter false OR no
+	// categories ⇒ byte-identical to no router). It is OPERATOR-TIER ONLY: the taxonomy
+	// is read from the user-global settings.yaml `models.router:` subtree (a project-tier
+	// router: is stripped with a WARN); the enable gate is a CLI FLAG, deliberately NOT a
+	// permconfig key (it grants an autonomous spend/capability decision the operator owns,
+	// the same posture as --subagent-ask-reviewer).
+
+	// SubagentModelRouter is the ENABLE gate (--subagent-model-router). It is a FLAG, not
+	// a permconfig key: turning on autonomous per-delegation model selection is an
+	// operator deployment decision. false (the default) ⇒ no router, byte-identical. A
+	// true flag with no taxonomy (RouterCategories empty) WARNs once at Build and stays
+	// OFF (a flag without categories cannot route).
+	SubagentModelRouter bool
+	// RouterCategories is the operator-defined routing taxonomy (name + description +
+	// model selector per category), folded from the operator-tier `models.router:`
+	// subtree by foldOperatorModelRouter. Empty ⇒ no router. Each entry's Model selector
+	// is resolved through the operator-merged alias map at classification time (operator
+	// taxonomy targets are UNCAPPED — the operator is authoritative).
+	RouterCategories []permconfig.RouterCategory
+	// RouterDefaultCategory is the category the classifier is told to choose when none
+	// clearly fits (advisory; the fail-soft inherit is the real safety net). Empty = none.
+	RouterDefaultCategory string
+	// RouterClassifierSlot names the model slot the CLASSIFIER itself runs on. Empty
+	// falls through to the `router` slot (which defaults to the cheap tier) — the
+	// classifier is a tiny housekeeping call, never the routed work.
+	RouterClassifierSlot string
 
 	// --- Guardrails (issue #27): the LLM-backed PreToolUse/PostToolUse content
 	// checker (the modelhook adapter). It inspects OUTBOUND tool-call args (exfil)
@@ -420,6 +454,23 @@ type Config struct {
 	// concrete provider model id. Resolved only here; the domain/agent always
 	// receives a concrete model string.
 	ModelAliases map[string]string
+
+	// ModelSlots binds a named internal lightweight LLM call (a "slot") to a model
+	// selector — an alias or a concrete id (ADR 0030, Phase 1+2). The wired slots
+	// this slice routes are "compaction", "ask-reviewer", and "guardrail"; semantic
+	// TIER keys ("cheap"/"fast"/"reasoning") give a default a slot falls through to
+	// (each routed slot defaults to "cheap"). It is COMPOSITION-ONLY: every value is
+	// resolved THROUGH lookupModelAlias (the same alias machinery the agent-def
+	// `model:` path uses), so the domain/agent never sees a slot. EMPTY/ABSENT ⇒
+	// byte-identical default (the call keeps the session model — resolveSlotModel
+	// returns ("", false) and every routed site keeps its pre-feature behaviour). It
+	// is OPERATOR-TIER ONLY this slice: read from --model-slot + the user-global
+	// settings.yaml `models.slots:` subtree (folded by foldOperatorModelSlots), never
+	// a project-tier file (a project re-pointing a slot is deferred to the
+	// allowlist-capped Layer-3 work). Resolution is FAIL-SOFT: a typo'd slot key or an
+	// alias meaning inherit WARNs and degrades to the session model — a broken
+	// housekeeping slot never wedges a compaction / ask-review / guardrail call.
+	ModelSlots map[string]string
 
 	// Slash commands: directory of <name>.md templates; EnableCommands turns on the
 	// default directories when CommandsDir is empty.
@@ -830,6 +881,28 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	// built and before the provider/model fail-fast normalization below.
 	cfg = foldOperatorGuardrails(cfg)
 
+	// Per-slot models (ADR 0030, Phase 1+2): fold the operator-tier `models:` YAML
+	// subtree (user-global + CLI only — a project file's models: block is handled by
+	// the Phase-4 fold below) onto cfg.ModelSlots/cfg.ModelAliases, CLI flags
+	// (--model-slot/--model-alias) winning per key. Runs after the resolver is built;
+	// the three routed call sites read the resolved slot models lazily.
+	//
+	// Phase 4 precedence (CLI > project-YAML > operator-YAML > built-in): snapshot the
+	// CLI-set model-binding keys BEFORE this operator-YAML fold runs, so the later
+	// foldOperatorModelDefault / foldProjectModelBindings can layer the YAML rungs UNDER
+	// the CLI ones (a CLI-set key/--model is SKIPPED by both YAML folds).
+	//
+	// ORDERING INVARIANT (load-bearing — do NOT move this capture below foldOperatorModelSlots):
+	// the snapshot is only a faithful CLI-vs-YAML discriminator BECAUSE at THIS point cfg
+	// holds ONLY the CLI bindings (foldOperatorModelSlots has not merged operator-YAML in
+	// yet) and cfg.Model is the bare CLI --model (the registry default + operator-YAML
+	// default are applied LATER). Capturing after either fold would record YAML-set keys as
+	// "CLI-set" and silently invert the precedence (project/operator-YAML would stop
+	// overriding). Pinned by TestPrecedenceCombinedTiersSameSlotCLIWins +
+	// TestPrecedenceCombinedTiersOperatorYAMLAndProject (the all-three-tiers seam guards).
+	cliModelKeys := captureCLIModelKeys(cfg)
+	cfg = foldOperatorModelSlots(cfg)
+
 	// Start-of-session git snapshot, computed ONCE here (FIX 2): gitSnapshot runs git
 	// against cfg.Workspace through a HARDENED/scrubbed env and only for a TRUSTED
 	// workspace (FIX 1). The single value is carried on cfg.gitStatus so every
@@ -863,6 +936,31 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	if cfg.Model == "" {
 		cfg.Model = reg.ResolvedDefaultModel()
 	}
+	// Operator-YAML models.default (ADR 0030 Phase 4): an operator's settings.yaml
+	// `models.default:` re-binds the session default OVER the registry default, but UNDER
+	// a CLI --model. The operator's OWN default is UNCAPPED (the allowlist caps PROJECT
+	// bindings only — the operator is authoritative). It is the operator-YAML rung of the
+	// default precedence: CLI --model > project-YAML default (capped) > operator-YAML
+	// default > registry default. Runs after the registry default so it overrides it, and
+	// before foldProjectModelBindings so a capped project default can override it in turn.
+	// No-op (byte-identical) when no operator models.default is configured.
+	cfg = foldOperatorModelDefault(cfg, cliModelKeys)
+	// Project-overridable model bindings within the operator allowlist (ADR 0030
+	// Phase 4): a TRUSTED project's .mecatl/settings.yaml models: block may re-bind
+	// default/slots/aliases, but ONLY to allowlisted entries (resolve-then-check). Runs
+	// AFTER foldOperatorModelSlots (so it overrides the operator-YAML layer) and AFTER
+	// cfg.Model was resolved to the registry default (so a project `default` can re-bind
+	// it and the cap resolves through the operator-merged alias map), and BEFORE
+	// modeNeedsEngine/logSlotConfigFacts below (so the plan slot, the predicate, and the
+	// narration all see the final merged maps). No-op (byte-identical) when there is no
+	// operator allowlist, an untrusted workspace, or no project models block.
+	cfg = foldProjectModelBindings(cfg, cliModelKeys)
+	// Subagent model router taxonomy (ADR 0031, Phase 5): fold the OPERATOR-TIER
+	// `models.router:` categories/default/classifier-slot onto cfg. OPERATOR-TIER ONLY
+	// (a project router: was stripped at capture) and FAIL-SOFT (a malformed category is
+	// WARN-dropped). It only supplies the taxonomy; the --subagent-model-router FLAG
+	// (cfg.SubagentModelRouter) gates ON/OFF. No-op (byte-identical) when no router block.
+	cfg = foldOperatorModelRouter(cfg)
 	// SubagentModel (issue #35): validate + resolve the alias ONCE here — FAIL-FAST
 	// on a value that doesn't resolve to a usable model id (the --agent-source-url
 	// loud-misconfig posture; warn-and-inert would silently run the whole child
@@ -898,6 +996,16 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	// see each fact once instead of N times. Other slog sites in this file are not
 	// yet relocated (iteration 2).
 	logBuildConfigFacts(cfg)
+	// Per-slot model facts (ADR 0030): narrate each ROUTED slot's resolved model
+	// ONCE here (never per-engine — the no-per-derivation-duplication rule). Slots are
+	// FAIL-SOFT (no fail-fast normalize): a broken slot already WARNed in
+	// resolveSlotModel and degrades to the session model. No-op when no slot configured.
+	logSlotConfigFacts(cfg)
+	// Subagent model router (ADR 0031): the build-once ACTIVE/inert fact. The flag is
+	// the enable gate; a flag with no taxonomy WARNs once and stays OFF; OFF (no flag) is
+	// silent (byte-identical). Build-once ONLY (never a per-engine line — the
+	// no-per-derivation-duplication rule + the "exactly THREE loop lines" invariant).
+	logModelRouterFacts(cfg)
 
 	// Slash-command driver source (Phase C2): ONE dial + Probe at build time
 	// (fatal on a fault — loud-misconfig posture), then the probed client is
@@ -1048,6 +1156,15 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		// over the client's streaming-HTTP servers, mounted for that session only. Built
 		// in buildEngine so it shares the main engine's exact collaborators.
 		SessionEngine: sessFactory,
+		// ModeNeedsEngine (ADR 0030 Layer 3): tells the Service whether a session's
+		// PermissionMode would resolve a model DIFFERING from the shared engine's model
+		// (cfg.Model) — i.e. whether a plan slot is configured AND it resolves to a
+		// different id. It lets a DEFAULT-FS session (normally on the shared engine) be
+		// PROMOTED to a per-session factory engine on a plan-mode switch. It is wired to
+		// nil (no promotion, BYTE-IDENTICAL to pre-Phase-3) unless the predicate could
+		// ever return true, so a deployment with no plan slot pays zero cost and a mode
+		// flip changes nothing.
+		ModeNeedsEngine: modeNeedsEngine(cfg),
 		// Evict a session's LEARNED permission rules when the session is closed
 		// (issue #3): the rules are per-session and non-durable, so they must not
 		// outlive the session that learned them.
@@ -1256,7 +1373,7 @@ func sessionEngineFactory(
 	instructions prompt.InstructionAssembler,
 	assets catalogAssets,
 ) server.SessionEngineFactory {
-	return func(ctx context.Context, sel server.ProviderSelector, specs []mcp.ServerConfig, profile server.SessionProfile, workspace string) (server.SessionEngineResult, error) {
+	return func(ctx context.Context, sel server.ProviderSelector, specs []mcp.ServerConfig, profile server.SessionProfile, workspace string, mode session.PermissionMode) (server.SessionEngineResult, error) {
 		// Pin the CHILD permission resolver to THIS session's base root (issue
 		// #32): a per-session engine's subagents/members/branches must resolve
 		// project permission rules from the SESSION's pre-fork root — the
@@ -1291,6 +1408,23 @@ func sessionEngineFactory(
 			// "" => provider/adapter default; a non-empty unknown model => verbatim
 			// passthrough (the catalog is NOT consulted to GATE the model string).
 			resolvedModel = sel.ModelID
+		}
+		// MODE→MODEL RE-RESOLUTION (ADR 0030 Layer 3, the opusplan pattern). When the
+		// session's PermissionMode is ModePlan and a `plan` slot resolves, the engine's
+		// model is RE-RESOLVED to the plan model — within the SAME session provider
+		// (resolveSlotModel returns a concrete id that flows verbatim to the provider; we
+		// NEVER switch resolvedProvider/resolvedProviderID, so "provider FIXED per
+		// session" holds). Everything downstream (windowFn, modelCapability,
+		// engineDepsForProvider) already keys on resolvedModel, so the swap is total with
+		// no further change here. ModeDefault/ModeAccept leave resolvedModel untouched
+		// (the session-selected model; acceptEdits shares the session model, no own slot)
+		// — byte-identical when no plan slot is configured (resolveSlotModel returns
+		// configured=false). This path is SILENT (no diagnostics): the build-once narration
+		// lives in logSlotConfigFacts, and re-firing here would duplicate per session/rebuild.
+		if mode == session.ModePlan {
+			if planModel, configured := resolveSlotModel(cfg, slotPlan, resolvedModel); configured && planModel != "" {
+				resolvedModel = planModel
+			}
 		}
 		// The compaction window is the LIVE-FIRST resolver over the resolved
 		// (provider, model) — the SAME reg.windowResolver the shared and child engines
@@ -1359,6 +1493,11 @@ func sessionEngineFactory(
 		// resolved (provider, model) through the same attachAskAdjudicator the shared
 		// engine uses — never a clone-and-swap of the build-time reviewer.
 		deps = attachAskAdjudicator(deps, cfg, reg, resolvedProvider, resolvedProviderID, resolvedModel)
+		// The OPT-IN semantic model router (ADR 0031), RE-DERIVED on this session's
+		// resolved (provider, model) through the same buildModelRouterTask the shared
+		// engine uses — the classifier compacts/counts on the session's provider, never a
+		// clone-and-swap. nil (the field stays nil) when the router is OFF.
+		deps.SubagentModelRouter = buildModelRouterTask(cfg, reg, resolvedProvider, resolvedProviderID, resolvedModel)
 		if noFS {
 			// MODEL-VISIBLE POSTURE (mandatory discoverability, the #40 pattern):
 			// tell the model up front there is no filesystem — and stop the prompt
@@ -1379,7 +1518,11 @@ func sessionEngineFactory(
 			// (resolve-at-use), so the echo and the running engine never diverge.
 			ProviderID: resolvedProviderID,
 			ModelID:    resolvedModel,
-			Close:      closeFn,
+			// Echo the mode this engine resolved its model for (ADR 0030 Layer 3), so the
+			// Service stamps sessionEngine.builtForMode from this one source and detects a
+			// later mode→model staleness — the SAME single-source discipline as the ids.
+			BuiltForMode: mode,
+			Close:        closeFn,
 		}, nil
 	}
 }
@@ -1638,6 +1781,10 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 	// engines get their own via the SAME attachAskAdjudicator in
 	// sessionEngineFactory, re-derived on the session's resolved provider/model.
 	deps = attachAskAdjudicator(deps, cfg, reg, provider, reg.Default(), cfg.Model)
+	// The OPT-IN semantic model router (ADR 0031) rides the MAIN engine's deps only,
+	// built on the shared engine's (default provider, cfg.Model). Per-session engines get
+	// their own via the SAME buildModelRouterTask in sessionEngineFactory. nil when OFF.
+	deps.SubagentModelRouter = buildModelRouterTask(cfg, reg, provider, reg.Default(), cfg.Model)
 	// The factory shares the build-once assets (global MCP manager, agent registry,
 	// flocked memory/user-model stores, skills, fork reaper) so every per-session
 	// catalog is assembled over the SAME collaborators as the shared one. It keeps
@@ -1861,6 +2008,22 @@ func engineDepsForProvider(
 	modelCfg := cfg
 	modelCfg.Model = model
 	counter := buildTokenCounter(modelCfg)
+	// COMPACTION SLOT (ADR 0030, Phase 2): route ONLY the compactor's tier-4 summary
+	// LLM call to the `compaction` slot model when one is configured — the engine's
+	// own Model/TokenCounter/PromptConfig/ContextWindow stay on the session model.
+	// When no slot resolves (the byte-identical default) the compactor is built on the
+	// session model+counter exactly as before. O5: keying the compactor's Counter to
+	// the compaction model is sound — the CascadeCompactor's BudgetTokens is
+	// window-derived (defaultContextWindowTokens × ratio in buildCompactor), NOT
+	// keyed to the live conversation, so swapping the counter's tokenizer cannot break
+	// the cascade budget math; only the summary LLM call's Model is the load-bearing
+	// swap (the heuristic compactor has no Model/Counter at all, so it is unaffected).
+	compactorCfg, compactorCounter := modelCfg, counter
+	if cm, ok := resolveSlotModel(cfg, slotCompaction, model); ok {
+		compactorCfg = modelCfg
+		compactorCfg.Model = cm
+		compactorCounter = buildTokenCounter(compactorCfg)
+	}
 	return agent.Deps{
 		LLM:          provider,
 		Policy:       policy,
@@ -1884,7 +2047,7 @@ func engineDepsForProvider(
 		ContextWindow:   windowFn,
 		CompactionRatio: defaultCompactionRatio,
 		TokenCounter:    counter,
-		Compactor:       buildCompactor(modelCfg, provider, counter),
+		Compactor:       buildCompactor(compactorCfg, provider, compactorCounter),
 		CommandExpander: buildCommandExpander(cfg, mcpProvider),
 		// No-progress nudge budget: operator-tunable (cfg), inherited by children
 		// (childEngineDepsForProvider keeps this field). Zero → NewEngine applies the
@@ -3472,6 +3635,12 @@ func childEngineDepsForProvider(cfg Config, role string, provider port.LLMProvid
 	// above.
 	deps.ChildAskReviewer = nil
 	deps.ChildAskReviewMaxDenies = 0
+	// A child engine NEVER carries the model router (ADR 0031): children have no
+	// Subagent tool (no nesting), and the classifier engine is itself built THROUGH
+	// this child path (buildModelRouterTask), so inheriting it here would recurse at
+	// construction. Like ChildAskReviewer above, the assignment lives only at the two
+	// main-engine sites (buildModelRouterTask), so this is a defensive pin.
+	deps.SubagentModelRouter = nil
 	return deps
 }
 
@@ -3658,9 +3827,20 @@ func buildAskAdjudicator(cfg Config, provReg *providerRegistry, provider port.LL
 func askAdjudicatorDeps(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string) (agent.Deps, bool) {
 	sel := strings.TrimSpace(cfg.SubagentAskReviewerModel)
 	if sel == "" {
+		// The --subagent-ask-reviewer flag STAYS the enable gate: a slot alone does
+		// NOT turn the reviewer on (a slot only chooses the model for a reviewer the
+		// operator already enabled). Empty flag ⇒ reviewer off, byte-identical.
 		return agent.Deps{}, false
 	}
-	model, _ := lookupModelAlias(cfg, sel)
+	// ASK-REVIEWER SLOT (ADR 0030, Phase 2): a configured `ask-reviewer` slot
+	// SUPERSEDES the flag's model (the flag still gates ON/OFF). Otherwise resolve the
+	// flag's value through the alias machinery exactly as before.
+	var model string
+	if sm, ok := resolveSlotModel(cfg, slotAskReviewer, parentModel); ok {
+		model = sm
+	} else {
+		model, _ = lookupModelAlias(cfg, sel)
+	}
 	if model == "" {
 		// Defensive only: Build's normalizeAskReviewerModel already rejected an
 		// unknown/inherit value fail-fast (and UseMock passes the literal through).
@@ -3693,6 +3873,88 @@ func attachAskAdjudicator(deps agent.Deps, cfg Config, provReg *providerRegistry
 	deps.ChildAskReviewer = buildAskAdjudicator(cfg, provReg, provider, parentProviderID, parentModel)
 	deps.ChildAskReviewMaxDenies = cfg.SubagentAskReviewerMaxDenies
 	return deps
+}
+
+// buildModelRouterTask constructs the OPT-IN semantic Subagent model-router closure
+// (ADR 0031, Phase 5) — the sibling of buildAskAdjudicator. It returns the
+// agent.Deps.SubagentModelRouter closure: given a (model-authored, untrusted) Subagent
+// task prompt it (1) builds a tool-less one-turn CLASSIFIER engine on the `router` slot
+// (or the operator's classifier-slot) over the SESSION's provider — byte-for-byte the
+// askAdjudicatorDeps recipe (childEngineDepsForProvider, MaxNoProgressNudges=-1, the
+// forced-nil nested caps); (2) drives it via agent.RunModelRouter to classify the task
+// into one of cfg.RouterCategories; (3) maps the chosen category to its Model selector
+// and resolves THAT through lookupModelAlias to a concrete id (operator taxonomy targets
+// are UNCAPPED — the operator is authoritative; a project re-pointing an alias a category
+// names is already capped transitively via cfg.ModelAliases post-Phase-4-fold). It is
+// FAIL-SOFT everywhere: any error / unknown category / unresolvable target → ok=false,
+// and the Subagent run() hook then inherits the default explorer model.
+//
+// Returns nil when the router is OFF (the flag is unset OR no taxonomy is configured) —
+// the engine then carries no SubagentModelRouter and the run() hook's routeTask is nil,
+// byte-identical to a deployment with no router. It is assigned at BOTH main-engine deps
+// sites (buildEngine + sessionEngineFactory), like attachAskAdjudicator, so a per-session
+// engine re-derives the closure on the session's resolved provider/model — never
+// clone-and-swap.
+//
+// ENGINE LIFETIME — the deviation from the ask-adjudicator: the reviewer engine is built
+// ONCE per session (attachAskAdjudicator stashes it inside the EngineAskReviewer). The
+// classifier engine here is instead rebuilt PER CLASSIFICATION CALL, inside the returned
+// closure (it is cheap — tool-less, one turn). This is DELIBERATE and must NOT be
+// "optimised" by stashing/caching one engine across calls: a cached classifier engine
+// would be pinned to one provider+model and reintroduce the exact clone-and-swap /
+// provider-fixed-per-session hazard the rest of this file avoids. The per-session
+// closure already closes over the right (provider, parentModel), so each call re-derives
+// the contamination-safe deps for the classifier model.
+func buildModelRouterTask(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string) func(taskPrompt string) (category, model string, ok bool) {
+	if !cfg.SubagentModelRouter || len(cfg.RouterCategories) == 0 {
+		return nil // OFF: no router, byte-identical.
+	}
+	// Resolve the CLASSIFIER model once per closure build (per session) via the SHARED
+	// resolveRouterClassifierModel — the SAME resolution logModelRouterFacts narrates, so
+	// the logged classifier model matches what this session classifies on.
+	classifierModel := resolveRouterClassifierModel(cfg, parentModel)
+	// Project the operator taxonomy into the engine-layer category value (name +
+	// description only — the engine never sees the per-category model selector; that
+	// mapping is composition's, below). Also index name→selector for the post-verdict map.
+	cats := make([]agent.ModelRouteCategory, 0, len(cfg.RouterCategories))
+	selectorByName := make(map[string]string, len(cfg.RouterCategories))
+	for _, c := range cfg.RouterCategories {
+		cats = append(cats, agent.ModelRouteCategory{Name: c.Name, Description: c.Description})
+		selectorByName[c.Name] = c.Model
+	}
+	defaultCat := cfg.RouterDefaultCategory
+	return func(taskPrompt string) (string, string, bool) {
+		// Build a fresh tool-less classifier engine (the askAdjudicatorDeps recipe): it
+		// compacts/counts/prompts on ITS model, fires no hooks, and carries no nested
+		// caps (childEngineDepsForProvider forces ChildAskReviewer + SubagentModelRouter
+		// nil — the no-nesting recursion guard).
+		windowFn := childWindowFor(cfg, provReg, parentProviderID, classifierModel)
+		deps := childEngineDepsForProvider(cfg, "model-router", provider, classifierModel, windowFn,
+			tool.NewCatalog(), promptConfig(modelCfgFor(cfg, classifierModel), cfg.gitStatus), nil)
+		deps.MaxNoProgressNudges = -1
+		eng := agent.NewEngine(deps)
+
+		category, ok := agent.RunModelRouter(context.Background(), eng, agent.ModelRouteRequest{
+			TaskPrompt: taskPrompt,
+			Categories: cats,
+			Default:    defaultCat,
+		})
+		if !ok {
+			return "", "", false // classifier miss: fail-soft inherit.
+		}
+		sel := strings.TrimSpace(selectorByName[category])
+		if sel == "" {
+			return "", "", false
+		}
+		// Operator taxonomy targets are UNCAPPED: resolve through the operator-merged
+		// alias map with no allowlist membership test (the operator is authoritative — a
+		// category mapping is the operator's own binding, like models.default).
+		id, known := lookupModelAlias(cfg, sel)
+		if !known || id == "" {
+			return "", "", false // unresolvable target: fail-soft inherit.
+		}
+		return category, id, true
+	}
 }
 
 // buildSubagentTool constructs the Subagent tool tool over a default child Engine

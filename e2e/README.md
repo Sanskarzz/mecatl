@@ -32,10 +32,10 @@ Environment knobs (all optional):
 | `MECATL_E2E_TARGET` | (unset → spawn local) | `host:port` of an existing mecated; skips the local spawn |
 | `MECATL_E2E_MODEL` | `anthropic/claude-3.5-haiku` | default-lane model for all tool scenarios (see "Prompt phrasing vs the upstream prompt filter" for why the OpenAI-family lane was demoted) |
 | `MECATL_E2E_MODEL_SECONDARY` | `openai/gpt-4.1-mini` | second lane (single-turn smoke only); `skip` disables it |
-| `MECATL_E2E_MAX_RUN_TOKENS` | `20000` | `--max-run-tokens` for the spawned server (a single full-catalog turn is ~5-6k input tokens, so a 4k budget trips at the first turn boundary) |
+| `MECATL_E2E_MAX_RUN_TOKENS` | `50000` | `--max-run-tokens` for the spawned server (a single full-catalog turn is ~5-6k input tokens; a runaway brake, not a cost control — raised 20k→50k for multi-turn + cross-restart headroom against live-model verbosity drift) |
 | `MECATL_E2E_MAX_TEAM_TOKENS` | `60000` | `--max-team-tokens` for the spawned server |
 | `MECATL_E2E_COMPACTION_WINDOW` | `2000` | compaction spec only: the `--context-window-override` for its OWN spawn (trigger = 0.8 × this conversation-tokens) |
-| `MECATL_E2E_COMPACTION_MAX_RUN_TOKENS` | `100000` | compaction spec only: `--max-run-tokens` for its OWN spawn (the reused 6-turn session needs headroom) |
+| `MECATL_E2E_COMPACTION_MAX_RUN_TOKENS` | `150000` | compaction + model-slots specs: `--max-run-tokens` for their OWN small-window spawns (the reused multi-turn session needs headroom; a safety rail above the ~110k natural usage, NOT a cost control) |
 | `MECATL_E2E_WORKSPACE` | — | remote target only: absolute workspace root on the server host (required) |
 | `MECATL_E2E_METRICS_URL` | — | remote target only: the `/metrics` URL (metrics spec Skips without it) |
 | `MECATL_E2E_AUTH_TOKEN` | — | remote target only: bearer token |
