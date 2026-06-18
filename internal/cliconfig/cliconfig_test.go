@@ -112,3 +112,131 @@ func TestReadProviderKeysIsTheSingleSeam(t *testing.T) {
 		t.Errorf("ReadProviderKeys mismatch: %+v", keys)
 	}
 }
+
+// TestKeyValueListParsesAndOverrides proves KeyValueList.Set collects repeatable
+// key=value pairs with last-write-wins semantics and trims surrounding whitespace
+// — the contract both --model-alias and --model-slot rely on.
+func TestKeyValueListParsesAndOverrides(t *testing.T) {
+	var m KeyValueList
+	if err := m.Set("fast=gpt-4o-mini"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if err := m.Set("fast=gpt-5"); err != nil { // later occurrence overrides
+		t.Fatalf("Set override: %v", err)
+	}
+	if err := m.Set(" smart = gpt-5-pro "); err != nil { // whitespace trimmed
+		t.Fatalf("Set trim: %v", err)
+	}
+	got := map[string]string(m)
+	if got["fast"] != "gpt-5" {
+		t.Errorf("fast = %q, want gpt-5 (last write wins)", got["fast"])
+	}
+	if got["smart"] != "gpt-5-pro" {
+		t.Errorf("smart = %q, want gpt-5-pro (trimmed)", got["smart"])
+	}
+}
+
+// TestKeyValueListRejectsMalformed pins the ONE parse-error message both mains
+// now share (issue #93: the twin copies had diverged — mecated said "model alias
+// must be key=value", mecatui said "must be key=value"). A missing '=' and an
+// empty key both fail with the unified message.
+func TestKeyValueListRejectsMalformed(t *testing.T) {
+	var m KeyValueList
+	for _, bad := range []string{"bogus", "=novalue", "  =novalue"} {
+		err := m.Set(bad)
+		if err == nil {
+			t.Errorf("Set(%q) should error", bad)
+			continue
+		}
+		if got := err.Error(); got != `must be key=value, got "`+bad+`"` {
+			t.Errorf("Set(%q) error = %q, want the unified message", bad, got)
+		}
+	}
+}
+
+// TestKeyValueListStringIsStable proves String renders a sorted, comma-separated
+// list (empty for nil/empty) — the stable form flag's default-value display needs.
+func TestKeyValueListStringIsStable(t *testing.T) {
+	var m KeyValueList
+	if got := m.String(); got != "" {
+		t.Errorf("nil String = %q, want empty", got)
+	}
+	m = KeyValueList{"smart": "gpt-5", "fast": "gpt-4o-mini"}
+	if got := m.String(); got != "fast=gpt-4o-mini,smart=gpt-5" {
+		t.Errorf("String = %q, want sorted comma-joined", got)
+	}
+}
+
+// TestKeyValueListAsMapIsNilSafe proves AsMap on a nil pointer returns nil (not
+// an empty map), so an unset flag yields the byte-identical default on app.Config.
+func TestKeyValueListAsMapIsNilSafe(t *testing.T) {
+	var m *KeyValueList
+	if got := m.AsMap(); got != nil {
+		t.Errorf("nil AsMap = %v, want nil", got)
+	}
+	m = new(KeyValueList)
+	if err := m.Set("fast=gpt-4o-mini"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	got := m.AsMap()
+	if got["fast"] != "gpt-4o-mini" {
+		t.Errorf("AsMap = %v, want fast=gpt-4o-mini", got)
+	}
+}
+
+// TestRegisterModelFlagsRegistersBoth proves RegisterModelFlags registers
+// --model-alias and --model-slot on the passed FlagSet with the supplied (or
+// defaulted) help text, and returns distinct bindings that parse independently.
+func TestRegisterModelFlagsRegistersBoth(t *testing.T) {
+	fs := flag.NewFlagSet("t", flag.ContinueOnError)
+	aliases, slots := RegisterModelFlags(fs, ModelFlagHelp{})
+	for _, name := range []string{"model-alias", "model-slot"} {
+		if f := fs.Lookup(name); f == nil {
+			t.Fatalf("flag --%s not registered", name)
+		}
+	}
+	// A zero ModelFlagHelp uses the mecated-style defaults.
+	if got := fs.Lookup("model-alias").Usage; got != DefaultModelFlagHelp.ModelAlias {
+		t.Errorf("model-alias help = %q, want the default", got)
+	}
+
+	if err := fs.Parse([]string{
+		"--model-alias", "fast=gpt-4o-mini",
+		"--model-slot", "compaction=cheap",
+	}); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got := aliases.AsMap()["fast"]; got != "gpt-4o-mini" {
+		t.Errorf("aliases[fast] = %q, want gpt-4o-mini", got)
+	}
+	if got := slots.AsMap()["compaction"]; got != "cheap" {
+		t.Errorf("slots[compaction] = %q, want cheap", got)
+	}
+}
+
+// TestRegisterModelFlagsHelpOverride proves a supplied help string wins over the
+// default (so mecated/mecatui keep their own wording), with the unspecified one
+// still falling back.
+func TestRegisterModelFlagsHelpOverride(t *testing.T) {
+	fs := flag.NewFlagSet("t", flag.ContinueOnError)
+	_, _ = RegisterModelFlags(fs, ModelFlagHelp{ModelAlias: "CUSTOM HELP"})
+	if got := fs.Lookup("model-alias").Usage; got != "CUSTOM HELP" {
+		t.Errorf("model-alias help = %q, want CUSTOM HELP", got)
+	}
+	if got := fs.Lookup("model-slot").Usage; got != DefaultModelFlagHelp.ModelSlot {
+		t.Errorf("model-slot help = %q, want the default", got)
+	}
+}
+
+// TestKeyValueListSatisfiesFlagValue pins the flag.Value interface contract so a
+// future refactor can't accidentally widen KeyValueList into something flag.Var
+// would reject — the exact contract RegisterModelFlags and both mains rely on.
+func TestKeyValueListSatisfiesFlagValue(t *testing.T) {
+	var v flag.Value = new(KeyValueList)
+	if err := v.Set("k=v"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if got := v.String(); got != "k=v" {
+		t.Errorf("String = %q, want k=v", got)
+	}
+}

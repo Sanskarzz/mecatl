@@ -326,8 +326,10 @@ func embeddedConfig(cfg config, diag port.Diagnostics) app.Config {
 		DefaultModel:    cfg.defaultModel,
 		SubagentModel:   cfg.subagentModel,
 		// Per-slot models (ADR 0030): the mecated flags mirror, mapped verbatim.
-		ModelAliases: cfg.modelAliases,
-		ModelSlots:   cfg.modelSlots,
+		// The *cliconfig.KeyValueList flag bindings are converted to the plain
+		// map[string]string app.Config expects (nil for an unset flag).
+		ModelAliases: cfg.modelAliases.AsMap(),
+		ModelSlots:   cfg.modelSlots.AsMap(),
 		// Headless ask reviewer (issue #31): the mecated flag mirrors, mapped
 		// verbatim. Empty model = off (the zero-cost default).
 		SubagentAskReviewerModel:     cfg.subagentAskReviewer,

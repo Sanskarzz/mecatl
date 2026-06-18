@@ -156,18 +156,18 @@ func TestParseFlagsAgentDefs(t *testing.T) {
 	if cfg.subagentModel != "cheap-id" {
 		t.Errorf("subagentModel = %q, want cheap-id", cfg.subagentModel)
 	}
-	if cfg.modelAliases["fast"] != "gpt-4o-mini" || cfg.modelAliases["smart"] != "gpt-5" {
-		t.Errorf("modelAliases = %v, want fast=gpt-4o-mini smart=gpt-5", cfg.modelAliases)
+	if got := cfg.modelAliases.AsMap(); got["fast"] != "gpt-4o-mini" || got["smart"] != "gpt-5" {
+		t.Errorf("modelAliases = %v, want fast=gpt-4o-mini smart=gpt-5", got)
 	}
-	if cfg.modelSlots["compaction"] != "cheap" || cfg.modelSlots["guardrail"] != "fast" {
-		t.Errorf("modelSlots = %v, want compaction=cheap guardrail=fast", cfg.modelSlots)
+	if got := cfg.modelSlots.AsMap(); got["compaction"] != "cheap" || got["guardrail"] != "fast" {
+		t.Errorf("modelSlots = %v, want compaction=cheap guardrail=fast", got)
 	}
 
 	// A malformed alias (no '=') is a parse error.
 	if _, err := parseFlags([]string{"--model-alias", "bogus"}); err == nil {
 		t.Error("parseFlags(--model-alias bogus) should error on a missing '='")
 	}
-	// A malformed slot (no '=') is a parse error too (same keyValueList grammar).
+	// A malformed slot (no '=') is a parse error too (same cliconfig.KeyValueList grammar).
 	if _, err := parseFlags([]string{"--model-slot", "bogus"}); err == nil {
 		t.Error("parseFlags(--model-slot bogus) should error on a missing '='")
 	}

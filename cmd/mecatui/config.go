@@ -6,43 +6,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
-	"strings"
 	"time"
 
 	"github.com/stacklok/mecatl/internal/app"
 	"github.com/stacklok/mecatl/internal/cliconfig"
 )
-
-// keyValueList is a repeatable "key=value" flag.Value collecting into an ordered
-// map (the mecated twin), backing --model-alias and --model-slot for the embedded
-// server. A later occurrence of the same key overrides an earlier one.
-type keyValueList map[string]string
-
-func (m keyValueList) String() string {
-	if len(m) == 0 {
-		return ""
-	}
-	parts := make([]string, 0, len(m))
-	for k, v := range m {
-		parts = append(parts, k+"="+v)
-	}
-	sort.Strings(parts)
-	return strings.Join(parts, ",")
-}
-
-func (m *keyValueList) Set(v string) error {
-	k, val, ok := strings.Cut(v, "=")
-	k = strings.TrimSpace(k)
-	if !ok || k == "" {
-		return fmt.Errorf("must be key=value, got %q", v)
-	}
-	if *m == nil {
-		*m = keyValueList{}
-	}
-	(*m)[k] = strings.TrimSpace(val)
-	return nil
-}
 
 // config is the resolved CLI/env configuration for mecatui.
 type config struct {
@@ -99,9 +67,11 @@ type config struct {
 	// (ADR 0030): modelAliases maps a short alias to a concrete id; modelSlots binds
 	// an internal lightweight call (compaction/ask-reviewer/guardrail) or a tier
 	// (cheap/fast/reasoning) to a selector resolved THROUGH modelAliases. INERT when
-	// dialling an external server.
-	modelAliases keyValueList
-	modelSlots   keyValueList
+	// dialling an external server. The *cliconfig.KeyValueList pointers are the
+	// flag bindings returned by cliconfig.RegisterModelFlags (issue #93: the type
+	// lives in cliconfig so the two mains cannot drift).
+	modelAliases *cliconfig.KeyValueList
+	modelSlots   *cliconfig.KeyValueList
 	// Headless ask reviewer (issue #31, embedded server only): the mecated flag
 	// mirrors. subagentAskReviewer names the reviewer model (empty = off);
 	// subagentAskReviewerMaxDenies is the per-run consecutive-deny breaker;
@@ -284,8 +254,11 @@ func parseFlags(args []string) (config, error) {
 	fs.StringVar(&cfg.defaultProvider, "default-provider", "", "embedded server only: deployment-wide default provider id shared by every client (e.g. openai, openrouter, anthropic); overrides the built-in provider preference for zero-selector sessions while a client-side selection still wins. Validated FAIL-FAST at startup: an unknown or unavailable provider refuses to start")
 	fs.StringVar(&cfg.defaultModel, "default-model", "", "embedded server only: deployment-wide default model id for the default provider; sits BELOW client-side defaults and ABOVE the per-provider built-in default. Validated FAIL-FAST at startup: a model not catalogued for the default provider refuses to start")
 	fs.StringVar(&cfg.subagentModel, "subagent-model", "", "embedded server only: global default model for every Subagent / Parallel-branch / team-member child that does not pin its own model (the analogue of CLAUDE_CODE_SUBAGENT_MODEL); the Parallel judge stays on the session model. Same provider as the session. Empty inherits --model; a value that does not resolve to a usable model id FAILS STARTUP")
-	fs.Var(&cfg.modelAliases, "model-alias", "embedded server only: model alias mapping as name=model-id (repeatable), e.g. --model-alias cheap=gpt-4o-mini. Aliases are resolved in the composition layer; a --model-slot selector and an agent def's `model: <alias>` resolve through this map")
-	fs.Var(&cfg.modelSlots, "model-slot", "embedded server only: per-slot model binding as slot=selector (repeatable), e.g. --model-slot compaction=cheap (ADR 0030). A SLOT routes an internal lightweight LLM call (`compaction`/`ask-reviewer`/`guardrail`) to its own model; a TIER key (`cheap`/`fast`/`reasoning`) gives a default a slot falls through to (each routed slot defaults to `cheap`). The selector is an alias (--model-alias / built-ins) or a concrete id. Empty keeps every call on the session model. FAIL-SOFT on a typo/inherit. Operator-tier only")
+	// Shared model alias/slot flags (cliconfig); mecatui keeps its own help wording.
+	cfg.modelAliases, cfg.modelSlots = cliconfig.RegisterModelFlags(fs, cliconfig.ModelFlagHelp{
+		ModelAlias: "embedded server only: model alias mapping as name=model-id (repeatable), e.g. --model-alias cheap=gpt-4o-mini. Aliases are resolved in the composition layer; a --model-slot selector and an agent def's `model: <alias>` resolve through this map",
+		ModelSlot:  "embedded server only: per-slot model binding as slot=selector (repeatable), e.g. --model-slot compaction=cheap (ADR 0030). A SLOT routes an internal lightweight LLM call (`compaction`/`ask-reviewer`/`guardrail`) to its own model; a TIER key (`cheap`/`fast`/`reasoning`) gives a default a slot falls through to (each routed slot defaults to `cheap`). The selector is an alias (--model-alias / built-ins) or a concrete id. Empty keeps every call on the session model. FAIL-SOFT on a typo/inherit. Operator-tier only",
+	})
 	fs.StringVar(&cfg.subagentAskReviewer, "subagent-ask-reviewer", "", "embedded server only: OPT-IN headless ask reviewer (issue #31), accepted for symmetry with mecated but INERT under mecatui — mecatui runs INTERACTIVE (a human sits at the approval modal), so a subagent/member/branch permission ask SURFACES to that modal, never reaching the reviewer (which only fires on a headless server with no human). Model id of a tool-less ONE-TURN reviewer; empty (default) disables it; an unusable model id FAILS STARTUP. To actually use the reviewer, run a headless `mecated --headless --subagent-ask-reviewer ...` and point mecatui at it with --server")
 	fs.IntVar(&cfg.subagentAskReviewerMaxDenies, "subagent-ask-reviewer-max-denies", 3, "embedded server only: circuit breaker for --subagent-ask-reviewer (INERT under mecatui — see that flag). <=0 uses the default (3)")
 	fs.StringVar(&cfg.subagentAskReviewerPolicyFile, "subagent-ask-reviewer-policy", "", "embedded server only: path to a TRUSTED policy rubric file for --subagent-ask-reviewer (INERT under mecatui — see that flag). Empty keeps the built-in rubric. Read once at startup; an unreadable file FAILS STARTUP")

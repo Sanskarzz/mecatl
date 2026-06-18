@@ -13,7 +13,10 @@ package cliconfig
 
 import (
 	"flag"
+	"fmt"
 	"os"
+	"sort"
+	"strings"
 
 	"github.com/stacklok/mecatl/internal/app"
 )
@@ -139,6 +142,105 @@ func (h ProviderFlagHelp) withDefaults() ProviderFlagHelp {
 	}
 	if h.AnthropicBaseURL == "" {
 		h.AnthropicBaseURL = DefaultProviderFlagHelp.AnthropicBaseURL
+	}
+	return h
+}
+
+// KeyValueList is a repeatable "key=value" flag.Value collecting into a
+// last-write-wins map. It backs --model-alias (e.g.
+// --model-alias fast=gpt-4o-mini --model-alias smart=gpt-5) and --model-slot
+// (e.g. --model-slot compaction=cheap) in both cmd/mecated and cmd/mecatui.
+// Extracted here (issue #93) so the two mains cannot drift apart — the twin
+// copies already had divergent Set error messages in #87.
+//
+// A nil *KeyValueList is usable: Set lazily allocates the backing map, exactly
+// as the pre-extraction inline types did, so a config struct field's zero value
+// (a nil map) is a valid flag binding.
+type KeyValueList map[string]string
+
+// String implements flag.Value. It renders the map as a sorted, comma-separated
+// list of key=value pairs (empty for a nil/empty map), the stable form flag's
+// default-value display expects.
+func (m KeyValueList) String() string {
+	if len(m) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(m))
+	for k, v := range m {
+		parts = append(parts, k+"="+v)
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
+}
+
+// Set implements flag.Value. A later occurrence of the same key overrides an
+// earlier one. A value without '=' (or with an empty key) is a parse error.
+func (m *KeyValueList) Set(v string) error {
+	k, val, ok := strings.Cut(v, "=")
+	k = strings.TrimSpace(k)
+	if !ok || k == "" {
+		return fmt.Errorf("must be key=value, got %q", v)
+	}
+	if *m == nil {
+		*m = KeyValueList{}
+	}
+	(*m)[k] = strings.TrimSpace(val)
+	return nil
+}
+
+// AsMap returns the backing map as a plain map[string]string (the type
+// app.Config.ModelAliases / ModelSlots expects), or nil for a nil receiver so
+// an unset flag yields the byte-identical default (a nil map, not an empty
+// one). It is the ONE conversion a cmd main does to thread a parsed KeyValueList
+// onto app.Config.
+func (m *KeyValueList) AsMap() map[string]string {
+	if m == nil {
+		return nil
+	}
+	return map[string]string(*m)
+}
+
+// ModelFlagHelp carries the per-main help text for the two repeatable model
+// flags --model-alias and --model-slot. The two mains word these slightly
+// differently (mecatui prefixes "embedded server only:"), so the help is passed
+// in rather than hard-coded — keeping each main's --help BYTE-IDENTICAL across
+// the extraction. A zero ModelFlagHelp falls back to DefaultModelFlagHelp (the
+// mecated wording), which is what a new consumer (mecatequi) would use.
+type ModelFlagHelp struct {
+	ModelAlias string
+	ModelSlot  string
+}
+
+// DefaultModelFlagHelp is the mecated-style wording, used when a field of the
+// passed ModelFlagHelp is empty. It mirrors the help text the mecated twin
+// carried before the extraction.
+var DefaultModelFlagHelp = ModelFlagHelp{
+	ModelAlias: "model alias mapping as name=model-id (repeatable), e.g. --model-alias fast=gpt-4o-mini. Aliases are resolved only in the composition layer; an agent def's `model: <alias>` resolves through this map (then the built-in sonnet/opus/haiku aliases)",
+	ModelSlot:  "per-slot model binding as slot=selector (repeatable), e.g. --model-slot compaction=cheap --model-slot cheap=gpt-4o-mini (ADR 0030). A SLOT routes an internal lightweight LLM call to its own model: the wired slots are `compaction` (the compaction summary call), `ask-reviewer` (the headless child-ask reviewer), and `guardrail` (the content checker); a TIER key (`cheap`/`fast`/`reasoning`) gives a default a slot falls through to (each routed slot defaults to `cheap`). The selector is an alias (resolved through --model-alias / the built-ins) or a concrete id. Empty (no --model-slot) keeps every call on the session model (byte-identical default). FAIL-SOFT: a typo'd slot or an alias meaning inherit WARNs and keeps the session model. For ask-reviewer/guardrail the slot supersedes the model of --subagent-ask-reviewer/--guardrails-model but does NOT enable them (those flags stay the on/off gate). Operator-tier only; the YAML twin is the user-global settings.yaml `models.slots:` subtree",
+}
+
+// RegisterModelFlags registers --model-alias / --model-slot on fs, each bound
+// to its own *KeyValueList, and returns the pair so the caller can thread them
+// onto app.Config (ModelAliases / ModelSlots). The help text comes from help,
+// falling back per-field to DefaultModelFlagHelp so a caller may pass a zero
+// value (or override only the fields it words differently). It is the ONE place
+// the two repeatable model flags are wired, so the two mains (and a future
+// mecatequi consumer) cannot drift apart.
+func RegisterModelFlags(fs *flag.FlagSet, help ModelFlagHelp) (aliases, slots *KeyValueList) {
+	help = help.withModelDefaults()
+	aliases = new(KeyValueList)
+	slots = new(KeyValueList)
+	fs.Var(aliases, "model-alias", help.ModelAlias)
+	fs.Var(slots, "model-slot", help.ModelSlot)
+	return aliases, slots
+}
+
+func (h ModelFlagHelp) withModelDefaults() ModelFlagHelp {
+	if h.ModelAlias == "" {
+		h.ModelAlias = DefaultModelFlagHelp.ModelAlias
+	}
+	if h.ModelSlot == "" {
+		h.ModelSlot = DefaultModelFlagHelp.ModelSlot
 	}
 	return h
 }

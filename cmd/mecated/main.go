@@ -29,7 +29,6 @@ import (
 	"os/signal"
 	"runtime"
 	"runtime/trace"
-	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -223,15 +222,18 @@ type config struct {
 	// such dir exists, mirroring the teams/fork "on-but-inert" philosophy. subagentModel
 	// globally overrides the model of every Subagent/member child that does not pin its
 	// own; modelAliases maps short aliases (sonnet/opus/fast/...) to concrete ids.
+	// The *cliconfig.KeyValueList pointers are the flag bindings returned by
+	// cliconfig.RegisterModelFlags (issue #93: the type lives in cliconfig so the
+	// two mains cannot drift).
 	agentsDirs         stringList
 	agentsConventional bool
 	subagentModel      string
-	modelAliases       keyValueList
+	modelAliases       *cliconfig.KeyValueList
 	// modelSlots binds a named internal lightweight call (compaction/ask-reviewer/
 	// guardrail) — or a tier (cheap/fast/reasoning) a slot falls through to — to a
 	// model selector (an alias or a concrete id), via the repeatable --model-slot
 	// flag. Resolved THROUGH modelAliases in the composition layer (ADR 0030).
-	modelSlots keyValueList
+	modelSlots *cliconfig.KeyValueList
 
 	// Headless ask reviewer (issue #31): subagentAskReviewer names the model (or
 	// --model-alias) of the OPT-IN one-turn reviewer that adjudicates a HEADLESS
@@ -430,36 +432,6 @@ func (l *stringList) String() string { return strings.Join(*l, ",") }
 
 func (l *stringList) Set(v string) error {
 	*l = append(*l, v)
-	return nil
-}
-
-// keyValueList is a repeatable "key=value" flag.Value collecting into an ordered
-// map. A later occurrence of the same key overrides an earlier one. It backs
-// --model-alias (e.g. --model-alias fast=gpt-4o-mini --model-alias smart=gpt-5).
-type keyValueList map[string]string
-
-func (m keyValueList) String() string {
-	if len(m) == 0 {
-		return ""
-	}
-	parts := make([]string, 0, len(m))
-	for k, v := range m {
-		parts = append(parts, k+"="+v)
-	}
-	sort.Strings(parts)
-	return strings.Join(parts, ",")
-}
-
-func (m *keyValueList) Set(v string) error {
-	k, val, ok := strings.Cut(v, "=")
-	k = strings.TrimSpace(k)
-	if !ok || k == "" {
-		return fmt.Errorf("model alias must be key=value, got %q", v)
-	}
-	if *m == nil {
-		*m = keyValueList{}
-	}
-	(*m)[k] = strings.TrimSpace(val)
 	return nil
 }
 
@@ -828,8 +800,8 @@ func appConfig(cfg config, sink port.EventSink, recorder port.ToolCallRecorder, 
 		// flag cannot express a rule list.
 		GuardrailsModel:         cfg.guardrailsModel,
 		GuardrailsDisabled:      cfg.guardrailsOff,
-		ModelAliases:            cfg.modelAliases,
-		ModelSlots:              cfg.modelSlots,
+		ModelAliases:            cfg.modelAliases.AsMap(),
+		ModelSlots:              cfg.modelSlots.AsMap(),
 		CommandsDir:             cfg.commandsDir,
 		EnableCommands:          cfg.enableCommands,
 		EnableParallel:          cfg.enableParallel,
@@ -1063,8 +1035,9 @@ func parseFlags(argv []string) (config, error) {
 	fs.BoolVar(&cfg.agentsConventional, "agents-conventional", true, "also discover agent definitions from the conventional locations: <workspace>/"+agents.ProjectDirMecatl+", <workspace>/"+agents.ProjectDirClaude+", $XDG_CONFIG_HOME/mecatl/agents (or ~/.config/mecatl/agents), and ~/.claude/agents (lower precedence than --agents-dir). ON by default and INERT when no such dir exists (like teams/fork). Pass --agents-conventional=false to disable. TRUST BOUNDARY: same trust class as AGENTS.md/CLAUDE.md")
 	fs.StringVar(&cfg.agentSourceURL, "agent-source-url", "", "host:port of a remote agent-definition gRPC driver (mecatl.driver.v1.AgentSourceService); the definition set is SNAPSHOTTED at startup (fatal if unreachable). Mutually exclusive with --agents-dir; the default-on conventional discovery is SUPERSEDED (not an error) — the driver becomes the only definition source. TRUST BOUNDARY: stronger than model steering — a def's hooks execute as UNGATED shell on the harness host (hookexec, every lifecycle phase, no permission ask); a compromised agent-source driver executes arbitrary shell on the harness host via def hooks, so treat it as harness-equivalent infrastructure. Same auth/TLS posture as --session-store-url (equal URLs share one connection)")
 	fs.StringVar(&cfg.subagentModel, "subagent-model", "", "global default model for every Subagent / Parallel-branch / team-member child that does not pin its own model (via an agent definition or a per-call override) — the analogue of CLAUDE_CODE_SUBAGENT_MODEL; the Parallel judge stays on the session model. May be a concrete id or an alias from --model-alias; resolved on the session's provider (same-provider only). Empty inherits the parent --model; a non-empty value that does not resolve to a usable model id (unknown alias, or an alias meaning inherit) FAILS STARTUP")
-	fs.Var(&cfg.modelAliases, "model-alias", "model alias mapping as name=model-id (repeatable), e.g. --model-alias fast=gpt-4o-mini. Aliases are resolved only in the composition layer; an agent def's `model: <alias>` resolves through this map (then the built-in sonnet/opus/haiku aliases)")
-	fs.Var(&cfg.modelSlots, "model-slot", "per-slot model binding as slot=selector (repeatable), e.g. --model-slot compaction=cheap --model-slot cheap=gpt-4o-mini (ADR 0030). A SLOT routes an internal lightweight LLM call to its own model: the wired slots are `compaction` (the compaction summary call), `ask-reviewer` (the headless child-ask reviewer), and `guardrail` (the content checker); a TIER key (`cheap`/`fast`/`reasoning`) gives a default a slot falls through to (each routed slot defaults to `cheap`). The selector is an alias (resolved through --model-alias / the built-ins) or a concrete id. Empty (no --model-slot) keeps every call on the session model (byte-identical default). FAIL-SOFT: a typo'd slot or an alias meaning inherit WARNs and keeps the session model. For ask-reviewer/guardrail the slot supersedes the model of --subagent-ask-reviewer/--guardrails-model but does NOT enable them (those flags stay the on/off gate). Operator-tier only; the YAML twin is the user-global settings.yaml `models.slots:` subtree")
+	// Shared model alias/slot flags (cliconfig): mecated uses the default help
+	// wording, so a zero ModelFlagHelp is enough.
+	cfg.modelAliases, cfg.modelSlots = cliconfig.RegisterModelFlags(fs, cliconfig.ModelFlagHelp{})
 	fs.StringVar(&cfg.subagentAskReviewer, "subagent-ask-reviewer", "", "OPT-IN headless ask reviewer (issue #31): model id or --model-alias of a tool-less ONE-TURN reviewer that adjudicates a HEADLESS subagent/member/branch permission ask the 4-step model would otherwise blanket auto-deny. Allow = this call only (never learned); deny/error keeps the call denied (fail-safe). Configured Deny/Ask rules and an interactive approver always win; resolved on the session's provider (same-provider only). Empty (default) disables it; a value that does not resolve to a usable model id FAILS STARTUP. Deliberately a server flag, NOT a permission-config key: it grants an autonomous approval capability, an operator deployment decision")
 	fs.IntVar(&cfg.subagentAskReviewerMaxDenies, "subagent-ask-reviewer-max-denies", 3, "circuit breaker for --subagent-ask-reviewer: after this many CONSECUTIVE non-allow reviewer outcomes (denies/errors/timeouts) in one run, further asks skip the reviewer and fall through to the plain auto-deny; an allow resets the count. <=0 uses the default (3)")
 	fs.StringVar(&cfg.subagentAskReviewerPolicyFile, "subagent-ask-reviewer-policy", "", "path to a TRUSTED policy rubric file for --subagent-ask-reviewer; its CONTENT replaces the built-in read-only/verification rubric the reviewer applies. Empty keeps the built-in rubric. Read once at startup; an unreadable file FAILS STARTUP")
