@@ -97,7 +97,7 @@ var (
 )
 
 // defaultMaxRounds bounds a team Run so a non-converging team cannot loop forever.
-const defaultMaxRounds = 24
+const defaultMaxRounds = 48
 
 // defaultTeamConcurrency bounds how many member turns run at once within a single
 // scheduling round, mirroring parallel.go's defaultParallelConcurrency. Running every
@@ -114,7 +114,7 @@ const defaultTeamConcurrency = 4
 // budget is the missing lifetime ceiling — it accumulates turns used across rounds
 // and stops scheduling a member once it is exhausted. Override with
 // WithMemberTurnBudget; 0 disables it.
-const defaultMemberTurnBudget = 100
+const defaultMemberTurnBudget = 200
 
 // TeamEvent tags a member session Event with the member that produced it, for the
 // multiplexed team event stream the caller observes.

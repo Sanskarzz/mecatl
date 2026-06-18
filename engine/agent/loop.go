@@ -296,7 +296,7 @@ func NewEngine(deps Deps) *Engine {
 	// consulted when a ChildAskReviewer is wired, but normalised unconditionally
 	// so the breaker construction in RunContentWith never sees a zero max.
 	if deps.ChildAskReviewMaxDenies <= 0 {
-		deps.ChildAskReviewMaxDenies = defaultAskReviewMaxDenies
+		deps.ChildAskReviewMaxDenies = DefaultAskReviewMaxDenies
 	}
 	if deps.Instructions == nil {
 		deps.Instructions = prompt.RootAssembler{}

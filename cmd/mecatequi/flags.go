@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/internal/adapter/slogdiag"
 	"github.com/stacklok/mecatl/internal/app"
@@ -154,7 +155,7 @@ func parseFlags(argv []string) (flags, error) {
 
 	fs.StringVar(&f.subagentAskReviewer, "subagent-ask-reviewer", "", "OPT-IN headless ask reviewer (issue #31): model id / alias of a tool-less one-turn reviewer adjudicating a child permission ask the headless auto-deny would otherwise reject. Empty disables it")
 	fs.BoolVar(&f.subagentModelRouter, "subagent-model-router", false, "OPT-IN semantic model router (ADR 0031): a tiny classifier on the `router` slot picks the child model per plain Subagent delegation from the operator-tier models.router: taxonomy. Fires before the child is minted (decide-once, same-provider); fail-soft to the inherited model on any miss. This flag is the ENABLE gate only; the taxonomy is operator-tier YAML. Default off (byte-identical to no router)")
-	fs.IntVar(&f.subagentAskReviewerMaxDenies, "subagent-ask-reviewer-max-denies", 3, "circuit breaker for --subagent-ask-reviewer: consecutive non-allow outcomes that disable the reviewer for the rest of the run; <=0 uses the default (3)")
+	fs.IntVar(&f.subagentAskReviewerMaxDenies, "subagent-ask-reviewer-max-denies", agent.DefaultAskReviewMaxDenies, "circuit breaker for --subagent-ask-reviewer: consecutive non-allow outcomes that disable the reviewer for the rest of the run; <=0 uses the default (3)")
 	fs.StringVar(&f.subagentAskReviewerPolicyFile, "subagent-ask-reviewer-policy", "", "path to a TRUSTED policy rubric file for --subagent-ask-reviewer; its CONTENT replaces the built-in rubric. Read once at startup; an unreadable file fails startup")
 
 	fs.StringVar(&f.posture, "posture", "", "OPERATOR POSTURE LADDER (strict < trusted < auto < yolo): strict (default) prompts every mutate — and a headless single-shot run has NO approver, so a main-agent ask CANCELS the run (exit 1). For an autonomous CI run use --posture auto (allow-all, child injection-defense ON) or trusted/yolo. trusted honours a project's ALLOW rules; auto adds allow-all + main substitution loosening; yolo additionally auto-runs $()/backtick/heredoc in children. An unknown value fails closed to strict")

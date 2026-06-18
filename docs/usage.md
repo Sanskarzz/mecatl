@@ -2343,8 +2343,8 @@ default session is always bounded:
 
 | Limit | Default | Disables when 0 |
 | --- | --- | --- |
-| `max_turns` | `100` | yes |
-| `max_tool_calls` | `400` | yes |
+| `max_turns` | `2000` | yes |
+| `max_tool_calls` | `8000` | yes |
 | `max_consecutive_failures` | `5` | yes |
 
 Supplying **any** non-zero limit field is taken as explicit and used as-is.
@@ -2997,8 +2997,8 @@ for `permission.ask` and resolve it with `POST …/approve` (or a `ResumeApprova
 frame over gRPC). Denied calls return the reason to the model.
 
 **The run "won't stop" / loops**
-It can't run unbounded: default limits cap it (`max_turns=100`,
-`max_tool_calls=400`, `max_consecutive_failures=5`). The terminal `result.stop`
+It can't run unbounded: default limits cap it (`max_turns=2000`,
+`max_tool_calls=8000`, `max_consecutive_failures=5`). The terminal `result.stop`
 tells you which limit fired (`max_turns`, `max_tool_calls`,
 `max_consecutive_failures`). Tighten them per session via `limits`.
 

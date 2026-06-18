@@ -45,7 +45,7 @@ var modelRouterLimits = session.Limits{MaxTurns: 1, MaxToolCalls: 1, MaxConsecut
 // one run, the breaker opens and further Subagent calls in that run skip the classifier
 // and inherit the default model, bounding classifier spend on a run whose tasks keep
 // failing to classify. A successful classification resets the count. It mirrors
-// defaultAskReviewMaxDenies (3).
+// DefaultAskReviewMaxDenies (3).
 const defaultModelRouterMaxMisses = 3
 
 // modelRouterBreaker is the per-RUN router circuit breaker. Its mutex does double duty:

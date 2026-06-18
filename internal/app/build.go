@@ -80,9 +80,9 @@ const defaultCompactionTargetRatio = 0.6
 // in package session, so the composition layer supplies these non-zero defaults
 // to ensure a session created without explicit limits is still bounded.
 const (
-	defaultMaxTurns               = 1000
-	defaultMaxToolCalls           = 4000
-	defaultMaxConsecutiveFailures = 5
+	deploymentMaxTurns               = 2000
+	deploymentMaxToolCalls           = 8000
+	deploymentMaxConsecutiveFailures = 5
 )
 
 // LLM resilience backoff bounds. Exponential backoff between BaseBackoff and
@@ -5035,9 +5035,9 @@ func childPermPolicy(cfg Config) *permpolicy.Policy {
 // value disables every stop condition in package session).
 func defaultLimits() session.Limits {
 	return session.Limits{
-		MaxTurns:               defaultMaxTurns,
-		MaxToolCalls:           defaultMaxToolCalls,
-		MaxConsecutiveFailures: defaultMaxConsecutiveFailures,
+		MaxTurns:               deploymentMaxTurns,
+		MaxToolCalls:           deploymentMaxToolCalls,
+		MaxConsecutiveFailures: deploymentMaxConsecutiveFailures,
 	}
 }
 

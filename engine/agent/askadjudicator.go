@@ -89,13 +89,19 @@ const defaultAskReviewPolicy = "Allow ONLY commands that are clearly read-only "
 // increment).
 const askReviewTimeout = 30 * time.Second
 
-// defaultAskReviewMaxDenies is the breaker threshold applied when
+// DefaultAskReviewMaxDenies is the breaker threshold applied when
 // Deps.ChildAskReviewMaxDenies is unset (NewEngine maps <=0 to this): after this
 // many CONSECUTIVE non-allow outcomes (denies, failures, timeouts) within one
 // run, further asks skip the reviewer and fall through to auto-deny — bounding
 // reviewer spend on a run whose children keep proposing disallowed commands. An
 // allow resets the count; an abstention (ErrNotReviewable) does not affect it.
-const defaultAskReviewMaxDenies = 3
+//
+// Exported so the cmd/ flag declarations (mecated/mecatui/mecatequi) reference a
+// single named const for their --subagent-ask-reviewer-max-denies default instead
+// of an inline literal that could drift from this value. See the run-bounds index
+// in docs/design/IMPLEMENTATION-NOTES.md and the drift guard in
+// engine/agent/runbounds_drift_test.go.
+const DefaultAskReviewMaxDenies = 3
 
 // askReviewLimits are the default reviewer run's stop conditions: ONE turn,
 // tool-less. The reviewer must answer in its first turn; an empty/no-verdict

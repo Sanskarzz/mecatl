@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/internal/app"
 	"github.com/stacklok/mecatl/internal/cliconfig"
 )
@@ -260,7 +261,7 @@ func parseFlags(args []string) (config, error) {
 		ModelSlot:  "embedded server only: per-slot model binding as slot=selector (repeatable), e.g. --model-slot compaction=cheap (ADR 0030). A SLOT routes an internal lightweight LLM call (`compaction`/`ask-reviewer`/`guardrail`) to its own model; a TIER key (`cheap`/`fast`/`reasoning`) gives a default a slot falls through to (each routed slot defaults to `cheap`). The selector is an alias (--model-alias / built-ins) or a concrete id. Empty keeps every call on the session model. FAIL-SOFT on a typo/inherit. Operator-tier only",
 	})
 	fs.StringVar(&cfg.subagentAskReviewer, "subagent-ask-reviewer", "", "embedded server only: OPT-IN headless ask reviewer (issue #31), accepted for symmetry with mecated but INERT under mecatui — mecatui runs INTERACTIVE (a human sits at the approval modal), so a subagent/member/branch permission ask SURFACES to that modal, never reaching the reviewer (which only fires on a headless server with no human). Model id of a tool-less ONE-TURN reviewer; empty (default) disables it; an unusable model id FAILS STARTUP. To actually use the reviewer, run a headless `mecated --headless --subagent-ask-reviewer ...` and point mecatui at it with --server")
-	fs.IntVar(&cfg.subagentAskReviewerMaxDenies, "subagent-ask-reviewer-max-denies", 3, "embedded server only: circuit breaker for --subagent-ask-reviewer (INERT under mecatui — see that flag). <=0 uses the default (3)")
+	fs.IntVar(&cfg.subagentAskReviewerMaxDenies, "subagent-ask-reviewer-max-denies", agent.DefaultAskReviewMaxDenies, "embedded server only: circuit breaker for --subagent-ask-reviewer (INERT under mecatui — see that flag). <=0 uses the default (3)")
 	fs.StringVar(&cfg.subagentAskReviewerPolicyFile, "subagent-ask-reviewer-policy", "", "embedded server only: path to a TRUSTED policy rubric file for --subagent-ask-reviewer (INERT under mecatui — see that flag). Empty keeps the built-in rubric. Read once at startup; an unreadable file FAILS STARTUP")
 	// Shared provider base-URL flags (cliconfig); mecatui keeps its own help wording.
 	cfg.providerFlags = cliconfig.RegisterProviderFlags(fs, cliconfig.ProviderFlagHelp{

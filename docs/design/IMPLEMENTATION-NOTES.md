@@ -1378,7 +1378,7 @@ ambiguity) → fall-through PLUS a distinct reviewer-failure INFO so a flaky rev
 visible. Every INFO carries the clamped `command` (an autonomous approval must record WHAT it ran,
 not only the policy reason — finding 3) and rides the EXISTING child-ask diagnostic chokepoint —
 the loop's three-line contract is untouched. The breaker (`askReviewBreaker`, default
-`defaultAskReviewMaxDenies` 3 via `Deps.ChildAskReviewMaxDenies`/`--subagent-ask-reviewer-max-denies`)
+`DefaultAskReviewMaxDenies` 3 via `Deps.ChildAskReviewMaxDenies`/`--subagent-ask-reviewer-max-denies`)
 counts CONSECUTIVE non-allow outcomes per run (via `noteBreakerFailure`), resets on allow, emits a
 ONE-time breaker-opened INFO on the crossing, and its mutex SERIALIZES reviews within the run
 (deterministic semantics + bounded concurrent reviewer spend).
@@ -1687,6 +1687,96 @@ Tier-4 tests in `cascade_test.go` cover prompt-reaches-request (all nine headers
 the DATA framing + the "only memory"/"preserved verbatim" framing, via
 `mockllm.WithRequestObserver`), budget-in-instruction, empty-summary
 abort, missing-sections/over-long acceptance, pairing preservation, and LLM-error abort.
+
+## Run-bound knobs — index
+
+The run-bound knobs (turn/tool-call/round caps, token budgets, no-progress nudges,
+structured-output retries, concurrency gates, compaction ratios, the per-call
+tighten-only overrides) are declared across three packages and several files. This
+is the single navigable index: knob, default, file, scope, and override path. The
+declarations STAY where they are (the layering rule holds — domain defaults in
+`engine/session`, application defaults in `engine/agent`, deployment defaults in
+`internal/app`); this table is navigation, not consolidation.
+
+The table is pinned to the code by TWO structural drift guards:
+`engine/agent/runbounds_drift_test.go` (`TestRunBoundsInventoryIsComplete`) and
+`internal/app/runbounds_drift_test.go`
+(`TestRunBoundsInventoryIsComplete` + `TestRunBoundsInventoryHasNoUnlistedConsts`).
+Add a knob → add a row here AND a row in the matching guard; change a value →
+update both; remove one → remove both. The `path` (`Symbol`) citations below are
+also verified by `docs/lint` (`CheckCitations`), so a rename that leaves the table
+stale fails `task test`. The guards are the same posture as
+`TestPerSessionCatalogMatchesSharedCatalog` (`internal/app/catalog_drift_test.go`)
+and the DAG layering test (`engine/arch/layering_test.go`).
+
+**Scope boundary.** "Run-bound" here means the caps that bound what a *run* may do —
+turn/tool-call/round caps, cumulative token budgets, concurrency gates, retry/nudge
+counts, the compaction trigger/target ratios, and the per-call tighten-only
+overrides. Compaction-*algorithm* internals (the cascade tier byte/token budgets in
+`engine/agent/cascade.go` — `cascadeKeepLastTurns`, `cascadeStripToolBodyChars`,
+`cascadeMaxCollapseChars`, `defaultSummaryMaxTokens`) shape how a *single*
+compaction summarises, not how much a run may consume, so they are deliberately OUT
+of this index (and out of both drift guards). Add a true run bound → it goes here; a
+new cascade tier knob does not.
+
+### Engine-application tier — `engine/agent/`
+
+| Knob | Default | File | Scope | Override path |
+|---|---|---|---|---|
+| no-progress nudge cap | 2 | `engine/agent/loop.go` (`defaultNoProgressNudges`) | shared loop (main + Subagent + team member + lead synthesis + Parallel) | `Deps.MaxNoProgressNudges` ← `Config.MaxNoProgressNudges`; `<0` disables, `0`→this |
+| compaction trigger ratio | 0.8 | `engine/agent/loop.go` (`defaultCompactionRatio`) | shared loop | `Deps.CompactionRatio` ← `Config.CompactionRatio`; `(0,1]` overrides, else this |
+| child concurrency gate | 4 | `engine/agent/subagent.go` (`defaultMaxConcurrentChildren`) | Subagent fan-out (forking + forker-less) | `WithMaxConcurrentChildren`; `<1`→1 |
+| structured-output retries | 2 | `engine/agent/subagent.go` (`defaultStructuredOutputRetries`) | per Subagent `output_schema` call | not configurable (correction re-drives) |
+| subagent run-token floor | 25 000 | `engine/agent/subagent.go` (`MinSubagentRunTokens`) | per-call `MaxRunTokensOverride` floor | tighten-only floor; raises a below-floor override |
+| Parallel fan-out cap | 8 | `engine/agent/parallel.go` (`defaultMaxBranches`) | per `Parallel` call | `WithMaxBranches`; non-positive ignored |
+| Parallel concurrency | 4 | `engine/agent/parallel.go` (`defaultParallelConcurrency`) | per `Parallel` call | `WithParallelConcurrency`; non-positive ignored |
+| team round cap | 48 | `engine/agent/teamsupervisor.go` (`defaultMaxRounds`) | per team `Run` | `WithMaxRounds` |
+| team member concurrency | 4 | `engine/agent/teamsupervisor.go` (`defaultTeamConcurrency`) | per scheduling round | `WithTeamConcurrency` |
+| member lifetime turn budget | 200 | `engine/agent/teamsupervisor.go` (`defaultMemberTurnBudget`) | cumulative per member across rounds | `WithMemberTurnBudget` |
+| ask-reviewer breaker | 3 | `engine/agent/askadjudicator.go` (`DefaultAskReviewMaxDenies`) | per run (consecutive non-allow reviewer outcomes) | `Deps.ChildAskReviewMaxDenies` ← `Config.SubagentAskReviewerMaxDenies` ← `--subagent-ask-reviewer-max-denies`; `<=0`→this |
+| model-router breaker | 3 | `engine/agent/modelrouter.go` (`defaultModelRouterMaxMisses`) | per run (router circuit-breaker) | not configurable |
+| preserved-fork LRU cap | 8 | `engine/agent/forkreaper.go` (`DefaultPreservedForkCap`) | process-wide preserved-winner-fork LRU | `NewLRUForkReaper(cap)`; non-positive→this |
+| child stop limits | 100 / 400 / 3 | `engine/agent/subagent.go` (`defaultChildLimits`) | per Subagent child / team member / Parallel branch | `WithChildLimits`; agent-def frontmatter merged per-field; per-call `max_turns`/`max_tool_calls` tighten-only |
+| ask-reviewer run limits | 1 / 1 / 1 | `engine/agent/askadjudicator.go` (`askReviewLimits`) | one-shot ask-reviewer run | not configurable |
+| guardrail-checker run limits | 1 / 1 / 1 | `engine/agent/guardrailcheck.go` (`guardrailCheckLimits`) | one-shot guardrail checker run | not configurable |
+
+### Composition tier — `internal/app/`
+
+| Knob | Default | File | Scope | Override path |
+|---|---|---|---|---|
+| deployment max-turns | 2000 | `internal/app/build.go` (`deploymentMaxTurns`) | main engine `Deps.Limits` | `Config.Limits` ← `defaultLimits()`; `--max-turns` (mecatequi only, `0`→this) |
+| deployment max-tool-calls | 8000 | `internal/app/build.go` (`deploymentMaxToolCalls`) | main engine `Deps.Limits` | `Config.Limits` ← `defaultLimits()`; no CLI flag |
+| deployment max-consecutive-failures | 5 | `internal/app/build.go` (`deploymentMaxConsecutiveFailures`) | main engine `Deps.Limits` | `Config.Limits` ← `defaultLimits()`; no CLI flag |
+| compaction trigger ratio (composition) | 0.8 | `internal/app/build.go` (`defaultCompactionRatio`) | shared engine compactor | `Config.CompactionRatio`; **duplicated in** `engine/agent/loop.go` (`defaultCompactionRatio`) — both pinned to 0.8, keep in sync |
+| cascade compaction target ratio | 0.6 | `internal/app/build.go` (`defaultCompactionTargetRatio`) | cascade compactor reduce-toward target | not separately configurable |
+| context-window floor | 128 000 | `internal/app/build.go` (`defaultContextWindowTokens`) | context-window resolver terminal floor | `--context-window-override` wins |
+| guardrails per-session check cap | 200 | `internal/app/guardrails.go` (`defaultGuardrailsMaxChecks`) | per-session checker-call cap (auto-applied when operator enables guardrails with a model and no `maxChecks`) | operator-tier `guardrails.maxChecks` |
+
+### Precedence (the MaxTurns axis; same shape applies to the other bounds)
+
+1. **Deployment default** (`internal/app/build.go`: `deploymentMaxTurns=2000` /
+   `deploymentMaxToolCalls=8000` / `deploymentMaxConsecutiveFailures=5`) via
+   `defaultLimits()` → `Config.Limits` → main-engine `Deps.Limits`.
+2. **Child/member default** (`engine/agent/subagent.go` `defaultChildLimits`,
+   100/400/3) is *tighter* and applies to Subagent children + team members + Parallel
+   branches unless overridden. A child inherits the deployment default ONLY through
+   `WithDefaults` when a def pins one field.
+3. **Agent-def frontmatter** `maxTurns` / `maxToolCalls` → merged per-field over
+   `defaultChildLimits` via `defLimits` / `session.Limits.WithDefaults`: a zero field
+   inherits the default; a set field takes that value.
+4. **Per-call tighten-only** (`max_turns` / `max_tool_calls` / `max_run_tokens` on
+   the Subagent/Team/Parallel tool call) → `tightenLimit` may only LOWER
+   `session.Limits`, never raise; `MaxRunTokensOverride` folds `min(override,
+   Deps.MaxRunTokens)`, floored by `MinSubagentRunTokens`.
+5. **Zero semantics:** in `session.Limits` a zero field = "unset" (disabled UNLESS a
+   default is supplied via `WithDefaults`); for `MaxRunTokens` / `MaxTeamTokens` /
+   `MaxNoProgressNudges` zero = "unset → apply fallback", except `MaxNoProgressNudges`
+   where `<0` = disabled. `MinSubagentRunTokens` floors `MaxRunTokensOverride` from
+   below (raises, does not disable).
+6. **`WithDefaults` behaviour** (`engine/session/session.go` `Limits.WithDefaults`):
+   per-field fill from `d`; a partially-set `Limits` keeps the unset fields from `d`,
+   NOT disabled. This is the invariant that makes "agent-def sets MaxTurns only" keep
+   the child `MaxToolCalls` default.
 
 ## Adapters — `internal/adapter/`
 
