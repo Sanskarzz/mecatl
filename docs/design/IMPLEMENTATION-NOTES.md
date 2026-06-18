@@ -2005,13 +2005,15 @@ policy-blocked / unavailable models) was counting toward the shared breaker via 
 `recordFailure`, tripping it and then blocking unrelated WORKING models for the cooldown.
 
 **Establishment bound (`PerAttemptTimeout`) is a SEPARATE timer, not an absolute deadline.**
-`PerAttemptTimeout` bounds only establishment (connect + the FIRST chunk). It is enforced by a
-standalone `time.Timer` in `establish`, NOT by a `context.WithTimeout` whose absolute deadline
+`PerAttemptTimeout` bounds only establishment (connect + the FIRST COMMITTING chunk). It is enforced
+by a standalone `time.Timer` in `establish`, NOT by a `context.WithTimeout` whose absolute deadline
 would stay live throughout streaming. The inner stream rides a deadline-free `context.WithCancel(ctx)`;
 the establishment timer's goroutine sets an `estTimedOut atomic.Bool` and calls `cancel()` ONLY if
-the first chunk has not been pulled by the budget. The timer is stopped and its goroutine fully
-JOINED the instant the first chunk is in hand (and on every failure exit — one `done`-channel join,
-so goleak stays green and the goroutine is gone before `restSeq` runs). After the first chunk the
+the first committing chunk has not been pulled by the budget. The timer stays live through any
+leading non-committing prefix (ChunkReasoning/ChunkReasoningItem), so a mid-reasoning-prefix error
+is still retried. The timer is stopped and its goroutine fully JOINED the instant the first
+committing chunk is in hand (and on every failure exit — one `done`-channel join, so goleak stays
+green and the goroutine is gone before `restSeq` runs). After the first committing chunk the
 streaming phase is governed solely by the idle watchdog (`StreamIdleTimeout`, on the SAME `cancel`
 handle) plus the parent ctx — so an actively-streaming long turn (a slow reasoning model) is NEVER
 cut at the per-attempt deadline. **Motivating incident:** a `context.WithTimeout` whose deadline

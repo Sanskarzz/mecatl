@@ -428,8 +428,8 @@ window (retryable) and the **post-first-chunk** stream (terminal).
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--llm-max-attempts` | `3` | max stream-establish attempts (initial call plus retries). Retries apply ONLY before the first chunk — no-replay-after-first-chunk. |
-| `--llm-per-attempt-timeout` | `300s` | per-attempt timeout for **establishing** an LLM stream (connect + first chunk only; **never cuts an actively-streaming turn** — enforced by a separate timer stopped at the first chunk, not an absolute deadline that lingers through the stream). A timeout here is **retryable**. 0 disables. Generous by default so a slow large-context reasoning model has time to first token. `mecatui` accepts the same flag for its embedded server. |
+| `--llm-max-attempts` | `3` | max stream-establish attempts (initial call plus retries). Retries apply ONLY before the first committing chunk (text, tool calls, usage, or done) — non-committing reasoning chunks are buffered and discarded on retry. |
+| `--llm-per-attempt-timeout` | `300s` | per-attempt timeout for **establishing** an LLM stream (connect + first committing chunk (text, tool calls, usage, or done) only; **never cuts an actively-streaming turn** — enforced by a separate timer stopped at the first committing chunk, not an absolute deadline that lingers through the stream). The timer stays live through any leading reasoning prefix — so increase this value if your model has a long thinking phase before its first output token. A timeout here is **retryable**. 0 disables. Generous by default so a slow large-context reasoning model has time to first token. `mecatui` accepts the same flag for its embedded server. |
 
 > **Note — the per-attempt-timeout default was raised from 60s to 300s.** It now bounds
 > establishment (time-to-first-token) ONLY, so the old 60s value starved slow reasoning

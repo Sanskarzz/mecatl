@@ -281,3 +281,70 @@ func TestFirstChunkErrorTerminatesStopError(t *testing.T) {
 		t.Fatalf("result error = %q, want the provider message surfaced", res.Error)
 	}
 }
+
+// preCommitReasoningProvider yields ChunkReasoning chunks on the first call then
+// a retryable 503 error, and a full valid turn on subsequent calls.
+type preCommitReasoningProvider struct {
+	calls         *int32
+	successChunks []port.Chunk
+	firstErr      error
+}
+
+func (*preCommitReasoningProvider) Capabilities() port.ProviderCapabilities {
+	return port.ProviderCapabilities{}
+}
+
+func (p *preCommitReasoningProvider) Stream(_ context.Context, _ port.LLMRequest) (iter.Seq2[port.Chunk, error], error) {
+	n := int(atomic.AddInt32(p.calls, 1))
+	if n == 1 {
+		err := p.firstErr
+		return func(yield func(port.Chunk, error) bool) {
+			if !yield(port.Chunk{Kind: port.ChunkReasoning, Text: "thinking"}, nil) {
+				return
+			}
+			yield(port.Chunk{}, err)
+		}, nil
+	}
+	chunks := p.successChunks
+	return func(yield func(port.Chunk, error) bool) {
+		for _, c := range chunks {
+			if !yield(c, nil) {
+				return
+			}
+		}
+	}, nil
+}
+
+// TestLoopPreCommitReasoningErrorRetriedAndSucceeds is the end-to-end test:
+// a provider that on call 1 streams ChunkReasoning then a 503 *streamStatusError
+// (retryable), and on call 2 streams a full valid turn, must complete StopEndTurn
+// with 2 provider calls and no leaked goroutines.
+func TestLoopPreCommitReasoningErrorRetriedAndSucceeds(t *testing.T) {
+	var calls int32
+	inner := &preCommitReasoningProvider{
+		calls: &calls,
+		firstErr: &streamStatusError{
+			msg:    "server_error: 503 Service Unavailable",
+			status: 503,
+		},
+		successChunks: []port.Chunk{
+			{Kind: port.ChunkText, Text: "done"},
+			{Kind: port.ChunkDone, Stop: session.StopEndTurn},
+		},
+	}
+	llm := llmresilience.Wrap(inner, llmresilience.Config{
+		MaxAttempts: 2,
+		BaseBackoff: time.Millisecond,
+	})
+
+	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t)})
+	r := e.Run(context.Background(), newSession(t, session.Limits{}), memfs.NewWorkspace("/ws"), "go")
+
+	res := lastResult(t, drain(r))
+	if res.Stop == session.StopError {
+		t.Fatalf("stop = StopError (%q), want StopEndTurn — pre-commit reasoning error must be retried", res.Stop)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("calls = %d, want 2 (1 failing with reasoning-only + 1 succeeding)", got)
+	}
+}

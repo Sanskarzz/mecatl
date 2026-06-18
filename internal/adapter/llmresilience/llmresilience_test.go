@@ -1531,3 +1531,262 @@ func lastKind(cs []port.Chunk) any {
 	}
 	return cs[len(cs)-1].Kind
 }
+
+// TestIsCommittingPredicate is the table test for the isCommitting predicate
+// over all 7 ChunkKind values.
+func TestIsCommittingPredicate(t *testing.T) {
+	cases := []struct {
+		kind port.ChunkKind
+		want bool
+	}{
+		{port.ChunkText, true},
+		{port.ChunkReasoning, false},
+		{port.ChunkReasoningItem, false},
+		{port.ChunkToolCall, true},
+		{port.ChunkUsage, true},
+		{port.ChunkDone, true},
+		{port.ChunkPhase, true},
+	}
+	for _, tc := range cases {
+		if got := isCommitting(tc.kind); got != tc.want {
+			t.Errorf("isCommitting(%v) = %v, want %v", tc.kind, got, tc.want)
+		}
+	}
+}
+
+// TestPreCommitReasoningOnlyErrorIsRetried verifies that a mid-reasoning error
+// (before any committing chunk) is retried: attempt 1 yields ChunkReasoning
+// then ChunkReasoningItem then a retryable net error; attempt 2 succeeds.
+func TestPreCommitReasoningOnlyErrorIsRetried(t *testing.T) {
+	conn := &net.OpError{Op: "dial", Err: errors.New("refused")}
+	reasoningChunks := []port.Chunk{
+		{Kind: port.ChunkReasoning, Text: "thinking..."},
+		{Kind: port.ChunkReasoningItem, Text: "blob"},
+	}
+	f := &fakeProvider{steps: []step{
+		{chunks: reasoningChunks, midErr: conn},
+		{chunks: textTurn("ok")},
+	}}
+	p := Wrap(f, tinyBackoffCfg(3))
+
+	seq, err := p.Stream(context.Background(), port.LLMRequest{})
+	if err != nil {
+		t.Fatalf("Stream returned error: %v", err)
+	}
+	got, derr := drain(t, seq)
+	if derr != nil {
+		t.Fatalf("drain error: %v", derr)
+	}
+	if f.Calls() != 2 {
+		t.Fatalf("inner called %d times, want 2 (pre-commit error must be retried)", f.Calls())
+	}
+	// The successful attempt's chunks must be present (step 2: textTurn("ok")).
+	if len(got) == 0 || got[0].Text != "ok" {
+		t.Fatalf("got %+v, want textTurn(ok)", got)
+	}
+}
+
+// TestPostCommitErrorNotRetried is the mutation guard: a retryable error that
+// arrives AFTER a committing ChunkText must NOT be retried. If isCommitting were
+// removed, the error would be treated as a pre-commit failure and retried (f.Calls()
+// would exceed 1), which would make this test fail.
+func TestPostCommitErrorNotRetried(t *testing.T) {
+	boom := &net.OpError{Op: "dial", Err: errors.New("transport blew up")}
+	f := &fakeProvider{steps: []step{
+		{chunks: []port.Chunk{{Kind: port.ChunkText, Text: "partial"}}, midErr: boom},
+		{chunks: textTurn("should-not-be-used")},
+	}}
+	p := Wrap(f, tinyBackoffCfg(3))
+
+	seq, err := p.Stream(context.Background(), port.LLMRequest{})
+	if err != nil {
+		t.Fatalf("Stream outer error: %v", err)
+	}
+	got, derr := drain(t, seq)
+	if !errors.Is(derr, boom) {
+		t.Fatalf("drain error = %v, want boom", derr)
+	}
+	if len(got) != 1 || got[0].Text != "partial" {
+		t.Fatalf("got %+v, want one 'partial' chunk before error", got)
+	}
+	if f.Calls() != 1 {
+		t.Fatalf("inner called %d times, want 1 (no replay after committing chunk)", f.Calls())
+	}
+}
+
+// TestMixedPreCommitThenCommittingThenErrorNotRetried asserts a mixed stream:
+// non-committing chunks followed by a committing chunk followed by a retryable
+// error — the committing chunk was already emitted so the error must NOT be retried.
+func TestMixedPreCommitThenCommittingThenErrorNotRetried(t *testing.T) {
+	boom := &net.OpError{Op: "dial", Err: errors.New("mid-stream failure")}
+	f := &fakeProvider{steps: []step{
+		{
+			chunks: []port.Chunk{
+				{Kind: port.ChunkReasoning, Text: "r"},
+				{Kind: port.ChunkReasoningItem, Text: "b"},
+				{Kind: port.ChunkText, Text: "partial"},
+			},
+			midErr: boom,
+		},
+		{chunks: textTurn("should-not-be-used")},
+	}}
+	p := Wrap(f, tinyBackoffCfg(3))
+
+	seq, err := p.Stream(context.Background(), port.LLMRequest{})
+	if err != nil {
+		t.Fatalf("Stream outer error: %v", err)
+	}
+	got, derr := drain(t, seq)
+	if !errors.Is(derr, boom) {
+		t.Fatalf("drain error = %v, want boom", derr)
+	}
+	// 3 chunks before the error: ChunkReasoning, ChunkReasoningItem, ChunkText.
+	if len(got) != 3 {
+		t.Fatalf("got %d chunks, want 3", len(got))
+	}
+	if f.Calls() != 1 {
+		t.Fatalf("inner called %d times, want 1 (no retry after committing chunk)", f.Calls())
+	}
+}
+
+// TestPreCommitChunksReplayedBeforeCommittingChunk asserts the pre-commit buffer
+// is replayed in order before the first committing chunk.
+func TestPreCommitChunksReplayedBeforeCommittingChunk(t *testing.T) {
+	f := &fakeProvider{steps: []step{{
+		chunks: []port.Chunk{
+			{Kind: port.ChunkReasoning, Text: "r1"},
+			{Kind: port.ChunkReasoningItem, Text: "b1"},
+			{Kind: port.ChunkText, Text: "t1"},
+			{Kind: port.ChunkDone, Stop: session.StopEndTurn},
+		},
+	}}}
+	p := Wrap(f, Config{MaxAttempts: 1})
+
+	seq, err := p.Stream(context.Background(), port.LLMRequest{})
+	if err != nil {
+		t.Fatalf("Stream error: %v", err)
+	}
+	got, derr := drain(t, seq)
+	if derr != nil {
+		t.Fatalf("drain error: %v", derr)
+	}
+	if len(got) != 4 {
+		t.Fatalf("got %d chunks, want 4", len(got))
+	}
+	if got[0].Kind != port.ChunkReasoning || got[0].Text != "r1" {
+		t.Errorf("got[0] = %+v, want ChunkReasoning r1", got[0])
+	}
+	if got[1].Kind != port.ChunkReasoningItem || got[1].Text != "b1" {
+		t.Errorf("got[1] = %+v, want ChunkReasoningItem b1", got[1])
+	}
+	if got[2].Kind != port.ChunkText || got[2].Text != "t1" {
+		t.Errorf("got[2] = %+v, want ChunkText t1", got[2])
+	}
+	if got[3].Kind != port.ChunkDone {
+		t.Errorf("got[3] = %+v, want ChunkDone", got[3])
+	}
+}
+
+// TestPreCommitReasoningErrorExhaustsToExhaustedError asserts that when every
+// attempt yields only reasoning chunks then a retryable error, the final error
+// is *ExhaustedError with Attempts == MaxAttempts.
+func TestPreCommitReasoningErrorExhaustsToExhaustedError(t *testing.T) {
+	conn := &net.OpError{Op: "dial", Err: errors.New("refused")}
+	f := &fakeProvider{steps: []step{
+		{chunks: []port.Chunk{{Kind: port.ChunkReasoning, Text: "thinking"}}, midErr: conn},
+	}}
+	p := Wrap(f, tinyBackoffCfg(3))
+
+	_, err := p.Stream(context.Background(), port.LLMRequest{})
+	var ex *ExhaustedError
+	if !errors.As(err, &ex) {
+		t.Fatalf("err = %v, want *ExhaustedError", err)
+	}
+	if ex.Attempts != 3 {
+		t.Fatalf("Attempts = %d, want 3", ex.Attempts)
+	}
+	if f.Calls() != 3 {
+		t.Fatalf("inner called %d times, want 3", f.Calls())
+	}
+}
+
+// TestPerAttemptTimeoutDuringPreCommitIsRetriedNotTruncated asserts that the
+// per-attempt timer fires while the establish loop is blocked waiting for the
+// first committing chunk (i.e., the provider is in its reasoning prefix and
+// never yields a committing chunk within the budget). The result must be a
+// clean retry — not truncation, not a phantom empty success.
+//
+// Setup: step 1 blocks before yielding any chunk (block:true); step 2 yields a
+// full valid turn. The establishment timer fires during the blocked first-chunk
+// read (same shape as TestPreFirstChunkStallStillUsesPerAttemptTimeout, but
+// from the perspective of the pre-commit reasoning-prefix path rather than the
+// outer-ctx-block path).
+func TestPerAttemptTimeoutDuringPreCommitIsRetriedNotTruncated(t *testing.T) {
+	f := &fakeProvider{steps: []step{
+		{block: true},            // blocks before ANY chunk → per-attempt timer fires
+		{chunks: textTurn("ok")}, // step 2: full valid turn
+	}}
+	cfg := Config{
+		MaxAttempts:       2,
+		BaseBackoff:       time.Nanosecond,
+		MaxBackoff:        time.Nanosecond,
+		PerAttemptTimeout: 20 * time.Millisecond,
+	}
+	p := Wrap(f, cfg)
+
+	seq, err := p.Stream(context.Background(), port.LLMRequest{})
+	if err != nil {
+		t.Fatalf("Stream returned error: %v (want nil — timeout during pre-commit must retry, not surface)", err)
+	}
+	got, derr := drain(t, seq)
+	if derr != nil {
+		t.Fatalf("drain error: %v", derr)
+	}
+	// Step 2 is textTurn("ok"): text + usage + done = 3 chunks.
+	if len(got) == 0 || got[0].Text != "ok" {
+		t.Fatalf("got %+v, want textTurn(ok) from step 2", got)
+	}
+	if f.Calls() != 2 {
+		t.Fatalf("inner called %d times, want 2 (pre-commit timeout retried once)", f.Calls())
+	}
+}
+
+// TestPreCommitOnlyStreamCleanClose pins the behaviour when a stream yields
+// only non-committing (reasoning) chunks and then ends cleanly — no error, no
+// ChunkDone. With the pre-commit-forward fix the chunks are NOT silently
+// discarded; they are forwarded to the caller. MaxAttempts=1 so no retry.
+//
+// This pins the current behaviour so a regression (panic, hang, or silent
+// discard) is caught.
+func TestPreCommitOnlyStreamCleanClose(t *testing.T) {
+	reasoningChunks := []port.Chunk{
+		{Kind: port.ChunkReasoning, Text: "r"},
+		{Kind: port.ChunkReasoningItem, Text: "b"},
+	}
+	f := &fakeProvider{steps: []step{
+		{chunks: reasoningChunks}, // yields 2 non-committing chunks then ends cleanly
+	}}
+	p := Wrap(f, Config{MaxAttempts: 1})
+
+	seq, err := p.Stream(context.Background(), port.LLMRequest{})
+	if err != nil {
+		t.Fatalf("Stream returned error: %v", err)
+	}
+	got, derr := drain(t, seq)
+	if derr != nil {
+		t.Fatalf("drain error: %v", derr)
+	}
+	// With the pre-commit-forward fix the reasoning chunks are forwarded.
+	if len(got) != 2 {
+		t.Fatalf("got %d chunks, want 2 (reasoning chunks must be forwarded on a clean pre-commit close)", len(got))
+	}
+	if got[0].Kind != port.ChunkReasoning || got[0].Text != "r" {
+		t.Errorf("got[0] = %+v, want ChunkReasoning r", got[0])
+	}
+	if got[1].Kind != port.ChunkReasoningItem || got[1].Text != "b" {
+		t.Errorf("got[1] = %+v, want ChunkReasoningItem b", got[1])
+	}
+	if f.Calls() != 1 {
+		t.Fatalf("inner called %d times, want 1 (no retry on a clean pre-commit-only close)", f.Calls())
+	}
+}

@@ -3,14 +3,17 @@
 // a consecutive-failure circuit breaker, per-attempt timeouts, and pluggable
 // error classification.
 //
-// The single load-bearing correctness rule is no-replay-after-first-chunk: a
-// model turn may stream text, reasoning, and tool calls, none of which can be
-// safely re-issued once partially observed. Therefore this layer only retries
-// failures that occur while establishing the stream — that is, before the first
-// port.Chunk is yielded. The decorator buffers exactly the first chunk of each
-// attempt: if the attempt fails before producing one, it is eligible for retry;
-// once any chunk has been emitted to the caller, a subsequent mid-stream error
-// is surfaced verbatim and never retried.
+// The single load-bearing correctness rule is no-replay-after-first-committing-chunk:
+// once any chunk that mutates session state has been observed, the turn cannot be
+// safely replayed. ChunkText, ChunkToolCall, ChunkUsage, ChunkDone, and ChunkPhase
+// are committing (assembled into session.Message or trigger dispatch). ChunkReasoning
+// and ChunkReasoningItem are NOT committing — they are opaque blobs replayed verbatim
+// on the NEXT turn's context and carry no partial session state mid-stream. This layer
+// therefore retries failures that arrive before the first committing chunk: it buffers
+// any leading non-committing chunks across a failed attempt and only promotes to the
+// no-retry zone when a committing chunk is in hand. Once any committing chunk has been
+// emitted to the caller, a subsequent mid-stream error is surfaced verbatim and never
+// retried.
 //
 // Post-first-chunk reads are additionally bounded by StreamIdleTimeout: the gap
 // between consecutive chunks AFTER the first is bounded so a mid-stream upstream
@@ -65,7 +68,7 @@ type Config struct {
 	// MaxBackoff caps the per-attempt backoff. 0 means no cap.
 	MaxBackoff time.Duration
 	// PerAttemptTimeout bounds each attempt's establishment (connect + first
-	// chunk). 0 disables it. It never overrides a shorter caller deadline.
+	// committing chunk). 0 disables it. It never overrides a shorter caller deadline.
 	PerAttemptTimeout time.Duration
 	// StreamIdleTimeout bounds the gap between consecutive chunks AFTER the first
 	// chunk has been observed. 0 disables it. A longer stall terminates the stream
@@ -330,13 +333,30 @@ func (p *resilientProvider) recordFailure(now time.Time) {
 	}
 }
 
-// firstChunk is the buffered head of an attempt's stream: the first chunk the
-// inner iterator produced, whether the stream was empty, and a continuation
-// iterator (restSeq) that yields the remainder and performs cleanup.
+// isCommitting reports whether a ChunkKind mutates session state. Once a
+// committing chunk has been observed the stream cannot be safely retried.
+// Non-committing kinds (ChunkReasoning, ChunkReasoningItem) carry opaque blobs
+// replayed on the NEXT turn and are safe to discard on retry.
+// Default: true — any unrecognised future kind is conservatively committing.
+func isCommitting(kind port.ChunkKind) bool {
+	switch kind {
+	case port.ChunkReasoning, port.ChunkReasoningItem:
+		return false
+	default:
+		return true
+	}
+}
+
+// firstChunk is the buffered head of an attempt's stream: the first committing
+// chunk the inner iterator produced, whether the stream was empty, any
+// non-committing chunks buffered before that first committing chunk, and a
+// continuation iterator (restSeq) that yields the remainder and performs cleanup.
 type firstChunk struct {
-	chunk   port.Chunk
-	empty   bool
-	restSeq iter.Seq2[port.Chunk, error]
+	chunk     port.Chunk
+	empty     bool
+	noCommit  bool         // true when pre-commit chunks were buffered but no committing chunk arrived (clean close)
+	preCommit []port.Chunk // non-committing chunks buffered before the first committing chunk
+	restSeq   iter.Seq2[port.Chunk, error]
 }
 
 // Stream establishes the inner stream with retries and breaker protection, then
@@ -406,21 +426,24 @@ func (p *resilientProvider) Stream(ctx context.Context, req port.LLMRequest) (it
 }
 
 // establish performs a single attempt: it bounds ESTABLISHMENT (connect + the
-// first chunk) by PerAttemptTimeout, calls the inner Stream, and pulls exactly
-// the first chunk so that a pre-chunk error is observed here (and thus retryable).
-// On success it returns the inner iterator, the buffered head, and a nil error.
-// On failure it returns the error and cancels the per-attempt context.
+// first committing chunk) by PerAttemptTimeout, calls the inner Stream, and pulls
+// chunks until the first COMMITTING chunk is in hand so that a pre-committing-chunk
+// error is observed here (and thus retryable). Non-committing chunks (ChunkReasoning,
+// ChunkReasoningItem) are buffered and replayed on success. On success it returns the
+// buffered head and a nil error. On failure it returns the error and cancels the
+// per-attempt context.
 //
 // The per-attempt budget is enforced by a SEPARATE establishment time.Timer, NOT
 // by an absolute context deadline: the inner stream rides a deadline-free
 // context.WithCancel(ctx), and the timer's goroutine calls cancel() ONLY if the
-// first chunk has not been pulled by PerAttemptTimeout. The timer is stopped and
-// its goroutine fully joined the instant the first chunk is in hand (and on every
-// failure exit). After that the streaming phase is governed solely by the idle
-// watchdog (StreamIdleTimeout, run in restSeq on the same cancel handle) plus the
-// parent ctx — so an actively-streaming long turn is NEVER cut at the per-attempt
-// deadline (the bug an absolute deadline used to cause: the deadline stayed live
-// through the whole stream and silently truncated a slow reasoning turn).
+// first committing chunk has not been pulled by PerAttemptTimeout. The timer stays
+// live through any leading non-committing (reasoning) prefix. The timer is stopped
+// and its goroutine fully joined the instant the first committing chunk is in hand
+// (and on every failure exit). After that the streaming phase is governed solely by
+// the idle watchdog (StreamIdleTimeout, run in restSeq on the same cancel handle)
+// plus the parent ctx — so an actively-streaming long turn is NEVER cut at the
+// per-attempt deadline (the bug an absolute deadline used to cause: the deadline
+// stayed live through the whole stream and silently truncated a slow reasoning turn).
 //
 // The deadline-free ctx is intentionally left live on success: it is cancelled
 // when the returned iterator finishes or the caller stops early (handled in
@@ -504,63 +527,80 @@ func (p *resilientProvider) establish(ctx context.Context, req port.LLMRequest) 
 		return nil, failure
 	}
 
-	// Pull the first chunk using a pull iterator so we can stop after one.
+	// Pull chunks until the first COMMITTING chunk is in hand. Non-committing
+	// chunks (ChunkReasoning, ChunkReasoningItem) are buffered. The establishment
+	// timer stays live through the reasoning prefix.
+	return p.pullToCommit(ctx, seq, stopEstTimer, cancel, establishmentFailure)
+}
+
+// pullToCommit drives the pull iterator from seq until the first COMMITTING chunk
+// is available, buffering any non-committing prefix. It is split from establish()
+// to keep establish's cyclomatic complexity within the lint budget.
+func (p *resilientProvider) pullToCommit(
+	ctx context.Context,
+	seq iter.Seq2[port.Chunk, error],
+	stopEstTimer func() bool,
+	cancel context.CancelFunc,
+	establishmentFailure func(error) error,
+) (*firstChunk, error) {
 	next, stop := iter.Pull2(seq)
-	chunk, cerr, ok := next()
-	if !ok {
-		// next() returned ok=false: either a genuinely empty stream (the inner
-		// yielded zero chunks and finished) OR the establishment timer fired during
-		// the first-chunk read and the adapter swallowed the ctx error (it yields
-		// nothing on cancel). A fired timer (estTimedOut) is a retryable
-		// establishment timeout — surface it as a real failure so the retry/breaker
-		// path engages and an exhausted attempt becomes a *ExhaustedError (→
-		// StopError), NOT a phantom clean-done empty completion. A genuinely empty
-		// stream (timer never fired, parent live) stays the empty-success path. We
-		// are still PRE-first-chunk here, so no-replay-after-first-chunk holds.
-		timedOut := estTimedOut.Load()
-		stopEstTimer()
-		stop()
-		if cancel != nil {
-			cancel()
+	var preCommit []port.Chunk
+	for {
+		chunk, cerr, ok := next()
+		if !ok {
+			// Stream ended (no committing chunk arrived — clean end or timer fired).
+			timedOut := stopEstTimer()
+			stop()
+			if cancel != nil {
+				cancel()
+			}
+			if timedOut && ctx.Err() == nil {
+				return nil, attemptError(context.DeadlineExceeded, errFirstChunkTimeout)
+			}
+			// If non-committing chunks arrived before the clean close, forward them
+			// rather than silently discarding them (empty = true short-circuits wrap).
+			if len(preCommit) > 0 {
+				return &firstChunk{preCommit: preCommit, noCommit: true}, nil
+			}
+			return &firstChunk{empty: true}, nil
 		}
-		if timedOut && ctx.Err() == nil {
+		if cerr != nil {
+			// Error before any committing chunk: retryable establishment failure.
+			failure := establishmentFailure(cerr)
+			stopEstTimer()
+			stop()
+			if cancel != nil {
+				cancel()
+			}
+			return nil, failure
+		}
+
+		if !isCommitting(chunk.Kind) {
+			// Non-committing chunk: buffer it and keep pulling.
+			preCommit = append(preCommit, chunk)
+			continue
+		}
+
+		// First committing chunk in hand. The establishment budget is over: stop
+		// and JOIN the timer goroutine NOW (before building rest) so it cannot fire
+		// mid-stream and cannot leak. The streaming phase is governed by restSeq's
+		// idle watchdog (StreamIdleTimeout) + the parent ctx only.
+		if stopEstTimer() {
+			// Late-fire race: the timer fired in the narrow window between pulling
+			// this committing chunk and stopping the timer. It has already called
+			// cancel(), so attemptCtx is dead and the streaming phase cannot proceed.
+			// Treat it as a retryable establishment timeout. SAFE: the committing
+			// chunk has NOT been yielded to the caller yet (we only buffered it here),
+			// so no-replay-after-first-committing-chunk still holds.
+			stop()
+			if cancel != nil {
+				cancel()
+			}
 			return nil, attemptError(context.DeadlineExceeded, errFirstChunkTimeout)
 		}
-		// Empty stream: not a failure — treat as a successful (empty) stream.
-		return &firstChunk{empty: true}, nil
+		rest := p.restSeq(next, stop, cancel)
+		return &firstChunk{chunk: chunk, preCommit: preCommit, restSeq: rest}, nil
 	}
-	if cerr != nil {
-		// Error before any real chunk: retryable establishment failure.
-		failure := establishmentFailure(cerr)
-		stopEstTimer()
-		stop()
-		if cancel != nil {
-			cancel()
-		}
-		return nil, failure
-	}
-
-	// We have a real first chunk. The establishment budget is over: stop and JOIN
-	// the timer goroutine NOW (before building rest) so it cannot fire mid-stream
-	// and cannot leak. The streaming phase is governed by restSeq's idle watchdog
-	// (StreamIdleTimeout) + the parent ctx only — the deadline-free ctx means a
-	// long actively-streaming turn runs to completion.
-	if stopEstTimer() {
-		// Late-fire race: the timer fired in the narrow window between pulling the
-		// first chunk and stopping the timer. It has already called cancel(), so
-		// attemptCtx is dead and the streaming phase cannot proceed — restSeq's first
-		// read would yield nothing and return silently (the exact truncation this
-		// change exists to prevent). Treat it as a retryable establishment timeout
-		// instead. SAFE: the first chunk has NOT been yielded to the caller yet
-		// (we only buffered it here), so no-replay-after-first-chunk still holds.
-		stop()
-		if cancel != nil {
-			cancel()
-		}
-		return nil, attemptError(context.DeadlineExceeded, errFirstChunkTimeout)
-	}
-	rest := p.restSeq(next, stop, cancel)
-	return &firstChunk{chunk: chunk, restSeq: rest}, nil
 }
 
 // restSeq builds the continuation iterator that yields the remainder of the
@@ -689,15 +729,32 @@ func attemptError(cause, err error) error {
 	return err
 }
 
-// wrap composes the buffered first chunk with the remainder of the inner stream.
+// wrap composes the buffered pre-commit chunks and the first committing chunk
+// with the remainder of the inner stream.
 func wrap(head *firstChunk) iter.Seq2[port.Chunk, error] {
 	return func(yield func(port.Chunk, error) bool) {
 		if head.empty {
 			return
 		}
+		// Replay non-committing chunks buffered before the first committing chunk.
+		for _, pc := range head.preCommit {
+			if !yield(pc, nil) {
+				if head.restSeq != nil {
+					for range head.restSeq {
+						break
+					}
+				}
+				return
+			}
+		}
+		// noCommit: only non-committing chunks were present (clean end before any
+		// committing chunk) — do not yield the zero-value head.chunk.
+		if head.noCommit {
+			return
+		}
 		if !yield(head.chunk, nil) {
-			// Caller stopped after the first chunk; drain the rest to trigger its
-			// cleanup (stop + cancel) without yielding further.
+			// Caller stopped after the first committing chunk; drain the rest to
+			// trigger its cleanup (stop + cancel) without yielding further.
 			if head.restSeq != nil {
 				for range head.restSeq {
 					break
