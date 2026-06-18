@@ -70,6 +70,42 @@ member's per-drive usage and surfacing via `TeamOutcome.BudgetExhausted` plus
 a `StopBudget` team stop. It is orthogonal to `--max-run-tokens`, which each
 member inherits per-run.
 
+## Worktree binding — operator-owned existing worktrees (issue #102)
+
+The fork seam above creates EPHEMERAL internal worktrees for isolation. A
+distinct, operator-facing concern is binding a session to an ALREADY-EXISTING git
+worktree so ALL local tools (`Read`/`Edit`/`Write`/`Grep`/`Glob`/`Bash`) are
+rooted there. The session workspace is set at `CreateSession` time and the file
+tools scope to it; the gap mecatl had was no first-class way to pick a sibling
+worktree AFTER launch (issue #102).
+
+The fix (see [ADR 0032](../adr/0032-worktree-binding.md)) is three clear,
+separated interfaces:
+
+- **Discovery** — a `ListWorktrees(workspace)` RPC backed by a
+  composition-injected, nil-safe `WorktreeLister` port (mirrors `ListCommands`).
+  The osfs-backed implementation shells out to `git worktree list --porcelain`
+  with the same scrubbed+neutralised git env as `gitSnapshot`, trust-gated,
+  fail-soft. A no-FS/cloud deployment leaves it nil ⇒ empty list +
+  `ServerCapabilities.worktrees = false`, so the feature is honestly absent
+  there (cloud-native compatible).
+- **Routing** — a session whose `workspace != Config.DefaultWorkspace` (the
+  launch root) routes through the per-session engine factory, which ALREADY
+  re-pins the CHILD permission resolver to the session root
+  (`childPermResolverFor`). The main policy ALREADY re-resolves
+  `.mecatl/settings.yaml` per workspace. When `DefaultWorkspace == ""` (a
+  child/member/cloud service) the trigger never fires. The session rehydrates to
+  the SAME worktree-rooted engine after a restart (the `needsRehydration`
+  widening).
+- **Switching** — mecatui's `/worktrees` overlay (a selecting overlay mirroring
+  `/models`) lists the worktrees and, on select, closes the old session and
+  creates a NEW one rooted at the chosen worktree via
+  `CreateSessionInWorkspace` (the restart-now precedent). Operator-driven only;
+  the model has no workspace-switch tool; a live session is never mutated.
+
+Trust stays OPERATOR-tier at launch (worktrees share `.git`); osfs path
+confinement is unchanged.
+
 ## Related
 
 - [Subagents & teams — the sibling delegation families](subagents-and-teams.md)

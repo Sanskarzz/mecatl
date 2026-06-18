@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"charm.land/bubbles/v2/textarea"
@@ -81,6 +82,8 @@ func (m Model) View() tea.View {
 		body = renderUserModelOverlay(m.deps.Theme, m.userModel, m.caps, m.width, m.vp.Height())
 	case m.models.view != modelsNone:
 		body = renderModelsOverlay(m.deps.Theme, m.models, m.caps, m.modelProvenanceLine(), m.width, m.vp.Height())
+	case m.worktrees.view != worktreesNone:
+		body = renderWorktreesOverlay(m.deps.Theme, m.worktrees, m.caps, m.width, m.vp.Height())
 	case m.phase == phaseIdle && m.conv.isEmpty() && !m.restartedThisRun:
 		// First-run zero-state: a welcome card in the empty viewport. Not an overlay
 		// (claims no keyboard); typing flows over it and it vanishes on the first block.
@@ -204,8 +207,10 @@ const headerIdentityPad = 4
 
 // headerIdentityParts builds the header identity segments. withNext is the next:
 // badge ("" to omit it). Order: mecatui · session · model · [next: …] · mode ·
-// socket. The next: badge sits AFTER the current model so the eye reads "running X,
-// next Y", and is the FIRST segment renderHeader sheds under width pressure.
+// ws: <worktree> · socket. The next: badge sits AFTER the current model so the eye
+// reads "running X, next Y", and is the FIRST segment renderHeader sheds under width
+// pressure. The ws: segment is shown only when the active workspace differs from the
+// launch workspace (Deps.Workspace) — no noise when not switched (issue #102).
 func (m Model) headerIdentityParts(sid, withNext string) []string {
 	parts := []string{"mecatui", "session " + short(sid)}
 	// Model segment: the EFFECTIVE model the server resolved THIS session to (set once
@@ -228,6 +233,13 @@ func (m Model) headerIdentityParts(sid, withNext string) []string {
 	// persistent visual cue for the same state the input box advertises.
 	if mode != "" {
 		parts = append(parts, m.renderHeaderMode(mode))
+	}
+	// Workspace segment (issue #102): shown only when the session is rooted at a
+	// DIFFERENT workspace than the launch directory (no noise in the common case).
+	// Display just the last path component to keep the header compact.
+	if ws := m.activeWorkspace; ws != "" && ws != m.deps.Workspace {
+		wsPart := m.deps.Theme.Style("muted").Render("ws:" + filepath.Base(ws))
+		parts = append(parts, wsPart)
 	}
 	if m.deps.Server != "" {
 		parts = append(parts, m.deps.Server)

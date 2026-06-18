@@ -17,3 +17,35 @@ func (s *Service) SessionEngineContextWindowForTest(id session.SessionID) (int, 
 	}
 	return se.engine.ContextWindow(), true
 }
+
+// HasSessionEngineForTest reports whether a per-session engine is registered for
+// id (false when the session rides the shared engine). Used by the issue-#102
+// worktree-binding tests to assert a worktree session routed through the
+// per-session factory (and that rehydration rebuilt one after a simulated
+// restart). Exported via export_test.go so an _external_ test (internal/app) can
+// reach across the package boundary through the Service the app.Build returns.
+func (s *Service) HasSessionEngineForTest(id session.SessionID) bool {
+	s.mu.Lock()
+	_, ok := s.sessionEngines[id]
+	s.mu.Unlock()
+	return ok
+}
+
+// DropSessionEngineForTest simulates a process restart by removing the
+// per-session engine registration for id (and its workspace override), WITHOUT
+// closing the engine (the process is "gone"). It is the test seam for the
+// issue-#102 rehydration assertion: after it, a prompt run must rehydrate. The
+// session itself stays in the store (a restart re-reads it from SessionStore).
+func (s *Service) DropSessionEngineForTest(id session.SessionID) {
+	s.mu.Lock()
+	delete(s.sessionEngines, id)
+	delete(s.sessionWorkspaces, id)
+	s.mu.Unlock()
+}
+
+// NeedsRehydrationForTest exposes the (Service) needsRehydration method (the
+// issue-#102 widened trigger) to external tests so the worktree/default/cloud
+// cases can be pinned directly without driving a full run.
+func (s *Service) NeedsRehydrationForTest(sess *session.Session) bool {
+	return s.needsRehydration(sess)
+}

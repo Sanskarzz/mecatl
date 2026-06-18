@@ -260,16 +260,11 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return mm, nil
 		}
 		// Agent-definition inventory result/error msg is reduced next; if it's not an
-		// AgentsMsg, fall through. Like the skills panel it fires no follow-up command.
-		if mm, handled := m.updateAgentsInvMsg(msg); handled {
-			return mm, nil
-		}
-		// Soul (persona) inspection result/error msg; fall through if not a SoulMsg.
-		if mm, handled := m.updateSoulMsg(msg); handled {
-			return mm, nil
-		}
-		// User-model inspection result/error msg; fall through if not a UserModelMsg.
-		if mm, handled := m.updateUserModelMsg(msg); handled {
+		// Inventory-overlay result/error msgs (agentsInv, soul, usermodel,
+		// /worktrees) — none carries a follow-up command. Grouped into one helper to
+		// keep update() under the cyclomatic cap as overlays accrue; each falls
+		// through if its msg type does not match.
+		if mm, handled := m.updateInventoryMsgs(msg); handled {
 			return mm, nil
 		}
 		// /models picker result/error + selection-saved msg. During connect it also
@@ -991,6 +986,7 @@ func (m Model) onOverlayKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 		m.onSoulKey,
 		m.onUserModelKey,
 		m.onModelsKey,
+		m.onWorktreesKey,
 	}
 	for _, route := range overlays {
 		if mm, cmd, handled := route(msg); handled {
@@ -1669,7 +1665,11 @@ func (m Model) runSelectedBuiltin() (tea.Model, tea.Cmd, bool) {
 	if !row.Builtin {
 		return m, nil, false
 	}
-	b, found := builtinByName(m.caps, m.deps.MCP != nil, m.deps.Agents != nil, m.deps.Skills != nil, m.deps.Soul != nil, m.deps.UserModel != nil, m.deps.Models != nil, row.Name)
+	b, found := builtinByName(m.caps, wiredCollaborators{
+		MCP: m.deps.MCP != nil, Agents: m.deps.Agents != nil, Skills: m.deps.Skills != nil,
+		Soul: m.deps.Soul != nil, UserModel: m.deps.UserModel != nil, Models: m.deps.Models != nil,
+		Worktrees: m.deps.Worktrees != nil,
+	}, row.Name)
 	if !found {
 		return m, nil, false
 	}
@@ -1717,7 +1717,11 @@ func (m Model) submitPrompt() (tea.Model, tea.Cmd) {
 	// "/name arg" line has a space → commandPrefix is false → also falls through
 	// (workspace commands expand server-side from the full line).
 	if name, ok := commandPrefix(text); ok {
-		if b, found := builtinByName(m.caps, m.deps.MCP != nil, m.deps.Agents != nil, m.deps.Skills != nil, m.deps.Soul != nil, m.deps.UserModel != nil, m.deps.Models != nil, name); found {
+		if b, found := builtinByName(m.caps, wiredCollaborators{
+			MCP: m.deps.MCP != nil, Agents: m.deps.Agents != nil, Skills: m.deps.Skills != nil,
+			Soul: m.deps.Soul != nil, UserModel: m.deps.UserModel != nil, Models: m.deps.Models != nil,
+			Worktrees: m.deps.Worktrees != nil,
+		}, name); found {
 			m.ta.Reset()
 			return b.run(m)
 		}

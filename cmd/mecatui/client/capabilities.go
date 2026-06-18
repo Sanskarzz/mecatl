@@ -35,6 +35,12 @@ type Capabilities struct {
 	// sees the daemon's automation posture. NOT session state. Empty (an older server,
 	// or strict/trusted) → no badge.
 	Posture string
+	// Worktrees is true when a WorktreeLister is wired (ListWorktrees may return a
+	// non-empty list for a real git repo). It gates the /worktrees overlay — the
+	// first-class operator workflow for binding a session to an EXISTING sibling
+	// git worktree (issue #102). An older server, or a no-FS/cloud server with no
+	// lister, yields false, so the overlay is honestly absent.
+	Worktrees bool
 }
 
 // capabilitiesFrom maps a proto ServerCapabilities (nil-safe) to the plain
@@ -57,6 +63,7 @@ func capabilitiesFrom(c *mecatlv1.ServerCapabilities) Capabilities {
 		Image:          c.GetImage(),
 		Audio:          c.GetAudio(),
 		Posture:        c.GetPosture(),
+		Worktrees:      c.GetWorktrees(),
 	}
 }
 

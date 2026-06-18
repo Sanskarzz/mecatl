@@ -139,6 +139,7 @@ func run(args []string) error {
 		Soul:                cl,
 		UserModel:           cl,
 		Models:              cl,
+		Worktrees:           cl,
 		SelectionStore:      store,
 		InitialModel:        initialSel,
 		WorkspaceDefault:    wsDefault,
@@ -628,7 +629,10 @@ func themeDirs(workspace, extraDir string) []string {
 // CreateSession(ctx, workspace, mode, sel). The workspace is fixed at startup;
 // the mode and model selection are per-call so in-TUI mode switches and /models
 // restarts carry the current desired posture through the same proto-build point.
-// The ui never sees the proto request.
+// The ui never sees the proto request. CreateSessionInWorkspace (issue #102) is
+// the /worktrees switch path: it passes an explicit workspace (a sibling git
+// worktree); CreateSession delegates to it with the launch workspace so the
+// existing restart + connect paths are byte-identical.
 type sessionAdapter struct {
 	cl        *client.Client
 	workspace string
@@ -636,10 +640,14 @@ type sessionAdapter struct {
 }
 
 func (s *sessionAdapter) CreateSession(ctx context.Context, sel client.ModelSelection, mode string) (string, client.Capabilities, client.ResolvedModel, error) {
+	return s.CreateSessionInWorkspace(ctx, s.workspace, sel, mode)
+}
+
+func (s *sessionAdapter) CreateSessionInWorkspace(ctx context.Context, workspace string, sel client.ModelSelection, mode string) (string, client.Capabilities, client.ResolvedModel, error) {
 	if mode == "" {
 		mode = s.mode
 	}
-	return s.cl.CreateSession(ctx, s.workspace, client.ModeFromString(mode), sel)
+	return s.cl.CreateSession(ctx, workspace, client.ModeFromString(mode), sel)
 }
 
 func (s *sessionAdapter) CloseSession(ctx context.Context, id string) error {

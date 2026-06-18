@@ -335,6 +335,16 @@ func (h *HarnessServer) ListCommands(ctx context.Context, req *mecatlv1.ListComm
 	return &mecatlv1.ListCommandsResponse{Commands: toProtoCommands(cmds)}, nil
 }
 
+// ListWorktrees returns the git worktrees of the repo rooted at the requested
+// workspace (issue #102).
+func (h *HarnessServer) ListWorktrees(ctx context.Context, req *mecatlv1.ListWorktreesRequest) (*mecatlv1.ListWorktreesResponse, error) {
+	wts, err := h.svc.ListWorktrees(ctx, req.GetWorkspace())
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	return &mecatlv1.ListWorktreesResponse{Worktrees: toProtoWorktrees(wts)}, nil
+}
+
 // toStatus maps service sentinel errors to gRPC status codes.
 func toStatus(err error) error {
 	switch {

@@ -29,6 +29,13 @@ import (
 // segment).
 type SessionCreator interface {
 	CreateSession(ctx context.Context, sel client.ModelSelection, mode string) (string, client.Capabilities, client.ResolvedModel, error)
+	// CreateSessionInWorkspace creates a session bound to an explicit workspace
+	// root (the /worktrees switch path, issue #102). CreateSession (above)
+	// delegates to this with the launch workspace, so the /models restart + the
+	// connect paths are byte-identical and only the /worktrees switch passes a
+	// different root. The workspace becomes the session's tool root (Read/Edit/
+	// Write/Grep/Glob/Bash cwd all resolve there); osfs confinement is unchanged.
+	CreateSessionInWorkspace(ctx context.Context, workspace string, sel client.ModelSelection, mode string) (string, client.Capabilities, client.ResolvedModel, error)
 	// CloseSession ends a server-side session by id. The /models restart-now handoff
 	// closes the OLD session before creating the new one so a model switch leaves no
 	// orphaned server-side session. Best-effort: the caller proceeds with the new
@@ -82,6 +89,7 @@ type Deps struct {
 	Soul      client.SoulFetcher     // soul (persona) inspection for the /soul panel; nil disables it
 	UserModel client.UserModelLister // user-model inspection for the /usermodel panel; nil disables it
 	Models    client.ModelLister     // selectable-model discovery for the /models picker; nil disables it
+	Worktrees client.WorktreeLister  // worktree discovery for the /worktrees overlay (issue #102); nil disables it
 	// SelectionStore persists the picked model (last-used). nil disables persistence
 	// (the pick still applies to the next create this run, just isn't remembered).
 	SelectionStore SelectionStore
@@ -283,6 +291,7 @@ type Model struct {
 	soul         soulState      // soul (persona) inspection overlay state (view==soulNone when closed)
 	userModel    userModelState // user-model inspection overlay state (view==userModelNone when closed)
 	models       modelsState    // /models picker overlay state (view==modelsNone when closed)
+	worktrees    worktreesState // /worktrees overlay state (view==worktreesNone when closed) — issue #102
 	// activeModel is the currently-selected (provider, model) the NEXT CreateSession
 	// will carry (apply-on-next-create). Seeded from Deps.InitialModel, updated by the
 	// picker, and reconciled-to-default at connect when its provider is unavailable. It
@@ -298,6 +307,13 @@ type Model struct {
 	// default itself. Zero value (empty ids) until SessionReadyMsg and for an older
 	// server → the header shows no model segment. The model is FIXED per session.
 	effectiveModel client.ResolvedModel
+	// activeWorkspace is the workspace root the CURRENT session is bound to. Seeded
+	// from Deps.Workspace at construction (the launch root) and updated by
+	// switchToWorktree (issue #102) to the chosen worktree path. Shown in the header
+	// when it differs from the launch workspace (Deps.Workspace), so the user can
+	// tell at a glance that the session is rooted at a sibling worktree rather than
+	// the launch directory. Empty = connecting (not yet bound).
+	activeWorkspace string
 	// pickedThisSession is the (provider, model) the user EXPLICITLY chose via the
 	// /models picker's restart-now confirm during THIS process — set when a restart-now
 	// handoff rebinds the session to a picked model. It is the provenance signal that
@@ -524,9 +540,10 @@ func New(deps Deps) Model {
 		// A model merely absent from the snapshot is kept (issue #41); if the server then
 		// rejects the create, createSessionCmd's fallback leg retries on the default and
 		// surfaces a loud warning (connectFallbackMsg) — connect still completes.
-		activeModel: deps.InitialModel,
-		activeMode:  client.ModeString(client.ModeFromString(deps.Mode)),
-		models:      modelsState{active: deps.InitialModel, globalDefault: deps.GlobalDefault},
+		activeModel:     deps.InitialModel,
+		activeMode:      client.ModeString(client.ModeFromString(deps.Mode)),
+		models:          modelsState{active: deps.InitialModel, globalDefault: deps.GlobalDefault},
+		activeWorkspace: deps.Workspace,
 	}
 }
 

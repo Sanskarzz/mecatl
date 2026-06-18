@@ -57,10 +57,9 @@ func runBatchLeaves(cmd tea.Cmd) {
 	}
 }
 
-// builtinNames extracts the ordered built-in names for a
-// caps/mcpWired/agentsWired/skillsWired/soulWired/userModelWired/modelsWired combo.
-func builtinNames(caps client.Capabilities, mcpWired, agentsWired, skillsWired, soulWired, userModelWired, modelsWired bool) []string {
-	bs := builtinCommands(caps, mcpWired, agentsWired, skillsWired, soulWired, userModelWired, modelsWired)
+// builtinNames extracts the ordered built-in names for a caps + wired-collab combo.
+func builtinNames(caps client.Capabilities, w wiredCollaborators) []string {
+	bs := builtinCommands(caps, w)
 	out := make([]string, len(bs))
 	for i, b := range bs {
 		out[i] = b.name
@@ -75,53 +74,53 @@ func builtinNames(caps client.Capabilities, mcpWired, agentsWired, skillsWired, 
 // /skills needs caps.Skills && the skills collaborator wired; /soul needs
 // caps.Soul && the soul collaborator wired; /usermodel needs caps.UserModel &&
 // the user-model collaborator wired; /models needs caps.ModelSelection && the model
-// lister wired. The fixed order is clear, help, mcp, agents, team, skills, soul,
-// usermodel, models.
+// lister wired; /worktrees needs caps.Worktrees && the worktree lister wired
+// (issue #102). The fixed order is clear, help, mcp, agents, team, skills, soul,
+// usermodel, models, worktrees.
 func TestBuiltinCommandsCapsFilter(t *testing.T) {
+	all := client.Capabilities{MCP: true, Agents: true, Teams: true, Skills: true, Soul: true, UserModel: true, ModelSelection: true, Worktrees: true, Posture: "auto"}
 	cases := []struct {
-		name           string
-		caps           client.Capabilities
-		mcpWired       bool
-		agentsWired    bool
-		skillsWired    bool
-		soulWired      bool
-		userModelWired bool
-		modelsWired    bool
-		want           []string
+		name string
+		caps client.Capabilities
+		w    wiredCollaborators
+		want []string
 	}{
-		{"bare", client.Capabilities{}, false, false, false, false, false, false, []string{"clear", "help"}},
-		{"mcp cap but not wired", client.Capabilities{MCP: true}, false, false, false, false, false, false, []string{"clear", "help"}},
-		{"mcp wired but no cap", client.Capabilities{}, true, false, false, false, false, false, []string{"clear", "help"}},
-		{"mcp cap and wired", client.Capabilities{MCP: true}, true, false, false, false, false, false, []string{"clear", "help", "mcp"}},
-		{"agents cap but not wired", client.Capabilities{Agents: true}, false, false, false, false, false, false, []string{"clear", "help"}},
-		{"agents wired but no cap", client.Capabilities{}, false, true, false, false, false, false, []string{"clear", "help"}},
-		{"agents cap and wired", client.Capabilities{Agents: true}, false, true, false, false, false, false, []string{"clear", "help", "agents"}},
-		{"teams only", client.Capabilities{Teams: true}, false, false, false, false, false, false, []string{"clear", "help", "team"}},
-		{"skills cap but not wired", client.Capabilities{Skills: true}, false, false, false, false, false, false, []string{"clear", "help"}},
-		{"skills wired but no cap", client.Capabilities{}, false, false, true, false, false, false, []string{"clear", "help"}},
-		{"skills cap and wired", client.Capabilities{Skills: true}, false, false, true, false, false, false, []string{"clear", "help", "skills"}},
-		{"soul cap but not wired", client.Capabilities{Soul: true}, false, false, false, false, false, false, []string{"clear", "help"}},
-		{"soul wired but no cap", client.Capabilities{}, false, false, false, true, false, false, []string{"clear", "help"}},
-		{"soul cap and wired", client.Capabilities{Soul: true}, false, false, false, true, false, false, []string{"clear", "help", "soul"}},
-		{"usermodel cap but not wired", client.Capabilities{UserModel: true}, false, false, false, false, false, false, []string{"clear", "help"}},
-		{"usermodel wired but no cap", client.Capabilities{}, false, false, false, false, true, false, []string{"clear", "help"}},
-		{"usermodel cap and wired", client.Capabilities{UserModel: true}, false, false, false, false, true, false, []string{"clear", "help", "usermodel"}},
-		{"models cap but not wired", client.Capabilities{ModelSelection: true}, false, false, false, false, false, false, []string{"clear", "help"}},
-		{"models wired but no cap", client.Capabilities{}, false, false, false, false, false, true, []string{"clear", "help"}},
-		{"models cap and wired", client.Capabilities{ModelSelection: true}, false, false, false, false, false, true, []string{"clear", "help", "models"}},
-		{"posture empty omits the builtin", client.Capabilities{}, false, false, false, false, false, false, []string{"clear", "help"}},
-		{"posture set adds the builtin", client.Capabilities{Posture: "yolo"}, false, false, false, false, false, false, []string{"clear", "help", "posture"}},
-		{"posture strict still shows (chrome is reportable)", client.Capabilities{Posture: "strict"}, false, false, false, false, false, false, []string{"clear", "help", "posture"}},
+		{"bare", client.Capabilities{}, wiredCollaborators{}, []string{"clear", "help"}},
+		{"mcp cap but not wired", client.Capabilities{MCP: true}, wiredCollaborators{}, []string{"clear", "help"}},
+		{"mcp wired but no cap", client.Capabilities{}, wiredCollaborators{MCP: true}, []string{"clear", "help"}},
+		{"mcp cap and wired", client.Capabilities{MCP: true}, wiredCollaborators{MCP: true}, []string{"clear", "help", "mcp"}},
+		{"agents cap but not wired", client.Capabilities{Agents: true}, wiredCollaborators{}, []string{"clear", "help"}},
+		{"agents wired but no cap", client.Capabilities{}, wiredCollaborators{Agents: true}, []string{"clear", "help"}},
+		{"agents cap and wired", client.Capabilities{Agents: true}, wiredCollaborators{Agents: true}, []string{"clear", "help", "agents"}},
+		{"teams only", client.Capabilities{Teams: true}, wiredCollaborators{}, []string{"clear", "help", "team"}},
+		{"skills cap but not wired", client.Capabilities{Skills: true}, wiredCollaborators{}, []string{"clear", "help"}},
+		{"skills wired but no cap", client.Capabilities{}, wiredCollaborators{Skills: true}, []string{"clear", "help"}},
+		{"skills cap and wired", client.Capabilities{Skills: true}, wiredCollaborators{Skills: true}, []string{"clear", "help", "skills"}},
+		{"soul cap but not wired", client.Capabilities{Soul: true}, wiredCollaborators{}, []string{"clear", "help"}},
+		{"soul wired but no cap", client.Capabilities{}, wiredCollaborators{Soul: true}, []string{"clear", "help"}},
+		{"soul cap and wired", client.Capabilities{Soul: true}, wiredCollaborators{Soul: true}, []string{"clear", "help", "soul"}},
+		{"usermodel cap but not wired", client.Capabilities{UserModel: true}, wiredCollaborators{}, []string{"clear", "help"}},
+		{"usermodel wired but no cap", client.Capabilities{}, wiredCollaborators{UserModel: true}, []string{"clear", "help"}},
+		{"usermodel cap and wired", client.Capabilities{UserModel: true}, wiredCollaborators{UserModel: true}, []string{"clear", "help", "usermodel"}},
+		{"models cap but not wired", client.Capabilities{ModelSelection: true}, wiredCollaborators{}, []string{"clear", "help"}},
+		{"models wired but no cap", client.Capabilities{}, wiredCollaborators{Models: true}, []string{"clear", "help"}},
+		{"models cap and wired", client.Capabilities{ModelSelection: true}, wiredCollaborators{Models: true}, []string{"clear", "help", "models"}},
+		{"worktrees cap but not wired", client.Capabilities{Worktrees: true}, wiredCollaborators{}, []string{"clear", "help"}},
+		{"worktrees wired but no cap", client.Capabilities{}, wiredCollaborators{Worktrees: true}, []string{"clear", "help"}},
+		{"worktrees cap and wired", client.Capabilities{Worktrees: true}, wiredCollaborators{Worktrees: true}, []string{"clear", "help", "worktrees"}},
+		{"posture empty omits the builtin", client.Capabilities{}, wiredCollaborators{}, []string{"clear", "help"}},
+		{"posture set adds the builtin", client.Capabilities{Posture: "yolo"}, wiredCollaborators{}, []string{"clear", "help", "posture"}},
+		{"posture strict still shows (chrome is reportable)", client.Capabilities{Posture: "strict"}, wiredCollaborators{}, []string{"clear", "help", "posture"}},
 		{
 			"all",
-			client.Capabilities{MCP: true, Agents: true, Teams: true, Skills: true, Soul: true, UserModel: true, ModelSelection: true, Posture: "auto"},
-			true, true, true, true, true, true,
-			[]string{"clear", "help", "mcp", "agents", "team", "skills", "soul", "usermodel", "models", "posture"},
+			all,
+			wiredCollaborators{MCP: true, Agents: true, Skills: true, Soul: true, UserModel: true, Models: true, Worktrees: true},
+			[]string{"clear", "help", "mcp", "agents", "team", "skills", "soul", "usermodel", "models", "worktrees", "posture"},
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := builtinNames(tc.caps, tc.mcpWired, tc.agentsWired, tc.skillsWired, tc.soulWired, tc.userModelWired, tc.modelsWired)
+			got := builtinNames(tc.caps, tc.w)
 			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
 				t.Fatalf("builtinCommands order/filter = %v, want %v", got, tc.want)
 			}
@@ -132,36 +131,43 @@ func TestBuiltinCommandsCapsFilter(t *testing.T) {
 // TestBuiltinByName covers the dispatch lookup: a registered built-in is found,
 // a gated-off one is not, and an unknown name is not.
 func TestBuiltinByName(t *testing.T) {
-	// agents cap + teams + skills cap + model_selection, mcp off.
-	caps := client.Capabilities{Agents: true, Teams: true, Skills: true, ModelSelection: true}
-	if _, ok := builtinByName(caps, false, true, true, true, true, true, "clear"); !ok {
+	// agents cap + teams + skills cap + model_selection + worktrees, mcp off.
+	caps := client.Capabilities{Agents: true, Teams: true, Skills: true, ModelSelection: true, Worktrees: true}
+	wired := wiredCollaborators{Agents: true, Skills: true, Models: true, Worktrees: true}
+	if _, ok := builtinByName(caps, wired, "clear"); !ok {
 		t.Error("clear should be found (always registered)")
 	}
-	if _, ok := builtinByName(caps, false, true, true, true, true, true, "agents"); !ok {
+	if _, ok := builtinByName(caps, wired, "agents"); !ok {
 		t.Error("agents should be found (agents cap + wired)")
 	}
-	if _, ok := builtinByName(caps, false, false, true, true, true, true, "agents"); ok {
+	if _, ok := builtinByName(caps, wiredCollaborators{Skills: true, Models: true, Worktrees: true}, "agents"); ok {
 		t.Error("agents should NOT be found (agents cap on but not wired)")
 	}
-	if _, ok := builtinByName(caps, false, true, true, true, true, true, "team"); !ok {
+	if _, ok := builtinByName(caps, wired, "team"); !ok {
 		t.Error("team should be found (teams on)")
 	}
-	if _, ok := builtinByName(caps, false, true, true, true, true, true, "skills"); !ok {
+	if _, ok := builtinByName(caps, wired, "skills"); !ok {
 		t.Error("skills should be found (skills cap + wired)")
 	}
-	if _, ok := builtinByName(caps, false, true, false, true, true, true, "skills"); ok {
+	if _, ok := builtinByName(caps, wiredCollaborators{Agents: true, Models: true, Worktrees: true}, "skills"); ok {
 		t.Error("skills should NOT be found (skills cap on but not wired)")
 	}
-	if _, ok := builtinByName(caps, false, true, true, true, true, true, "models"); !ok {
+	if _, ok := builtinByName(caps, wired, "models"); !ok {
 		t.Error("models should be found (model_selection cap + wired)")
 	}
-	if _, ok := builtinByName(caps, false, true, true, true, true, false, "models"); ok {
+	if _, ok := builtinByName(caps, wiredCollaborators{Agents: true, Skills: true, Worktrees: true}, "models"); ok {
 		t.Error("models should NOT be found (model_selection cap on but not wired)")
 	}
-	if _, ok := builtinByName(caps, false, true, true, true, true, true, "mcp"); ok {
+	if _, ok := builtinByName(caps, wired, "worktrees"); !ok {
+		t.Error("worktrees should be found (worktrees cap + wired)")
+	}
+	if _, ok := builtinByName(caps, wiredCollaborators{Agents: true, Skills: true, Models: true}, "worktrees"); ok {
+		t.Error("worktrees should NOT be found (worktrees cap on but not wired)")
+	}
+	if _, ok := builtinByName(caps, wired, "mcp"); ok {
 		t.Error("mcp should NOT be found (mcp off / not wired)")
 	}
-	if _, ok := builtinByName(caps, false, true, true, true, true, true, "nope"); ok {
+	if _, ok := builtinByName(caps, wired, "nope"); ok {
 		t.Error("unknown name should not be found")
 	}
 }

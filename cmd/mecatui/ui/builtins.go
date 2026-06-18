@@ -23,21 +23,37 @@ type builtin struct {
 	run  func(Model) (tea.Model, tea.Cmd)
 }
 
+// wiredCollaborators is the set of "is this ui collaborator wired" booleans the
+// built-in registry consults. It collapses the long bool parameter list (which
+// had reached 7 and was growing per feature) into one named struct so call sites
+// read clearly and a new collaborator is one field, not an 8th positional bool.
+type wiredCollaborators struct {
+	MCP       bool
+	Agents    bool
+	Skills    bool
+	Soul      bool
+	UserModel bool
+	Models    bool // mirrors client.Capabilities.ModelSelection
+	Worktrees bool
+}
+
 // builtinCommands returns the caps-filtered built-in set for the connected
 // server. /clear and /help are ALWAYS present — they act purely on the Model and
 // need no server feature. /mcp is present only when the server advertises MCP
-// AND a Commander-independent MCP collaborator is wired (mcpWired); /agents (the
+// AND a Commander-independent MCP collaborator is wired (w.MCP); /agents (the
 // definition inventory) only when the server advertises Agents AND an agents
-// collaborator is wired (agentsWired); /team (the live-team overlay) only when
-// the server advertises Teams; /skills only when the server advertises Skills
-// AND a skills collaborator is wired (skillsWired); /soul only when the server
-// advertises Soul AND a soul collaborator is wired (soulWired); /usermodel only
+// collaborator is wired (w.Agents); /team (the live-team overlay) only when the
+// server advertises Teams; /skills only when the server advertises Skills
+// AND a skills collaborator is wired (w.Skills); /soul only when the server
+// advertises Soul AND a soul collaborator is wired (w.Soul); /usermodel only
 // when the server advertises UserModel AND a user-model collaborator is wired
-// (userModelWired); /models (the model picker) only when the server advertises
-// model_selection AND a model lister is wired (modelsWired). The order is fixed
-// (clear, help, mcp, agents, team, skills, soul, usermodel, models) and locked by a
-// test so the palette ordering is stable.
-func builtinCommands(caps client.Capabilities, mcpWired, agentsWired, skillsWired, soulWired, userModelWired, modelsWired bool) []builtin {
+// (w.UserModel); /models (the model picker) only when the server advertises
+// model_selection AND a model lister is wired (w.Models); /worktrees (the
+// worktree switch overlay, issue #102) only when the server advertises
+// worktrees AND a worktree lister is wired (w.Worktrees). The order is fixed
+// (clear, help, mcp, agents, team, skills, soul, usermodel, models, worktrees)
+// and locked by a test so the palette ordering is stable.
+func builtinCommands(caps client.Capabilities, w wiredCollaborators) []builtin {
 	out := []builtin{
 		{
 			name: "clear",
@@ -50,14 +66,14 @@ func builtinCommands(caps client.Capabilities, mcpWired, agentsWired, skillsWire
 			run:  Model.runHelp,
 		},
 	}
-	if caps.MCP && mcpWired {
+	if caps.MCP && w.MCP {
 		out = append(out, builtin{
 			name: "mcp",
 			desc: "browse MCP inventory",
 			run:  Model.runMCP,
 		})
 	}
-	if caps.Agents && agentsWired {
+	if caps.Agents && w.Agents {
 		out = append(out, builtin{
 			name: "agents",
 			desc: "browse agent definitions",
@@ -71,32 +87,39 @@ func builtinCommands(caps client.Capabilities, mcpWired, agentsWired, skillsWire
 			run:  Model.runTeam,
 		})
 	}
-	if caps.Skills && skillsWired {
+	if caps.Skills && w.Skills {
 		out = append(out, builtin{
 			name: "skills",
 			desc: "browse skills inventory",
 			run:  Model.runSkills,
 		})
 	}
-	if caps.Soul && soulWired {
+	if caps.Soul && w.Soul {
 		out = append(out, builtin{
 			name: "soul",
 			desc: "inspect the persona (read-only)",
 			run:  Model.runSoul,
 		})
 	}
-	if caps.UserModel && userModelWired {
+	if caps.UserModel && w.UserModel {
 		out = append(out, builtin{
 			name: "usermodel",
 			desc: "inspect the user model (read-only)",
 			run:  Model.runUserModel,
 		})
 	}
-	if caps.ModelSelection && modelsWired {
+	if caps.ModelSelection && w.Models {
 		out = append(out, builtin{
 			name: "models",
 			desc: "pick the model for the next session",
 			run:  Model.runModels,
+		})
+	}
+	if caps.Worktrees && w.Worktrees {
+		out = append(out, builtin{
+			name: "worktrees",
+			desc: "switch to a sibling git worktree",
+			run:  Model.runWorktrees,
 		})
 	}
 	// /posture prints the server-wide operator posture tier + a line per defense.
@@ -115,8 +138,8 @@ func builtinCommands(caps client.Capabilities, mcpWired, agentsWired, skillsWire
 // builtinByName looks up a built-in by name within the caps-filtered set, for
 // dispatch. ok is false when no built-in by that name is currently registered
 // (either unknown, or gated off on this server).
-func builtinByName(caps client.Capabilities, mcpWired, agentsWired, skillsWired, soulWired, userModelWired, modelsWired bool, name string) (builtin, bool) {
-	for _, b := range builtinCommands(caps, mcpWired, agentsWired, skillsWired, soulWired, userModelWired, modelsWired) {
+func builtinByName(caps client.Capabilities, w wiredCollaborators, name string) (builtin, bool) {
+	for _, b := range builtinCommands(caps, w) {
 		if b.name == name {
 			return b, true
 		}
@@ -195,6 +218,13 @@ func (m Model) runUserModel() (tea.Model, tea.Cmd) {
 // belt-and-braces here.
 func (m Model) runModels() (tea.Model, tea.Cmd) {
 	return m.openModels()
+}
+
+// runWorktrees opens the /worktrees overlay (issue #102). Only registered when
+// caps.Worktrees && the worktree lister is wired, so openWorktrees's own
+// nil/idle guards are belt-and-braces here.
+func (m Model) runWorktrees() (tea.Model, tea.Cmd) {
+	return m.openWorktrees()
 }
 
 // runPosture shows the server-wide operator posture tier and a compact per-defense

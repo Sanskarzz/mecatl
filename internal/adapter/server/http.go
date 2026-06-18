@@ -55,6 +55,7 @@ func NewHTTPHandler(svc *Service) *HTTPHandler {
 	h.mux.HandleFunc("GET /v1/soul", h.getSoul)
 	h.mux.HandleFunc("GET /v1/usermodel", h.getUserModel)
 	h.mux.HandleFunc("GET /v1/commands", h.listCommands)
+	h.mux.HandleFunc("GET /v1/worktrees", h.listWorktrees)
 	h.mux.HandleFunc("POST /v1/teams", h.createTeam)
 	h.mux.HandleFunc("POST /v1/teams/{id}/members", h.spawnTeammate)
 	h.mux.HandleFunc("POST /v1/teams/{id}/messages", h.sendTeammateMessage)
@@ -950,6 +951,16 @@ func (h *HTTPHandler) listCommands(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, &mecatlv1.ListCommandsResponse{Commands: toProtoCommands(cmds)})
+}
+
+// listWorktrees handles GET /v1/worktrees?workspace= (issue #102).
+func (h *HTTPHandler) listWorktrees(w http.ResponseWriter, r *http.Request) {
+	wts, err := h.svc.ListWorktrees(r.Context(), r.URL.Query().Get("workspace"))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, &mecatlv1.ListWorktreesResponse{Worktrees: toProtoWorktrees(wts)})
 }
 
 // --- helpers ----------------------------------------------------------------

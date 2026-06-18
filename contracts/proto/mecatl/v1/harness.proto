@@ -96,6 +96,16 @@ service HarnessService {
   // empty workspace, or a server with no command expander, returns an empty list.
   rpc ListCommands(ListCommandsRequest) returns (ListCommandsResponse);
 
+  // ListWorktrees returns the git worktrees of the repo rooted at the requested
+  // workspace (issue #102). It powers the client's /worktrees overlay — the
+  // first-class operator workflow for binding a session to an EXISTING sibling
+  // worktree (a new session rooted there, not a live-session switch). It is
+  // DISCOVERY only, composition-injected (nil-safe: a no-FS/cloud server, or an
+  // untrusted workspace, returns an empty list); it never performs a live
+  // model/network call and never mutates anything. An empty workspace or a server
+  // with no worktree lister also returns an empty list.
+  rpc ListWorktrees(ListWorktreesRequest) returns (ListWorktreesResponse);
+
   // ListSkills returns the resolved skills inventory snapshot: each discovered
   // skill's name + one-line description. Derived from the snapshot taken at
   // startup (skills are discovered once at build time and immutable for the
@@ -305,6 +315,13 @@ message ServerCapabilities {
   // StopBudget discipline). Additive: an older server leaves it empty and the client
   // shows no badge (strict/trusted also show no badge).
   string posture = 13;
+  // worktrees is true when a WorktreeLister is wired (ListWorktrees may return a
+  // non-empty list for a real git repo). Gates the client's /worktrees overlay —
+  // the first-class operator workflow for binding a session to an EXISTING sibling
+  // git worktree (issue #102). Additive: an older server leaves it false and the
+  // client hides the overlay. A no-FS/cloud server (no lister wired) also yields
+  // false, so the feature is honestly absent there.
+  bool worktrees = 14;
 }
 
 // CreateSessionResponse carries the newly-allocated session id.
@@ -1160,6 +1177,37 @@ message ListCommandsRequest {
 message ListCommandsResponse {
   // commands are the (possibly empty) discovered commands, name-sorted.
   repeated Command commands = 1;
+}
+
+// --- Worktree discovery (issue #102) -----------------------------------------
+
+// Worktree is one discovered git worktree of a repo, mirroring a
+// `git worktree list --porcelain` record. Path is the absolute working-tree path
+// (the value handed to CreateSessionRequest.workspace to bind a session there);
+// branch is empty for a detached HEAD; head is the commit SHA the worktree is at.
+message Worktree {
+  // path is the absolute working-tree path; required.
+  string path = 1;
+  // branch is the checked-out ref name; empty for a detached HEAD.
+  string branch = 2;
+  // head is the commit SHA the worktree is at.
+  string head = 3;
+  // bare is true for a bare worktree.
+  bool bare = 4;
+}
+
+// ListWorktreesRequest names the workspace whose repo's worktrees are listed.
+message ListWorktreesRequest {
+  // workspace is the session root whose repo's worktrees are enumerated. Empty
+  // returns an empty list (there is no repo to enumerate).
+  string workspace = 1;
+}
+
+// ListWorktreesResponse carries the discovered worktrees.
+message ListWorktreesResponse {
+  // worktrees are the (possibly empty) discovered worktrees, in `git worktree
+  // list` order (the main worktree first).
+  repeated Worktree worktrees = 1;
 }
 
 // --- Skills inventory discovery ---------------------------------------------

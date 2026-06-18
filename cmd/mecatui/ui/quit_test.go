@@ -339,7 +339,11 @@ func TestQuitFatalSinglePressProgram(t *testing.T) {
 // reducer to phaseFatal for the single-press fatal-exit proof.
 type errSession struct{}
 
-func (errSession) CreateSession(_ context.Context, _ client.ModelSelection, _ string) (string, client.Capabilities, client.ResolvedModel, error) {
+func (errSession) CreateSession(ctx context.Context, sel client.ModelSelection, mode string) (string, client.Capabilities, client.ResolvedModel, error) {
+	return errSession{}.CreateSessionInWorkspace(ctx, "", sel, mode)
+}
+
+func (errSession) CreateSessionInWorkspace(_ context.Context, _ string, _ client.ModelSelection, _ string) (string, client.Capabilities, client.ResolvedModel, error) {
 	return "", client.Capabilities{}, client.ResolvedModel{}, context.DeadlineExceeded
 }
 

@@ -1928,6 +1928,7 @@ func TestSelectableGateBlocksAndClears(t *testing.T) {
 	cases := []nonSelectableCase{
 		{"mcpOverlay", func(m *Model) { m.mcp.view = mcpPanel }},
 		{"modelsOverlay", func(m *Model) { m.models.view = modelsPanel }},
+		{"worktreesOverlay", func(m *Model) { m.worktrees.view = worktreesPanel }},
 		{"help", func(m *Model) { m.showHelp = true }},
 		{"awaitingApproval", func(m *Model) { m.phase = phaseAwaitingApproval }},
 		{"fatal", func(m *Model) { m.phase = phaseFatal }},

@@ -147,6 +147,7 @@ type fakeConv struct {
 	// is closed once (createdOnce) on the first create so a test can sequence on the
 	// create having happened without polling rendered output.
 	createdSel  client.ModelSelection
+	createdWksp string // workspace the LAST CreateSession(InWorkspace) carried
 	mode        string
 	setModeErr  error
 	setModeSeen []string
@@ -248,9 +249,17 @@ func (c *fakeConv) getSessionCalls() int {
 	return c.getSessionCount
 }
 
-func (c *fakeConv) CreateSession(_ context.Context, sel client.ModelSelection, mode string) (string, client.Capabilities, client.ResolvedModel, error) {
+func (c *fakeConv) CreateSession(ctx context.Context, sel client.ModelSelection, mode string) (string, client.Capabilities, client.ResolvedModel, error) {
+	return c.CreateSessionInWorkspace(ctx, "", sel, mode)
+}
+
+// CreateSessionInWorkspace is the /worktrees switch path (issue #102): it
+// records the carried workspace so a test can assert the picked worktree
+// threaded into the create, then delegates to the shared create body.
+func (c *fakeConv) CreateSessionInWorkspace(_ context.Context, workspace string, sel client.ModelSelection, mode string) (string, client.Capabilities, client.ResolvedModel, error) {
 	c.mu.Lock()
 	c.createdSel = sel
+	c.createdWksp = workspace
 	if mode != "" {
 		c.mode = mode
 	}

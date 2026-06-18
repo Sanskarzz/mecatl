@@ -59,6 +59,7 @@ Documentation/citation conventions are in [`docs/design/README.md`](../design/RE
 - [0025 — UX discoverability](./0025-ux-discoverability.md)
 - [0026 — Clipboard image paste](./0026-clipboard-image-paste.md)
 - [0028 — mecatequi (single-shot GitHub Action)](./0028-mecatequi.md)
+- [0032 — First-class worktree binding for a session](./0032-worktree-binding.md)
 
 ### Retired
 - [0029 — Repo-map tree-sitter](./0029-repomap-tree-sitter.md) *(retired)*

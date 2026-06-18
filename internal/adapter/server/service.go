@@ -197,6 +197,32 @@ type Config struct {
 	// It is read-only and called per request (discovery is cheap file scanning).
 	Commands CommandLister
 
+	// Worktrees lists the git worktrees of a repo root, backing the ListWorktrees
+	// RPC (the client's /worktrees overlay — the first-class operator workflow for
+	// binding a session to an EXISTING sibling worktree, issue #102). It is the
+	// composition-injected discovery seam: the composition root supplies an
+	// osfs-backed implementation that shells out to `git worktree list --porcelain`
+	// with a scrubbed env, trust-gated; a no-FS/cloud deployment (or an untrusted
+	// workspace) leaves it nil. Optional and nil-safe: when nil, ListWorktrees
+	// returns an empty list and the ServerCapabilities.worktrees bit is false so a
+	// client hides the overlay honestly. Read-only and called per request.
+	Worktrees WorktreeLister
+
+	// DefaultWorkspace is the workspace the SHARED engine was assembled for (the
+	// server's launch root). A CreateSession whose workspace DIFFERS (non-empty and
+	// != DefaultWorkspace) routes through the per-session engine factory so the
+	// session's subagents/members pin their CHILD permission resolver to the
+	// session root (the same re-pin sessionEngineFactory already applies for no-fs
+	// / selector / mode sessions), and the session rehydrates to the SAME engine
+	// after a process restart. The main policy ALREADY re-resolves `.mecatl/
+	// settings.yaml` per workspace on every session; the per-session route closes
+	// the CHILD-resolver gap (a shared-engine child would otherwise read the launch
+	// root's project rules) and the restart-fidelity gap. Empty for a child/member
+	// service or a no-root cloud deployment — then the trigger never fires (every
+	// non-empty workspace is "different" but worktree discovery is nil there, so
+	// the feature is inert). See docs/adr/0032-worktree-binding.md.
+	DefaultWorkspace string
+
 	// Agents is the resolved agent-definition snapshot taken at startup. It backs
 	// ListAgents and is a pure read of this snapshot (no live discovery). The
 	// composition root (internal/app) resolves the registry once and projects each
@@ -782,7 +808,7 @@ func (s *Service) createSession(ctx context.Context, workspace string, mode sess
 	// the unset caps. A zero field means "unset", not "explicitly unlimited".
 	limits = limits.WithDefaults(s.cfg.DefaultLimits)
 
-	needPerSession := sel != (ProviderSelector{}) || len(specs) > 0 || profile == ProfileNoFS
+	needPerSession := s.sessionNeedsPerFactory(sel, specs, profile, workspace)
 	if !needPerSession {
 		// Shared-engine fast path (today's behaviour, byte-identical). The labels are
 		// the empty pair + default profile here (the empty-selector default profile is
@@ -911,6 +937,7 @@ func (s *Service) capabilities() *mecatlv1.ServerCapabilities {
 		Image:          pcaps.Image,
 		Audio:          pcaps.Audio,
 		Posture:        s.cfg.Posture,
+		Worktrees:      s.cfg.Worktrees != nil,
 	}
 }
 
@@ -1368,7 +1395,7 @@ func (s *Service) engineAndWorkspaceFor(ctx context.Context, sess *session.Sessi
 		s.mu.Lock()
 		ws = s.sessionWorkspaces[id]
 		s.mu.Unlock()
-	case !hasEngine && !needsRehydration(sess) && s.cfg.ModeNeedsEngine != nil && s.cfg.SessionEngine != nil && s.cfg.ModeNeedsEngine(sess.Mode):
+	case !hasEngine && !s.needsRehydration(sess) && s.cfg.ModeNeedsEngine != nil && s.cfg.SessionEngine != nil && s.cfg.ModeNeedsEngine(sess.Mode):
 		// CASE 2 (ADR 0030 Layer 3): a DEFAULT-FS session that would otherwise ride the
 		// shared engine, but its mode (plan) resolves a DIFFERENT model — promote it to a
 		// per-session factory engine. A default-FS session has the empty selector + a real
@@ -1381,7 +1408,7 @@ func (s *Service) engineAndWorkspaceFor(ctx context.Context, sess *session.Sessi
 		}
 		se, hasEngine = promoted, true
 	}
-	if !hasEngine && needsRehydration(sess) {
+	if !hasEngine && s.needsRehydration(sess) {
 		// RESTART REHYDRATION (issue #55, widened in the cloud-native Phase 1): a
 		// PERSISTED session that needed a PER-SESSION engine — a non-default
 		// provider/model selector, OR the no-fs profile — has its engine + (for no-fs)
@@ -1424,6 +1451,19 @@ func (s *Service) engineAndWorkspaceFor(ctx context.Context, sess *session.Sessi
 	return engine, ws, nil
 }
 
+// sessionNeedsPerFactory reports whether a CreateSession with the given inputs
+// must route through the per-session engine factory (rather than the shared
+// engine fast path). It is the single expression behind needPerSession in
+// createSession, extracted so createSession stays under the cyclomatic cap. The
+// worktree arm (issue #102): a session whose workspace DIFFERS from the server's
+// launch root routes through the factory so children pin their resolver to the
+// session root. When DefaultWorkspace == "" (a child/member/cloud service) the
+// arm never fires (a non-empty workspace can't differ from "").
+func (s *Service) sessionNeedsPerFactory(sel ProviderSelector, specs []mcp.ServerConfig, profile SessionProfile, workspace string) bool {
+	return sel != (ProviderSelector{}) || len(specs) > 0 || profile == ProfileNoFS ||
+		(workspace != "" && s.cfg.DefaultWorkspace != "" && workspace != s.cfg.DefaultWorkspace)
+}
+
 // needsRehydration reports whether a loaded session that has NO live per-session
 // engine registered (i.e. its in-memory registrations did not survive a restart)
 // must have one rebuilt before it runs. It is the WIDENED Phase 1 trigger: the
@@ -1435,10 +1475,20 @@ func (s *Service) engineAndWorkspaceFor(ctx context.Context, sess *session.Sessi
 // the shared engine with zero rehydration overhead, exactly as before. The
 // empty-workspace check stays as the SECOND defense (a no-fs session that
 // somehow persisted no profile label still rehydrates).
-func needsRehydration(sess *session.Session) bool {
+//
+// Worktree binding (issue #102, docs/adr/0032): a session whose persisted
+// workspace DIFFERS from the server's launch root (DefaultWorkspace) ALSO needs
+// rehydration — its per-session engine (which re-pins the CHILD permission
+// resolver to the session root) lived only in process memory and is gone after a
+// restart. When DefaultWorkspace is empty (a child/member service or a no-root
+// cloud deployment) this arm never fires (a non-empty workspace can't differ
+// from ""), so the cloud/no-root posture is byte-identical. A default FS session
+// (Workspace == DefaultWorkspace) does NOT rehydrate, exactly as before.
+func (s *Service) needsRehydration(sess *session.Session) bool {
 	return sess.Profile == string(ProfileNoFS) ||
 		sess.ProviderID != "" || sess.ModelID != "" ||
-		sess.Workspace == ""
+		sess.Workspace == "" ||
+		(sess.Workspace != "" && s.cfg.DefaultWorkspace != "" && sess.Workspace != s.cfg.DefaultWorkspace)
 }
 
 // profileForSession reconstructs the SessionProfile from a loaded session's persisted
@@ -2203,4 +2253,60 @@ func (s *Service) ListCommands(ctx context.Context, workspace string) ([]Command
 		return nil, fmt.Errorf("%w: list commands: %v", ErrInternal, err)
 	}
 	return cmds, nil
+}
+
+// --- Worktree discovery (issue #102) ----------------------------------------
+
+// Worktree is one discovered git worktree of a repo, mirroring the proto Worktree
+// message (a `git worktree list --porcelain` record). The Service exposes its own
+// proto-free type so the wire adapters and the composition seam (WorktreeLister)
+// need not import the proto package directly.
+type Worktree struct {
+	// Path is the absolute working-tree path (the value handed to
+	// CreateSessionRequest.workspace to bind a session to this worktree).
+	Path string
+	// Branch is the checked-out ref name; empty for a detached HEAD.
+	Branch string
+	// Head is the commit SHA the worktree is at.
+	Head string
+	// Bare is true for a bare worktree.
+	Bare bool
+}
+
+// WorktreeLister enumerates the git worktrees of the repo rooted at root. It is
+// the composition-injected discovery seam backing ListWorktrees (the client's
+// /worktrees overlay): the composition root supplies an osfs-backed implementation
+// that shells out to `git worktree list --porcelain` with a scrubbed env,
+// trust-gated; a no-FS/cloud deployment (or an untrusted workspace) leaves it nil.
+// It is read-only and nil-safe: when nil, ListWorktrees returns an empty list and
+// ServerCapabilities.worktrees is false. It NEVER performs a live model/network
+// call and never mutates anything.
+type WorktreeLister interface {
+	// List returns the worktrees of the repo at root (the main worktree first, in
+	// `git worktree list` order), or an error on a genuine discovery fault. An
+	// untrusted/non-repo root yields an empty slice, NOT an error (fail-soft).
+	List(ctx context.Context, root string) ([]Worktree, error)
+}
+
+// ListWorktrees returns the git worktrees of the repo rooted at the given
+// workspace. An empty root, a nil lister (worktree discovery disabled — a no-FS
+// or cloud server), or a lister that enumerates nothing all yield an empty slice.
+// A discovery fault from the lister is returned as ErrInternal so the wire
+// adapters surface it distinctly. Read-only.
+//
+// Security: when DefaultWorkspace is configured, only the default workspace root
+// is allowed. A client supplying any other path would otherwise trigger a git
+// shell-out against an arbitrary directory; the clamp returns empty instead.
+func (s *Service) ListWorktrees(ctx context.Context, workspace string) ([]Worktree, error) {
+	if s.cfg.Worktrees == nil || workspace == "" {
+		return nil, nil
+	}
+	if s.cfg.DefaultWorkspace != "" && workspace != s.cfg.DefaultWorkspace {
+		return nil, nil
+	}
+	wts, err := s.cfg.Worktrees.List(ctx, workspace)
+	if err != nil {
+		return nil, fmt.Errorf("%w: list worktrees: %v", ErrInternal, err)
+	}
+	return wts, nil
 }

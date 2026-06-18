@@ -558,6 +558,25 @@ func toProtoCommands(cs []Command) []*mecatlv1.Command {
 	return out
 }
 
+// toProtoWorktree maps a Service Worktree to its proto form (issue #102).
+func toProtoWorktree(w Worktree) *mecatlv1.Worktree {
+	return &mecatlv1.Worktree{
+		Path:   w.Path,
+		Branch: w.Branch,
+		Head:   w.Head,
+		Bare:   w.Bare,
+	}
+}
+
+// toProtoWorktrees maps a slice of Service Worktrees to their proto form.
+func toProtoWorktrees(wts []Worktree) []*mecatlv1.Worktree {
+	out := make([]*mecatlv1.Worktree, 0, len(wts))
+	for _, w := range wts {
+		out = append(out, toProtoWorktree(w))
+	}
+	return out
+}
+
 // --- team mappers ------------------------------------------------------------
 
 // toProtoTeamMember maps a team.Member roster entry to its proto form.

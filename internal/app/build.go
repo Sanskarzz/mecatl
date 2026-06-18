@@ -1063,12 +1063,14 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	commandLister := buildCommandLister(cfg, mcpProvider)
 
 	svcCfg := server.Config{
-		Engine:        engine,
-		Store:         store,
-		Workspaces:    osfsWorkspaceFactory(cfg.diag(), assets.skillReadRoots),
-		DefaultLimits: defaultLimits(),
-		MCPProvider:   mcpProvider,
-		MCPSources:    mcpInventory,
+		Engine:           engine,
+		Store:            store,
+		Workspaces:       osfsWorkspaceFactory(cfg.diag(), assets.skillReadRoots),
+		DefaultWorkspace: cfg.Workspace, // the launch root; a session on a DIFFERENT root routes through the per-session factory (issue #102, docs/adr/0032)
+		Worktrees:        buildWorktreeLister(cfg),
+		DefaultLimits:    defaultLimits(),
+		MCPProvider:      mcpProvider,
+		MCPSources:       mcpInventory,
 		// Live re-probe: ListMcpSources re-consults the resolved sources on each call
 		// so a TUI panel refresh (ctrl+o → ctrl+r) reflects CURRENT source status,
 		// not just this startup snapshot. nil when MCP is unconfigured (keeps the
@@ -5067,6 +5069,101 @@ func osfsWorkspaceFactory(d port.Diagnostics, skillReadRoots []string) server.Wo
 		}
 		return ws
 	}
+}
+
+// buildWorktreeLister returns the osfs-backed WorktreeLister backing the
+// ListWorktrees RPC (the /worktrees overlay, issue #102). It shells out to
+// `git worktree list --porcelain` with the SAME scrubbed+neutralised git env as
+// gitSnapshot (envscrub then gitenv) so a repo-local git config cannot run code
+// AND the harness credentials are never exposed to a repo-local git driver. It
+// is TRUST-GATED: when the launch workspace is untrusted the lister is nil, so
+// no git ever runs against an untrusted repo (the same discipline as gitSnapshot
+// at `internal/app/build.go` (`gitSnapshot`)). It is nil when there is no
+// workspace (a child/member service, or a no-root cloud deployment), no shell,
+// or git is unavailable — then ListWorktrees returns an empty list and the
+// ServerCapabilities.worktrees bit is false, so the feature is honestly absent
+// in no-FS/cloud environments. The lister is read-only, fail-soft (any git
+// fault returns an empty list, never an error — discovery must never block the
+// overlay), and bounds each call with a 5s timeout. See
+// docs/adr/0032-worktree-binding.md.
+func buildWorktreeLister(cfg Config) server.WorktreeLister {
+	if cfg.Workspace == "" || cfg.Shell == "" || !cfg.TrustProject {
+		return nil
+	}
+	return gitWorktreeLister{shell: cfg.Shell}
+}
+
+// gitWorktreeLister is the osfs-backed WorktreeLister. The runner is built once
+// (over the launch root, but CommandRunner.Run honors the per-call workdir, so
+// one runner serves every session workspace). The scrubbed env is applied via
+// osfs.WithCommandEnvList, the same seam every agent-facing shell uses.
+// It holds no diagnostics sink: the discovery path is intentionally fail-soft
+// (every error yields (nil, nil) so the overlay renders empty rather than
+// surfacing an error) — a noisy WARN on a non-repo root or a missing git binary
+// would fire on every list call in a cloud/no-git environment.
+type gitWorktreeLister struct {
+	shell string
+}
+
+// List enumerates the git worktrees of the repo at root via
+// `git worktree list --porcelain`. It is fail-soft: a non-repo root, a git
+// fault, a missing git, or a timeout yields (nil, nil) — never an error — so the
+// overlay renders empty instead of blocking. The porcelain output is
+// blank-line-separated records of `worktree <path>` / `HEAD <sha>` /
+// `branch <ref>` / `bare` lines; the main worktree comes first.
+func (g gitWorktreeLister) List(ctx context.Context, root string) ([]server.Worktree, error) {
+	if root == "" {
+		return nil, nil
+	}
+	env := gitenv.Scrub(envscrub.Scrub(os.Environ()))
+	runner, err := osfs.NewCommandRunnerShell(root, g.shell, osfs.WithCommandEnvList(env))
+	if err != nil {
+		return nil, nil // no shell — fail-soft
+	}
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	res, err := runner.Run(cctx, "git worktree list --porcelain", root)
+	if err != nil || res.ExitCode != 0 {
+		return nil, nil // not a repo / git unavailable — fail-soft
+	}
+	return parseWorktreePorcelain(res.Stdout), nil
+}
+
+// parseWorktreePorcelain parses `git worktree list --porcelain` output into
+// []server.Worktree. Records are blank-line-separated; each record's first line
+// is `worktree <path>`, optionally followed by `HEAD <sha>`, `branch <ref>`,
+// `bare`, and `detached`. Malformed lines are skipped (fail-soft).
+func parseWorktreePorcelain(out string) []server.Worktree {
+	var wts []server.Worktree
+	var cur *server.Worktree
+	flush := func() {
+		if cur != nil {
+			wts = append(wts, *cur)
+			cur = nil
+		}
+	}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimRight(line, "\r")
+		switch {
+		case line == "":
+			flush()
+		case strings.HasPrefix(line, "worktree "):
+			flush()
+			cur = &server.Worktree{Path: strings.TrimSpace(strings.TrimPrefix(line, "worktree "))}
+		case cur == nil:
+			// stray line before a worktree record — skip
+		case strings.HasPrefix(line, "HEAD "):
+			cur.Head = strings.TrimSpace(strings.TrimPrefix(line, "HEAD "))
+		case strings.HasPrefix(line, "branch "):
+			cur.Branch = strings.TrimSpace(strings.TrimPrefix(line, "branch "))
+		case line == "bare":
+			cur.Bare = true
+		case line == "detached":
+			// detached HEAD: branch stays empty (already the zero value)
+		}
+	}
+	flush()
+	return wts
 }
 
 // newForkWorkspace returns the ONE workspace constructor every fork family

@@ -55,6 +55,7 @@ const (
 	HarnessService_ListToolHiveGroups_FullMethodName  = "/mecatl.v1.HarnessService/ListToolHiveGroups"
 	HarnessService_ListAgents_FullMethodName          = "/mecatl.v1.HarnessService/ListAgents"
 	HarnessService_ListCommands_FullMethodName        = "/mecatl.v1.HarnessService/ListCommands"
+	HarnessService_ListWorktrees_FullMethodName       = "/mecatl.v1.HarnessService/ListWorktrees"
 	HarnessService_ListSkills_FullMethodName          = "/mecatl.v1.HarnessService/ListSkills"
 	HarnessService_GetSoul_FullMethodName             = "/mecatl.v1.HarnessService/GetSoul"
 	HarnessService_GetUserModel_FullMethodName        = "/mecatl.v1.HarnessService/GetUserModel"
@@ -128,6 +129,15 @@ type HarnessServiceClient interface {
 	// CommandExpander handles it when a "/<cmd> args" prompt is submitted). An
 	// empty workspace, or a server with no command expander, returns an empty list.
 	ListCommands(ctx context.Context, in *ListCommandsRequest, opts ...grpc.CallOption) (*ListCommandsResponse, error)
+	// ListWorktrees returns the git worktrees of the repo rooted at the requested
+	// workspace (issue #102). It powers the client's /worktrees overlay — the
+	// first-class operator workflow for binding a session to an EXISTING sibling
+	// worktree (a new session rooted there, not a live-session switch). It is
+	// DISCOVERY only, composition-injected (nil-safe: a no-FS/cloud server, or an
+	// untrusted workspace, returns an empty list); it never performs a live
+	// model/network call and never mutates anything. An empty workspace or a server
+	// with no worktree lister also returns an empty list.
+	ListWorktrees(ctx context.Context, in *ListWorktreesRequest, opts ...grpc.CallOption) (*ListWorktreesResponse, error)
 	// ListSkills returns the resolved skills inventory snapshot: each discovered
 	// skill's name + one-line description. Derived from the snapshot taken at
 	// startup (skills are discovered once at build time and immutable for the
@@ -325,6 +335,16 @@ func (c *harnessServiceClient) ListCommands(ctx context.Context, in *ListCommand
 	return out, nil
 }
 
+func (c *harnessServiceClient) ListWorktrees(ctx context.Context, in *ListWorktreesRequest, opts ...grpc.CallOption) (*ListWorktreesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListWorktreesResponse)
+	err := c.cc.Invoke(ctx, HarnessService_ListWorktrees_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *harnessServiceClient) ListSkills(ctx context.Context, in *ListSkillsRequest, opts ...grpc.CallOption) (*ListSkillsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListSkillsResponse)
@@ -504,6 +524,15 @@ type HarnessServiceServer interface {
 	// CommandExpander handles it when a "/<cmd> args" prompt is submitted). An
 	// empty workspace, or a server with no command expander, returns an empty list.
 	ListCommands(context.Context, *ListCommandsRequest) (*ListCommandsResponse, error)
+	// ListWorktrees returns the git worktrees of the repo rooted at the requested
+	// workspace (issue #102). It powers the client's /worktrees overlay — the
+	// first-class operator workflow for binding a session to an EXISTING sibling
+	// worktree (a new session rooted there, not a live-session switch). It is
+	// DISCOVERY only, composition-injected (nil-safe: a no-FS/cloud server, or an
+	// untrusted workspace, returns an empty list); it never performs a live
+	// model/network call and never mutates anything. An empty workspace or a server
+	// with no worktree lister also returns an empty list.
+	ListWorktrees(context.Context, *ListWorktreesRequest) (*ListWorktreesResponse, error)
 	// ListSkills returns the resolved skills inventory snapshot: each discovered
 	// skill's name + one-line description. Derived from the snapshot taken at
 	// startup (skills are discovered once at build time and immutable for the
@@ -606,6 +635,9 @@ func (UnimplementedHarnessServiceServer) ListAgents(context.Context, *ListAgents
 }
 func (UnimplementedHarnessServiceServer) ListCommands(context.Context, *ListCommandsRequest) (*ListCommandsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListCommands not implemented")
+}
+func (UnimplementedHarnessServiceServer) ListWorktrees(context.Context, *ListWorktreesRequest) (*ListWorktreesResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListWorktrees not implemented")
 }
 func (UnimplementedHarnessServiceServer) ListSkills(context.Context, *ListSkillsRequest) (*ListSkillsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListSkills not implemented")
@@ -884,6 +916,24 @@ func _HarnessService_ListCommands_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _HarnessService_ListWorktrees_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListWorktreesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HarnessServiceServer).ListWorktrees(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HarnessService_ListWorktrees_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HarnessServiceServer).ListWorktrees(ctx, req.(*ListWorktreesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _HarnessService_ListSkills_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ListSkillsRequest)
 	if err := dec(in); err != nil {
@@ -1129,6 +1179,10 @@ var HarnessService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListCommands",
 			Handler:    _HarnessService_ListCommands_Handler,
+		},
+		{
+			MethodName: "ListWorktrees",
+			Handler:    _HarnessService_ListWorktrees_Handler,
 		},
 		{
 			MethodName: "ListSkills",

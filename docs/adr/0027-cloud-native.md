@@ -436,6 +436,7 @@ durable artifact survives and is reloaded), or **lost** (gone, possibly leaking)
 | 22 | `askReviewBreaker` (headless ask-reviewer circuit breaker) | `agent.Run` | run | dies with the run | lost (run-scoped by design) | `engine/agent/askadjudicator.go:144` (commit `1b774d4`) |
 | 23 | Subagent model-router classifier engine (ADR 0031) | `buildModelRouterTask` closure (composition) | session (re-derived per session; ONE engine built per classification call) | none needed (tool-less, no hooks, no goroutine; GC'd after the one-turn drive) | reconstructible (rebuilt from the operator taxonomy + the session's provider/model at next Build / next classification); decision = derive (nothing persisted) | `internal/app/build.go` (`buildModelRouterTask`); `engine/agent/modelrouter.go` (`RunModelRouter`) |
 | 24 | `modelRouterBreaker` (per-run model-router circuit breaker, ADR 0031) | `agent.Run` | run | dies with the run | lost (run-scoped by design, mirroring `askReviewBreaker` row 22) | `engine/agent/modelrouter.go` (`modelRouterBreaker`); armed in `engine/agent/loop.go` (`RunContentWith`) |
+| 25 | `gitWorktreeLister` (osfs-backed worktree discovery, issue #102) | `app.Build` | process lifetime | none (value type, no goroutine, no Close needed) | reconstructible (rebuilt from `cfg.Shell` at next Build; no state) | `internal/app/build.go` (`buildWorktreeLister`) |
 
 ### Does resource-lifetime management earn a seam now?
 

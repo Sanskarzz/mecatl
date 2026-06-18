@@ -1723,6 +1723,7 @@ Service: `mecatl.v1.HarnessService` (`contracts/proto/mecatl/v1/harness.proto`).
 | `ListModels` | unary | the selectable provider/model inventory — public metadata only (powers the `/models` picker; see §3) |
 | `ListAgents` | unary | the discovered agent-definition registry (name, description, resolved model, tool scope) |
 | `ListCommands` | unary | the available slash commands for a workspace (discovery only — expansion happens on the run path) |
+| `ListWorktrees` | unary | the git worktrees of a repo (discovery only — powers the mecatui `/worktrees` switch; nil-safe on a no-FS/cloud server; issue #102) |
 | `ListSkills` | unary | the discovered skills inventory (name + one-line description) |
 | `GetSoul` | unary | the resolved soul's build-time snapshot: content, size/hash, provenance, trust + drift state |
 | `GetUserModel` | unary | the **live** user-model index (entry keys + descriptions; values omitted — `Recall` loads them) |
@@ -1943,12 +1944,16 @@ allow-all operator posture — same semantics, root refusal, and `MECATL_SANDBOX
 `IS_SANDBOX` env as `mecated`; see the allow-all note in §7). It is **ignored when
 dialling an external `--server`**. Note the TUI's **built-in slash commands**
 (`/clear`, `/help`, and the caps-gated `/mcp`, `/agents`, `/team`, `/skills`,
-`/soul`, `/usermodel`, `/models` — in that fixed palette order) still work
+`/soul`, `/usermodel`, `/models`, `/worktrees` — in that fixed palette order) still work
 regardless — they act on the TUI itself, not the server, so typing `/` always
 opens a useful palette even with workspace slash-command expansion off
 (`/agents` browses the agent-definition inventory; `/team`, also `ctrl+a`,
 opens the live agent-team overlay; `/skills` the skills inventory; `/soul` and
-`/usermodel` the persona/user-model views; `/models` the model picker). See
+`/usermodel` the persona/user-model views; `/models` the model picker;
+`/worktrees` the sibling-git-worktree switch — it lists the repo's worktrees and,
+on select, starts a NEW session rooted at the chosen worktree so all local tools
+bind there; gated on the server advertising `worktrees`, so it is honestly absent
+against a no-FS/cloud server; issue #102). See
 `docs/tui.md` for all flags.
 
 It streams the conversation (glamour markdown for assistant text, themed cards
