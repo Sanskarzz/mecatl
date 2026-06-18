@@ -821,12 +821,6 @@ func (r *renderer) renderBlockFresh(idx int, b *block, expand bool) string {
 	}
 }
 
-// maxReasoningLines caps how many lines of the reasoning summary show when the
-// global details toggle (ctrl+t) is on; the rest collapse with a neutral
-// "…(truncated)" tail so a long chain-of-thought never dominates the scrollback
-// even when expanded.
-const maxReasoningLines = 24
-
 // reasoningCaveat is the dim one-line disclaimer prepended to the EXPANDED
 // reasoning. It signals the prose is a lossy summary, not the model's actual
 // process — streamed chain-of-thought is often unfaithful and drives
@@ -839,9 +833,11 @@ const reasoningCaveat = "— summary of the model's reasoning; may not reflect i
 // is still streaming and no answer text has begun it reads "reasoning…" (a live
 // "the model is working" affordance); otherwise it is the static
 // "reasoning summary · N lines · ctrl+t expand". When the global details toggle
-// (expand) is on, a dim caveat plus the full summary text are shown, line-capped
-// so they cannot drown the answer. Streamed reasoning is never a trust anchor:
-// hidden unless explicitly asked for, and clearly labelled as a lossy summary.
+// (expand) is on, a dim caveat plus the full summary text are shown with no line
+// cap (a long chain-of-thought no longer truncates once the user has explicitly
+// asked to see it — matching how resultBody handles tool results). Streamed
+// reasoning is never a trust anchor: hidden unless explicitly asked for, and
+// clearly labelled as a lossy summary.
 func (r *renderer) renderReasoning(b *block, expand bool) string {
 	if b.reasoning == "" {
 		return ""
@@ -856,8 +852,7 @@ func (r *renderer) renderReasoning(b *block, expand bool) string {
 		return style.Render("reasoning summary · " + plural(n, "line") + " · ctrl+t expand")
 	}
 	header := style.Render("reasoning summary · " + plural(n, "line") + " · ctrl+t collapse")
-	body := truncateLinesTail(text, maxReasoningLines, "  …(truncated)")
-	return header + "\n" + r.wrapStyled(reasoningCaveat, style) + "\n" + r.wrapStyled(body, style)
+	return header + "\n" + r.wrapStyled(reasoningCaveat, style) + "\n" + r.wrapStyled(text, style)
 }
 
 // wrapStyled word-wraps s to the live terminal width MINUS the style's own

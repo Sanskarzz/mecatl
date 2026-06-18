@@ -8,6 +8,7 @@ package ui
 // so the wrap budget can never drift behind a hardcoded number.
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -199,6 +200,46 @@ func TestUserBlockInsetTracksStyle(t *testing.T) {
 	for i, ln := range strings.Split(out, "\n") {
 		if w := maxLineWidth(ln); w > r.width {
 			t.Errorf("line %d exceeds width %d (got %d): %q", i, r.width, w, stripANSIstr(ln))
+		}
+	}
+}
+
+// TestReasoningExpandedShowsFullBody locks the issue #96 fix: expanding a
+// reasoning summary (ctrl+t) shows the FULL body with no line cap, NOT the old
+// 24-line tail truncation. A 58-line reasoning block must render all 58 lines
+// (plus header + caveat) when expanded — matching how resultBody handles tool
+// results — while the collapsed path still shows only the one-line header.
+func TestReasoningExpandedShowsFullBody(t *testing.T) {
+	r := newTestRenderer()
+	r.setWidth(200) // wide so each reasoning line stays one logical line
+	var lines []string
+	for i := 0; i < 58; i++ {
+		lines = append(lines, fmt.Sprintf("reasoning step %d", i+1))
+	}
+	reasoning := strings.Join(lines, "\n")
+	b := block{kind: blockAssistant, raw: "the answer", reasoning: reasoning}
+
+	// Collapsed: only the header, none of the body lines.
+	collapsed := stripANSIstr(r.renderBlock(0, &b, false))
+	if !strings.Contains(collapsed, "reasoning summary · 58 lines · ctrl+t expand") {
+		t.Errorf("collapsed should report 58 lines:\n%s", collapsed)
+	}
+	if strings.Contains(collapsed, "reasoning step 1") || strings.Contains(collapsed, "reasoning step 58") {
+		t.Errorf("collapsed must hide the body:\n%s", collapsed)
+	}
+	if strings.Contains(collapsed, "…(truncated)") {
+		t.Errorf("collapsed must not carry a truncation tail:\n%s", collapsed)
+	}
+
+	// Expanded: EVERY reasoning line present, no truncation tail.
+	expanded := stripANSIstr(r.renderBlock(0, &b, true))
+	if strings.Contains(expanded, "…(truncated)") {
+		t.Errorf("expanded reasoning must NOT truncate (issue #96):\n%s", expanded)
+	}
+	for i := 1; i <= 58; i++ {
+		want := fmt.Sprintf("reasoning step %d", i)
+		if !strings.Contains(expanded, want) {
+			t.Errorf("expanded reasoning missing %q:\n%s", want, expanded)
 		}
 	}
 }
