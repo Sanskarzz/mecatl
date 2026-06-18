@@ -13,14 +13,29 @@ type ToolCallID string
 // named tool with tool-specific arguments. It is produced by the LLM provider
 // and consumed by both the Tooling and Governance contexts. Construct it with
 // NewToolCall; it carries no mutating methods.
+//
+// JSON tags use capitalized keys (json:"ID", json:"Name", json:"Args") to
+// preserve the wire format that predates JSON tagging — old snapshots serialized
+// these fields as "ID", "Name", "Args" by Go's default reflection rule, so the
+// tags below preserve exact backward compatibility. ItemID uses a lowercase tag
+// following the ProviderPhase precedent (additive, omitempty).
 type ToolCall struct {
 	// ID pairs this call with its ToolResult.
-	ID ToolCallID
+	ID ToolCallID `json:"ID"`
 	// Name is the tool name as registered in the catalog.
-	Name string
+	Name string `json:"Name"`
 	// Args is the raw, tool-specific argument payload, validated against the
 	// tool's JSON schema by the Tool itself.
-	Args json.RawMessage
+	Args json.RawMessage `json:"Args"`
+	// ItemID is the provider-assigned item-level unique identifier for this
+	// function_call output item (e.g. the "id" field in the OpenAI Responses
+	// API, distinct from ID which carries "call_id"). Carried opaquely — same
+	// discipline as Message.Reasoning and Message.ProviderPhase — so the adapter
+	// can round-trip it for store:false stateless multi-turn replay. Empty string
+	// means "no item id" and the field is wire-omitted on replay. The STRUCTURE
+	// is provider-neutral; the CONTENTS are provider-private — do NOT interpret
+	// or validate this value in domain code.
+	ItemID string `json:"item_id,omitempty"`
 }
 
 // NewToolCall constructs a ToolCall value object.

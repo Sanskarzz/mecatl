@@ -203,8 +203,22 @@ func assistantItems(m session.Message) []responses.ResponseInputItemUnionParam {
 		out = append(out, responses.ResponseInputItemUnionParam{OfReasoning: &reasoning})
 	}
 	for _, call := range m.ToolCalls {
-		out = append(out, responses.ResponseInputItemParamOfFunctionCall(
-			string(call.Args), string(call.ID), call.Name))
+		fc := responses.ResponseFunctionToolCallParam{
+			Arguments: string(call.Args),
+			CallID:    string(call.ID),
+			Name:      call.Name,
+		}
+		// Replay the provider-assigned item ID (e.g. "fc_1" from the OpenAI
+		// Responses API) so the provider can de-duplicate items across turns in
+		// store:false stateless replay. Without this, each turn's function_call
+		// items have no "id" field and the provider auto-assigns sequential fc_N
+		// values — which can collide with items from the current response and
+		// produce "Duplicate item found with id fc_N" (Azure GPT-5.x). An empty
+		// ItemID (non-OpenAI or pre-fix captures) is wire-omitted via omitzero.
+		if call.ItemID != "" {
+			fc.ID = oai.String(call.ItemID)
+		}
+		out = append(out, responses.ResponseInputItemUnionParam{OfFunctionCall: &fc})
 	}
 	if m.Text != "" {
 		item := responses.ResponseInputItemParamOfMessage(

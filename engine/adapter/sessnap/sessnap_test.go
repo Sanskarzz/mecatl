@@ -294,6 +294,82 @@ func TestSnapshotRoundTripsPhase(t *testing.T) {
 	}
 }
 
+// TestSnapshotRoundTripsItemID asserts that a ToolCall carrying a non-empty
+// ItemID survives a Marshal -> Unmarshal round-trip with the value intact, and
+// that the wire JSON contains the "item_id" key (not a vacuous no-op).
+//
+// This pins the fix for the "Duplicate item found with id fc_N" error from Azure
+// GPT-5.x: the ToolCall.ItemID field must survive snapshot persistence so that a
+// restarted process can still replay the provider-assigned item id on subsequent
+// stateless turns. It also verifies backward compat: an old snapshot with no
+// "item_id" key decodes with ItemID == "" (the zero value, wire-omitted on
+// replay — safe, non-OpenAI providers / pre-fix captures stay unchanged).
+func TestSnapshotRoundTripsItemID(t *testing.T) {
+	const itemID = "fc_7"
+	s := session.New("itm1", session.ModeDefault, "/ws", session.Limits{}, time.Unix(1700000000, 0).UTC())
+	if err := s.BeginTurn(); err != nil {
+		t.Fatalf("BeginTurn: %v", err)
+	}
+	call := session.ToolCall{
+		ID:     "call_abc",
+		Name:   "read_file",
+		Args:   json.RawMessage(`{"path":"a.go"}`),
+		ItemID: itemID,
+	}
+	if err := s.RecordAssistant(session.NewAssistantMessage("", "", []session.ToolCall{call})); err != nil {
+		t.Fatalf("RecordAssistant: %v", err)
+	}
+
+	line, err := sessnap.Marshal(s)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	// The item_id key must be present in the wire JSON (non-vacuous round-trip).
+	if !strings.Contains(string(line), `"item_id":"`+itemID+`"`) {
+		t.Fatalf("snapshot JSON missing item_id key with value %q; got:\n%s", itemID, line)
+	}
+
+	got, err := sessnap.Unmarshal(line)
+	if err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	msgs := got.Conversation.Messages
+	if len(msgs) == 0 {
+		t.Fatalf("restored conversation has no messages")
+	}
+	var restoredCall *session.ToolCall
+	for i := range msgs {
+		if len(msgs[i].ToolCalls) > 0 {
+			c := msgs[i].ToolCalls[0]
+			restoredCall = &c
+			break
+		}
+	}
+	if restoredCall == nil {
+		t.Fatalf("restored conversation has no ToolCalls in any message")
+	}
+	if restoredCall.ItemID != itemID {
+		t.Fatalf("restored ItemID = %q, want %q", restoredCall.ItemID, itemID)
+	}
+
+	// Backward-compat: an old snapshot without an "item_id" key decodes with
+	// ItemID == "" (wire-omit safe — replaying without an id is the pre-fix behavior).
+	oldSnap := `{"id":"old2","state":"idle","mode":"default","limits":{},"counters":{},` +
+		`"workspace":"/ws","created_at":"2023-11-14T22:13:20Z",` +
+		`"messages":[{"role":"assistant","tool_calls":[{"ID":"call_x","Name":"read_file","Args":{"path":"z.go"}}]}]}`
+	got2, err := sessnap.Unmarshal([]byte(oldSnap))
+	if err != nil {
+		t.Fatalf("Unmarshal old snapshot: %v", err)
+	}
+	if len(got2.Conversation.Messages) == 0 || len(got2.Conversation.Messages[0].ToolCalls) == 0 {
+		t.Fatalf("old snapshot has no tool calls after unmarshal")
+	}
+	if got2.Conversation.Messages[0].ToolCalls[0].ItemID != "" {
+		t.Fatalf("old snapshot (no item_id key) decoded ItemID = %q, want empty",
+			got2.Conversation.Messages[0].ToolCalls[0].ItemID)
+	}
+}
+
 // TestLoadV1SnapshotNoPartsIsTextOnly asserts a v1 snapshot JSON with no "parts"
 // key decodes to a text-only message (nil Parts) without error — the additive
 // field is back-compatible.

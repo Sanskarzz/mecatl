@@ -60,9 +60,10 @@ func TestTranslateFunctionCallTurn(t *testing.T) {
 	got := decodeFixture(t, "function_call_turn.sse")
 	want := []port.Chunk{
 		{Kind: port.ChunkToolCall, ToolCall: &session.ToolCall{
-			ID:   "call_abc",
-			Name: "read_file",
-			Args: json.RawMessage(`{"path":"main.go"}`),
+			ID:     "call_abc",
+			Name:   "read_file",
+			Args:   json.RawMessage(`{"path":"main.go"}`),
+			ItemID: "fc_1", // the provider-assigned item id from the fixture
 		}},
 		{Kind: port.ChunkUsage, Usage: &session.Usage{InputTokens: 40, OutputTokens: 9, CacheReadTokens: 32}},
 		{Kind: port.ChunkDone, Stop: session.StopEndTurn},
@@ -677,7 +678,8 @@ func assertChunks(t *testing.T, got, want []port.Chunk) {
 		if (g.ToolCall == nil) != (w.ToolCall == nil) {
 			t.Errorf("chunk %d tool-call presence mismatch: got %v want %v", i, g.ToolCall, w.ToolCall)
 		} else if w.ToolCall != nil {
-			if g.ToolCall.ID != w.ToolCall.ID || g.ToolCall.Name != w.ToolCall.Name || string(g.ToolCall.Args) != string(w.ToolCall.Args) {
+			if g.ToolCall.ID != w.ToolCall.ID || g.ToolCall.Name != w.ToolCall.Name ||
+				string(g.ToolCall.Args) != string(w.ToolCall.Args) || g.ToolCall.ItemID != w.ToolCall.ItemID {
 				t.Errorf("chunk %d tool call = %+v, want %+v", i, g.ToolCall, w.ToolCall)
 			}
 		}
@@ -753,7 +755,11 @@ func TestBuildParams(t *testing.T) {
 		func(m map[string]any) bool {
 			return m["type"] == "reasoning" && m["encrypted_content"] == "REASONING_BLOB"
 		},
-		func(m map[string]any) bool { return m["type"] == "function_call" && m["call_id"] == "call_1" },
+		func(m map[string]any) bool {
+			// NewToolCall leaves ItemID empty → no "id" key must appear in wire JSON.
+			_, hasID := m["id"]
+			return m["type"] == "function_call" && m["call_id"] == "call_1" && !hasID
+		},
 		func(m map[string]any) bool { return m["type"] == "function_call_output" && m["call_id"] == "call_1" },
 		func(m map[string]any) bool { return m["role"] == "assistant" },
 	}
@@ -761,6 +767,163 @@ func TestBuildParams(t *testing.T) {
 		if !check(items[i]) {
 			t.Errorf("input item %d unexpected: %v", i, items[i])
 		}
+	}
+}
+
+// TestItemIDRoundTrip verifies that a ToolCall carrying a non-empty ItemID has
+// its item id forwarded as the "id" field in the wire JSON, and that a ToolCall
+// with an empty ItemID omits the "id" key entirely. This pins the fix for the
+// "Duplicate item found with id fc_N" error from Azure GPT-5.x with store:false:
+// without the ItemID round-trip, each replayed function_call item has no "id",
+// causing the provider to auto-assign sequential fc_N values that can collide
+// with items from the current response.
+func TestItemIDRoundTrip(t *testing.T) {
+	// Part 1: non-empty ItemID is forwarded as "id" in the wire JSON.
+	req := port.LLMRequest{
+		Model: "gpt-5.5",
+		Messages: []session.Message{
+			session.NewUserMessage("do stuff"),
+			session.NewAssistantMessage("", "", []session.ToolCall{
+				{ID: "call_abc", Name: "read_file",
+					Args: json.RawMessage(`{"path":"a.go"}`), ItemID: "fc_3"},
+			}),
+			session.NewToolMessage(session.NewToolResult("call_abc", "content of a")),
+			session.NewAssistantMessage("done", "", nil),
+		},
+	}
+	params, err := buildParams(req)
+	if err != nil {
+		t.Fatalf("buildParams: %v", err)
+	}
+	raw, err := json.Marshal(params.Input.OfInputItemList)
+	if err != nil {
+		t.Fatalf("marshal input: %v", err)
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(raw, &items); err != nil {
+		t.Fatalf("unmarshal input: %v", err)
+	}
+	var fcItem map[string]any
+	for _, it := range items {
+		if it["type"] == "function_call" {
+			fcItem = it
+			break
+		}
+	}
+	if fcItem == nil {
+		t.Fatalf("no function_call item in:\n%s", raw)
+	}
+	if got, ok := fcItem["id"].(string); !ok || got != "fc_3" {
+		t.Errorf("function_call item[id] = %v, want %q (ItemID must be forwarded as id)", fcItem["id"], "fc_3")
+	}
+	if got := fcItem["call_id"]; got != "call_abc" {
+		t.Errorf("function_call item[call_id] = %v, want %q", got, "call_abc")
+	}
+
+	// Part 2: empty ItemID (via NewToolCall) omits the "id" key entirely.
+	req2 := port.LLMRequest{
+		Model: "gpt-5.5",
+		Messages: []session.Message{
+			session.NewUserMessage("do stuff"),
+			session.NewAssistantMessage("", "", []session.ToolCall{
+				session.NewToolCall("call_xyz", "write_file", json.RawMessage(`{"path":"b.go"}`)),
+			}),
+			session.NewToolMessage(session.NewToolResult("call_xyz", "ok")),
+			session.NewAssistantMessage("done", "", nil),
+		},
+	}
+	params2, err := buildParams(req2)
+	if err != nil {
+		t.Fatalf("buildParams (no ItemID): %v", err)
+	}
+	raw2, err := json.Marshal(params2.Input.OfInputItemList)
+	if err != nil {
+		t.Fatalf("marshal input (no ItemID): %v", err)
+	}
+	var items2 []map[string]any
+	if err := json.Unmarshal(raw2, &items2); err != nil {
+		t.Fatalf("unmarshal input (no ItemID): %v", err)
+	}
+	for _, it := range items2 {
+		if it["type"] == "function_call" {
+			if _, hasID := it["id"]; hasID {
+				t.Errorf("empty ItemID must not produce an id key; got item: %v", it)
+			}
+		}
+	}
+}
+
+// TestItemIDMultiTurnRoundTrip verifies the production bug scenario: two assistant
+// turns each carrying function_call items with the SAME ItemID value (e.g. both
+// "fc_1" — the real Azure counter-reset-per-response bug). Both items must appear
+// in the serialized stateless replay input with the correct "id" field forwarded.
+//
+// Without the ItemID fix the provider auto-assigns sequential fc_N values that
+// collide across turns and produces "Duplicate item found with id fc_N" (Azure
+// GPT-5.x). This test exercises the EXACT multi-turn assembly path through
+// assistantItems in a two-turn conversation with distinct call_ids but the same
+// provider-assigned item id.
+func TestItemIDMultiTurnRoundTrip(t *testing.T) {
+	req := port.LLMRequest{
+		Model: "gpt-5.5",
+		Messages: []session.Message{
+			session.NewUserMessage("do two things"),
+			// Turn 1: ItemID "fc_1" (e.g. first response, counter reset to 1)
+			session.NewAssistantMessage("", "", []session.ToolCall{
+				{ID: "call_t1", Name: "read_file",
+					Args: json.RawMessage(`{"path":"a.go"}`), ItemID: "fc_1"},
+			}),
+			session.NewToolMessage(session.NewToolResult("call_t1", "content of a")),
+			// Turn 2: ALSO ItemID "fc_1" — the Azure counter resets per response
+			session.NewAssistantMessage("", "", []session.ToolCall{
+				{ID: "call_t2", Name: "read_file",
+					Args: json.RawMessage(`{"path":"b.go"}`), ItemID: "fc_1"},
+			}),
+			session.NewToolMessage(session.NewToolResult("call_t2", "content of b")),
+			session.NewAssistantMessage("done", "", nil),
+		},
+	}
+	params, err := buildParams(req)
+	if err != nil {
+		t.Fatalf("buildParams: %v", err)
+	}
+	raw, err := json.Marshal(params.Input.OfInputItemList)
+	if err != nil {
+		t.Fatalf("marshal input: %v", err)
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(raw, &items); err != nil {
+		t.Fatalf("unmarshal input: %v", err)
+	}
+
+	// Collect all function_call items.
+	var fcItems []map[string]any
+	for _, it := range items {
+		if it["type"] == "function_call" {
+			fcItems = append(fcItems, it)
+		}
+	}
+	if len(fcItems) != 2 {
+		t.Fatalf("expected 2 function_call items, got %d:\n%s", len(fcItems), raw)
+	}
+
+	// Both must carry id == "fc_1" (the preserved ItemID).
+	for i, fc := range fcItems {
+		if got, ok := fc["id"].(string); !ok || got != "fc_1" {
+			t.Errorf("function_call item %d: id = %v, want %q", i, fc["id"], "fc_1")
+		}
+	}
+
+	// The two items must have DISTINCT call_ids (they are different calls).
+	if fcItems[0]["call_id"] == fcItems[1]["call_id"] {
+		t.Errorf("function_call items have the same call_id %q; they should differ",
+			fcItems[0]["call_id"])
+	}
+	if fcItems[0]["call_id"] != "call_t1" {
+		t.Errorf("function_call item 0 call_id = %v, want call_t1", fcItems[0]["call_id"])
+	}
+	if fcItems[1]["call_id"] != "call_t2" {
+		t.Errorf("function_call item 1 call_id = %v, want call_t2", fcItems[1]["call_id"])
 	}
 }
 

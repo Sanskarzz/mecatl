@@ -126,11 +126,17 @@ func translate(event responses.ResponseStreamEventUnion, st *streamState) ([]por
 			return []port.Chunk{{Kind: port.ChunkPhase, Text: string(item.Phase)}}, nil
 		case "function_call":
 			// The assembled function_call carries call_id, name, and the final
-			// arguments JSON string.
+			// arguments JSON string. item.ID is the provider's opaque item-level
+			// identifier (e.g. "fc_1" from the OpenAI Responses API), distinct from
+			// call_id. It is stored in ItemID for verbatim replay on subsequent
+			// stateless turns so the provider can de-duplicate items (prevents the
+			// "Duplicate item found with id fc_N" error on store:false multi-turn
+			// sessions with Azure GPT-5.x).
 			call := session.ToolCall{
-				ID:   session.ToolCallID(item.CallID),
-				Name: item.Name,
-				Args: json.RawMessage(item.Arguments.OfString),
+				ID:     session.ToolCallID(item.CallID),
+				ItemID: item.ID,
+				Name:   item.Name,
+				Args:   json.RawMessage(item.Arguments.OfString),
 			}
 			return []port.Chunk{{Kind: port.ChunkToolCall, ToolCall: &call}}, nil
 		default:
