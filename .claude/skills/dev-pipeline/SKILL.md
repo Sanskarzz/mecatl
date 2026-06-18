@@ -38,7 +38,7 @@ worth the ceremony.
 ## The pipeline
 
 ### 1. Approach (plan, no code)
-Spawn an **architect** agent (`Plan` or `software-architect`, opus or an equivalent high reasoning model) to
+Spawn an **architect** agent (`Plan` or `software-architect`, on a high-reasoning model) to
 investigate the issue and produce a concrete, file-level implementation plan.
 It reads code and writes a plan — it writes **no production code**. The plan is
 a **checkable artifact**: later steps verify the diff *against* it, so capture
