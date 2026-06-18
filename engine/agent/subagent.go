@@ -151,7 +151,10 @@ type parentCaps struct {
 	// when no router is wired (the default) or on a child run (no nesting). The returned
 	// model is an opaque model string — engine/agent stays model-string-only (the layering
 	// rule); composition owns aliases/slots/the cap.
-	routeTask func(taskPrompt string) (category, model string, ok bool)
+	//
+	// The ctx is the run's ctx so a Run.Cancel propagates into the classifier turn
+	// (issue #94); see SubagentModelRouter.
+	routeTask func(ctx context.Context, taskPrompt string) (category, model string, ok bool)
 }
 
 // registerChildRun is the nil-safe registration wrapper a spawning tool calls: a
@@ -1223,12 +1226,15 @@ func validateFork(callID session.ToolCallID, args subagentArgs, caps parentCaps)
 // router is wired (the byte-identical default) or on a child run (no nesting — a child
 // has no Subagent tool, so structurally no parentCaps.routeTask). FAIL-SOFT: a router
 // miss (ok=false) returns empty strings and the caller inherits the default explorer.
-func maybeRouteModel(args subagentArgs, resuming bool, caps parentCaps) (category, model string) {
+//
+// The ctx is the run's ctx, threaded to routeTask so a Run.Cancel propagates into the
+// classifier turn (issue #94).
+func maybeRouteModel(ctx context.Context, args subagentArgs, resuming bool, caps parentCaps) (category, model string) {
 	if resuming || args.Fork || caps.routeTask == nil ||
 		strings.TrimSpace(args.Model) != "" || strings.TrimSpace(args.Agent) != "" {
 		return "", ""
 	}
-	if cat, m, ok := caps.routeTask(args.Prompt); ok {
+	if cat, m, ok := caps.routeTask(ctx, args.Prompt); ok {
 		return cat, strings.TrimSpace(m)
 	}
 	return "", ""
@@ -1355,8 +1361,9 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.W
 	// OPT-IN semantic model router (ADR 0031): for a PLAIN default delegation, classify
 	// the task and mint the child on the routed model via the per-call factory path. The
 	// gating + fail-soft live in maybeRouteModel; an empty routedModel inherits the
-	// default explorer.
-	routedCategory, routedModel := maybeRouteModel(args, resuming, caps)
+	// default explorer. The run's ctx threads down so a Run.Cancel propagates into the
+	// classifier turn (issue #94).
+	routedCategory, routedModel := maybeRouteModel(ctx, args, resuming, caps)
 
 	engine, limits, errResult, ok := t.resolveEngineAndLimits(call.ID, args, resuming, routedModel)
 	if !ok {

@@ -66,7 +66,7 @@ func TestBuildModelRouterTaskMapsCategoryToModel(t *testing.T) {
 	if fn == nil {
 		t.Fatal("router task must be non-nil when enabled with a taxonomy")
 	}
-	cat, model, ok := fn("redesign the storage layer")
+	cat, model, ok := fn(context.Background(), "redesign the storage layer")
 	if !ok {
 		t.Fatal("a valid classification must resolve")
 	}
@@ -87,7 +87,7 @@ func TestBuildModelRouterTaskResolvesCategoryAlias(t *testing.T) {
 	cfg.ModelAliases = map[string]string{"tiny": "resolved-tiny-1.0"} // alias → concrete id
 
 	fn := buildModelRouterTask(cfg, reg, prov, providerAnthropic, "session-model")
-	_, model, ok := fn("rename a var")
+	_, model, ok := fn(context.Background(), "rename a var")
 	if !ok || model != "resolved-tiny-1.0" {
 		t.Fatalf("aliased category routed to (%q, %v), want resolved-tiny-1.0 true", model, ok)
 	}
@@ -100,7 +100,7 @@ func TestBuildModelRouterTaskFailSoftOnMiss(t *testing.T) {
 	reg := regForTest(prov, providerAnthropic, "session-model")
 
 	fn := buildModelRouterTask(routerTaxonomyCfg(), reg, prov, providerAnthropic, "session-model")
-	if _, _, ok := fn("x"); ok {
+	if _, _, ok := fn(context.Background(), "x"); ok {
 		t.Fatal("a classifier miss must be fail-soft (ok=false), never a fabricated route")
 	}
 }
@@ -113,7 +113,7 @@ func TestBuildModelRouterTaskFailSoftOnUnresolvableTarget(t *testing.T) {
 	cfg := routerTaxonomyCfg()
 	cfg.RouterCategories[0].Model = "sonnet" // a built-in alias meaning inherit → unresolvable
 	fn := buildModelRouterTask(cfg, reg, prov, providerAnthropic, "session-model")
-	if _, _, ok := fn("x"); ok {
+	if _, _, ok := fn(context.Background(), "x"); ok {
 		t.Fatal("an unresolvable category target must be fail-soft (ok=false)")
 	}
 }
@@ -250,7 +250,7 @@ func TestRouterClassifierRunsOnSlotModel(t *testing.T) {
 	if fn == nil {
 		t.Fatal("router task must be non-nil")
 	}
-	cat, _, ok := fn("classify this")
+	cat, _, ok := fn(context.Background(), "classify this")
 	if !ok || cat != "large" {
 		t.Fatalf("classification failed: cat=%q ok=%v", cat, ok)
 	}

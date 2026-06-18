@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stacklok/mecatl/engine/adapter/memfs"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
@@ -41,7 +42,7 @@ func routerTool() *SubagentTool {
 // A plain default delegation with a wired routeTask mints the child on the ROUTED model.
 func TestRunRouteTaskRoutesPlainDelegation(t *testing.T) {
 	tl := routerTool()
-	caps := parentCaps{children: newChildRunRegistry(), routeTask: func(string) (string, string, bool) {
+	caps := parentCaps{children: newChildRunRegistry(), routeTask: func(context.Context, string) (string, string, bool) {
 		return "large", "big-model", true
 	}}
 	res, err := tl.ExecuteWithParent(context.Background(),
@@ -62,7 +63,7 @@ func TestRunRouteTaskRoutesPlainDelegation(t *testing.T) {
 func TestRunExplicitModelBeatsRouter(t *testing.T) {
 	tl := routerTool()
 	var calls int
-	caps := parentCaps{children: newChildRunRegistry(), routeTask: func(string) (string, string, bool) {
+	caps := parentCaps{children: newChildRunRegistry(), routeTask: func(context.Context, string) (string, string, bool) {
 		calls++
 		return "large", "router-model", true
 	}}
@@ -89,7 +90,7 @@ func TestRunForkDoesNotRoute(t *testing.T) {
 	caps := parentCaps{
 		children:    newChildRunRegistry(),
 		forkHistory: func() []session.Message { return nil }, // turn-0 fork → empty snapshot (benign)
-		routeTask: func(string) (string, string, bool) {
+		routeTask: func(context.Context, string) (string, string, bool) {
 			calls++
 			return "large", "router-model", true
 		},
@@ -118,7 +119,7 @@ func TestRunNamedAgentBeatsRouter(t *testing.T) {
 			[]AgentMeta{{Name: "reviewer", Description: "a specialist"}}),
 	).(*SubagentTool)
 	var calls int
-	caps := parentCaps{children: newChildRunRegistry(), routeTask: func(string) (string, string, bool) {
+	caps := parentCaps{children: newChildRunRegistry(), routeTask: func(context.Context, string) (string, string, bool) {
 		calls++
 		return "large", "router-model", true
 	}}
@@ -143,10 +144,10 @@ func TestRunNamedAgentBeatsRouter(t *testing.T) {
 // precedence decision, so the assertion is deterministic and needs no store fixture.
 func TestRunResumeDoesNotRoute(t *testing.T) {
 	var calls int
-	route := func(string) (string, string, bool) { calls++; return "large", "router-model", true }
+	route := func(context.Context, string) (string, string, bool) { calls++; return "large", "router-model", true }
 	caps := parentCaps{children: newChildRunRegistry(), routeTask: route}
 	args := subagentArgs{Prompt: "x", Resume: "subagent-abc"}
-	cat, model := maybeRouteModel(args, true /*resuming*/, caps)
+	cat, model := maybeRouteModel(context.Background(), args, true /*resuming*/, caps)
 	if calls != 0 {
 		t.Fatalf("routeTask must NOT be consulted on a resume; called %d times", calls)
 	}
@@ -159,7 +160,7 @@ func TestRunResumeDoesNotRoute(t *testing.T) {
 // the delegation still completes, never errors.
 func TestRunRouteTaskMissInheritsDefault(t *testing.T) {
 	tl := routerTool()
-	caps := parentCaps{children: newChildRunRegistry(), routeTask: func(string) (string, string, bool) {
+	caps := parentCaps{children: newChildRunRegistry(), routeTask: func(context.Context, string) (string, string, bool) {
 		return "", "", false // miss
 	}}
 	res, err := tl.ExecuteWithParent(context.Background(),
@@ -206,7 +207,7 @@ func TestRouterBreakerOpensAfterConsecutiveMisses(t *testing.T) {
 		Catalog: tool.NewCatalog(),
 		Policy:  allowAllInt(),
 		Model:   "main",
-		SubagentModelRouter: func(string) (string, string, bool) {
+		SubagentModelRouter: func(context.Context, string) (string, string, bool) {
 			mu.Lock()
 			callCount++
 			mu.Unlock()
@@ -223,7 +224,7 @@ func TestRouterBreakerOpensAfterConsecutiveMisses(t *testing.T) {
 	// Call past the threshold: the first defaultModelRouterMaxMisses calls consult the
 	// underlying router (all miss), the breaker opens, and subsequent calls SKIP it.
 	for i := 0; i < defaultModelRouterMaxMisses+3; i++ {
-		caps.routeTask("task")
+		caps.routeTask(context.Background(), "task")
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -244,7 +245,7 @@ func TestRouterBreakerResetsOnSuccess(t *testing.T) {
 		Catalog: tool.NewCatalog(),
 		Policy:  allowAllInt(),
 		Model:   "main",
-		SubagentModelRouter: func(string) (string, string, bool) {
+		SubagentModelRouter: func(context.Context, string) (string, string, bool) {
 			mu.Lock()
 			callCount++
 			h := hit
@@ -259,22 +260,22 @@ func TestRouterBreakerResetsOnSuccess(t *testing.T) {
 	caps := mainEngine.parentCaps(run, nil, 0)
 	// Two misses (below the threshold of 3), then a success resets, then more misses must
 	// not trip immediately — proving the reset.
-	caps.routeTask("t")
-	caps.routeTask("t")
+	caps.routeTask(context.Background(), "t")
+	caps.routeTask(context.Background(), "t")
 	mu.Lock()
 	hit = true
 	mu.Unlock()
-	if _, _, ok := caps.routeTask("t"); !ok {
+	if _, _, ok := caps.routeTask(context.Background(), "t"); !ok {
 		t.Fatal("a success must classify")
 	}
 	mu.Lock()
 	hit = false
 	mu.Unlock()
 	// Three more misses are needed to re-open (the count was reset).
-	caps.routeTask("t")
-	caps.routeTask("t")
-	caps.routeTask("t")
-	caps.routeTask("t") // this one should be skipped (breaker open again)
+	caps.routeTask(context.Background(), "t")
+	caps.routeTask(context.Background(), "t")
+	caps.routeTask(context.Background(), "t")
+	caps.routeTask(context.Background(), "t") // this one should be skipped (breaker open again)
 	mu.Lock()
 	defer mu.Unlock()
 	// 2 (initial misses) + 1 (success) + 3 (re-trip) = 6 underlying consultations; the 7th
@@ -301,7 +302,7 @@ func TestRouterBreakerSerializesConcurrentCalls(t *testing.T) {
 		Catalog: tool.NewCatalog(),
 		Policy:  allowAllInt(),
 		Model:   "main",
-		SubagentModelRouter: func(string) (string, string, bool) {
+		SubagentModelRouter: func(context.Context, string) (string, string, bool) {
 			mu.Lock()
 			callCount++
 			mu.Unlock()
@@ -317,7 +318,7 @@ func TestRouterBreakerSerializesConcurrentCalls(t *testing.T) {
 	for i := 0; i < goroutines; i++ {
 		go func() {
 			defer wg.Done()
-			caps.routeTask("concurrent task")
+			caps.routeTask(context.Background(), "concurrent task")
 		}()
 	}
 	wg.Wait()
@@ -332,5 +333,59 @@ func TestRouterBreakerSerializesConcurrentCalls(t *testing.T) {
 	if callCount != defaultModelRouterMaxMisses {
 		t.Fatalf("underlying router consulted %d times under %d concurrent calls, want exactly %d (serialised breaker)",
 			callCount, goroutines, defaultModelRouterMaxMisses)
+	}
+}
+
+// TestRouteTaskPropagatesRunCtx (issue #94): the run's ctx — NOT context.Background() —
+// is threaded into SubagentModelRouter, so a Run.Cancel between the breaker's hardAbort
+// check and the classifier call propagates into the classifier turn and it dies with the
+// run instead of running out its 30s clock. The routeTask closure built by parentCaps
+// must forward the ctx it receives. Fail-soft holds: a cancelled ctx yields ok=false.
+func TestRouteTaskPropagatesRunCtx(t *testing.T) {
+	var (
+		gotCtx context.Context
+		mu     sync.Mutex
+	)
+	mainEngine := NewEngine(Deps{
+		LLM:     mockllm.New(),
+		Catalog: tool.NewCatalog(),
+		Policy:  allowAllInt(),
+		Model:   "main",
+		SubagentModelRouter: func(ctx context.Context, _ string) (string, string, bool) {
+			mu.Lock()
+			gotCtx = ctx
+			mu.Unlock()
+			// Block until the ctx is cancelled, proving the classifier turn observes it.
+			<-ctx.Done()
+			return "", "", false
+		},
+	})
+	run := &Run{router: &modelRouterBreaker{max: defaultModelRouterMaxMisses}, children: newChildRunRegistry()}
+	caps := mainEngine.parentCaps(run, nil, 0)
+	if caps.routeTask == nil {
+		t.Fatal("routeTask must be wired when SubagentModelRouter is set")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		caps.routeTask(ctx, "task")
+		close(done)
+	}()
+	// Cancel the run ctx; the router closure must unblock and return (fail-soft) rather
+	// than hang for the 30s modelRouterTimeout.
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("routeTask did not return after its ctx was cancelled — the run ctx is not propagated into the classifier turn (issue #94)")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if gotCtx == nil {
+		t.Fatal("SubagentModelRouter was never invoked")
+	}
+	if gotCtx != ctx {
+		t.Fatal("SubagentModelRouter received a ctx that is not the one passed to routeTask — the run ctx must propagate (issue #94)")
 	}
 }

@@ -235,18 +235,27 @@ type Deps struct {
 	// the child on, plus the category label it classified into. It is a composition
 	// closure — the engine layer is model-string-only (the layering rule): composition
 	// owns the classifier engine, the category taxonomy, and the category→model mapping
-	// (aliases/slots/the allowlist cap), and hands the engine only func(string)(string,
-	// string, bool). It is consulted by the Subagent run() hook ONLY for a plain default
-	// delegation (no per-call model, no agent, no fork, no resume) and is FAIL-SOFT
-	// throughout: ok=false (any classifier failure, an unknown category, the breaker
-	// open) → the call falls through to the inherited default explorer model,
-	// byte-identically to a deployment with no router. DEFAULT nil: no router, the
-	// long-standing behaviour. Set on the MAIN engine only (a child has no Subagent
-	// tool, so structurally no router); childEngineDepsForProvider forces it nil (the
-	// no-nesting recursion guard). Like ChildAskReviewer, the router is built into the
-	// per-call parentCaps.routeTask closure in Engine.parentCaps, never called directly
-	// by the loop, so it is NOT a port.LLMRequest field and never reaches a request.
-	SubagentModelRouter func(taskPrompt string) (category, model string, ok bool)
+	// (aliases/slots/the allowlist cap), and hands the engine only func(ctx,
+	// string)(string, string, bool). It is consulted by the Subagent run() hook ONLY
+	// for a plain default delegation (no per-call model, no agent, no fork, no resume)
+	// and is FAIL-SOFT throughout: ok=false (any classifier failure, an unknown
+	// category, the breaker open) → the call falls through to the inherited default
+	// explorer model, byte-identically to a deployment with no router. DEFAULT nil: no
+	// router, the long-standing behaviour. Set on the MAIN engine only (a child has no
+	// Subagent tool, so structurally no router); childEngineDepsForProvider forces it
+	// nil (the no-nesting recursion guard). Like ChildAskReviewer, the router is built
+	// into the per-call parentCaps.routeTask closure in Engine.parentCaps, never called
+	// directly by the loop, so it is NOT a port.LLMRequest field and never reaches a
+	// request.
+	//
+	// The ctx is the RUN's ctx (threaded down via parentCaps.routeTask), NOT
+	// context.Background(): a Run.Cancel between the breaker's hardAbort check and the
+	// classifier call must propagate into RunModelRouter so the classifier turn dies
+	// with the run instead of running out its 30s clock (issue #94 — the
+	// cancellation-propagation gap the hardAbort TOCTOU otherwise leaves). Fail-soft
+	// holds regardless: a cancelled ctx yields StopCancelled → ok=false → inherit the
+	// default model, exactly the existing miss path.
+	SubagentModelRouter func(ctx context.Context, taskPrompt string) (category, model string, ok bool)
 
 	// ProgressiveTools, when true, enables progressive tool disclosure
 	// (pattern 9): the per-turn request advertises lightweight specs for tools

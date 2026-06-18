@@ -3905,7 +3905,7 @@ func attachAskAdjudicator(deps agent.Deps, cfg Config, provReg *providerRegistry
 // provider-fixed-per-session hazard the rest of this file avoids. The per-session
 // closure already closes over the right (provider, parentModel), so each call re-derives
 // the contamination-safe deps for the classifier model.
-func buildModelRouterTask(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string) func(taskPrompt string) (category, model string, ok bool) {
+func buildModelRouterTask(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string) func(ctx context.Context, taskPrompt string) (category, model string, ok bool) {
 	if !cfg.SubagentModelRouter || len(cfg.RouterCategories) == 0 {
 		return nil // OFF: no router, byte-identical.
 	}
@@ -3923,7 +3923,7 @@ func buildModelRouterTask(cfg Config, provReg *providerRegistry, provider port.L
 		selectorByName[c.Name] = c.Model
 	}
 	defaultCat := cfg.RouterDefaultCategory
-	return func(taskPrompt string) (string, string, bool) {
+	return func(ctx context.Context, taskPrompt string) (string, string, bool) {
 		// Build a fresh tool-less classifier engine (the askAdjudicatorDeps recipe): it
 		// compacts/counts/prompts on ITS model, fires no hooks, and carries no nested
 		// caps (childEngineDepsForProvider forces ChildAskReviewer + SubagentModelRouter
@@ -3934,7 +3934,11 @@ func buildModelRouterTask(cfg Config, provReg *providerRegistry, provider port.L
 		deps.MaxNoProgressNudges = -1
 		eng := agent.NewEngine(deps)
 
-		category, ok := agent.RunModelRouter(context.Background(), eng, agent.ModelRouteRequest{
+		// Forward the run's ctx (NOT context.Background()) so a Run.Cancel propagates into
+		// RunModelRouter and the classifier turn dies with the run instead of running out
+		// its 30s clock (issue #94). Fail-soft holds: a cancelled ctx → StopCancelled →
+		// ok=false → inherit the default model.
+		category, ok := agent.RunModelRouter(ctx, eng, agent.ModelRouteRequest{
 			TaskPrompt: taskPrompt,
 			Categories: cats,
 			Default:    defaultCat,

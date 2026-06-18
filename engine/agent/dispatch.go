@@ -818,7 +818,7 @@ func (e *Engine) parentCaps(r *Run, sess *session.Session, turnIdx int) parentCa
 	// the caller inherits the default explorer model.
 	if e.deps.SubagentModelRouter != nil && r.router != nil {
 		route, breaker, hardAbort, diag := e.deps.SubagentModelRouter, r.router, r.hardAbort, r.diag
-		caps.routeTask = func(taskPrompt string) (string, string, bool) {
+		caps.routeTask = func(ctx context.Context, taskPrompt string) (string, string, bool) {
 			breaker.mu.Lock()
 			defer breaker.mu.Unlock()
 			if breaker.consecutiveMiss >= breaker.max {
@@ -832,10 +832,16 @@ func (e *Engine) parentCaps(r *Run, sess *session.Session, turnIdx int) parentCa
 				return "", "", false
 			default:
 			}
-			category, model, ok := route(taskPrompt)
+			// Pass the run's ctx (not context.Background()) so a Run.Cancel between this
+			// check and the classifier call propagates into RunModelRouter and the
+			// classifier turn dies with the run instead of running out its 30s clock
+			// (issue #94). The hardAbort check above is a fast-path skip; ctx is the
+			// race-closing bound. Fail-soft holds: a cancelled ctx → StopCancelled →
+			// ok=false → inherit the default model, the existing miss path.
+			category, model, ok := route(ctx, taskPrompt)
 			if !ok || strings.TrimSpace(model) == "" {
 				if justOpened := noteRouterMiss(breaker); justOpened && diag != nil {
-					diag.Log(context.Background(), port.LevelInfo,
+					diag.Log(ctx, port.LevelInfo,
 						"subagent model router: breaker OPEN after consecutive misses; remaining subagents this run inherit the default model",
 						"threshold", breaker.max)
 				}
@@ -843,7 +849,7 @@ func (e *Engine) parentCaps(r *Run, sess *session.Session, turnIdx int) parentCa
 			}
 			breaker.consecutiveMiss = 0 // a successful classification resets the breaker.
 			if diag != nil {
-				diag.Log(context.Background(), port.LevelInfo,
+				diag.Log(ctx, port.LevelInfo,
 					"subagent routed", "category", category, "model", model)
 			}
 			return category, model, true
