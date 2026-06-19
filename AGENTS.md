@@ -29,17 +29,29 @@ binaries and is the wrong workflow.
 
 ```sh
 task build              # → bin/mecated, bin/mecademo, bin/mecatui  (NEVER `go build` to repo root)
-task test               # full suite, -race
+task test               # full suite, -race (root module + engine module + the GOWORK=off engine-standalone hygiene proof)
 task test:golden        # refresh mecatui View/teatest goldens (-update) then re-run
+task api:check          # api-compat gate: fail if the engine public surface drifts from engine/api/*.txt (also under task test)
+task api:update         # regenerate engine/api/*.txt after an INTENTIONAL core-API change (commit + engine/CHANGELOG.md note)
 task e2e                # LIVE e2e vs OpenRouter (real money, needs OPENROUTER_API_KEY exported) — NOT part of task test
 task bench              # hot-path testing.B microbenchmarks (-benchmem) for benchstat; BENCHCOUNT=N overrides — NOT part of task test
 task perf:scenarios     # OFFLINE whole-loop scenario benchmarks (perf-tracking Phase 2); MECATL_PERF_JSON=path for KPI JSON — NOT part of task test
 task pgo:collect        # collect a PROVISIONAL offline CPU profile for PGO into .scratch/pgo/ — NOT committed; see perf-tracking Phase 4
-task lint               # golangci-lint v2 + go vet
+task lint               # golangci-lint v2 + go vet (root module + engine module via --config ../.golangci.yml)
+task vuln               # govulncheck reachable-vuln scan over BOTH modules (needs network for vuln DB) — NOT part of task test
+task tidy               # tidy BOTH go.mod files: root tidy, go work sync, then engine GOWORK=off tidy
 task generate           # regenerate contracts/gen from contracts/proto via buf
-go test ./engine/agent/ -run TestFullCycle   # a single test
+cd engine && go test ./agent/ -run TestFullCycle   # a single engine test (engine/ is its OWN module — run go test from engine/, not the repo root)
 go run ./cmd/mecademo    # end-to-end demo, fully offline (mock provider)
 ```
+
+> `engine/` is its **own Go module** (`github.com/stacklok/mecatl/engine`), kept in
+> this repo as a MONOREPO via the committed `go.work` (`use ./` + `use ./engine`).
+> The root module consumes it via `require …/engine` + `replace …/engine => ./engine`.
+> External consumers importing `engine/agent` get only the engine's tiny dep closure
+> (`doublestar` + `x/sync` + test-only `goleak`), not mecatl's heavy require cone. A
+> `go test ./...` from the repo root does NOT cross the module boundary — engine tests
+> are a second invocation from `engine/`. See ADR 0036.
 
 ## Architecture (where things live)
 
@@ -50,6 +62,11 @@ interfaces, the agent loop, and the in-tree reference adapters (`engine/adapter/
 fully self-contained (tests included: nothing under `engine/` imports `internal/...`)
 and intended to be importable as a library by external consumers; `internal/` holds
 the heavy adapters (`internal/adapter/*`) and the composition layer (`internal/app`).
+**`engine/` is its OWN Go module** (`github.com/stacklok/mecatl/engine`; ADR 0036),
+consumed in-repo via the committed `go.work` and a root `replace …/engine => ./engine`;
+its standalone dep closure is just `doublestar` + `x/sync` + test-only `goleak`, so an
+external consumer's graph stays small. The repo stays a monorepo — both modules move in
+lockstep.
 
 - `engine/session/` — DOMAIN: the `Session` aggregate (state machine), Conversation, the `ToolCall`/`ToolResult`/`Usage` value objects, the `Event` taxonomy.
 - `engine/governance/` — DOMAIN: permission `Effect`/`Scope`/`Rule` + `Evaluator`, bash splitting/canonicalization, hook event types. **Session-free** (`session` imports it, never the reverse).
@@ -57,7 +74,7 @@ the heavy adapters (`internal/adapter/*`) and the composition layer (`internal/a
 - `engine/prompt/` — DOMAIN: two-layer prompt assembly + AGENTS.md/CLAUDE.md discovery; the turn-0 `InstructionAssembler` chain and its consumer-local ports (`MemoryIndexSource`, `SoulSource`, `UserModelSource`, and `CommandSource` + `SourceExpander` — LIVE-semantics slash commands reusing the SAME parse/strip/substitute path as `DirCommandExpander`, so a template expands byte-identically whichever backend serves it; `ValidCommandName` is the ONE invocation-grammar validator). Trust/provenance decisions live in composition, not here.
 - `engine/port/` — the PORT interfaces the loop consumes (`LLMProvider`, `SessionStore`, `HookRunner`, `PermissionPolicy`, `Clock`, `Diagnostics`, `ToolCallRecorder`, `EventSink`).
 - `engine/agent/` — APPLICATION: the loop (`Engine`/`Run`), dispatch, permission pause/resume, compaction, the Subagent delegation tool, the agent-team `Supervisor`/`TeamTool`. Read-only subagents (Subagent + team members) run their Bash in an isolated git worktree via a sandboxed runner, TRUST-GATED (issue #40): an untrusted workspace nils the runner — no read-only subagent/member shell, honest Spec note — while Mutating members/Parallel branches keep their HARDENED shells (`buildForceCopyRunner`: force-copy forking runs NO git, so the fork-time checkout RCE the gate closes can't fire there; their run-time git over the verbatim-copied untrusted `.git` is the accepted main-session-parity residual); see `docs/adr/0014-agent-teams.md` and the subagent-shell gotcha.
-- `engine/adapter/` — the REFERENCE adapters that travel with the importable core (offline tests + sane defaults for any engine consumer): `mockllm`, `memfs`, `memstore`, `sessnap`, `permpolicy`, `permstore`, `wallclock` (the production `port.Clock`), `fsconformance`, `memconformance`, `storeconformance`, `sourceconformance` (SkillSource/SoulSource/AgentDefSource/CommandSource suites + the canonical fixtures `Fixture`/`AgentFixture`/`CommandFixture` and their `New*FixtureSource` references). Stdlib + engine-only (memfs adds doublestar); strict depguard allowlists; core PRODUCTION code still must not import them (test files may).
+- `engine/adapter/` — the REFERENCE adapters that travel with the importable core (offline tests + sane defaults for any engine consumer): `mockllm`, `memfs`, `memstore`, `sessnap`, `eventsource` (the reference event-log→`*session.Session` fold for event-sourced `SessionStore.Load`, ADR 0038), `permpolicy`, `permstore`, `wallclock` (the production `port.Clock`), `fsconformance`, `memconformance`, `storeconformance`, `sourceconformance` (SkillSource/SoulSource/AgentDefSource/CommandSource suites + the canonical fixtures `Fixture`/`AgentFixture`/`CommandFixture` and their `New*FixtureSource` references). Stdlib + engine-only (memfs adds doublestar); strict depguard allowlists; core PRODUCTION code still must not import them (test files may).
 - `internal/adapter/` — ADAPTERS: `openai`, `anthropic` (native Messages API), `llmresilience` (retry/breaker + stream-idle watchdog wrapper), `osfs`, `permconfig`, `workspacetrust`, `soul`, `memory`, `skills`, `agents`, `providercatalog` (embedded models.dev subset), `openrouter`, `gitenv`, `hashutil`, `xdgconfig`, `hookexec`, `slogdiag` (the only slog bridge), `store/jsonlstore`, `grpcdriver` (remote session/memory store + skill/soul/agent-def/command source driver clients + server wrappers), `tools`, `server`, and more — see the directory.
 - `internal/app/` — COMPOSITION (not domain): the single shared assembly (`app.Build`) of provider registry + catalog + policy + engine into a `server.Service`. The ONLY package allowed to import adapters + `engine/agent`. Per-session provider/model routing, live model listing, capability intersection, trust/soul selection all live here. See `docs/adr/0016-multi-provider.md`.
 - `contracts/proto/mecatl/v1/` — gRPC contract (source of truth); `contracts/proto/mecatl/driver/v1/` — the driver protocol (SessionStoreService/MemoryStoreService stores; SkillSourceService/SoulSourceService/AgentSourceService/CommandSourceService content sources) a remote driver process implements; `contracts/gen/` is generated, **never hand-edit**.
@@ -67,7 +84,7 @@ the heavy adapters (`internal/adapter/*`) and the composition layer (`internal/a
 
 ## The layering rule (the thing to get right)
 
-Dependencies point **inward only**, machine-enforced two ways (both run under `task lint`/`task test`): the **depguard allowlist** in `.golangci.yml` (per-file — each core tier is `list-mode: strict` allowing only `$gostd` + the exact core packages it imports, with an `os` deny on top; a NEW heavy-adapter import is rejected by default) AND the **DAG test** in `engine/arch/layering_test.go` (whole-graph — transitive direction + cycle detection, which the per-file depguard cannot express). `engine/team` is part of the core (agent imports it).
+Dependencies point **inward only**, machine-enforced THREE ways (all run under `task lint`/`task test`): the **depguard allowlist** in `.golangci.yml` (per-file — each core tier is `list-mode: strict` allowing only `$gostd` + the exact core packages it imports, with an `os` deny on top; a NEW heavy-adapter import is rejected by default; the engine module shares THIS config via `--config ../.golangci.yml`, no engine-local copy); the **DAG test** in `engine/arch/layering_test.go` (whole-graph — transitive direction + cycle detection, which the per-file depguard cannot express); AND the **module boundary itself** (ADR 0036) — the engine is its own Go module, so a stray engine→host-repo import breaks the `GOWORK=off` standalone build outright (`task test:engine-standalone`). `engine/team` is part of the core (agent imports it).
 
 - Domain (`session`, `prompt`, `governance`, `tool`), `engine/team`, and `engine/agent` must **never** import an adapter, `contracts/gen`, `os`, the OpenAI/Anthropic SDKs, or gRPC.
 - `engine/port` imports only domain + stdlib. `engine/agent` imports only domain + `port` + `team` (+ stdlib + `golang.org/x/sync/errgroup`) — adapters are injected. (Core **test** files may import the `engine/adapter/*` reference adapters — `memfs`/`mockllm`/`permpolicy`/… — to run offline; the depguard core rules exclude `$test`, and the DAG test reads non-test imports only. The engine tree is fully self-contained, tests included: nothing under `engine/` imports `internal/...` — integration tests that need a heavy adapter live next to that adapter under `internal/adapter/`.)
@@ -134,6 +151,7 @@ gauntlet items in `docs/harnesses/08-design-considerations.md` each have a passi
 - Commit directly to `main`. End commit messages with the `Co-Authored-By` trailer.
 - Never `git add -A` — stage explicit paths.
 - For smoke tests / scratch files, use the repo-local `.scratch/` dir (gitignored) — **not** `/tmp` or `mktemp`.
+- **Changed a core `engine/` exported API?** The `api-compat` gate will fail until you run `task api:update`, commit the changed `engine/api/*.txt`, and note the change in `engine/CHANGELOG.md` classified per `engine/COMPATIBILITY.md` (Added = minor, Changed/Removed = breaking). See ADR 0037.
 - **Changed any Markdown? Run `task generate` (or `task docs`) before committing — always.** `llms.txt` is generated and goes stale the instant docs change; never hand-edit it. `task docs` regenerates it (`task docs:llms`) and runs the strict link gate (`task docs:check`); `task generate` also refreshes it. The CI `docs` job will fail the PR on a stale `llms.txt` or any link regression — `matlatl check . --strict` (no broken links/anchors, orphans, unreachable, or ambiguous links; corpus config in `.matlatl.yml` / `.matlatlignore`). On a merge/rebase conflict in `llms.txt`, don't hand-merge — take either side and re-run `task docs:llms`.
 
 ## See also

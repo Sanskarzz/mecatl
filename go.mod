@@ -1,6 +1,6 @@
 module github.com/stacklok/mecatl
 
-go 1.26.3
+go 1.26.4
 
 require (
 	buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go v1.36.11-20260415201107-50325440f8f2.1
@@ -23,6 +23,7 @@ require (
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
 	github.com/prometheus/procfs v0.20.1
+	github.com/stacklok/mecatl/engine v0.0.0-00010101000000-000000000000
 	github.com/stacklok/toolhive v0.28.3
 	github.com/tiktoken-go/tokenizer v0.8.0
 	go.opentelemetry.io/contrib/instrumentation/runtime v0.69.0
@@ -40,6 +41,7 @@ require (
 	golang.org/x/sync v0.20.0
 	golang.org/x/term v0.43.0
 	golang.org/x/time v0.15.0
+	golang.org/x/tools v0.44.0
 	google.golang.org/grpc v1.81.1
 	google.golang.org/protobuf v1.36.11
 	k8s.io/api v0.35.3
@@ -267,7 +269,6 @@ require (
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sys v0.45.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
-	golang.org/x/tools v0.44.0 // indirect
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
@@ -289,3 +290,5 @@ require (
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.2-0.20260122202528-d9cc6641c482 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
+
+replace github.com/stacklok/mecatl/engine => ./engine

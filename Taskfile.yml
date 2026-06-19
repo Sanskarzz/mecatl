@@ -34,6 +34,9 @@ tasks:
       - go build -o bin/mecatequi ./cmd/mecatequi
       # mecatui stamps its build version into the welcome splash via -X main.version.
       - go build -ldflags "-X main.version=$(git describe --tags --always --dirty 2>/dev/null || echo dev)" -o bin/mecatui ./cmd/mecatui
+      # engine/ is its own Go module (consumed via the committed go.work). Building
+      # it here keeps the importable-core module compiling alongside the binaries.
+      - cd engine && go build ./...
 
   install:
     desc: Install mecated and mecatui into GOBIN/GOPATH/bin
@@ -47,6 +50,32 @@ tasks:
     cmds:
       - go test ./cmd/mecatui/ui/ -update
       - go test ./cmd/mecatui/ui/
+
+  api:check:
+    desc: |
+      The api-compat gate — fail if the engine module's public API surface (the
+      seven core packages) drifts from the committed engine/api/*.txt snapshots.
+      See engine/COMPATIBILITY.md + ADR 0037. (Also runs under `task test` via ./...)
+    cmds:
+      - go test ./internal/apicheck
+
+  api:update:
+    desc: |
+      Regenerate the committed engine/api/*.txt public-API snapshots after an
+      INTENTIONAL change to a core engine package. Commit the result and add an
+      engine/CHANGELOG.md entry classified per engine/COMPATIBILITY.md.
+    cmds:
+      - go test ./internal/apicheck -update
+
+  api:release-check:
+    desc: |
+      ADVISORY (never fails CI): run gorelease over the engine module to preview
+      the SemVer classification of the surface change. It needs a base engine/vX.Y.Z
+      tag to be meaningful — none exists yet, so until the first tag is cut the
+      authoritative PR guard is `task api:check`. See engine/COMPATIBILITY.md.
+    cmds:
+      - echo "advisory only — gorelease is meaningful once an engine/vX.Y.Z tag exists; the api-compat text gate (task api:check) is the PR guard until then."
+      - cd engine && go run golang.org/x/exp/cmd/gorelease@v0.0.0-20260611194520-c48552f49976 || true
 
   clean:
     desc: Remove the bin/ build output directory
@@ -97,9 +126,24 @@ tasks:
       - ko resolve -f deploy/
 
   test:
-    desc: Run unit tests with the race detector
+    desc: Run unit tests with the race detector (root module + engine module + the standalone hygiene proof)
     cmds:
       - go test -race ./...
+      # engine/ is a separate module under the workspace — `./...` from the root
+      # does NOT cross the module boundary, so its tests are a second invocation.
+      - cd engine && go test -race ./...
+      - task: test:engine-standalone
+
+  test:engine-standalone:
+    desc: |
+      Prove the engine module builds + tests with NO workspace and NO host-repo
+      deps (GOWORK=off): the importable core's tiny dependency closure
+      (doublestar + x/sync + goleak) is self-contained. This is the hygiene gate
+      that an external consumer's `go get github.com/stacklok/mecatl/engine`
+      experience depends on — see docs/adr/0036-engine-module.md.
+    cmds:
+      - cd engine && GOWORK=off go build ./...
+      - cd engine && GOWORK=off go test ./...
 
   test:actions:
     desc: |
@@ -153,9 +197,10 @@ tasks:
       FUZZTIME: '{{.FUZZTIME | default "30s"}}'
     cmds:
       # `go test` fuzzes only ONE target per invocation, so run them in sequence.
-      - go test ./engine/governance/ -run='^$' -fuzz='^FuzzSplitCommands$' -fuzztime={{.FUZZTIME}}
-      - go test ./engine/governance/ -run='^$' -fuzz='^FuzzCanonicalize$' -fuzztime={{.FUZZTIME}}
-      - go test ./engine/governance/ -run='^$' -fuzz='^FuzzReadOnlyBash$' -fuzztime={{.FUZZTIME}}
+      # The governance fuzzers live in the engine MODULE, so they run from engine/.
+      - cd engine && go test ./governance/ -run='^$' -fuzz='^FuzzSplitCommands$' -fuzztime={{.FUZZTIME}}
+      - cd engine && go test ./governance/ -run='^$' -fuzz='^FuzzCanonicalize$' -fuzztime={{.FUZZTIME}}
+      - cd engine && go test ./governance/ -run='^$' -fuzz='^FuzzReadOnlyBash$' -fuzztime={{.FUZZTIME}}
       - go test ./internal/adapter/openai/ -run='^$' -fuzz='^FuzzDecodeSSE$' -fuzztime={{.FUZZTIME}}
 
   bench:
@@ -176,8 +221,9 @@ tasks:
     cmds:
       # -run='^$' skips the unit tests (cuts noise); -benchmem reports B/op and
       # allocs/op; -count gives benchstat the samples it needs for a confidence
-      # interval. Offline only — every benchmark uses mockllm + memfs.
-      - go test -bench=. -benchmem -count={{.BENCHCOUNT}} -run='^$' ./engine/prompt/ ./engine/governance/ ./engine/agent/
+      # interval. Offline only — every benchmark uses mockllm + memfs. The hot-path
+      # benchmarks live in the engine MODULE, so they run from engine/.
+      - cd engine && go test -bench=. -benchmem -count={{.BENCHCOUNT}} -run='^$' ./prompt/ ./governance/ ./agent/
 
   perf:scenarios:
     desc: |
@@ -284,24 +330,63 @@ tasks:
         silent: true
 
   test:cover:
-    desc: Run tests with coverage and write coverage/coverage.{out,html}
+    desc: Run tests with coverage and write coverage/coverage.{out,html} (root module + engine module)
     cmds:
       - mkdir -p coverage
       - go test -race -coverprofile=coverage/coverage.out -covermode=atomic ./...
       - go tool cover -func=coverage/coverage.out
       - go tool cover -html=coverage/coverage.out -o coverage/coverage.html
       - 'echo "HTML coverage report: coverage/coverage.html"'
+      # engine/ is a separate module — cover it in its own pass (sibling profile).
+      - cd engine && go test -race -coverprofile=../coverage/engine.out -covermode=atomic ./...
+      - go tool cover -func=coverage/engine.out
+      - go tool cover -html=coverage/engine.out -o coverage/engine.html
+      - 'echo "HTML engine coverage report: coverage/engine.html"'
 
   lint:
-    desc: Run golangci-lint (parallel-safe) and go vet
+    desc: Run golangci-lint (parallel-safe) and go vet over the root module + the engine module
     cmds:
       - golangci-lint run --allow-parallel-runners ./...
       - go vet ./...
+      # engine/ is its own module — it shares the ROOT golangci config (no
+      # engine-local .golangci.yml) so the depguard layering allowlists stay the
+      # single source of truth across the module boundary.
+      - cd engine && golangci-lint run --config ../.golangci.yml --allow-parallel-runners ./...
+      - cd engine && go vet ./...
+
+  vuln:
+    desc: |
+      Run govulncheck over the root module + the engine module (manual / CI
+      target — NOT part of `task test`: it needs the network to fetch the Go
+      vulnerability database, like `task e2e`/`task bench` are excluded). It
+      reports only REACHABLE vulnerabilities (call-graph analysis). Pinned via
+      `go run` (not a require), the same pin as the `vuln` CI job.
+
+      govulncheck has no native allowlist, so the JSON stream is filtered through
+      .github/scripts/govulncheck-gate.go (a `go run` filter — no jq/external
+      tool): it fails on any NEW reachable vuln while accepting a documented
+      allowlist. The ROOT module allowlists two unfixable-upstream docker CVEs
+      (GO-2026-4887/4883, transitive via toolhive, reachable only in internal/);
+      the ENGINE module is STRICT (no allowlist). `pipefail` + the gate's
+      fail-closed checks make a govulncheck error a hard fail, never a vacuous
+      pass. Supply-chain hygiene that travels with the engine library when
+      the downstream consumer pins it. See issue #118.
+    cmds:
+      # `set -o pipefail` per cmd: go-task does NOT enable it, so without it a
+      # mid-scan govulncheck crash (after the JSON `config` preamble) would let
+      # the gate see zero findings and pass green. pipefail propagates the
+      # govulncheck failure, matching the CI job.
+      - cmd: set -o pipefail; go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 -format json ./... | go run .github/scripts/govulncheck-gate.go GO-2026-4887 GO-2026-4883 # v1.1.4
+      # engine/ is a separate module — `./...` from the root does NOT cross the
+      # module boundary, so its scan is a second invocation against engine/go.mod.
+      # No allowlist: the engine library's closure is clean and must stay clean.
+      - cmd: set -o pipefail; cd engine && go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 -format json ./... | go run ../.github/scripts/govulncheck-gate.go # v1.1.4
 
   lint:fix:
-    desc: Run golangci-lint with autofix (parallel-safe)
+    desc: Run golangci-lint with autofix (parallel-safe) over the root module + the engine module
     cmds:
       - golangci-lint run --allow-parallel-runners --fix ./...
+      - cd engine && golangci-lint run --config ../.golangci.yml --allow-parallel-runners --fix ./...
 
   lint:actions:
     desc: |
@@ -349,9 +434,21 @@ tasks:
       - cmd: test -z "$(gofmt -l .)" || { echo "gofmt needs to run on:"; gofmt -l .; exit 1; }
 
   tidy:
-    desc: Tidy go.mod / go.sum
+    desc: Tidy go.mod / go.sum for the root module + the engine module, then sync the workspace
     cmds:
+      # INVARIANT — do NOT reorder these three steps. The order
+      #   (1) root `go mod tidy`  →  (2) `go work sync`  →  (3) engine `GOWORK=off go mod tidy`
+      # is load-bearing. engine/ is a separate module: it must be tidied with the
+      # workspace OFF (step 3) so its go.sum reflects its OWN tiny closure, not the
+      # host repo's heavy cone. `go work sync` (step 2) aligns the shared transitive
+      # versions across both modules but can DROP `/go.mod` hash lines from
+      # engine/go.sum; the standalone tidy MUST run AFTER the sync to restore them.
+      # Reordering (running the sync last, or the engine tidy before it) leaves
+      # engine/go.sum missing those `/go.mod` lines, which breaks the GOWORK=off
+      # engine-standalone CI job on a fresh checkout. Keep this exact order.
       - go mod tidy
+      - go work sync
+      - cd engine && GOWORK=off go mod tidy
 
   generate:
     desc: Regenerate contracts/gen from contracts/proto via buf
