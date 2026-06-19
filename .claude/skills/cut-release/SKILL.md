@@ -78,22 +78,21 @@ core, `github.com/stacklok/mecatl/engine`, is its **own Go module** (ADR 0036) w
 tag grammar `engine/vX.Y.Z` (distinct from the root tags). It carries a public-API
 compatibility contract (`engine/COMPATIBILITY.md`, ADR 0037).
 
-- **The first `engine/vX.Y.Z` tag is `engine/v0.1.0`** — the initial pre-v1 MINOR baseline. The
-  initial public surface is classified **Added** by `engine/COMPATIBILITY.md`, and pre-v1 an Added
-  surface is a MINOR bump, so the baseline tag is `v0.1.0` (not `v0.0.1`). Cutting it is a deliberate
-  maintainer decision (deferred per ADR 0037) — do NOT cut it as part of a routine root release
-  unless asked. The grammar is `engine/vX.Y.Z`, **distinct** from the root `vX.Y.Z` tags; the two
-  version lines are independent. Subsequent bumps follow `engine/COMPATIBILITY.md` (minor = additive,
-  patch = fixes).
+- **The first `engine/vX.Y.Z` tag is `engine/v0.0.1`** — a deliberate "earliest, no stability
+  promise" initial cut (the lowest pre-v1 patch, signalling zero stability commitment for the very
+  first published surface). Cutting it is a deliberate maintainer decision (deferred per ADR 0037) —
+  do NOT cut it as part of a routine root release unless asked. The grammar is `engine/vX.Y.Z`,
+  **distinct** from the root `vX.Y.Z` tags; the two version lines are independent. SUBSEQUENT bumps
+  follow `engine/COMPATIBILITY.md` (pre-v1: minor = additive, patch = fixes).
 
 ### Cutting an engine tag (mirrors the root flow)
 
 Run from the repo root.
 
-1. **Pick the engine version.** First cut = `engine/v0.1.0` (the initial pre-v1 MINOR baseline: the
-   initial surface is classified Added, which is a minor bump pre-v1); thereafter increment per
-   semver, classified per `engine/COMPATIBILITY.md` (pre-v1: Added = minor, Changed/Removed = minor
-   too; patch = fixes). The latest engine tag (none yet on the first cut):
+1. **Pick the engine version.** First cut = `engine/v0.0.1` (a deliberate "earliest, no stability
+   promise" initial cut); thereafter increment per semver, classified per `engine/COMPATIBILITY.md`
+   (pre-v1: Added = minor, Changed/Removed = minor too; patch = fixes). The latest engine tag (none
+   yet on the first cut):
    ```sh
    git tag --sort=-v:refname --list 'engine/v*' | head -1
    ```

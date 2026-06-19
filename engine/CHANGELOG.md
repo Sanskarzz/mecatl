@@ -11,7 +11,9 @@ The covered surface is the seven core packages (`session`, `governance`, `tool`,
 
 ## [Unreleased]
 
-This is the **initial baseline**. The entries below record the establishment of
+## [0.0.1] - 2026-06-19
+
+This is the **initial baseline** (tagged `engine/v0.0.1`). The entries below record the establishment of
 the module and its compatibility contract, not a change to a previously-published
 surface.
 
