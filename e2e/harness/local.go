@@ -98,16 +98,24 @@ func NewLocalWith(extraArgs ...string) (*Local, error) {
 // store on disk), this spawn reads the prior's durable awaiting snapshot and can
 // resume it. Extra mecated flags append last, exactly like NewLocalWith.
 //
-// The prior MUST already be dead (Kill) before this is called — two live mecateds
-// over the same JSONL store would race writes. The caller owns Close on the
-// returned Local; the shared state tree is the PRIOR's, so closing this spawn
-// does not disturb the prior's artifacts.
+// Normally the prior MUST already be dead (Kill) before this is called — two
+// live mecateds over the same JSONL store would race writes. The single
+// exception is a deployment that wires a session lease (cloud-native Phase 4):
+// then two live spawns over one store are SAFE precisely because the lease
+// enforces single-writer (the lease-exclusion spec relies on this). The caller
+// owns Close on the returned Local.
+//
+// It binds the new spawn's state tree to the prior's SHARED tree (prior.stateRoot),
+// NOT prior.Root — so chaining (bootstrap → A → B) keeps every spawn on the SAME
+// store. Using prior.Root would point a third spawn at the second's OWN (empty)
+// root; for an ordinary first spawn prior.stateRoot == prior.Root, so 2-process
+// callers are unaffected.
 func NewLocalSharingStore(prior *Local, extraArgs ...string) (*Local, error) {
 	root, err := newScratchRoot()
 	if err != nil {
 		return nil, err
 	}
-	l := &Local{Root: root, stateRoot: prior.Root, extraArgs: extraArgs}
+	l := &Local{Root: root, stateRoot: prior.stateRoot, extraArgs: extraArgs}
 	if err := l.start(); err != nil {
 		_ = l.Close()
 		return nil, err
@@ -196,7 +204,7 @@ func (l *Local) start() error {
 		// fixtures, and git-init the workspace. A shared-store second spawn SKIPS
 		// all of this — the prior already laid the tree out and its store holds the
 		// live (awaiting) snapshot the restart leg resumes.
-		for _, d := range []string{"workspace", "store", "memory", "usermodel", "soul"} {
+		for _, d := range []string{"workspace", "store", "memory", "usermodel", "soul", "lease"} {
 			if err := os.MkdirAll(l.stateDir(d), 0o755); err != nil {
 				return err
 			}
@@ -209,21 +217,19 @@ func (l *Local) start() error {
 		}
 	}
 
-	grpcPort, err := freePort()
+	// Reserve all three ports AT ONCE (holding the listeners open together) so
+	// the OS hands back three DISTINCT ports. Allocating them one-at-a-time with
+	// a close between calls lets the OS re-assign the same just-freed ephemeral
+	// port to the next bind — which collided http==metrics in CI and crashed the
+	// daemon at startup ("bind: address already in use"). This is the only spawn
+	// path, and the lease spec spawns three daemons per run, widening that window.
+	ports, err := freePorts(3)
 	if err != nil {
 		return err
 	}
-	httpPort, err := freePort()
-	if err != nil {
-		return err
-	}
-	metricsPort, err := freePort()
-	if err != nil {
-		return err
-	}
-	l.grpcAddr = "127.0.0.1:" + strconv.Itoa(grpcPort)
-	l.httpAddr = "127.0.0.1:" + strconv.Itoa(httpPort)
-	l.metricsAddr = "127.0.0.1:" + strconv.Itoa(metricsPort)
+	l.grpcAddr = "127.0.0.1:" + strconv.Itoa(ports[0])
+	l.httpAddr = "127.0.0.1:" + strconv.Itoa(ports[1])
+	l.metricsAddr = "127.0.0.1:" + strconv.Itoa(ports[2])
 
 	args := []string{
 		"--grpc-addr", l.grpcAddr,
@@ -343,14 +349,30 @@ func (l *Local) waitReady(timeout time.Duration) error {
 	return lastErr
 }
 
-// freePort binds :0 on loopback, reads the assigned port, and releases it.
-func freePort() (int, error) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, err
+// freePorts reserves n distinct free loopback ports. It binds n listeners on
+// :0 SIMULTANEOUSLY, reads each assigned port, then releases them all — so the
+// OS cannot hand the same ephemeral port to two of them (which it can, and did
+// in CI, when ports are allocated one-at-a-time with a close between calls).
+// The bind→read→close→hand-to-daemon window is still racy in principle against
+// OTHER processes (loopback-private, and FlakeAttempts covers the rare case),
+// but it can no longer collide a single daemon's own ports against each other.
+func freePorts(n int) ([]int, error) {
+	lns := make([]net.Listener, 0, n)
+	defer func() {
+		for _, ln := range lns {
+			_ = ln.Close()
+		}
+	}()
+	ports := make([]int, 0, n)
+	for range n {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return nil, err
+		}
+		lns = append(lns, ln)
+		ports = append(ports, ln.Addr().(*net.TCPAddr).Port)
 	}
-	defer ln.Close()
-	return ln.Addr().(*net.TCPAddr).Port, nil
+	return ports, nil
 }
 
 // initWorkspaceGit makes the workspace a real git repo with one commit, so the
@@ -403,6 +425,8 @@ func (l *Local) StateDir(kind StateKind) string {
 		return l.stateDir("usermodel")
 	case StateStore:
 		return l.stateDir("store")
+	case StateLease:
+		return l.stateDir("lease")
 	case StateArtifacts:
 		// Artifacts are PER-PROCESS (this spawn's own log/transcripts).
 		return l.dir("artifacts")
