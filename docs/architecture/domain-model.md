@@ -132,13 +132,17 @@ API. The real constants:
 | `compaction.archive` | `EvCompactionArchive` | carries the pre-compaction conversation for the durable record; **log-only**, skipped on the client wire (cloud-native Phase 3b) |
 | `no_progress` | `EvNoProgress` | a completed turn produced no tool call and no meaningful text; the loop is nudging (gentle, then a final best-effort extraction) or giving up |
 | `result` | `EvResult` | terminal: carries `ResultPayload{Stop, Text, Usage}` |
+| `user_prompt` | `EvUserPrompt` | a user-role message was recorded (the genuine client prompt AND the harness-authored synthetic continuations — the no-progress / background nudges & completion notice), carrying `UserPromptPayload`; **log-only**, persisted to the durable event log and skipped on the client wire — it lets an event-sourced fold reconstruct user-role turns |
 | `subagent.start/tool/end` | `EvSubagent*` | a `Subagent` child run's REDACTED, metadata-only projection (flat fleet) |
 | `team.start/member/tasks/findings/end` | `EvTeam*` | an in-process `Team` run's BOUNDED projection (coordinating roster) |
 | `parallel.start/branch/end` | `EvParallel*` | a `Parallel` fork-join run's REDACTED, metadata-only GROUP projection (join + winner + fork paths) |
 
 `Event` carries `Type, Seq, Turn, Text` plus optional pointers `ToolCall`,
-`ToolResult`, `Ask *PendingAsk`, `Result *ResultPayload`, `Usage *Usage`,
-`Subagent`, `Team`, `Parallel`.
+`ToolResult`, `Ask *PendingAsk`, `Result *ResultPayload`, `TurnEnd *TurnEndPayload`,
+`Hook *HookPayload`, `Approval *ApprovalPayload`,
+`CompactionArchive *CompactionArchivePayload`, `UserPrompt *UserPromptPayload`,
+`Usage *Usage`, `Subagent`, `Team`, `Parallel` (each set only on its own event
+kind).
 
 The three DELEGATION families (`subagent.*` / `team.*` / `parallel.*`) project child-loop
 lifecycle events and differ in AGGREGATION shape — flat fleet vs coordinating roster vs

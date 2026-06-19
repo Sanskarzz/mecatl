@@ -22,7 +22,18 @@ that signs images with **cosign** and emits an **SBOM** and **SLSA provenance**
 (health probes can switch TCP→httpGet against the endpoints above). A **live
 BDD e2e suite** (`e2e/`, `task e2e`, the `e2e-live.yml` workflow) exercises the
 harness against a real model; it is opt-in (real money) and deliberately not
-part of `task test`.
+part of `task test`. The toolchain is **go 1.26.4** (both modules).
+
+**Supply-chain scanning** (#118) closes the loop on dependency hygiene:
+**`govulncheck`** runs per-module — the `engine` module is held STRICT-CLEAN,
+while the root module runs through a fail-closed **reachable-vuln gate**
+(`.github/scripts/govulncheck-gate.go`: it parses `govulncheck -format json` and
+fails on any reachable finding whose OSV id is not on a dated accepted-risk
+allowlist — govulncheck has no native ignore mechanism, and the wrapper runs
+under `pipefail` so a broken scan cannot pass vacuously). **`dependabot`**
+(`.github/dependabot.yml`) tracks both Go modules independently plus the
+SHA-pinned GitHub Actions (grouping minor+patch, isolating majors); every action
+is **SHA-pinned** with a `# vX.Y.Z` comment that dependabot preserves.
 
 ### Multi-replica deployment & single-writer enforcement
 

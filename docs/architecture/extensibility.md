@@ -127,6 +127,23 @@ yields no sources and nothing is read. Discovery (reading files, YAML parsing vi
 `go.yaml.in/yaml/v3`) is an adapter concern; nothing in this package is imported
 by a domain package — it merely implements the domain `tool.Tool` interface.
 
+### The engine as an embeddable library
+
+The extensibility story is not only "swap an adapter inside mecatl" — `engine/`
+is **its own Go module** (`github.com/stacklok/mecatl/engine`), so an external
+consumer can import the loop, the domain, and the ports directly without pulling
+in mecatl's full dependency cone. The engine module's standalone closure is
+deliberately tiny — `doublestar` + `x/sync` (+ test-only `goleak`) — versus the
+toolhive/k8s/OTel/gRPC cone the root module carries; an embedding host brings its
+own adapters. The exported identifiers of the **seven core packages** (`session`,
+`governance`, `tool`, `prompt`, `port`, `team`, `agent`) are the engine's STABLE
+public surface, governed by [`engine/COMPATIBILITY.md`](../../engine/COMPATIBILITY.md)
+and the `api-compat` gate (`internal/apicheck`); the `engine/adapter/*` reference
+adapters (`mockllm`, `memfs`, `nofs`, `memstore`, …) ship for offline tests and
+sane defaults and carry **no** stability promise. See
+[ADR 0036](../adr/0036-engine-module.md) (the module carve) and
+[ADR 0037](../adr/0037-engine-stability-contract.md) (the contract).
+
 ### Seam summary
 
 Every capability above is a default-on (or opt-in) interface; the core never

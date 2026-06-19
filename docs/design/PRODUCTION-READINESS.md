@@ -30,7 +30,8 @@ record; current behaviour is in the linked [architecture](../architecture.md) do
 | Allow-all / posture ladder | ✅ shipped · ⛔ managed-scope kill-switch · ⛔ `auto`+reviewer posture | [ALLOW-ALL-POSTURE.md](../adr/0022-allow-all-posture.md) | [deployment & hardening](../architecture/deployment-and-hardening.md) |
 | Workspace trust | ✅ Phases 0/1/2a/2b/2c · ⛔ Phase 3 (descoped) | [WORKSPACE-TRUST-SPIKE.md](../adr/0023-workspace-trust.md) | [deployment & hardening](../architecture/deployment-and-hardening.md) |
 | Driver seams (remote stores/sources) | ✅ Phases A–C2 · ⛔ workspace/FS driver (sketch only) | [DRIVERS.md](../adr/0005-driver-seams.md) | [observability](../architecture/observability.md) |
-| Cloud-native arc | ✅ Phases 0–3 · ⛔ Phase 4 (writer exclusion / leasing) | [CLOUD-NATIVE.md](../adr/0027-cloud-native.md) | [observability](../architecture/observability.md) |
+| Cloud-native arc | ✅ Phases 0–4 (Phase 4 = cross-process single-writer via `port.SessionLease`: memlease / flocklease / gRPC-driver / k8slease backends; byte-identical default when unwired) | [CLOUD-NATIVE.md](../adr/0027-cloud-native.md) | [observability](../architecture/observability.md) |
+| Engine as importable module + stability contract + event-sourced rehydration | ✅ shipped | [engine-module.md](../adr/0036-engine-module.md) (own Go module via `go.work`) · [engine-stability-contract.md](../adr/0037-engine-stability-contract.md) (`COMPATIBILITY.md` + api-compat gate) · [event-sourced-rehydration.md](../adr/0038-event-sourced-rehydration.md) (`eventsource.Fold` + `EvUserPrompt`); also covers clock-injectability | [overview](../architecture.md) |
 | Diagnostics (injected `port.Diagnostics`) | ✅ shipped | [DIAGNOSTICS.md](../adr/0020-diagnostics.md) | [observability](../architecture/observability.md) |
 | Perf observability (live admin/MCP) | ✅ Phases 1+2 · 🟦 Phase 3 (fleet/Pyroscope, optional) | [perf-observability.md](../adr/0018-perf-observability.md) | [observability](../architecture/observability.md) |
 | Perf tracking (offline regression gate) | ✅ Phases 0–4 · ⛔ Phases 5–6 (deferred-until-justified) | [perf-tracking.md](../adr/0019-perf-tracking.md) | [observability](../architecture/observability.md) |
@@ -53,6 +54,7 @@ record; current behaviour is in the linked [architecture](../architecture.md) do
 | OS-level sandbox (process trust) | ⏸️ Deferred | Explicitly deferred (2026-05-29). The `CommandRunner` port is the seam; a Landlock(+seccomp) wrapper drops in later without touching the loop. Bash is also fully optional (shell-less deploys avoid the surface entirely), so this is not a blocker for those. |
 | Secrets handling (no key logging) | ✅ | key via env, never logged |
 | MCP transport restriction (no stdio) | ✅ | streaming-HTTP only |
+| Supply-chain hygiene (per-module vuln scan, dependabot, SHA-pinned actions) | ✅ | per-module `govulncheck` (engine STRICT, no allowlist / root fail-closed reachable-vuln gate via `.github/scripts/govulncheck-gate.go` + a documented 2-CVE docker allowlist reachable only through `internal/` ToolHive); `.github/dependabot.yml` for both modules + github-actions; every action SHA-pinned. Issue #118 |
 
 ## Reliability
 

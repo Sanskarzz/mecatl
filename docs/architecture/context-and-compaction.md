@@ -43,6 +43,7 @@ Two seams keep a long run inside the model's context window:
 - [The agent loop that triggers compaction](agent-loop.md)
 - [Providers — the per-model token counter & window](providers.md)
 - [Memory — cross-session recall](memory.md)
+- [Observability & persistence](observability.md) — `EvCompactionArchive` is the durable, non-destructive bridge: compaction emits the pre-compaction conversation to the event log.
 
 ---
 

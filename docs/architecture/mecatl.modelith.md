@@ -50,7 +50,7 @@ A typed, ordered item on a `Run`'s output stream — the single observable curre
 
 ### `EventLog`
 
-The durable, append-only record of a `Session`'s `Events`, distinct from the transient stream the loop emits. It is the source of truth for replaying state the `Session` snapshot does not carry — learned `PermissionRules` and the pre-compaction `Conversation` archive — when a `Session` is rehydrated after a restart.
+The durable, append-only record of a `Session`'s `Events`, distinct from the transient stream the loop emits. It is the source of truth for replaying state the `Session` snapshot does not carry — learned `PermissionRules`, the pre-compaction `Conversation` archive, and the user-role turns (the log-only `EvUserPrompt`) — when a `Session` is rehydrated after a restart. Because it carries the user turns alongside the assistant/tool `Events`, a host whose system of record IS the log can reconstruct the whole `Session` by FOLDING the stream (the event-sourced rehydration path), not only top up a snapshot (structural reconstruction; a pure fold is byte-identical-replay only for providers not using the opaque reasoning-replay fields — Reasoning/ProviderPhase/ToolCall.ItemID are not on the event stream — see ADR 0038).
 
 **Relationships**
 
@@ -61,6 +61,8 @@ The durable, append-only record of a `Session`'s `Events`, distinct from the tra
 - **event-log-append-only** — The `EventLog` is append-only and records each `Event` at most once, independently of whether a `Client` is still connected.
 
 - **event-log-records-terminal-tail** — The `EventLog` records every `Event` a `Run` emits, including the terminal result emitted after a `Client` disconnects.
+
+- **event-log-reconstructs-user-turns** — The `EventLog` records every user-role turn (the genuine prompt and the harness's synthetic continuations) as a log-only `EvUserPrompt`, so folding the stream reconstructs the `Session`'s `Conversation` including what the user asked — not only the assistant and tool `Events`.
 
 
 ### `Finding`

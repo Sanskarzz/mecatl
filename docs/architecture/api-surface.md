@@ -119,6 +119,17 @@ design decisions behind this adapter — framing, the per-session client MCP
 mount, fs/\* delegation, and learned permissions — are recorded in
 [ADR 0001 — the ACP adapter](../adr/0001-acp-adapter.md).
 
+> **The wire is one surface; the engine library is another.** The proto/HTTP/ACP
+> surface above is the way a *client process* drives mecatl. An *embedding Go
+> consumer* instead imports the `engine/` module directly, whose STABLE public
+> surface is the exported identifiers of the **seven core packages** (`session`,
+> `governance`, `tool`, `prompt`, `port`, `team`, `agent`). That surface is
+> governed by [`engine/COMPATIBILITY.md`](../../engine/COMPATIBILITY.md) and the
+> `api-compat` freshness gate (`internal/apicheck`, `task api:check`), which fails
+> CI on any unflagged change to the committed `engine/api/*.txt` baselines (#114,
+> [ADR 0037](../adr/0037-engine-stability-contract.md)). See
+> [extensibility](extensibility.md) for the engine-as-library framing.
+
 ## Related
 
 - [The agent loop behind the API](agent-loop.md)

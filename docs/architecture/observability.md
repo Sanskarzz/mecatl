@@ -106,12 +106,29 @@
   client can't abort the durable write. `jsonlstore` triples as
   `SessionStore`+`ToolCallRecorder`+`EventLog` (a `.events.jsonl` sidecar);
   memstore has an in-memory sibling; `grpcdriver` carries the remote
-  `EventLogService` (`--event-log-url`, independent of the session store). Two
-  consumers, both in **composition** (never the loop): the non-destructive
-  **compaction archive** and the **permstore verdict-replay**
+  `EventLogService` (`--event-log-url`, independent of the session store). The
+  log also records the new **log-only `EvUserPrompt`** — every user-role turn
+  (the genuine prompt plus the harness's synthetic continuations), skipped on the
+  client wire — so that a fold can reconstruct what the user asked. **Three**
+  consumers, all in **composition** (never the loop): the non-destructive
+  **compaction archive**; the **permstore verdict-replay**
   (`internal/app/approvalreplay.go`) that re-derives learned allow-always rules
-  after a restart so a previously-approved tool does not re-ask. See
-  `docs/adr/0027-cloud-native.md` Phase 3 and the `eventlogconformance` suite.
+  after a restart so a previously-approved tool does not re-ask; and (#115)
+  **event-sourced `SessionStore.Load`** — a host whose system of record is the
+  event log folds `EventLog` + `SessionMeta` → `*session.Session` via
+  `engine/adapter/eventsource.Fold`. That third consumer carries a documented
+  **replay-fidelity limitation**: the opaque assistant-replay fields
+  (`Message.Reasoning`/`ProviderPhase`, `ToolCall.ItemID`) are not on the stream,
+  so a pure fold is byte-identical-replay faithful only for plain-chat providers
+  (ADR 0038). See `docs/adr/0027-cloud-native.md` Phase 3 and the
+  `eventlogconformance` suite.
+
+  > **Two `Load` implementations, one port.** mecatl's own adapters (memstore,
+  > jsonlstore, the remote driver) implement `Load` by **snapshot-deserialize**
+  > (`sessnap`) — byte-identical including the reasoning-replay fields. An
+  > event-log-as-system-of-record host instead implements `Load` by
+  > **event-fold** (`eventsource.Fold`), which carries the replay-fidelity caveat
+  > above. Both satisfy the same `port.SessionStore.Load` contract.
 
 - **SessionLease** (`port.SessionLease`, cloud-native Phase 4) — OPTIONAL
   cross-process single-writer enforcement for multi-replica deployments over a

@@ -66,7 +66,19 @@ contract ([`engine/COMPATIBILITY.md`](../engine/COMPATIBILITY.md)) and enforced
 by the `api-compat` gate — a change to that surface fails CI until the committed
 `engine/api/*.txt` snapshots and `engine/CHANGELOG.md` are updated
 ([ADR 0037](adr/0037-engine-stability-contract.md)); the `engine/adapter/*`
-reference adapters carry no such promise. The LLM provider sits behind the `port.LLMProvider` seam, with each
+reference adapters carry no such promise. Three sibling efforts harden the same
+embeddable-core arc: the engine is now **fully clock-injectable** — every core
+wall-clock read flows through `port.Clock` (`Engine.now()`), enforced by an AST
+guard (`engine/arch/clock_test.go`) so an embedding host can drive it
+deterministically (#116); `port.SessionStore.Load` carries a documented
+**event-sourced reconstruction contract** so a host whose system of record is an
+append-only log can fold its `EventLog` (+ `SessionMeta`) into a session via
+`engine/adapter/eventsource.Fold` — the durable log now records the log-only
+`EvUserPrompt` so user turns reconstruct, with a replay-fidelity caveat for
+reasoning providers (#115, [ADR 0038](adr/0038-event-sourced-rehydration.md)); and the
+supply chain gains per-module **`govulncheck`** (engine strict-clean; a
+fail-closed reachable-vuln gate on the root) plus **`dependabot`** over both
+modules and the SHA-pinned actions, on a **go 1.26.4** toolchain (#118). The LLM provider sits behind the `port.LLMProvider` seam, with each
 wire format isolated entirely inside its own adapter — the OpenAI Responses API
 in `internal/adapter/openai`, the native Anthropic Messages API in
 `internal/adapter/anthropic` ([multi-provider](architecture/providers.md)) — so the core is provider-agnostic and

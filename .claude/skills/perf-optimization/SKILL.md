@@ -29,13 +29,20 @@ the `perf-mcp-interpretation` skill instead — different tool, different signal
 
 - `task bench` — hot-path microbenchmarks (`engine/prompt`, `engine/governance`,
   `engine/agent`). `BENCHCOUNT` default 10. Offline (mockllm + memfs). Not part of
-  `task test`.
+  `task test`. **The engine is its own Go module** (ADR 0036), so `task bench`/`task fuzz`
+  run these as `cd engine && go test … ./prompt/ ./governance/ ./agent/`. An ad-hoc
+  re-run on an engine package must do the same: `cd engine && go test -bench=… ./agent/`
+  (an explicit `./engine/agent/` path also resolves via the committed `go.work`, but the
+  `./...` wildcard does **not** cross the module boundary).
 - `task perf:scenarios` — five whole-loop scenarios. Four live in
   `perf/scenarios/` (single-session-long, team-fanout, background-subagents,
   compaction-cycle); the fifth (tui-scrollback) lives in `cmd/mecatui/ui/`, and the
   task runs **both** packages — so `go test ./perf/scenarios/` alone gives only four.
   `BENCHCOUNT` default 6. `MECATL_PERF_JSON=.scratch/x.json` writes the KPI JSON.
 - Both are deterministic and offline — never reach for a live model/network.
+- **PGO/bench captures over `engine/` packages depend on the active `go.work`** (the committed
+  workspace wires `./engine` in alongside the root) — a `GOWORK=off` invocation resolves the engine
+  module standalone and won't see the host repo.
 
 ## What to gate on (allocs-first)
 
@@ -101,6 +108,11 @@ Update the baseline snapshot in `docs/adr/0019-perf-tracking.md`.
   the stale/wrong path), confirm a test goes red, then restore (back up with `cp`,
   restore with `cp` — never `git checkout`, it wipes uncommitted work). A guard that
   stays green when the behaviour is broken is worse than none.
+- **A perf change touching an EXPORTED `engine/` symbol trips the `api-compat` CI gate**
+  (`task api:check`, ADR 0036/0037) — a failure mode a perf optimizer wouldn't expect. Keep
+  pure-perf changes byte-identical to the engine's public surface and it never fires; if the
+  surface legitimately changed, run `task api:update` and add an `engine/CHANGELOG.md` entry
+  classified per `engine/COMPATIBILITY.md`.
 
 ## Common pitfalls
 

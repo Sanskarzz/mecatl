@@ -78,12 +78,52 @@ core, `github.com/stacklok/mecatl/engine`, is its **own Go module** (ADR 0036) w
 tag grammar `engine/vX.Y.Z` (distinct from the root tags). It carries a public-API
 compatibility contract (`engine/COMPATIBILITY.md`, ADR 0037).
 
-- **No `engine/vX.Y.Z` tag has been cut yet.** Cutting the first one is a deliberate maintainer
-  decision (deferred per ADR 0037) — do NOT cut it as part of a routine root release unless asked.
-- When you DO cut an engine tag, first run **`task api:release-check`** (advisory `gorelease`) to
-  preview the SemVer classification of the surface change, and confirm `engine/CHANGELOG.md` has an
-  entry for everything since the last engine tag. The `api-compat` gate already guarantees the
-  committed `engine/api/*.txt` snapshots match the surface being tagged.
+- **The first `engine/vX.Y.Z` tag is `engine/v0.1.0`** — the initial pre-v1 MINOR baseline. The
+  initial public surface is classified **Added** by `engine/COMPATIBILITY.md`, and pre-v1 an Added
+  surface is a MINOR bump, so the baseline tag is `v0.1.0` (not `v0.0.1`). Cutting it is a deliberate
+  maintainer decision (deferred per ADR 0037) — do NOT cut it as part of a routine root release
+  unless asked. The grammar is `engine/vX.Y.Z`, **distinct** from the root `vX.Y.Z` tags; the two
+  version lines are independent. Subsequent bumps follow `engine/COMPATIBILITY.md` (minor = additive,
+  patch = fixes).
+
+### Cutting an engine tag (mirrors the root flow)
+
+Run from the repo root.
+
+1. **Pick the engine version.** First cut = `engine/v0.1.0` (the initial pre-v1 MINOR baseline: the
+   initial surface is classified Added, which is a minor bump pre-v1); thereafter increment per
+   semver, classified per `engine/COMPATIBILITY.md` (pre-v1: Added = minor, Changed/Removed = minor
+   too; patch = fixes). The latest engine tag (none yet on the first cut):
+   ```sh
+   git tag --sort=-v:refname --list 'engine/v*' | head -1
+   ```
+
+2. **Pre-flight.** Confirm `engine/CHANGELOG.md` has an `[Unreleased]` entry covering everything
+   since the last engine tag (on the **first** cut that is the whole initial surface — the existing
+   `[Unreleased]` baseline section). Then run the advisory `gorelease` check:
+   ```sh
+   task api:release-check
+   ```
+   **On the FIRST cut this is a no-op / uninformative:** `gorelease` can only classify the surface
+   against a *prior* `engine/vX.Y.Z` base tag, and none exists yet — so it has nothing to compare
+   to. That is expected. The authoritative guard is the `api-compat` gate (`task api:check`), which
+   already guarantees the committed `engine/api/*.txt` snapshots match the surface being tagged.
+
+3. **Create the annotated tag** with a concise summary:
+   ```sh
+   git tag -a engine/vX.Y.Z -m "engine/vX.Y.Z — <one-line summary>"
+   ```
+
+4. **Push the tag:**
+   ```sh
+   git push origin engine/vX.Y.Z
+   ```
+
+**IMPORTANT — an engine tag fires NO image build.** `release.yml` triggers on `v*` (the root tag
+glob), which does **not** match `engine/v*`, so cutting an engine tag runs none of the ko build /
+cosign / SBOM / SLSA pipeline. It only publishes the module version, making it resolvable for
+`go get github.com/stacklok/mecatl/engine@engine/vX.Y.Z` consumers (ADR 0036/0037). There is no pin
+bump and no `release.yml` run to confirm — the push of the tag is the whole release.
 
 ## Notes
 

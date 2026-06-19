@@ -84,7 +84,8 @@ via a committed Go workspace.
 The engine module is RELEASED under submodule tags of the form `engine/vX.Y.Z`
 (Go's required convention for a module in a subdirectory), separate from the root
 `v*` container-image tags. The stability/breaking-change contract and the
-apidiff CI gate over those tags are issue #114 — out of scope here.
+apidiff CI gate over those tags are issue #114 — out of scope here (see
+[ADR 0037](./0037-engine-stability-contract.md)).
 
 ## Consequences
 

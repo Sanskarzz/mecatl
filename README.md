@@ -50,6 +50,7 @@ ships as a client of the same API.
 - **Observability** — Prometheus metrics (`/metrics`), OpenTelemetry spans with an OTLP exporter, per-tool-call logging, and an append-only JSONL replay store.
 - **Deployment** — `ko`-built static distroless image, PSS-restricted manifests, and a signed release (cosign + SBOM + SLSA provenance).
 - **Strict hexagonal/DDD** — the domain and the loop depend only on ports; the OpenAI client, the servers, the filesystem, and the tools are adapters wired only at the composition root.
+- **Importable engine core** — `engine/` is its own Go module (`github.com/stacklok/mecatl/engine`) with a tiny dependency closure (`x/sync` + `doublestar` + test-only `goleak`), so an external project can embed the loop and inject its own adapters without dragging in mecatl's heavy require cone. A published **API compatibility contract** (`engine/COMPATIBILITY.md` + a CI api-compat gate) governs breaking changes, and an **event-sourced rehydration** reference fold (`engine/adapter/eventsource`) reconstructs a `Session` from an append-only event log for a consumer whose system-of-record is events rather than snapshots.
 
 ## Quick start
 

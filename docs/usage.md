@@ -109,6 +109,14 @@ ports the loop consumes (`engine/port`: `LLMProvider`, `SessionStore`, …) are
 interfaces you implement or wire to the in-tree reference adapters under
 `engine/adapter/*`.
 
+If your system-of-record is an **append-only event log** rather than a snapshot
+store, the `engine/adapter/eventsource` reference fold (`eventsource.Fold`,
+[ADR 0038](adr/0038-event-sourced-rehydration.md)) reconstructs a `Session` by
+replaying the durable `port.EventLog` stream — including the log-only
+`EvUserPrompt` events the loop emits at every user-message record site. It is the
+reference implementation of a `port.SessionStore.Load` for an event-sourced
+consumer, so you can back the same loop with events instead of snapshots.
+
 The module is released under submodule tags of the form `engine/vX.Y.Z` (Go's
 convention for a module in a subdirectory), separate from the root `vX.Y.Z`
 container-image tags.
