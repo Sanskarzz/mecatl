@@ -315,9 +315,10 @@ deployments (it is orthogonal to the ask-review path).
 
 **Observability.** `EvSubagentStart` carries `RoutedCategory`/`RoutedModel` (bare metadata,
 gauntlet-#7 safe) when routed; a per-classification INFO rides the existing child
-diagnostic chokepoint and a Build-once "router ACTIVE" fact narrates the config. This slice
-scopes the routed fields to the session struct + diagnostics; the proto/client wire is a
-follow-up.
+diagnostic chokepoint and a Build-once "router ACTIVE" fact narrates the config. The
+routed fields surface end-to-end: the session struct + the proto/client wire
+(`routed_category`/`routed_model` on the `Subagent` event payload), relayed through
+the gRPC + HTTP relays and rendered by mecatui (inline card + ctrl+a fleet roster).
 
 ## Related
 

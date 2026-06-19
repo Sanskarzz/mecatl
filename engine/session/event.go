@@ -449,8 +449,10 @@ type SubagentPayload struct {
 	// that inherited the default model). They are BARE METADATA — a category label and a
 	// model id, never the task prompt or the classifier's reasoning — so they are
 	// gauntlet-#7 safe (no child content, no model-influenced free text crosses). They
-	// are session-struct + diagnostics only this slice; the proto/client wire for them is
-	// a deliberate follow-up (no proto field, so no `task generate` needed — see ADR 0031).
+	// surface end-to-end: the session struct + a per-classification INFO (dispatch-path
+	// `routeTask` closure) + a Build-once "router ACTIVE" fact + the proto/client wire
+	// (`routed_category`/`routed_model` on the `Subagent` event payload, relayed through
+	// the gRPC + HTTP relays and the mecatui client).
 	RoutedCategory string
 	RoutedModel    string
 	// ToolName is the name of a child tool that just ran. Set on EvSubagentTool

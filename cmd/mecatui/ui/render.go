@@ -1120,6 +1120,10 @@ func (r *renderer) renderSubagent(b *block, expand bool) string {
 		out.WriteString(muted.Render("↳ " + sanitizeTerminal(b.subGoal)))
 		out.WriteString("\n")
 	}
+	if routed := subagentRoutedLabel(b.subRoutedCategory, b.subRoutedModel); routed != "" {
+		out.WriteString(muted.Render(routed))
+		out.WriteString("\n")
+	}
 
 	if b.subDone {
 		out.WriteString(muted.Render(subagentResolvedLine(b)))
@@ -1137,6 +1141,26 @@ func (r *renderer) renderSubagent(b *block, expand bool) string {
 
 	out.WriteString(muted.Render(subagentLiveLine(b)))
 	return strings.TrimRight(out.String(), "\n")
+}
+
+// subagentRoutedLabel renders the opt-in model router's bare metadata for a
+// delegation as a muted one-line cue: "routed: <category> → <model>". It returns
+// "" when the child was not routed (no router, or a fail-soft miss that inherited
+// the default model). The category/model are server-derived bare metadata
+// (sanitized) — never child content — so gauntlet #7 holds.
+func subagentRoutedLabel(category, model string) string {
+	category = sanitizeTerminal(category)
+	model = sanitizeTerminal(model)
+	if category == "" && model == "" {
+		return ""
+	}
+	if model == "" {
+		return "routed: " + category
+	}
+	if category == "" {
+		return "routed: " + model
+	}
+	return "routed: " + category + " → " + model
 }
 
 // subagentLiveLine is the calm, monotonic collapsed status line: token totals and

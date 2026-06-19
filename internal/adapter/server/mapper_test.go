@@ -160,6 +160,22 @@ func TestToProtoTable(t *testing.T) {
 			},
 		},
 		{
+			// Routed-category metadata is BARE metadata (a label + a model id), set on
+			// subagent.start only when the opt-in model router classified the delegation
+			// (ADR 0031). It must round-trip to the proto fields verbatim — gauntlet #7
+			// holds (no child content crosses).
+			name: "subagent.start routed",
+			in: session.Event{Type: session.EvSubagentStart, Seq: 200, Turn: 1,
+				Subagent: &session.SubagentPayload{ParentCallID: "p1", ChildID: "subagent-p1", Goal: "investigate main.go",
+					RoutedCategory: "small", RoutedModel: "openai/gpt-4.1-mini"}},
+			assert: func(t *testing.T, got *mecatlv1.Event) {
+				s := got.GetSubagent()
+				if s == nil || s.GetRoutedCategory() != "small" || s.GetRoutedModel() != "openai/gpt-4.1-mini" {
+					t.Fatalf("subagent.start routed metadata mismatch: %+v", s)
+				}
+			},
+		},
+		{
 			name: "subagent.tool",
 			in: session.Event{Type: session.EvSubagentTool, Seq: 21, Turn: 1,
 				Subagent: &session.SubagentPayload{ParentCallID: "p1", ChildID: "subagent-p1", ToolName: "Grep", IsError: true, ToolCount: 3}},

@@ -660,7 +660,7 @@ message Hook {
 // without ever seeing the child's content, preserving context isolation.
 //
 // Which fields are set depends on the event kind:
-//   - subagent.start: parent_call_id, child_id, goal.
+//   - subagent.start: parent_call_id, child_id, goal, routed_category, routed_model.
 //   - subagent.tool:  parent_call_id, child_id, tool_name, is_error, tool_count.
 //   - subagent.end:   parent_call_id, child_id, tool_count, usage, stop, duration_ms.
 message Subagent {
@@ -691,6 +691,18 @@ message Subagent {
   // working while the parent run continues (its result is collected via the
   // SubagentStatus tool).
   bool background = 10;
+  // routed_category is the OPT-IN semantic model router's chosen CATEGORY label
+  // for this delegation (subagent.start only), set when the router was wired AND
+  // classified this delegation (empty otherwise — no router, or a fail-soft miss
+  // that inherited the default model). BARE METADATA — a label, never the task
+  // prompt or classifier reasoning — so it is context-isolation safe (gauntlet
+  // #7: no child content crosses). Mirrors session.SubagentPayload.RoutedCategory.
+  string routed_category = 11;
+  // routed_model is the concrete MODEL id the routed child was minted on
+  // (subagent.start only), paired with routed_category. BARE METADATA — a model
+  // id, never model-influenced free text — so it is context-isolation safe
+  // (gauntlet #7). Mirrors session.SubagentPayload.RoutedModel.
+  string routed_model = 12;
 }
 
 // TeamMemberSpec is one roster entry forwarded on team.start. Mirrors

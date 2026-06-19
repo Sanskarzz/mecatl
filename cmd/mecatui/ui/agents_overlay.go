@@ -545,11 +545,16 @@ func subagentRosterLine(ln *subagentLane) string {
 	if ln.background {
 		marker = " " + subagentBackgroundMarker
 	}
-	return fmt.Sprintf("%s %s #%s%s · %s · %s · ↑%s ↓%s",
+	routed := ""
+	if r := subagentRoutedLabel(ln.routedCategory, ln.routedModel); r != "" {
+		routed = " · " + r
+	}
+	return fmt.Sprintf("%s %s #%s%s%s · %s · %s · ↑%s ↓%s",
 		subagentLaneGlyph(ln),
 		goal,
 		shortChildID(ln.childID),
 		marker,
+		routed,
 		subagentLaneState(ln),
 		plural(ln.toolCount, "tool"),
 		humanizeTokens(ln.usage.InputTokens),

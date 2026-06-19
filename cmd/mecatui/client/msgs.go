@@ -131,18 +131,24 @@ const (
 // ParentCallID attributes the msg to the originating Subagent tool block.
 // Background marks a detached-delivery (background: true) child; the server sets
 // it on subagent.start only, and an older server yields false (no marker).
+// RoutedCategory/RoutedModel are the OPT-IN semantic model router's bare
+// metadata (a category label + a model id) on subagent.start, empty when no
+// router classified the delegation (ADR 0031) — never child content, so
+// gauntlet #7 holds.
 type SubagentMsg struct {
-	Kind         SubagentKind
-	ParentCallID string
-	ChildID      string
-	Goal         string
-	Background   bool
-	ToolName     string
-	IsError      bool
-	ToolCount    int
-	Usage        Usage
-	Stop         string
-	DurationMs   int64
+	Kind           SubagentKind
+	ParentCallID   string
+	ChildID        string
+	Goal           string
+	Background     bool
+	RoutedCategory string
+	RoutedModel    string
+	ToolName       string
+	IsError        bool
+	ToolCount      int
+	Usage          Usage
+	Stop           string
+	DurationMs     int64
 }
 
 // TeamKind discriminates the three team.* event kinds carried by a TeamMsg, so
@@ -388,17 +394,19 @@ func hookDecisionFrom(d mecatlv1.HookDecision) HookDecision {
 // point for the three subagent.* event kinds.
 func subagentMsg(kind SubagentKind, s *mecatlv1.Subagent) SubagentMsg {
 	return SubagentMsg{
-		Kind:         kind,
-		ParentCallID: s.GetParentCallId(),
-		ChildID:      s.GetChildId(),
-		Goal:         s.GetGoal(),
-		Background:   s.GetBackground(),
-		ToolName:     s.GetToolName(),
-		IsError:      s.GetIsError(),
-		ToolCount:    int(s.GetToolCount()),
-		Usage:        usageFrom(s.GetUsage()),
-		Stop:         s.GetStop(),
-		DurationMs:   s.GetDurationMs(),
+		Kind:           kind,
+		ParentCallID:   s.GetParentCallId(),
+		ChildID:        s.GetChildId(),
+		Goal:           s.GetGoal(),
+		Background:     s.GetBackground(),
+		RoutedCategory: s.GetRoutedCategory(),
+		RoutedModel:    s.GetRoutedModel(),
+		ToolName:       s.GetToolName(),
+		IsError:        s.GetIsError(),
+		ToolCount:      int(s.GetToolCount()),
+		Usage:          usageFrom(s.GetUsage()),
+		Stop:           s.GetStop(),
+		DurationMs:     s.GetDurationMs(),
 	}
 }
 

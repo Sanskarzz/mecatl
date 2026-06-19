@@ -183,6 +183,12 @@ type block struct {
 	subStop       string
 	subDurationMs int64
 	subDone       bool
+	// subRoutedCategory/subRoutedModel are the opt-in model router's bare metadata
+	// for this delegation (a category label + a model id), set on subagent.start
+	// only when the router classified it (ADR 0031). Empty when no router ran. BARE
+	// metadata — never child content — so gauntlet #7 holds.
+	subRoutedCategory string
+	subRoutedModel    string
 
 	// Team fields (attached to a Team tool block): the BOUNDED projection of an
 	// in-process team's run. team is true once a team.start has been attributed to
@@ -227,17 +233,19 @@ type block struct {
 // via SubagentStatus — the events carry only background + done, never the
 // registry's delivered state, so the lane renders what it honestly knows.
 type subagentLane struct {
-	childID    string
-	goal       string
-	background bool
-	current    string // latest child tool name, "" when none yet
-	trace      []subToolChip
-	toolCount  int
-	usage      client.Usage
-	isError    bool // the most-recent child tool errored (transient)
-	done       bool
-	stop       string
-	durationMs int64
+	childID        string
+	goal           string
+	background     bool
+	routedCategory string // opt-in model router's category label (ADR 0031); "" when unrouted
+	routedModel    string // opt-in model router's chosen model id (ADR 0031); "" when unrouted
+	current        string // latest child tool name, "" when none yet
+	trace          []subToolChip
+	toolCount      int
+	usage          client.Usage
+	isError        bool // the most-recent child tool errored (transient)
+	done           bool
+	stop           string
+	durationMs     int64
 }
 
 // conversation is the ordered scrollback. It owns block creation/mutation so the
@@ -427,14 +435,17 @@ func (c *conversation) subagentBlock(parentCallID string) *block {
 }
 
 // setSubagentStart marks the Subagent block matching parentCallID as a subagent and
-// records its goal title. Returns false when no matching block exists.
-func (c *conversation) setSubagentStart(parentCallID, goal string) bool {
+// records its goal title and routed-category metadata. Returns false when no
+// matching block exists.
+func (c *conversation) setSubagentStart(parentCallID, goal, routedCategory, routedModel string) bool {
 	b := c.subagentBlock(parentCallID)
 	if b == nil {
 		return false
 	}
 	b.subagent = true
 	b.subGoal = goal
+	b.subRoutedCategory = routedCategory
+	b.subRoutedModel = routedModel
 	return true
 }
 
@@ -489,17 +500,19 @@ func (c *conversation) fleetLane(childID string) *subagentLane {
 	return &c.subagentFleet[len(c.subagentFleet)-1]
 }
 
-// fleetStart records a child's goal label and background mode on its fleet lane
-// (creating the lane). A missing childID is dropped: the fleet keys on ChildID, so
-// without one there is no stable row — the inline card (keyed by ParentCallID)
-// still renders regardless.
-func (c *conversation) fleetStart(childID, goal string, background bool) {
+// fleetStart records a child's goal label, background mode, and routed-category
+// metadata on its fleet lane (creating the lane). A missing childID is dropped:
+// the fleet keys on ChildID, so without one there is no stable row — the inline
+// card (keyed by ParentCallID) still renders regardless.
+func (c *conversation) fleetStart(childID, goal, routedCategory, routedModel string, background bool) {
 	if childID == "" {
 		return
 	}
 	ln := c.fleetLane(childID)
 	ln.goal = goal
 	ln.background = background
+	ln.routedCategory = routedCategory
+	ln.routedModel = routedModel
 }
 
 // fleetTool records a resolved child tool on the fleet lane: the latest tool name

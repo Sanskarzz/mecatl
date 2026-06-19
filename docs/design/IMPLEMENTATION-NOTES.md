@@ -557,8 +557,11 @@ caps.routeTask != nil`), it calls `caps.routeTask(args.Prompt)` BETWEEN `validat
 per-call `model` factory path (`t.engineFactory(routedModel)` — decide-once, contamination-safe,
 same-provider). PRECEDENCE by gating: per-call `model` > agent-def `Model` > fork/resume > router >
 inherited default. Both foreground and background route (the decision is threaded into
-`backgroundChild`). `EvSubagentStart` carries `RoutedCategory`/`RoutedModel` (session-struct +
-diagnostics only this slice; proto/client wire is a follow-up — no `buf`/`task generate` needed).
+`backgroundChild`). `EvSubagentStart` carries `RoutedCategory`/`RoutedModel` (bare
+metadata: a category label + a model id, gauntlet-#7 safe), surfaced end-to-end —
+the session struct + a per-classification INFO + the proto/client wire
+(`routed_category`/`routed_model` on the `Subagent` event payload, relayed through
+gRPC + HTTP and rendered by mecatui).
 
 COMPOSITION half: `buildModelRouterTask` (`internal/app/build.go`, sibling of `buildAskAdjudicator`)
 returns the `Deps.SubagentModelRouter` closure — nil when OFF (`!cfg.SubagentModelRouter ||

@@ -22,18 +22,18 @@ import (
 // because it needs the --subagent-model-router flag plus a router taxonomy, which the
 // shared target is not started with. Local-only by construction.
 //
-// HOW THE ASSERTION WORKS. The harness cannot observe the child's model on the wire (the
-// routed model rides the session struct + diagnostics this slice, not the client wire —
-// the RoutedCategory/RoutedModel proto fields are a deliberate follow-up, see ADR 0031),
-// so the spec asserts the OBSERVABLE facts that together prove the feature is wired and
-// did not wedge: (A) the build-once "subagent model router ACTIVE" INFO names the
-// category count + classifier model (logModelRouterFacts) — i.e. the router was wired,
-// not silently OFF; and (B) a plain Subagent delegation actually RAN and the run
-// completed cleanly — i.e. the classifier call + the routed child both ran against the
-// live provider without wedging. The full per-delegation routed-model assertion is the
-// offline test's job (internal/app TestRouterRoutesChildToClassifiedModelE2E reads the
-// child's Model off a mock observer); a live wire assertion is a follow-up that lands
-// with the proto/client RoutedModel fields.
+// HOW THE ASSERTION WORKS. The harness observes the routed model on the wire:
+// `RoutedCategory`/`RoutedModel` ride the `subagent.start` event payload
+// (`routed_category`/`routed_model` proto fields, ADR 0031), so the spec asserts
+// the OBSERVABLE facts that together prove the feature is wired and did not wedge:
+// (A) the build-once "subagent model router ACTIVE" INFO names the category count +
+// classifier model (logModelRouterFacts) — i.e. the router was wired, not silently
+// OFF; (B) a plain Subagent delegation actually RAN and the run completed cleanly —
+// i.e. the classifier call + the routed child both ran against the live provider
+// without wedging; and (C) the `subagent.start` event carries the routed model the
+// router classified this delegation to (the per-delegation wire assertion). The
+// offline test (internal/app TestRouterRoutesChildToClassifiedModelE2E) reads the
+// child's Model off a mock observer; this is the live wire confirmation.
 func modelRouterSpecs() {
 	ginkgo.Describe("subagent model router", func() {
 		ginkgo.It("classifies a plain Subagent delegation and routes it to a category model",
@@ -99,6 +99,20 @@ func modelRouterSpecs() {
 					"the run did not end cleanly (stop="+res.Stop()+") — the classifier or routed child may have wedged"+logTail())
 				gomega.Expect(strings.TrimSpace(res.Result.Error)).To(gomega.BeEmpty(),
 					"a clean routed run carries no error"+logTail())
+
+				// (C) The subagent.start event carries the routed model the classifier
+				// picked for this delegation. The task ("Read the file … reply with the
+				// fruit") is a trivial single-step lookup, so the router should classify it
+				// to the "small" category (the cheap lane). Assert the routed model rides
+				// the wire and matches the small-category model — the per-delegation proof.
+				starts := res.SubagentMsgs(client.SubagentStart)
+				gomega.Expect(len(starts)).To(gomega.BeNumerically(">=", 1),
+					"expected at least one subagent.start event (the routed delegation)"+logTail())
+				start := starts[0]
+				gomega.Expect(start.RoutedModel).To(gomega.Equal(small),
+					"the routed child should be on the small-category model"+logTail())
+				gomega.Expect(start.RoutedCategory).To(gomega.Equal("small"),
+					"the router should classify the trivial lookup as 'small'"+logTail())
 			})
 	})
 }

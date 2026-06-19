@@ -290,16 +290,18 @@ func toProtoTeamTaskSnapshot(t session.TeamTaskSnapshot) *mecatlv1.TeamTask {
 // payload's documented contract.
 func toProtoSubagent(p session.SubagentPayload) *mecatlv1.Subagent {
 	return &mecatlv1.Subagent{
-		ParentCallId: p.ParentCallID,
-		ChildId:      p.ChildID,
-		Goal:         p.Goal,
-		Background:   p.Background,
-		ToolName:     p.ToolName,
-		IsError:      p.IsError,
-		ToolCount:    clampInt32(p.ToolCount),
-		Usage:        toProtoUsage(p.Usage),
-		Stop:         string(p.Stop),
-		DurationMs:   p.DurationMs,
+		ParentCallId:   p.ParentCallID,
+		ChildId:        p.ChildID,
+		Goal:           p.Goal,
+		Background:     p.Background,
+		RoutedCategory: p.RoutedCategory,
+		RoutedModel:    p.RoutedModel,
+		ToolName:       p.ToolName,
+		IsError:        p.IsError,
+		ToolCount:      clampInt32(p.ToolCount),
+		Usage:          toProtoUsage(p.Usage),
+		Stop:           string(p.Stop),
+		DurationMs:     p.DurationMs,
 	}
 }
 

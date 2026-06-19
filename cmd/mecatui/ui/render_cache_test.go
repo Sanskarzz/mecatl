@@ -92,7 +92,7 @@ var oracleSteps = []struct {
 	}},
 	{"setSubagentStart", func(c *conversation) {
 		c.addTool("call-sub", "Subagent", `{"goal":"dig"}`)
-		c.setSubagentStart("call-sub", "dig into the code")
+		c.setSubagentStart("call-sub", "dig into the code", "", "")
 	}},
 	{"addSubagentTool", func(c *conversation) { c.addSubagentTool("call-sub", "Grep", false, 1) }},
 	{"setSubagentEnd", func(c *conversation) {
@@ -100,7 +100,7 @@ var oracleSteps = []struct {
 	}},
 	// The fleet accumulators mutate conversation state OFF the blocks (footer /
 	// ctrl+a roster); they must leave the block render untouched.
-	{"fleetStart", func(c *conversation) { c.fleetStart("child-1", "dig into the code", false) }},
+	{"fleetStart", func(c *conversation) { c.fleetStart("child-1", "dig into the code", "", "", false) }},
 	{"fleetTool", func(c *conversation) { c.fleetTool("child-1", "Grep", false, 1) }},
 	{"fleetEnd", func(c *conversation) {
 		c.fleetEnd("child-1", client.Usage{InputTokens: 1200, OutputTokens: 340}, 3, "end_turn", 4200)

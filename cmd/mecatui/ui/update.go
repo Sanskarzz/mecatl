@@ -696,8 +696,8 @@ func (m *Model) applySubagent(msg client.SubagentMsg) {
 	// Both are redacted, metadata-only — neither carries child content (gauntlet #7).
 	switch msg.Kind {
 	case client.SubagentStart:
-		m.conv.setSubagentStart(msg.ParentCallID, msg.Goal)
-		m.conv.fleetStart(msg.ChildID, msg.Goal, msg.Background)
+		m.conv.setSubagentStart(msg.ParentCallID, msg.Goal, msg.RoutedCategory, msg.RoutedModel)
+		m.conv.fleetStart(msg.ChildID, msg.Goal, msg.RoutedCategory, msg.RoutedModel, msg.Background)
 	case client.SubagentTool:
 		m.conv.addSubagentTool(msg.ParentCallID, msg.ToolName, msg.IsError, msg.ToolCount)
 		m.conv.fleetTool(msg.ChildID, msg.ToolName, msg.IsError, msg.ToolCount)
