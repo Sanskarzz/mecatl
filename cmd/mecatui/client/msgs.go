@@ -210,6 +210,12 @@ type TeamMemberSpec struct {
 	Role     string
 	Mutating bool
 	Lead     bool
+	// RoutedCategory/RoutedModel are the OPT-IN semantic model router's bare metadata
+	// (a category label + a model id) for a routed member, empty when no router
+	// classified the member (ADR 0031 / ADR 0034) — never member content, so gauntlet
+	// #7 holds.
+	RoutedCategory string
+	RoutedModel    string
 }
 
 // TeamMsg is the BOUNDED projection of an in-process team's run, as plain data
@@ -302,6 +308,12 @@ type ParallelMsg struct {
 	// BranchLabel / Goal are set on ParallelBranchStart.
 	BranchLabel string
 	Goal        string
+	// RoutedCategory/RoutedModel are the OPT-IN semantic model router's bare metadata
+	// (a category label + a model id) for a routed branch, set on branch_start only,
+	// empty when no router classified the branch (ADR 0031 / ADR 0034) — never branch
+	// content, so gauntlet #7 holds.
+	RoutedCategory string
+	RoutedModel    string
 	// ToolName / IsError / ToolCount carry per-branch tool activity (branch_tool;
 	// ToolCount is also final on branch_end).
 	ToolName  string
@@ -424,6 +436,8 @@ func parallelMsg(kind ParallelKind, p *mecatlv1.Parallel) ParallelMsg {
 		ChildID:         p.GetChildId(),
 		BranchLabel:     p.GetBranchLabel(),
 		Goal:            p.GetGoal(),
+		RoutedCategory:  p.GetRoutedCategory(),
+		RoutedModel:     p.GetRoutedModel(),
 		ToolName:        p.GetToolName(),
 		IsError:         p.GetIsError(),
 		ToolCount:       int(p.GetToolCount()),
@@ -475,10 +489,12 @@ func teamMsg(kind TeamKind, t *mecatlv1.Team) TeamMsg {
 	}
 	for _, r := range t.GetRoster() {
 		msg.Roster = append(msg.Roster, TeamMemberSpec{
-			Name:     r.GetName(),
-			Role:     r.GetRole(),
-			Mutating: r.GetMutating(),
-			Lead:     r.GetLead(),
+			Name:           r.GetName(),
+			Role:           r.GetRole(),
+			Mutating:       r.GetMutating(),
+			Lead:           r.GetLead(),
+			RoutedCategory: r.GetRoutedCategory(),
+			RoutedModel:    r.GetRoutedModel(),
 		})
 	}
 	for _, tk := range t.GetTasks() {

@@ -53,7 +53,14 @@ const (
 // by capturing the per-team aggregate. Returning agent.MemberBuild (rather than a
 // bare *Engine) is how a def's permissionMode reaches the supervisor's per-member
 // session.
-type MemberEngineFactory func(t *team.Team, spec agent.MemberSpec) agent.MemberBuild
+//
+// routedModel is the OPT-IN model router's classification (ADR 0034) — the
+// ALREADY-RESOLVED concrete model id for an UNDEFINED member, "" otherwise (no router, a
+// miss, or a DEFINED member whose def pins its own model). It is the same shape as
+// agent.TeamMemberEngineFactory so one factory satisfies both. On the gRPC RunTeam path
+// the supervisor runs ZERO-CAPS (no parent caps ⇒ no routeTask), so routedModel is always
+// "" there and the member is built byte-identically to today.
+type MemberEngineFactory func(t *team.Team, spec agent.MemberSpec, routedModel string) agent.MemberBuild
 
 // teamState couples a team's shared coordination aggregate with the supervisor
 // that drives it and the base workspace it was created over.
@@ -116,7 +123,9 @@ func (s *Service) CreateTeam(ctx context.Context, workspace, name, goal string, 
 
 	t := team.New(name)
 	base := s.cfg.Workspaces(workspace)
-	factory := func(spec agent.MemberSpec) agent.MemberBuild { return s.cfg.MemberEngine(t, spec) }
+	factory := func(spec agent.MemberSpec, routedModel string) agent.MemberBuild {
+		return s.cfg.MemberEngine(t, spec, routedModel)
+	}
 
 	// Compute the team id FIRST (it needs only NewID, no dependency on the supervisor)
 	// so the member-session prefix can namespace member ids by it — keeping the gRPC

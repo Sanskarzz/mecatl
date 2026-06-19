@@ -23,7 +23,7 @@ import (
 func teamToolFactory(t *testing.T, providers map[string]*mockllm.Provider) agent.TeamMemberEngineFactory {
 	t.Helper()
 	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
-	return func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
+	return func(tm *team.Team, spec agent.MemberSpec, _ string) agent.MemberBuild {
 		prov, ok := providers[spec.Name]
 		if !ok {
 			t.Fatalf("teamToolFactory: no provider scripted for member %q", spec.Name)
@@ -744,7 +744,7 @@ func tasksSnapshotEqual(a, b []session.TeamTaskSnapshot) bool {
 // read-parallel Subagent/Fork tools, the Team tool reports ReadOnly() == false so the
 // dispatcher serialises it.
 func TestTeamToolReadOnlyIsFalse(t *testing.T) {
-	tt := agent.NewTeamTool(func(*team.Team, agent.MemberSpec) agent.MemberBuild { return agent.MemberBuild{} })
+	tt := agent.NewTeamTool(func(*team.Team, agent.MemberSpec, string) agent.MemberBuild { return agent.MemberBuild{} })
 	ro, ok := tt.(interface{ ReadOnly() bool })
 	if !ok {
 		t.Fatalf("Team tool does not expose ReadOnly()")
@@ -758,7 +758,7 @@ func TestTeamToolReadOnlyIsFalse(t *testing.T) {
 // result (not a harness error), so the model can retry. Cases: empty goal, empty
 // members, empty member name, duplicate names, empty role.
 func TestTeamToolBadRoster(t *testing.T) {
-	tt := agent.NewTeamTool(func(*team.Team, agent.MemberSpec) agent.MemberBuild {
+	tt := agent.NewTeamTool(func(*team.Team, agent.MemberSpec, string) agent.MemberBuild {
 		t.Fatalf("factory must not be called for an invalid roster")
 		return agent.MemberBuild{}
 	})
@@ -819,7 +819,7 @@ func TestTeamToolReadOnlyMemberForksViaReadOnlyForker(t *testing.T) {
 	// A factory that grants the member a (mutating) Bash stand-in and marks it
 	// IsolateReadOnly — the composition-layer signal that it was granted a shell and
 	// must run in an isolated worktree via the read-only forker.
-	factory := func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
+	factory := func(tm *team.Team, spec agent.MemberSpec, _ string) agent.MemberBuild {
 		cat := tool.NewCatalog()
 		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
 			cat.MustRegister(tl)

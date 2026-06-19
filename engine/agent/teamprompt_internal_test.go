@@ -323,7 +323,7 @@ func TestRenderTurnPromptTrustedGoalCannotForgeFraming(t *testing.T) {
 func TestSupervisorUntrustedGoalDefault(t *testing.T) {
 	tm := team.New("t")
 	base := memfs.NewWorkspace("/ws")
-	factory := func(MemberSpec) MemberBuild { return MemberBuild{} }
+	factory := func(MemberSpec, string) MemberBuild { return MemberBuild{} }
 
 	def := NewSupervisor(tm, base, factory, WithTeamGoal("g"))
 	if def.untrustedGoal {

@@ -283,7 +283,7 @@ func RunTeamScenario(ctx context.Context) (agent.TeamOutcome, error) {
 			mockllm.TextTurn("Inspection complete; finding recorded."),
 		),
 	}
-	factory := func(spec agent.MemberSpec) agent.MemberBuild {
+	factory := func(spec agent.MemberSpec, _ string) agent.MemberBuild {
 		prov, ok := scripts[spec.Name]
 		if !ok {
 			return agent.MemberBuild{}

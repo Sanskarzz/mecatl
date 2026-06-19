@@ -54,7 +54,9 @@ func noFSTeamWiring(t *testing.T, provider port.LLMProvider, a catalogAssets) (s
 	}
 	tm := team.New("nofs-team")
 	sup := agent.NewSupervisor(tm, nofs.New(),
-		func(spec agent.MemberSpec) agent.MemberBuild { return factory(tm, spec) })
+		func(spec agent.MemberSpec, routedModel string) agent.MemberBuild {
+			return factory(tm, spec, routedModel)
+		})
 	return factory, sup, tm
 }
 
@@ -69,7 +71,7 @@ func TestNoFSTeamMemberSurface(t *testing.T) {
 	a := noFSTeamAssets(t)
 	factory, _, tm := noFSTeamWiring(t, mockllm.New(mockllm.TextTurn("ok")), a)
 
-	build := factory(tm, agent.MemberSpec{Name: "scout", InitialPrompt: "go"})
+	build := factory(tm, agent.MemberSpec{Name: "scout", InitialPrompt: "go"}, "")
 	if build.Engine == nil {
 		t.Fatal("no-fs member factory returned a nil engine")
 	}

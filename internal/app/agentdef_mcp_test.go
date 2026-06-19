@@ -259,7 +259,9 @@ func TestMemberReadOnlyDefWithMCPAccepted(t *testing.T) {
 	factory := memberFactoryForTest(cfg, prov, hookexec.New(nil), regOf(def), nil, nil, false, nil)
 
 	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"),
-		func(spec agent.MemberSpec) agent.MemberBuild { return factory(tm, spec) })
+		func(spec agent.MemberSpec, routedModel string) agent.MemberBuild {
+			return factory(tm, spec, routedModel)
+		})
 	// A read-only member holding an MCP tool (ReadOnly()==false) must NOT trip
 	// ErrReadOnlyMemberMutating — it must enrol.
 	if err := sup.AddMember(context.Background(), agent.MemberSpec{
@@ -297,7 +299,9 @@ func TestMemberReadOnlyDefWithEditStillRejected(t *testing.T) {
 	factory := memberFactoryForTest(cfg, editCall(), hookexec.New(nil), regOf(def), nil, nil, false, nil)
 
 	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"),
-		func(spec agent.MemberSpec) agent.MemberBuild { return factory(tm, spec) })
+		func(spec agent.MemberSpec, routedModel string) agent.MemberBuild {
+			return factory(tm, spec, routedModel)
+		})
 	if err := sup.AddMember(context.Background(), agent.MemberSpec{
 		Name: "mixed", AgentType: "mixed", InitialPrompt: "go",
 	}); err != nil {

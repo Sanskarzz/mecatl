@@ -271,11 +271,14 @@ canonicalization are always operator-only.
 never capped (the operator is authoritative). See
 [ADR 0030](../adr/0030-model-selection-heuristics.md).
 
-## The semantic subagent model router (Phase 5)
+## The semantic model router (Phase 5)
 
-The **OPT-IN semantic model router** ([ADR 0031](../adr/0031-subagent-model-router.md))
-picks which model a `Subagent` delegation runs on, **per task**, from an operator-defined
-menu. It is the Phase-5 realisation of ADR 0030's deferred "Layer 3b" — built as a sibling
+The **OPT-IN semantic model router** ([ADR 0031](../adr/0031-subagent-model-router.md),
+extended by [ADR 0034](../adr/0034-team-parallel-model-routing.md)) picks which model a
+delegation runs on, **per task**, from an operator-defined menu. ADR 0031 shipped it for
+the `Subagent` family; ADR 0034 extended it to **agent-team members** and **Parallel
+branches** — the same operator taxonomy and `--subagent-model-router` enable flag govern all
+three. It is the Phase-5 realisation of ADR 0030's deferred "Layer 3b" — built as a sibling
 of the headless ask reviewer and the guardrail checker, not as new architecture.
 
 **Taxonomy + enable gate.** The operator defines categories in the user-global
@@ -319,6 +322,38 @@ diagnostic chokepoint and a Build-once "router ACTIVE" fact narrates the config.
 routed fields surface end-to-end: the session struct + the proto/client wire
 (`routed_category`/`routed_model` on the `Subagent` event payload), relayed through
 the gRPC + HTTP relays and rendered by mecatui (inline card + ctrl+a fleet roster).
+
+**Team members + Parallel branches (ADR 0034).** The same router governs the other two
+delegation families, reusing the one `parentCaps.routeTask` closure the dispatcher binds per
+run (so a mixed turn shares ONE breaker / miss-counter / classifier-usage fold across all
+families). The per-family seam respects each family's engine lifetime:
+
+- A **team member** is classified **once at `AddMember`** (decide-once; the member engine is
+  built once and reused across rounds via `Reopen`, never re-routed), off its
+  `InitialPrompt` (falling back to its name). Only a **plain undefined** member routes — a
+  member with an agent def pins its own model. `AddMember` runs serially on the single
+  Team-tool goroutine, so members classify one at a time. The routed model id threads
+  through the `MemberEngine` factory's new `routedModel` parameter; the
+  `EvTeamStart` roster entry carries `RoutedCategory`/`RoutedModel`. The gRPC `RunTeam`
+  direct path is **zero-caps** (no `routeTask`), so it never routes — byte-identical.
+- A **Parallel branch** is classified **per-branch in `runBranch`** (each branch routes at
+  most once) over an OPTIONAL `engineFactory` (the `WithSubagentEngineFactory` shape); on a
+  hit the branch runs on the routed engine, on a miss/unwired the shared branch child. The
+  branch_start event carries the routed metadata. The breaker mutex serialises the concurrent
+  branch classifications.
+
+Like the Subagent family, the team and parallel routed fields surface **end-to-end on the
+proto/client wire**: `routed_category`/`routed_model` on the `TeamMemberSpec` (team.start
+roster) and on the `Parallel` event (branch_start), relayed through the gRPC + HTTP relays
+and rendered by mecatui (the ctrl+a Teams roster row and the Parallel group-focus branch
+row). Bare metadata only — a category label + a model id, never member/branch content
+(gauntlet #7).
+
+The category→model→engine mapping stays in composition (`buildMemberEngine` substitutes the
+routed model on the undefined branch; the new `buildParallelEngineFactory` mints the branch
+engine) — both through the contamination-safe per-provider path (window/compactor/counter
+re-derived), never a clone-and-swap. Fail-soft, decide-once, the breaker, and OFF-is-byte-
+identical all hold per family.
 
 ## Related
 

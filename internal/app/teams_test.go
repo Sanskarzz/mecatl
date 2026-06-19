@@ -599,7 +599,9 @@ func TestAgencyDeltaReachesTeamMemberAndLead(t *testing.T) {
 
 		tm := team.New("t")
 		sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"),
-			func(spec agent.MemberSpec) agent.MemberBuild { return factory(tm, spec) })
+			func(spec agent.MemberSpec, routedModel string) agent.MemberBuild {
+				return factory(tm, spec, routedModel)
+			})
 		if err := sup.AddMember(context.Background(), agent.MemberSpec{
 			Name: "lead", Lead: true, AgentType: "", InitialPrompt: "go",
 		}); err != nil {
@@ -630,7 +632,7 @@ func TestAgencyDeltaReachesTeamMemberAndLead(t *testing.T) {
 func scriptedMemberFactory(t *testing.T, scripts map[string][]mockllm.Turn) server.MemberEngineFactory {
 	t.Helper()
 	allow := permpolicy.NewPolicy(defaultRules(), nil)
-	return func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
+	return func(tm *team.Team, spec agent.MemberSpec, _ string) agent.MemberBuild {
 		turns, ok := scripts[spec.Name]
 		if !ok {
 			t.Fatalf("scriptedMemberFactory: no script for member %q", spec.Name)

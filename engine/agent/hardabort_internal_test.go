@@ -124,7 +124,7 @@ func TestCancelUnwedgesStalledTeamRun(t *testing.T) {
 		"w1": mockllm.New(echoTurns("w1", 10)...),
 		"w2": mockllm.New(echoTurns("w2", 10)...),
 	}
-	factory := func(tm *team.Team, spec MemberSpec) MemberBuild {
+	factory := func(tm *team.Team, spec MemberSpec, _ string) MemberBuild {
 		prov, ok := providers[spec.Name]
 		if !ok {
 			t.Fatalf("no provider scripted for member %q", spec.Name)
@@ -396,7 +396,7 @@ func TestCancelMemberUnparksEvChSend(t *testing.T) {
 		"worker": mockllm.New(echoTurns("worker", 40)...),
 	}
 	tm := team.New("evch-park")
-	factory := func(spec MemberSpec) MemberBuild {
+	factory := func(spec MemberSpec, _ string) MemberBuild {
 		prov, ok := providers[spec.Name]
 		if !ok {
 			t.Fatalf("no provider scripted for member %q", spec.Name)

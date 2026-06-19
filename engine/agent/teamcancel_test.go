@@ -64,7 +64,7 @@ func (p *promptRecordingProvider) lastPrompt() string {
 func cancelMemberFactory(t *testing.T, tm *team.Team, providers map[string]port.LLMProvider, extra ...tool.Tool) agent.MemberEngine {
 	t.Helper()
 	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
-	return func(spec agent.MemberSpec) agent.MemberBuild {
+	return func(spec agent.MemberSpec, _ string) agent.MemberBuild {
 		prov, ok := providers[spec.Name]
 		if !ok {
 			t.Fatalf("cancelMemberFactory: no provider scripted for member %q", spec.Name)
@@ -275,7 +275,7 @@ func TestCancelChildReachesTeamMember(t *testing.T) {
 	)
 	providers := map[string]*mockllm.Provider{"lead": leadProv, "worker": workerProv}
 	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
-	factory := func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
+	factory := func(tm *team.Team, spec agent.MemberSpec, _ string) agent.MemberBuild {
 		prov, ok := providers[spec.Name]
 		if !ok {
 			t.Fatalf("no provider for member %q", spec.Name)

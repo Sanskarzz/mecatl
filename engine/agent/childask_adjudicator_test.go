@@ -124,7 +124,7 @@ func TestAdjudicatorAllowRunsTeamMemberCommand(t *testing.T) {
 	memberPolicy := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil,
 		governance.WithAudience(governance.AudienceSubagent))
 
-	factory := func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
+	factory := func(tm *team.Team, spec agent.MemberSpec, _ string) agent.MemberBuild {
 		cat := tool.NewCatalog()
 		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
 			cat.MustRegister(tl)

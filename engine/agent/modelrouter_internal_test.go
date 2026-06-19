@@ -336,6 +336,59 @@ func TestRouterBreakerSerializesConcurrentCalls(t *testing.T) {
 	}
 }
 
+// TestRouterBreakerSharedAcrossFamilies (ADR 0034): all three delegation families
+// (Subagent / Parallel branches / team members) route through the ONE caps.routeTask the
+// dispatcher binds per run, so a mixed turn shares a SINGLE breaker + miss counter. Here a
+// Parallel fan-out of N branches and one Subagent-shaped call all consult the same
+// always-miss router; the breaker must open ONCE after exactly `max` underlying
+// consultations across the families combined — never `max` per family. Run under -race it
+// also proves the cross-family concurrent classifications are data-race-clean on the one
+// breaker. (We drive routeTask directly here, the shape every family uses, so the test is
+// family-agnostic — exactly the point: one closure, one breaker.)
+func TestRouterBreakerSharedAcrossFamilies(t *testing.T) {
+	var (
+		mu        sync.Mutex
+		callCount int
+	)
+	mainEngine := NewEngine(Deps{
+		LLM:     mockllm.New(),
+		Catalog: tool.NewCatalog(),
+		Policy:  allowAllInt(),
+		Model:   "main",
+		SubagentModelRouter: func(context.Context, string) (string, string, session.Usage, bool) {
+			mu.Lock()
+			callCount++
+			mu.Unlock()
+			return "", "", session.Usage{}, false // always miss
+		},
+	})
+	run := &Run{router: &modelRouterBreaker{max: defaultModelRouterMaxMisses}, children: newChildRunRegistry()}
+	caps := mainEngine.parentCaps(run, nil, 0)
+
+	// Simulate a mixed turn: several "parallel branch" classifications + one "subagent"
+	// classification, concurrently, all through the SAME caps.routeTask. The combined
+	// consult count must cap at `max` — proving one breaker spans the families.
+	const parallelBranches = 5
+	var wg sync.WaitGroup
+	for i := 0; i < parallelBranches; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); caps.routeTask(context.Background(), "branch task") }()
+	}
+	wg.Add(1)
+	go func() { defer wg.Done(); caps.routeTask(context.Background(), "subagent task") }()
+	wg.Wait()
+	// A few more after they've all run: the breaker is open, so these are skipped too.
+	caps.routeTask(context.Background(), "later")
+	caps.routeTask(context.Background(), "later")
+
+	mu.Lock()
+	defer mu.Unlock()
+	if callCount != defaultModelRouterMaxMisses {
+		t.Fatalf("underlying router consulted %d times across families, want exactly %d (ONE shared breaker, not per-family)",
+			callCount, defaultModelRouterMaxMisses)
+	}
+}
+
 // TestRouteTaskPropagatesRunCtx (issue #94): the run's ctx — NOT context.Background() —
 // is threaded into SubagentModelRouter, so a Run.Cancel between the breaker's hardAbort
 // check and the classifier call propagates into the classifier turn and it dies with the

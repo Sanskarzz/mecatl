@@ -718,6 +718,19 @@ message TeamMemberSpec {
   bool mutating = 3;
   // lead marks the coordinating member.
   bool lead = 4;
+  // routed_category is the OPT-IN semantic model router's chosen CATEGORY label for
+  // this member (team.start roster only), set when the router was wired AND classified
+  // this member (empty otherwise — no router, a fail-soft miss that inherited the
+  // default member model, or a DEFINED member whose agent def pinned its own model so
+  // the router never fired). BARE METADATA — a label, never the member's role/prompt or
+  // classifier reasoning — so it is context-isolation safe (gauntlet #7: no member
+  // content crosses). Mirrors session.TeamMemberSpec.RoutedCategory.
+  string routed_category = 5;
+  // routed_model is the concrete MODEL id the routed member's engine was minted on
+  // (team.start roster only), paired with routed_category. BARE METADATA — a model id,
+  // never model-influenced free text — so it is context-isolation safe (gauntlet #7).
+  // Mirrors session.TeamMemberSpec.RoutedModel.
+  string routed_model = 6;
 }
 
 // Team is the BOUNDED observability projection carried by the three team.* events.
@@ -815,7 +828,7 @@ message Team {
 //
 // Which fields are set depends on the event kind:
 //   - parallel.start:                  parent_call_id, join, branch_count.
-//   - parallel.branch (branch_start):  parent_call_id, kind, branch_index, branch_label, goal.
+//   - parallel.branch (branch_start):  parent_call_id, kind, branch_index, branch_label, goal, routed_category, routed_model.
 //   - parallel.branch (branch_tool):   parent_call_id, kind, branch_index, tool_name, is_error, tool_count.
 //   - parallel.branch (branch_end):    parent_call_id, kind, branch_index, tool_count, stop, usage, duration_ms, failed, workspace.
 //   - parallel.end:                    parent_call_id, join, branch_count, winner, winner_workspace, usage (run total), stop.
@@ -873,6 +886,18 @@ message Parallel {
   // branch_start/branch_end — the CancelChild handle, carried explicitly so a
   // client never derives ids from the (internal) id grammar.
   string child_id = 18;
+  // routed_category is the OPT-IN semantic model router's chosen CATEGORY label for
+  // this branch (branch_start only), set when the router was wired AND classified this
+  // branch (empty otherwise — no router, a fail-soft miss that inherited the default
+  // branch model, or a branch cancelled before it started). BARE METADATA — a label,
+  // never the branch prompt or classifier reasoning — so it is context-isolation safe
+  // (gauntlet #7: no branch content crosses). Mirrors session.ParallelPayload.RoutedCategory.
+  string routed_category = 19;
+  // routed_model is the concrete MODEL id the routed branch was minted on (branch_start
+  // only), paired with routed_category. BARE METADATA — a model id, never
+  // model-influenced free text — so it is context-isolation safe (gauntlet #7).
+  // Mirrors session.ParallelPayload.RoutedModel.
+  string routed_model = 20;
 }
 
 // ToolCall is a request from the model to invoke a named tool. Mirrors

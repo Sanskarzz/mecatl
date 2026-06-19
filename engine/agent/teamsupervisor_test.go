@@ -24,7 +24,7 @@ import (
 func memberFactory(t *testing.T, tm *team.Team, providers map[string]*mockllm.Provider) agent.MemberEngine {
 	t.Helper()
 	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
-	return func(spec agent.MemberSpec) agent.MemberBuild {
+	return func(spec agent.MemberSpec, _ string) agent.MemberBuild {
 		prov, ok := providers[spec.Name]
 		if !ok {
 			t.Fatalf("memberFactory: no provider scripted for member %q", spec.Name)
@@ -346,7 +346,7 @@ func TestSupervisorMemberTurnBudgetStops(t *testing.T) {
 func limitedMemberFactory(t *testing.T, tm *team.Team, providers map[string]*mockllm.Provider, limits session.Limits) agent.MemberEngine {
 	t.Helper()
 	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
-	return func(spec agent.MemberSpec) agent.MemberBuild {
+	return func(spec agent.MemberSpec, _ string) agent.MemberBuild {
 		prov, ok := providers[spec.Name]
 		if !ok {
 			t.Fatalf("limitedMemberFactory: no provider scripted for member %q", spec.Name)
@@ -413,7 +413,7 @@ func TestSupervisorRoundConcurrencyBounded(t *testing.T) {
 	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 
 	providers := map[string]*mockllm.Provider{}
-	factory := func(spec agent.MemberSpec) agent.MemberBuild {
+	factory := func(spec agent.MemberSpec, _ string) agent.MemberBuild {
 		prov := providers[spec.Name]
 		cat := tool.NewCatalog()
 		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
@@ -647,7 +647,7 @@ func (fakeMutatingTool) Execute(_ context.Context, c session.ToolCall, _ tool.Wo
 func catalogFactory(t *testing.T, tm *team.Team, extra ...tool.Tool) agent.MemberEngine {
 	t.Helper()
 	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
-	return func(spec agent.MemberSpec) agent.MemberBuild {
+	return func(spec agent.MemberSpec, _ string) agent.MemberBuild {
 		cat := tool.NewCatalog()
 		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
 			cat.MustRegister(tl)
@@ -715,8 +715,8 @@ func TestSupervisorAcceptsMutatingMemberWithMutatingTool(t *testing.T) {
 func TestSupervisorAcceptsReadOnlyMemberWithMCPTool(t *testing.T) {
 	tm := team.New("t")
 	mcpTool := fakeMutatingTool{name: "mcp__remote__do"}
-	factory := func(spec agent.MemberSpec) agent.MemberBuild {
-		b := catalogFactory(t, tm, mcpTool)(spec)
+	factory := func(spec agent.MemberSpec, routedModel string) agent.MemberBuild {
+		b := catalogFactory(t, tm, mcpTool)(spec, routedModel)
 		b.MCPToolNames = []string{"mcp__remote__do"}
 		return b
 	}
@@ -731,8 +731,8 @@ func TestSupervisorAcceptsReadOnlyMemberWithMCPTool(t *testing.T) {
 // workspace-mutating tool (not in MCPToolNames) is still rejected.
 func TestSupervisorStillRejectsRealMutatingDespiteMCPExempt(t *testing.T) {
 	tm := team.New("t")
-	factory := func(spec agent.MemberSpec) agent.MemberBuild {
-		b := catalogFactory(t, tm, fakeMutatingTool{name: "mcp__remote__do"}, fakeMutatingTool{name: "Edit"})(spec)
+	factory := func(spec agent.MemberSpec, _ string) agent.MemberBuild {
+		b := catalogFactory(t, tm, fakeMutatingTool{name: "mcp__remote__do"}, fakeMutatingTool{name: "Edit"})(spec, "")
 		b.MCPToolNames = []string{"mcp__remote__do"} // exempt the MCP tool only
 		return b
 	}
@@ -748,8 +748,8 @@ func TestSupervisorStillRejectsRealMutatingDespiteMCPExempt(t *testing.T) {
 // signal that the member was granted a shell and must run in an isolated worktree.
 func roShellFactory(t *testing.T, tm *team.Team) agent.MemberEngine {
 	t.Helper()
-	return func(spec agent.MemberSpec) agent.MemberBuild {
-		b := catalogFactory(t, tm, fakeMutatingTool{name: "Bash"})(spec)
+	return func(spec agent.MemberSpec, _ string) agent.MemberBuild {
+		b := catalogFactory(t, tm, fakeMutatingTool{name: "Bash"})(spec, "")
 		b.IsolateReadOnly = true
 		return b
 	}
@@ -882,7 +882,7 @@ func TestSupervisorMemberDispositionCancelled(t *testing.T) {
 	// Cancel the run as soon as the worker's turn reaches the provider, so the member's
 	// in-flight run observes the cancellation and ends StopCancelled.
 	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
-	factory := func(spec agent.MemberSpec) agent.MemberBuild {
+	factory := func(spec agent.MemberSpec, _ string) agent.MemberBuild {
 		cat := tool.NewCatalog()
 		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
 			cat.MustRegister(tl)
@@ -932,7 +932,7 @@ func TestSupervisorMemberDispositionDone(t *testing.T) {
 func TestSupervisorMemberDispositionNoProgressIsDone(t *testing.T) {
 	tm := team.New("t")
 	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
-	factory := func(spec agent.MemberSpec) agent.MemberBuild {
+	factory := func(spec agent.MemberSpec, _ string) agent.MemberBuild {
 		cat := tool.NewCatalog()
 		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
 			cat.MustRegister(tl)
@@ -969,8 +969,8 @@ func singleMember(t *testing.T, out agent.TeamOutcome) agent.MemberOutcome {
 func TestSupervisorRunsMemberCloseOnCleanup(t *testing.T) {
 	tm := team.New("t")
 	var closed int
-	factory := func(spec agent.MemberSpec) agent.MemberBuild {
-		b := catalogFactory(t, tm)(spec)
+	factory := func(spec agent.MemberSpec, _ string) agent.MemberBuild {
+		b := catalogFactory(t, tm)(spec, "")
 		b.Close = func() error { closed++; return nil }
 		return b
 	}
@@ -996,7 +996,7 @@ func TestSupervisorRelaysMemberContextWindow(t *testing.T) {
 	const window = 1_050_000 // a catalogued large-context model window, NOT the 128k floor
 	tm := team.New("ctxwin")
 	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
-	factory := func(spec agent.MemberSpec) agent.MemberBuild {
+	factory := func(spec agent.MemberSpec, _ string) agent.MemberBuild {
 		cat := tool.NewCatalog()
 		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
 			cat.MustRegister(tl)

@@ -727,7 +727,7 @@ func (m *Model) applyParallel(msg client.ParallelMsg) {
 	case client.ParallelStart:
 		m.conv.parallelStart(msg.ParentCallID, msg.Join, msg.BranchCount)
 	case client.ParallelBranchStart:
-		m.conv.parallelBranchStart(msg.ParentCallID, msg.BranchIndex, msg.ChildID, msg.BranchLabel, msg.Goal)
+		m.conv.parallelBranchStart(msg.ParentCallID, msg.BranchIndex, msg.ChildID, msg.BranchLabel, msg.Goal, msg.RoutedCategory, msg.RoutedModel)
 	case client.ParallelBranchTool:
 		m.conv.parallelBranchTool(msg.ParentCallID, msg.BranchIndex, msg.ToolName, msg.IsError, msg.ToolCount)
 	case client.ParallelBranchEnd:

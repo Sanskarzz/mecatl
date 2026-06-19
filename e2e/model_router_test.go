@@ -10,6 +10,7 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 
+	"github.com/stacklok/mecatl/cmd/mecatui/client"
 	"github.com/stacklok/mecatl/e2e/harness"
 )
 
@@ -24,16 +25,24 @@ import (
 //
 // HOW THE ASSERTION WORKS. The harness observes the routed model on the wire:
 // `RoutedCategory`/`RoutedModel` ride the `subagent.start` event payload
-// (`routed_category`/`routed_model` proto fields, ADR 0031), so the spec asserts
-// the OBSERVABLE facts that together prove the feature is wired and did not wedge:
-// (A) the build-once "subagent model router ACTIVE" INFO names the category count +
-// classifier model (logModelRouterFacts) — i.e. the router was wired, not silently
-// OFF; (B) a plain Subagent delegation actually RAN and the run completed cleanly —
-// i.e. the classifier call + the routed child both ran against the live provider
-// without wedging; and (C) the `subagent.start` event carries the routed model the
-// router classified this delegation to (the per-delegation wire assertion). The
-// offline test (internal/app TestRouterRoutesChildToClassifiedModelE2E) reads the
+// (`routed_category`/`routed_model` proto fields, ADR 0031 / #97 / #110), so the spec
+// asserts the OBSERVABLE facts that together prove the feature is wired and did not
+// wedge: (A) the build-once "subagent model router ACTIVE" INFO names the category
+// count + classifier model (logModelRouterFacts) — i.e. the router was wired, not
+// silently OFF; (B) a plain Subagent delegation actually RAN and the run completed
+// cleanly — i.e. the classifier call + the routed child both ran against the live
+// provider without wedging; and (C) the `subagent.start` event carries the routed
+// model the router classified this delegation to (the per-delegation wire assertion).
+// The offline test (internal/app TestRouterRoutesChildToClassifiedModelE2E) reads the
 // child's Model off a mock observer; this is the live wire confirmation.
+//
+// CLASSIFIER KNOB. The classifier slot (slots.router) is a SEPARATE knob
+// (MECATL_E2E_ROUTER_CLASSIFIER_MODEL, default google/gemini-2.5-flash — alias
+// router-cat) from the cheap category-target models, so the classifier is a model that
+// demonstrably emits the one-line JSON verdict on OpenRouter rather than reusing the
+// category lane (a prior openai/gpt-4.1-mini classifier returned near-empty completions —
+// a fail-soft miss that inherits the default model, which empties the routed wire fields).
+// The team/parallel router specs share this knob.
 func modelRouterSpecs() {
 	ginkgo.Describe("subagent model router", func() {
 		ginkgo.It("classifies a plain Subagent delegation and routes it to a category model",
@@ -48,6 +57,13 @@ func modelRouterSpecs() {
 				// cheap OpenRouter-lane models so a routed child actually runs.
 				small := envOrDefault("MECATL_E2E_ROUTER_SMALL_MODEL", "openai/gpt-4.1-mini")
 				large := envOrDefault("MECATL_E2E_ROUTER_LARGE_MODEL", "openai/gpt-4.1")
+				// The CLASSIFIER slot is a SEPARATE knob from the category targets: it must
+				// reliably emit the one-line JSON verdict on OpenRouter, or RunModelRouter
+				// gets a verdict-less turn → fail-soft miss → inherit the default model
+				// (openai/gpt-4.1-mini returned near-empty completions as the classifier).
+				// Default to a cheap model that demonstrably emits the JSON verdict; the
+				// category targets stay cheap (they only run the routed child).
+				classifier := envOrDefault("MECATL_E2E_ROUTER_CLASSIFIER_MODEL", "google/gemini-2.5-flash")
 				dir, err := os.MkdirTemp("", "mecatl-router-e2e-*")
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				defer func() { _ = os.RemoveAll(dir) }()
@@ -57,8 +73,9 @@ func modelRouterSpecs() {
 					"  aliases:\n" +
 					"    small-cat: " + small + "\n" +
 					"    large-cat: " + large + "\n" +
+					"    router-cat: " + classifier + "\n" +
 					"  slots:\n" +
-					"    router: small-cat\n" +
+					"    router: router-cat\n" +
 					"  router:\n" +
 					"    default-category: small\n" +
 					"    categories:\n" +

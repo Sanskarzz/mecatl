@@ -101,7 +101,7 @@ func TestDefaultMemberUsesSubagentModel(t *testing.T) {
 	factory := buildMemberEngine(cfg, regForTest(prov, providerAnthropic, cfg.Model), prov, providerAnthropic, cfg.Model,
 		hookexec.New(nil), agents.NewRegistry(nil), nil, nil, nil, false, nil, catalogAssets{}, false)
 
-	build := factory(team.New("t"), agent.MemberSpec{Name: "m"})
+	build := factory(team.New("t"), agent.MemberSpec{Name: "m"}, "")
 	if build.Engine == nil {
 		t.Fatal("factory returned a nil engine")
 	}
@@ -128,7 +128,7 @@ func TestDefaultMemberInheritsParentWhenUnset(t *testing.T) {
 	factory := buildMemberEngine(cfg, regForTest(prov, providerAnthropic, cfg.Model), prov, providerAnthropic, cfg.Model,
 		hookexec.New(nil), agents.NewRegistry(nil), nil, nil, nil, false, nil, catalogAssets{}, false)
 
-	build := factory(team.New("t"), agent.MemberSpec{Name: "m"})
+	build := factory(team.New("t"), agent.MemberSpec{Name: "m"}, "")
 	// "claude-default" is uncatalogued ⇒ floor (see TestDefaultExplorerInheritsParentWhenUnset).
 	if got := build.Engine.ContextWindow(); got != defaultContextWindowTokens {
 		t.Fatalf("default member ContextWindow = %d, want the %d floor (uncatalogued inherit model)", got, defaultContextWindowTokens)
@@ -156,7 +156,7 @@ func TestMemberEngineRelaysResolvedContextWindow(t *testing.T) {
 	factory := buildMemberEngine(cfg, regForTest(prov, providerAnthropic, cfg.Model), prov, providerAnthropic, cfg.Model,
 		hookexec.New(nil), agents.NewRegistry(nil), nil, nil, nil, false, nil, catalogAssets{}, false)
 
-	build := factory(team.New("t"), agent.MemberSpec{Name: "m"})
+	build := factory(team.New("t"), agent.MemberSpec{Name: "m"}, "")
 	if got := build.Engine.ContextWindow(); got != catAnthropicCtx {
 		t.Fatalf("inherited-default member ContextWindow = %d, want the parent model's resolved catalog window %d (issue #64: NOT the %d floor)",
 			got, catAnthropicCtx, defaultContextWindowTokens)

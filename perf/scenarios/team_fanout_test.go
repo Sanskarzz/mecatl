@@ -67,7 +67,7 @@ func runTeamFanout(ctx context.Context) agent.TeamOutcome {
 		)
 	}
 
-	factory := func(spec agent.MemberSpec) agent.MemberBuild {
+	factory := func(spec agent.MemberSpec, _ string) agent.MemberBuild {
 		prov, ok := scripts[spec.Name]
 		if !ok {
 			return agent.MemberBuild{}

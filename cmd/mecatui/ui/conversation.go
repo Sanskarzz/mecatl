@@ -60,6 +60,13 @@ type teamLane struct {
 	role      string // the member's roster role (e.g. "researcher"); shown in the ctrl+a overlay roster, omitted from the calm inline card
 	mutating  bool
 	lead      bool
+	// routedCategory/routedModel are the opt-in model router's bare metadata for this
+	// member (a category label + a model id), set on team.start only when the router
+	// classified it (ADR 0031 / ADR 0034); "" when unrouted (no router, fail-soft miss,
+	// or a DEFINED member that pinned its own model). BARE metadata — never member
+	// content — so gauntlet #7 holds.
+	routedCategory string
+	routedModel    string
 
 	current   string // last tool name run, or "" when none yet
 	toolCount int
@@ -587,19 +594,25 @@ type parallelBranch struct {
 	// childID is the branch's child SESSION id ("parallel-<callID>-<i>") — the
 	// CancelChild handle, arriving on branch_start/branch_end (D16). Empty from an
 	// older server (the x cancel key then no-ops for the lane).
-	childID    string
-	label      string
-	goal       string
-	current    string // latest branch tool name, "" when none yet
-	trace      []subToolChip
-	toolCount  int
-	usage      client.Usage
-	isError    bool // the most-recent branch tool errored (transient)
-	done       bool
-	failed     bool
-	stop       string
-	durationMs int64
-	workspace  string
+	childID string
+	label   string
+	goal    string
+	// routedCategory/routedModel are the opt-in model router's bare metadata for this
+	// branch (a category label + a model id), set on branch_start only when the router
+	// classified it (ADR 0031 / ADR 0034); "" when unrouted. BARE metadata — never
+	// branch content — so gauntlet #7 holds.
+	routedCategory string
+	routedModel    string
+	current        string // latest branch tool name, "" when none yet
+	trace          []subToolChip
+	toolCount      int
+	usage          client.Usage
+	isError        bool // the most-recent branch tool errored (transient)
+	done           bool
+	failed         bool
+	stop           string
+	durationMs     int64
+	workspace      string
 }
 
 // parallelGroup is the fan-out GROUP projection of ONE Parallel call, keyed by
@@ -671,10 +684,11 @@ func (c *conversation) parallelStart(parentCallID, join string, branchCount int)
 	g.branchCount = branchCount
 }
 
-// parallelBranchStart records a branch's label + goal + child id on its group branch
-// (creating both). The child id (the CancelChild handle) is set only when non-empty,
-// so a later event from an older server never erases a known id.
-func (c *conversation) parallelBranchStart(parentCallID string, index int, childID, label, goal string) {
+// parallelBranchStart records a branch's label + goal + child id + routed-category
+// metadata on its group branch (creating both). The child id (the CancelChild handle)
+// is set only when non-empty, so a later event from an older server never erases a
+// known id.
+func (c *conversation) parallelBranchStart(parentCallID string, index int, childID, label, goal, routedCategory, routedModel string) {
 	if parentCallID == "" {
 		return
 	}
@@ -684,6 +698,8 @@ func (c *conversation) parallelBranchStart(parentCallID string, index int, child
 	}
 	br.label = label
 	br.goal = goal
+	br.routedCategory = routedCategory
+	br.routedModel = routedModel
 }
 
 // parallelBranchTool records a resolved branch tool: the latest tool name (liveness),
@@ -801,10 +817,12 @@ func (c *conversation) setTeamStart(parentCallID, teamID string, roster []client
 	b.teamLanes = make([]teamLane, 0, len(roster))
 	for _, m := range roster {
 		b.teamLanes = append(b.teamLanes, teamLane{
-			name:     m.Name,
-			role:     m.Role,
-			mutating: m.Mutating,
-			lead:     m.Lead,
+			name:           m.Name,
+			role:           m.Role,
+			mutating:       m.Mutating,
+			lead:           m.Lead,
+			routedCategory: m.RoutedCategory,
+			routedModel:    m.RoutedModel,
 		})
 	}
 	return true

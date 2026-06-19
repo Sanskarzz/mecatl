@@ -40,6 +40,11 @@ func TestTeamMemberSpecHasNoContentFields(t *testing.T) {
 		"Role":     "short role label",
 		"Mutating": "workspace mode flag",
 		"Lead":     "lead flag",
+		// OPT-IN model router (ADR 0034): a CATEGORY label (operator taxonomy name) and a
+		// concrete MODEL id the member's engine was minted on — bare metadata, never the
+		// member's role/prompt or the classifier's reasoning.
+		"RoutedCategory": "router category label",
+		"RoutedModel":    "routed concrete model id",
 	})
 }
 

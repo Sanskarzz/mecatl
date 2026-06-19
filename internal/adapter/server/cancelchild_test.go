@@ -270,7 +270,7 @@ func newTeamConverseService(t *testing.T) (*server.Service, *parkTool) {
 		mockllm.TextTurn("worker: never reached"),
 	)
 	providers := map[string]*mockllm.Provider{"lead": leadProv, "worker": workerProv}
-	factory := func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
+	factory := func(tm *team.Team, spec agent.MemberSpec, _ string) agent.MemberBuild {
 		prov, ok := providers[spec.Name]
 		if !ok {
 			t.Fatalf("no provider scripted for member %q", spec.Name)

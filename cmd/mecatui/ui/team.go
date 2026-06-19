@@ -371,13 +371,14 @@ func renderTeamRoster(th theme.Theme, st teamState, b *block, height int) string
 // teamRosterLine is one roster row: the inline lane line (state glyph + mutating
 // cue + name + [lead] + current tool/state + usage), then the per-member context
 // meter band (only when the member's window is known), then the member's ROLE
-// appended as a dim suffix when present — the detail the calm inline card omits,
-// surfaced here in the dedicated deep view. The context meter reuses the footer's
-// renderContextMeter so the band/percentage/⚠ vocabulary matches the main meter
-// exactly. It is GATED on a known window (ctxWindow>0): with no window there is no
-// denominator, so a bare "ctx <size>" with no band is suppressed entirely. The
-// role is sanitized (roster-derived) and truncated so a long role can't blow out
-// the row.
+// appended as a dim suffix when present, then the opt-in model router's "routed:
+// <category> → <model>" cue when the member was routed — the detail the calm inline
+// card omits, surfaced here in the dedicated deep view. The context meter reuses the
+// footer's renderContextMeter so the band/percentage/⚠ vocabulary matches the main
+// meter exactly. It is GATED on a known window (ctxWindow>0): with no window there is
+// no denominator, so a bare "ctx <size>" with no band is suppressed entirely. The
+// role is sanitized (roster-derived) and truncated so a long role can't blow out the
+// row. The routed cue is bare metadata (a label + a model id), never member content.
 func teamRosterLine(th theme.Theme, ln *teamLane, nameW int, teamDone bool) string {
 	line := teamLaneLine(ln, nameW, teamDone)
 	if ln.ctxWindow > 0 {
@@ -385,6 +386,9 @@ func teamRosterLine(th theme.Theme, ln *teamLane, nameW int, teamDone bool) stri
 	}
 	if ln.role != "" {
 		line += " · " + truncate(sanitizeTerminal(ln.role), maxTeamRoleLen)
+	}
+	if r := subagentRoutedLabel(ln.routedCategory, ln.routedModel); r != "" {
+		line += " · " + r
 	}
 	return line
 }

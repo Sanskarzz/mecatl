@@ -404,7 +404,7 @@ func TestMemberDefMemoryInjected(t *testing.T) {
 	factory := buildMemberEngine(cfg, regForTest(prov, providerMock, cfg.Model), prov, providerMock, cfg.Model,
 		hookexec.New(nil), agents.NewRegistry([]agents.AgentDef{def}), nil, nil, nil, false, nil, catalogAssets{}, false)
 
-	build := factory(team.New("t"), agent.MemberSpec{Name: "m", AgentType: "spec"})
+	build := factory(team.New("t"), agent.MemberSpec{Name: "m", AgentType: "spec"}, "")
 	if build.Engine == nil {
 		t.Fatal("factory returned a nil engine")
 	}

@@ -210,7 +210,8 @@ func TestToProtoTable(t *testing.T) {
 				Team: &session.TeamPayload{ParentCallID: "p1", TeamID: "team-p1",
 					Roster: []session.TeamMemberSpec{
 						{Name: "lead", Role: "coordinate", Lead: true},
-						{Name: "worker", Role: "investigate", Mutating: true},
+						{Name: "worker", Role: "investigate", Mutating: true,
+							RoutedCategory: "large", RoutedModel: "anthropic/claude-opus-4"},
 					}}},
 			assert: func(t *testing.T, got *mecatlv1.Event) {
 				tm := got.GetTeam()
@@ -221,6 +222,16 @@ func TestToProtoTable(t *testing.T) {
 				if len(r) != 2 || r[0].GetName() != "lead" || !r[0].GetLead() ||
 					r[1].GetName() != "worker" || !r[1].GetMutating() || r[1].GetLead() {
 					t.Fatalf("team.start roster mismatch: %+v", r)
+				}
+				// Routed-category metadata is BARE metadata (a label + a model id), set on the
+				// team.start roster entry only when the opt-in model router classified the
+				// member (ADR 0031 / ADR 0034). It must round-trip verbatim — gauntlet #7 holds
+				// (no member content crosses). The lead was unrouted (both empty).
+				if r[0].GetRoutedCategory() != "" || r[0].GetRoutedModel() != "" {
+					t.Fatalf("team.start unrouted lead carries routed metadata: %+v", r[0])
+				}
+				if r[1].GetRoutedCategory() != "large" || r[1].GetRoutedModel() != "anthropic/claude-opus-4" {
+					t.Fatalf("team.start routed member metadata mismatch: %+v", r[1])
 				}
 			},
 		},
@@ -382,7 +393,8 @@ func TestToProtoTable(t *testing.T) {
 			name: "parallel.branch branch_start",
 			in: session.Event{Type: session.EvParallelBranch, Seq: 41, Turn: 1,
 				Parallel: &session.ParallelPayload{ParentCallID: "p1", Kind: session.ParallelBranchStart,
-					BranchIndex: 1, ChildID: "parallel-p1-1", BranchLabel: "branch-2", Goal: "explore beta"}},
+					BranchIndex: 1, ChildID: "parallel-p1-1", BranchLabel: "branch-2", Goal: "explore beta",
+					RoutedCategory: "small", RoutedModel: "openai/gpt-4.1-mini"}},
 			assert: func(t *testing.T, got *mecatlv1.Event) {
 				p := got.GetParallel()
 				if p == nil || p.GetKind() != "branch_start" || p.GetBranchIndex() != 1 ||
@@ -392,6 +404,13 @@ func TestToProtoTable(t *testing.T) {
 				// child_id (the CancelChild handle — D16) crosses verbatim.
 				if p.GetChildId() != "parallel-p1-1" {
 					t.Fatalf("parallel branch_start child_id = %q, want parallel-p1-1", p.GetChildId())
+				}
+				// Routed-category metadata is BARE metadata (a label + a model id), set on
+				// branch_start only when the opt-in model router classified the branch (ADR
+				// 0031 / ADR 0034). It round-trips verbatim — gauntlet #7 holds (no branch
+				// content crosses).
+				if p.GetRoutedCategory() != "small" || p.GetRoutedModel() != "openai/gpt-4.1-mini" {
+					t.Fatalf("parallel branch_start routed metadata mismatch: %+v", p)
 				}
 			},
 		},

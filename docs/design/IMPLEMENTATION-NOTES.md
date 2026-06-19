@@ -389,7 +389,7 @@ below makes it project-overridable WITHIN an operator allowlist.
 `logSlotConfigFacts` narrates each routed slot ONCE in `Build` (the build-once-facts discipline —
 never per-engine; the loop's THREE-lines invariant holds). NO `port.LLMRequest` widening (the slot
 is a composition model-string choice). Team synthesis is DEFERRED (no clean seam — the lead
-synthesis runs on the lead member's whole engine); the subagent router is a later ADR-0030 layer.
+synthesis runs on the lead member's whole engine); the semantic model router shipped in Phase 5 (ADR 0031, extended to team members + Parallel branches by ADR 0034).
 Guards: `app.TestSlotsByteIdenticalDefault` (G1), `app.TestResolveSlotModelTable`
 + `TestCompactionSlotRoutesSummaryOnly` + `TestAskReviewerSlotSupersedesFlag` +
 `TestGuardrailSlotRoutesChecker` (G2), `app.TestCompactionSlotE2ESummaryModel` +
@@ -592,6 +592,69 @@ Guards: `engine/agent` `TestRunModelRouter*` + `TestRun(RouteTask|ExplicitModel|
 parent→classifier→child→parent request POSITIONS) + `TestRouterOffIsByteIdenticalE2E`; `permconfig`
 `TestOperatorRouterParsed` + `TestProjectRouterStrippedWithWarn` + `TestRouterStrictUnknownKeyRejected`;
 flag parse `TestParseFlagsSubagentModelRouter` (mecated) + the mecatequi router subtest.
+
+**Extending the router to team members + Parallel branches (ADR 0034).** The router PRIMITIVE
+is family-agnostic: the ONE `parentCaps.routeTask` closure (above) is bound per run by the
+dispatcher and is already threaded into `ParallelTool` and the team `Supervisor` (both hold
+`parentCaps`). ADR 0034 reuses it verbatim for the other two delegation families — NO new
+breaker, NO new usage-fold, NO change to `RunModelRouter`/`buildModelRouterTask`/the config.
+A mixed turn (Subagent + Parallel + Team) shares ONE breaker / miss-counter / fold, because
+all three call the SAME closure.
+
+TEAM members — route ONCE at `AddMember`, off the member spec (NOT per-round). The member
+engine is built once at `AddMember` and reused across rounds via `Reopen`, with a stable
+`MemberSessionID`; per-round routing would force a clone-and-swap and break the id↔engine
+stability. `Supervisor.maybeRouteMember` (`engine/agent/teamsupervisor.go`) gates on a PLAIN
+UNDEFINED member (`spec.AgentType==""`) AND `s.caps.routeTask != nil` (zero-caps RunTeam never
+routes), classifies off `spec.InitialPrompt` (falling back to the member name), and is
+FAIL-SOFT. `AddMember` runs SERIALLY on the single Team-tool goroutine, OUTSIDE the round
+errgroup, so members classify one at a time. The `MemberEngine` /
+`TeamMemberEngineFactory` / `server.MemberEngineFactory` signatures gained a `routedModel
+string` parameter; composition's `buildMemberEngine` substitutes it for the def-less default
+on the UNDEFINED branch only (window + prompt config re-derived via `childWindowFor` /
+`newChildEngineForProvider` — contamination-safe, NOT a clone-and-swap), and IGNORES it on
+the DEFINED branch (the def pins the model). The routed category/model are recorded on
+`memberRT` and read back by the Team tool via `Supervisor.MemberRouting(name)` to project
+onto the `EvTeamStart` roster (`session.TeamMemberSpec.RoutedCategory`/`RoutedModel` — bare
+metadata, gauntlet-#7). Decide-once: `Reopen` never re-routes.
+
+PARALLEL branches — route per-branch in `runBranch`, via an engine factory. `ParallelTool`
+gained an OPTIONAL `engineFactory func(model string)(*Engine,bool)` (the EXACT
+`WithSubagentEngineFactory` shape; `WithParallelEngineFactory` injects it). In `runBranch` —
+once per branch, on the per-branch goroutine — `maybeRouteBranchModel` (gate: `engineFactory
+!= nil && caps.routeTask != nil`, fail-soft) classifies the composed prompt; on a hit the
+branch runs on `engineFactory(routedModel)`, on a miss/unwired the shared `childEngine`
+(byte-identical). The breaker mutex inside `caps.routeTask` serialises the concurrent branch
+classifications + the parent-usage folds, so NO new lock is added to `parallel.go`. The
+`branch_start` event carries `session.ParallelPayload.RoutedCategory`/`RoutedModel`; a
+cancelled-before-start branch carries neither (never routed). Composition's
+`buildParallelEngineFactory` (`internal/app/build.go`, sibling of `buildSubagentEngineFactory`)
+mints the routed branch engine through `childEngineDepsForProvider` over the parallel branch
+catalog (Read/Grep/Glob/Edit/Write + Bash), using the routed model DIRECTLY (NOT
+`resolveDefaultChildModel`, which would re-run the def-less chain and discard the routed id);
+`registerParallelTool` wires it unconditionally (inert without a `routeTask`).
+NO new outlives-a-call resource (ADR 0027 List 1): the routed engines are per-call /
+per-AddMember, session-scoped. Guards: `engine/agent`
+`TestParallel(RoutesBranchOnClassifiedModel|RouteMissInheritsDefault|OffIsDefaultEngine|RoutesEachBranchExactlyOnce|BranchStartCarriesRoutedMetadata|BranchStartEmptyRoutedOnMiss|FanOutSharesBreakerRace|RoutedEventsNoContentLeak)`
++ `TestMember(RoutesAtAddMember|RouteMissInheritsDefault|ZeroCapsNoRouting|RouteFallsBackToName|RoutesOncePerRun|SessionIDUnaffectedByRouting)`
++ `TestDefinedMemberSkipsRouter` + `TestRouterBreakerSharedAcrossFamilies`; `app`
+`TestMemberEngine(HonoursRoutedModelForUndefined|IgnoresRoutedModelForDefined|EmptyRoutedModelIsDefault)`
++ `TestParallelEngineFactory(RoutesContaminationSafe|SatisfiesOptionShape)`
++ `TestTeamRoutesMembersToCategoryModelsE2E` + `TestParallelRoutesBranchesToCategoryModelsE2E`
++ the two OFF-byte-identical e2e siblings.
+
+WIRE (landed, mirroring the Subagent router's #110). The team + parallel routed fields
+surface end-to-end on the proto/client wire, NOT session-struct-only: `routed_category`/
+`routed_model` on the `TeamMemberSpec` message (team.start roster, fields 5/6) and on the
+`Parallel` message (branch_start, fields 19/20). `toProtoTeam`/`toProtoParallel` populate
+them from the payload (both relays flow through the one mapper), the mecatui client structs
+(`client.TeamMemberSpec`, `client.ParallelMsg`) carry them via the generated getters, and
+mecatui renders a muted `routed: <category> → <model>` cue on the ctrl+a Teams roster row
+(`teamRosterLine`) and the Parallel group-focus branch row (`parallelBranchLine`) — reusing
+the Subagent router's `subagentRoutedLabel` helper, absent when unrouted. Bare metadata only
+(gauntlet #7). The LIVE e2e specs (`team_router_test.go` / `parallel_router_test.go`) assert
+the routed model per member/branch ON THE WIRE (deterministic), replacing the prior
+"subagent routed" log-substring proxy.
 
 **Subagent structured output (`output_schema` + `SubmitResult` + bounded validation-retry).** When
 `subagentArgs.OutputSchema` (a model-authored JSON schema) is present, the child is given a synthetic

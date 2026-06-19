@@ -3782,6 +3782,48 @@ func parallelChildDeps(cfg Config, provReg *providerRegistry, provider port.LLMP
 		childCat, promptConfig(modelCfgFor(cfg, model), cfg.gitStatus), nil)
 }
 
+// buildParallelEngineFactory returns the per-branch model-override factory the Parallel
+// tool invokes when the OPT-IN model router (ADR 0034) classifies a branch onto a model.
+// It mirrors the SHAPE of buildSubagentEngineFactory — given an opaque model id it mints a
+// fresh child engine pinned to that model on the parent's provider, re-deriving the
+// provider-closing Deps (Compactor/TokenCounter/Env.Model/ContextWindow) via the
+// contamination-safe per-provider path, NEVER a clone-and-swap of an existing engine's LLM.
+// It is deliberately NOT identical to buildSubagentEngineFactory (do not try to DRY them on
+// the strength of this comment): a Parallel BRANCH layers Edit+Write onto the read-only
+// explorer surface, uses promptConfig (not explorerPromptConfig), the role "parallel:model="
+// (not "task:model="), and goes through childEngineDepsForProvider (not
+// newChildEngineForProvider) — the same divergences buildParallelChildEngine/parallelChildDeps
+// carry from buildChildEngine. The branch catalog is the
+// SAME Read/Grep/Glob/Edit/Write (+ Bash when a runner is wired) parallelChildDeps builds,
+// so a routed branch has the identical mutating-in-its-own-fork surface as the shared
+// branch child. A blank model is unroutable (ok=false → the branch falls back to the
+// shared childEngine, fail-soft); any non-blank model routes on the parent provider with
+// its window re-derived through childWindowFor. Cross-provider routing by a bare model id
+// is out of scope (the registry is keyed by provider) — same posture as the Subagent and
+// member factories. composition owns the category→model→engine mapping; engine/agent only
+// ever sees func(string)(*Engine,bool).
+func buildParallelEngineFactory(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, _ string, runner tool.CommandRunner) func(model string) (*agent.Engine, bool) {
+	return func(model string) (*agent.Engine, bool) {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			return nil, false
+		}
+		// Use the routed model DIRECTLY — NOT through resolveDefaultChildModel (which would
+		// re-run the def-less `SubagentModel > parent` chain and discard the routed id when a
+		// cheap-child default is configured). The routed id is the ALREADY-RESOLVED concrete
+		// model composition's buildModelRouterTask produced; the same discipline
+		// buildSubagentEngineFactory uses for a per-call model override. The branch catalog
+		// mirrors parallelChildDeps exactly (Read/Grep/Glob/Edit/Write + Bash when wired).
+		childCat := readOnlyExplorerCatalog(runner)
+		childCat.MustRegister(tools.EditTool{})
+		childCat.MustRegister(tools.WriteTool{})
+		windowFn := childWindowFor(cfg, provReg, parentProviderID, model)
+		deps := childEngineDepsForProvider(cfg, "parallel:model="+model, provider, model, windowFn,
+			childCat, promptConfig(modelCfgFor(cfg, model), cfg.gitStatus), nil)
+		return agent.NewEngine(deps), true
+	}
+}
+
 // buildParallelJudgeEngine constructs the minimal, tool-less read-only child *Engine
 // the Parallel join=judge/best strategy runs to SELECT a winner. It scores text only,
 // so it gets an EMPTY catalog (no tools) under an allow-all policy. It is a DISTINCT
@@ -4329,11 +4371,36 @@ func modelCfgFor(cfg Config, model string) Config {
 // member still resolves its model through the def-less chain. The catalog's
 // non-read-only tools (Remember/RememberUser, MCP) ride MemberBuild.MCPToolNames
 // — the supervisor's documented exemption for non-WORKSPACE mutators — so the
+// applyMemberRoute substitutes the OPT-IN model router's ALREADY-RESOLVED routedModel
+// (ADR 0034) for an UNDEFINED member's def-less default model, re-deriving the window AND
+// the prompt's per-model config through the SAME contamination-safe path the rest of
+// buildMemberEngine uses (childWindowFor / modelCfgFor) — so the member compacts/counts/
+// prompts on the routed model, never a clone-and-swap. An empty routedModel (router off,
+// miss, or zero-caps RunTeam) returns the inputs unchanged (byte-identical default). It is
+// split out of buildMemberEngine purely to keep that function under the gocyclo budget; it
+// is only ever called on the UNDEFINED branch (a defined member's def pins its own model).
+func applyMemberRoute(cfg Config, provReg *providerRegistry, parentProviderID, routedModel, model string, windowFn func() int, pc prompt.Config) (string, func() int, prompt.Config) {
+	rm := strings.TrimSpace(routedModel)
+	if rm == "" {
+		return model, windowFn, pc
+	}
+	return rm, childWindowFor(cfg, provReg, parentProviderID, rm), promptConfig(modelCfgFor(cfg, rm), cfg.gitStatus)
+}
+
 // base-sharing read-only-member backstop stays sound. `a` is read only when noFS.
 func buildMemberEngine(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, teamHooks port.HookRunner, reg *agents.Registry, skillIdx skillIndex, runner, mutatingRunner tool.CommandRunner, roIsolationAvailable bool, mainMgr *mcp.Manager, a catalogAssets, noFS bool) server.MemberEngineFactory {
-	return func(t *team.Team, spec agent.MemberSpec) agent.MemberBuild {
+	return func(t *team.Team, spec agent.MemberSpec, routedModel string) agent.MemberBuild {
 		if noFS {
 			model, windowFn := resolveDefaultChildModel(cfg, provReg, parentProviderID, parentModel)
+			// OPT-IN model router (ADR 0034): an undefined member the supervisor classified
+			// runs on the ALREADY-RESOLVED routed model with its re-derived window, through
+			// the SAME contamination-safe newChildEngineForProvider path the default uses.
+			// (The no-FS member is always undefined here — agent-def adoption is skipped on
+			// this branch — so any routedModel applies.) Empty routedModel = today's default.
+			if rm := strings.TrimSpace(routedModel); rm != "" {
+				model = rm
+				windowFn = childWindowFor(cfg, provReg, parentProviderID, rm)
+			}
 			cat := noFSChildCatalog(context.Background(), cfg, a)
 			// Exempt the catalog's non-workspace mutators (memory writers, MCP
 			// tools) BEFORE the coordination tools are added (those are exempted
@@ -4497,6 +4564,13 @@ func buildMemberEngine(cfg Config, provReg *providerRegistry, provider port.LLMP
 			// not the shared parent base. (Bash can still escape its cwd via absolute
 			// paths / `cd`, the inherent Bash trust model; isolation is the boundary.)
 			isolateReadOnly = registerDefaultMemberTools(cat, spec, runner, mutatingRunner, roIsolationAvailable)
+			// OPT-IN model router (ADR 0034): the supervisor classified this UNDEFINED
+			// member, so run it on the ALREADY-RESOLVED routed model in place of the
+			// def-less default (a DEFINED member never reaches here — its def pinned the
+			// model via resolveChildProvider above). applyMemberRoute is a no-op on an empty
+			// routedModel (router off, miss, or zero-caps RunTeam), so the default is
+			// byte-identical to today.
+			model, windowFn, pc = applyMemberRoute(cfg, provReg, parentProviderID, routedModel, model, windowFn, pc)
 		}
 
 		// Team coordination tools ALWAYS, in both branches: they bypass the def

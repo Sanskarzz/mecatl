@@ -50,7 +50,7 @@ func (noopMemStore) Search(context.Context, string, int) ([]tool.MemoryEntry, er
 // stubMemberEngine satisfies Config.MemberEngine (MemberEngineFactory) just
 // enough to be non-nil; the Service only nil-checks it for the teams cap. It is
 // never invoked.
-func stubMemberEngine(*team.Team, agent.MemberSpec) agent.MemberBuild {
+func stubMemberEngine(*team.Team, agent.MemberSpec, string) agent.MemberBuild {
 	return agent.MemberBuild{}
 }
 

@@ -59,7 +59,7 @@ func (p *promptRecorder) turns(member string) []string {
 func recordingFactory(t *testing.T, tm *team.Team, rec *promptRecorder, scripts map[string][]mockllm.Turn) agent.MemberEngine {
 	t.Helper()
 	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
-	return func(spec agent.MemberSpec) agent.MemberBuild {
+	return func(spec agent.MemberSpec, _ string) agent.MemberBuild {
 		turns, ok := scripts[spec.Name]
 		if !ok {
 			t.Fatalf("recordingFactory: no script for member %q", spec.Name)
@@ -642,7 +642,7 @@ func TestBudgetStoppedLeadStillSynthesises(t *testing.T) {
 		report:  "CONSOLIDATED: budget-stopped lead still produced this report.",
 	}
 	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
-	factory := func(spec agent.MemberSpec) agent.MemberBuild {
+	factory := func(spec agent.MemberSpec, _ string) agent.MemberBuild {
 		cat := tool.NewCatalog()
 		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
 			cat.MustRegister(tl)

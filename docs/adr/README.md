@@ -43,6 +43,9 @@ Documentation/citation conventions are in [`docs/design/README.md`](../design/RE
 ### Providers & APIs
 - [0016 — Multi-provider](./0016-multi-provider.md)
 - [0017 — OpenAI Responses API](./0017-openai-responses-api.md) *(research)*
+- [0030 — Layered model-selection heuristics](./0030-model-selection-heuristics.md)
+- [0031 — Semantic subagent model router](./0031-subagent-model-router.md)
+- [0034 — Extend the model router to team members and Parallel branches](./0034-team-parallel-model-routing.md)
 
 ### Performance & diagnostics
 - [0018 — Perf observability](./0018-perf-observability.md)

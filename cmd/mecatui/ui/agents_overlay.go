@@ -928,8 +928,12 @@ func parallelBranchLine(br *parallelBranch) string {
 	} else if br.current != "" {
 		state = sanitizeTerminal(br.current) + "…"
 	}
-	return fmt.Sprintf("%s %s · %s · %s · %s · ↑%s ↓%s",
-		glyph, sanitizeTerminal(label), goal, state,
+	routed := ""
+	if r := subagentRoutedLabel(br.routedCategory, br.routedModel); r != "" {
+		routed = " · " + r
+	}
+	return fmt.Sprintf("%s %s · %s%s · %s · %s · ↑%s ↓%s",
+		glyph, sanitizeTerminal(label), goal, routed, state,
 		plural(br.toolCount, "tool"),
 		humanizeTokens(br.usage.InputTokens),
 		humanizeTokens(br.usage.OutputTokens))

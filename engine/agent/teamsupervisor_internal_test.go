@@ -103,7 +103,7 @@ func TestRunTurnCancelledMemberCapturesTurnsUsed(t *testing.T) {
 	tm := team.New("t")
 	ctx, cancel := context.WithCancel(context.Background())
 	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
-	factory := func(spec MemberSpec) MemberBuild {
+	factory := func(spec MemberSpec, _ string) MemberBuild {
 		cat := tool.NewCatalog()
 		for _, tl := range MemberTools(tm, spec.Name, nil) {
 			cat.MustRegister(tl)
@@ -152,7 +152,7 @@ func TestRunTurnCancelledMemberCapturesTurnsUsed(t *testing.T) {
 func TestCleanupAllAttributesIdleClientCancel(t *testing.T) {
 	tm := team.New("demo")
 	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
-	factory := func(spec MemberSpec) MemberBuild {
+	factory := func(spec MemberSpec, _ string) MemberBuild {
 		cat := tool.NewCatalog()
 		for _, tl := range MemberTools(tm, spec.Name, nil) {
 			cat.MustRegister(tl)

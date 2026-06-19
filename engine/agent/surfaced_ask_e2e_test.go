@@ -167,7 +167,7 @@ func TestE2E_SurfacedTeamMemberAskDoesNotBlockPeers(t *testing.T) {
 	leadBash := &fakeBash{}
 	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 
-	factory := func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
+	factory := func(tm *team.Team, spec agent.MemberSpec, _ string) agent.MemberBuild {
 		cat := tool.NewCatalog()
 		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
 			cat.MustRegister(tl)
@@ -312,7 +312,7 @@ func TestE2E_TwoConcurrentSurfacedAsksBothResolved(t *testing.T) {
 	betaBash := &fakeBash{}
 	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 
-	factory := func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
+	factory := func(tm *team.Team, spec agent.MemberSpec, _ string) agent.MemberBuild {
 		cat := tool.NewCatalog()
 		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
 			cat.MustRegister(tl)
@@ -394,7 +394,7 @@ func TestE2E_TwoConcurrentSurfacedAsksBothResolved(t *testing.T) {
 func TestE2E_HeadlessTeamMemberDeniedResultIsAccurate(t *testing.T) {
 	leadBash := &fakeBash{}
 	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
-	factory := func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
+	factory := func(tm *team.Team, spec agent.MemberSpec, _ string) agent.MemberBuild {
 		cat := tool.NewCatalog()
 		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
 			cat.MustRegister(tl)

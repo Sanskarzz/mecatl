@@ -264,7 +264,8 @@ func registerParallelTool(ctx context.Context, cfg Config, cat *tool.Catalog, re
 	// copied, possibly untrusted .git, so the env scrub (gitenv.Scrub) must pin the
 	// fixed keys; the attacker-NAMED-driver residual that remains is accepted at
 	// main-session parity — see buildForceCopyRunner.
-	parallelChild := buildParallelChildEngine(cfg, reg, s.provider, s.providerID, s.model, buildForceCopyRunner(cfg))
+	forceCopyRunner := buildForceCopyRunner(cfg)
+	parallelChild := buildParallelChildEngine(cfg, reg, s.provider, s.providerID, s.model, forceCopyRunner)
 	judge := agent.NewEngineJudge(buildParallelJudgeEngine(modelCfgFor(cfg, s.model), s.provider))
 	opts := []agent.ParallelOption{
 		agent.WithParallelSubagentStopHook(hooks),
@@ -274,6 +275,14 @@ func registerParallelTool(ctx context.Context, cfg Config, cat *tool.Catalog, re
 		// surfaced "branch id:" — the same store InspectSubagent reads and the Subagent
 		// tool persists children to (disjoint "parallel-" prefix).
 		agent.WithParallelStore(store),
+		// OPT-IN model router (ADR 0034): the per-branch model-override factory mints a
+		// branch engine on a router-classified model through the SAME contamination-safe
+		// per-provider path the branch child uses (window/compactor/counter re-derived).
+		// Wired unconditionally — it is consulted only when the run also wired routeTask
+		// (the SubagentModelRouter dispatcher seam) AND the classifier hits, so with the
+		// router OFF the Parallel tool runs byte-identically on the shared branch child.
+		agent.WithParallelEngineFactory(
+			buildParallelEngineFactory(cfg, reg, s.provider, s.providerID, s.model, forceCopyRunner)),
 	}
 	// NO nil fallback here: Phase A builds exactly ONE reaper per process —
 	// silently minting a per-assembly LRU would multiply the ForkPreservedCap

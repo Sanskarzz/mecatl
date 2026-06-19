@@ -414,3 +414,40 @@ func TestParallelBranchTransientToolGlyph(t *testing.T) {
 		t.Errorf("a still-running branch (transient tool error) should keep the ◐ glyph, not a terminal ✗:\n%s", out)
 	}
 }
+
+// branchStartParRouted is branchStartPar plus the opt-in model router's bare metadata
+// (a category label + a model id, ADR 0034) — set on branch_start only when the router
+// classified the branch.
+func branchStartParRouted(parent string, idx int, label, goal, routedCat, routedModel string) client.ParallelMsg {
+	msg := branchStartPar(parent, idx, label, goal)
+	msg.RoutedCategory = routedCat
+	msg.RoutedModel = routedModel
+	return msg
+}
+
+// TestParallelBranchRoutedMetadata asserts the opt-in model router's bare metadata
+// (category + model, ADR 0034) surfaces on a branch row in the group focus view as a
+// muted "routed: <category> → <model>" cue — and is absent for an unrouted branch. It
+// rides the REAL wire path (Update → applyParallel) and carries no branch content
+// (gauntlet #7).
+func TestParallelBranchRoutedMetadata(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = seedParallel(m, "p1",
+		startPar("p1", "all", 2),
+		branchStartParRouted("p1", 0, "branch-1", "trivial single-step", "small", "openai/gpt-4.1-mini"),
+		branchStartPar("p1", 1, "branch-2", "unrouted"),
+	)
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = mm.(Model)
+	out := stripANSIstr(m.View().Content)
+	if !strings.Contains(out, "routed: small → openai/gpt-4.1-mini") {
+		t.Errorf("routed branch should surface the routed-model cue in group focus:\n%s", out)
+	}
+	// The unrouted branch (branch-2) must not carry a routed cue. Assert there is exactly
+	// one "routed:" occurrence (the routed branch-1's), so the unrouted branch is clean.
+	if n := strings.Count(out, "routed:"); n != 1 {
+		t.Errorf("exactly one routed cue expected (the routed branch only), got %d:\n%s", n, out)
+	}
+}

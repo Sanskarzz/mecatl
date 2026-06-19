@@ -288,7 +288,7 @@ func TestAskReviewerE2EHeadlessTeamAllow(t *testing.T) {
 		SubagentAskReviewerModel: "reviewer-model",
 	}
 
-	memberFactory := func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
+	memberFactory := func(tm *team.Team, spec agent.MemberSpec, _ string) agent.MemberBuild {
 		cat := tool.NewCatalog()
 		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
 			cat.MustRegister(tl)

@@ -371,6 +371,12 @@ func TestParallelPayloadHasNoContentFields(t *testing.T) {
 		// branch content: it is composed of the id prefix + the parent call id + the
 		// branch index, none of which a branch authors.
 		"ChildID": true,
+		// RoutedCategory / RoutedModel are the OPT-IN model router's classification for
+		// this branch (ADR 0034): a CATEGORY label (operator-authored taxonomy name) and a
+		// concrete MODEL id — bare metadata, never the branch prompt, summary, or the
+		// classifier's reasoning. Mirrors SubagentPayload's identically-justified routed
+		// fields; gauntlet-#7 safe (no branch content crosses).
+		"RoutedCategory": true, "RoutedModel": true,
 	}
 	rt := reflect.TypeOf(session.ParallelPayload{})
 	for i := 0; i < rt.NumField(); i++ {

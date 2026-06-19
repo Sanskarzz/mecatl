@@ -156,7 +156,7 @@ var oracleSteps = []struct {
 	// The parallel accumulators likewise live off the blocks (ctrl+a Parallel tab).
 	{"parallelStart", func(c *conversation) { c.parallelStart("call-par", "first", 2) }},
 	{"parallelBranchStart", func(c *conversation) {
-		c.parallelBranchStart("call-par", 0, "parallel-call-par-0", "fast", "try the fast path")
+		c.parallelBranchStart("call-par", 0, "parallel-call-par-0", "fast", "try the fast path", "", "")
 	}},
 	{"parallelBranchTool", func(c *conversation) { c.parallelBranchTool("call-par", 0, "Bash", false, 1) }},
 	{"parallelBranchEnd", func(c *conversation) {

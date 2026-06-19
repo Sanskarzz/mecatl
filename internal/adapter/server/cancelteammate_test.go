@@ -47,7 +47,7 @@ func cancelTeammateService(t *testing.T, providers map[string]*mockllm.Provider,
 		mu       sync.Mutex
 		captured *team.Team
 	)
-	memberEngine := func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
+	memberEngine := func(tm *team.Team, spec agent.MemberSpec, _ string) agent.MemberBuild {
 		mu.Lock()
 		captured = tm
 		mu.Unlock()

@@ -226,7 +226,14 @@ type MemberBuild struct {
 // (forked) Workspace.Root() as the working directory, so an isolated member's Bash
 // runs in its OWN worktree/fork, never the shared parent base — which is why an
 // isolated member MAY be given Bash while a base-sharing read-only member must not.
-type MemberEngine func(spec MemberSpec) MemberBuild
+//
+// routedModel is the OPT-IN semantic model router's classification for an UNDEFINED
+// member (ADR 0034), the ALREADY-RESOLVED concrete model id the member's engine should
+// be minted on; it is "" when the router was off, missed, or the member is DEFINED (a
+// def pins its own model — the factory IGNORES routedModel then). The supervisor owns
+// the route decision (it holds the parent caps) and passes the result here; composition
+// substitutes routedModel for the default child model only on the undefined branch.
+type MemberEngine func(spec MemberSpec, routedModel string) MemberBuild
 
 // Supervisor orchestrates one agent team. Build it with NewSupervisor, enrol
 // members with AddMember (before Run), then call Run.
@@ -367,6 +374,15 @@ type memberRT struct {
 	// figure — NEVER also from turn.end (see memberEventUsage's double-count warning);
 	// folded in the same capture block as turnsUsed, before Reopen.
 	tokensUsed session.Usage
+	// routedCategory / routedModel are the OPT-IN semantic model router's classification
+	// for this member (ADR 0034), captured ONCE at AddMember (decide-once — a member's
+	// engine is built once and reused across rounds via Reopen, so it is never re-routed).
+	// Both empty when the router was off, missed, or the member is DEFINED (a def pins its
+	// own model so the router never fired). They are BARE METADATA the Team tool reads back
+	// (MemberRouting) to project onto the EvTeamStart roster — never member content. Written
+	// once in AddMember (single goroutine, before any round), read after AddMember.
+	routedCategory string
+	routedModel    string
 }
 
 // SupervisorOption configures a Supervisor.
@@ -574,10 +590,21 @@ func (s *Supervisor) AddMember(ctx context.Context, spec MemberSpec) error {
 		return fmt.Errorf("agent: enrol member: %w", err)
 	}
 
+	// OPT-IN model router (ADR 0034): classify this member ONCE here, before the engine
+	// is built (decide-once — the member engine is built once and reused across rounds via
+	// Reopen, never re-routed). maybeRouteMember gates on a PLAIN UNDEFINED member (no
+	// agent def) AND a wired routeTask, and is FAIL-SOFT (a miss returns ""). routedModel
+	// is then threaded into the factory, which substitutes it for the default child model
+	// on the undefined branch only — a DEFINED member's factory ignores it (its def pins
+	// the model). AddMember runs SERIALLY on the single Team-tool dispatch goroutine (and
+	// the route happens here, OUTSIDE the round errgroup), so the breaker mutex inside
+	// routeTask sees one classification at a time.
+	routedCategory, routedModel := s.maybeRouteMember(ctx, spec)
+
 	// Build the engine FIRST: the factory reads only spec (never the workspace), and
 	// its MemberBuild.IsolateReadOnly decides whether a read-only member needs its own
 	// (worktree) fork — so workspace selection depends on the build, not the reverse.
-	build := s.factory(spec)
+	build := s.factory(spec, routedModel)
 	eng := build.Engine
 	if eng == nil {
 		if build.Close != nil {
@@ -668,7 +695,8 @@ func (s *Supervisor) AddMember(ctx context.Context, spec MemberSpec) error {
 	s.caps.startChildRun(sess.ID)
 
 	s.members[spec.Name] = &memberRT{spec: spec, engine: eng, ws: ws, cleanup: cleanup, sess: sess,
-		isolated: needFork, ctx: memberCtx, cancel: memberCancel}
+		isolated: needFork, ctx: memberCtx, cancel: memberCancel,
+		routedCategory: routedCategory, routedModel: routedModel}
 	s.order = append(s.order, spec.Name)
 	// Cache the lead's name on first enrolment of a Lead member, so the synthesis
 	// phase finds it without re-scanning. The Team tool synthesises member 0 as the
@@ -677,6 +705,49 @@ func (s *Supervisor) AddMember(ctx context.Context, spec MemberSpec) error {
 		s.leadName = spec.Name
 	}
 	return nil
+}
+
+// maybeRouteMember consults the OPT-IN semantic model router (ADR 0034) for a PLAIN
+// UNDEFINED member and returns the classified category + the ALREADY-RESOLVED concrete
+// model id the member's engine should be minted on (both empty when not routed).
+// PRECEDENCE is enforced by GATING, mirroring maybeRouteModel (the Subagent gate): a
+// DEFINED member (spec.AgentType set) pins its own engine/model via its agent def, so the
+// router fires only for an undefined member — it fills the gap, never overrides a def's
+// pinned model. (A member has no per-call model, so there is no model arg to gate on.)
+// s.caps.routeTask is nil when no router is wired (the byte-identical default), on the
+// gRPC RunTeam zero-caps path, or on a child run (no nesting — a member cannot itself form
+// a team). FAIL-SOFT: a router miss (ok=false) returns empty strings and the factory
+// inherits the default member model.
+//
+// The classification artifact is the member's InitialPrompt (its first-turn briefing —
+// the model-authored role text, the closest analogue to a Subagent task prompt); when it
+// is empty it falls back to the member's name so the classifier always has a signal. ctx
+// is the enrolment ctx, threaded to routeTask so a cancel propagates into the classifier
+// turn (issue #94).
+func (s *Supervisor) maybeRouteMember(ctx context.Context, spec MemberSpec) (category, model string) {
+	if s.caps.routeTask == nil || strings.TrimSpace(spec.AgentType) != "" {
+		return "", ""
+	}
+	artifact := strings.TrimSpace(spec.InitialPrompt)
+	if artifact == "" {
+		artifact = spec.Name
+	}
+	if cat, m, ok := s.caps.routeTask(ctx, artifact); ok {
+		return cat, strings.TrimSpace(m)
+	}
+	return "", ""
+}
+
+// MemberRouting returns the OPT-IN model router's bare-metadata classification (category,
+// model id) for a member by name (both empty when the member was not routed or is
+// unknown). It is the read-back seam the Team tool uses to project routed metadata onto
+// the EvTeamStart roster — captured once at AddMember, never member content. Safe to call
+// after AddMember (the fields are immutable once set).
+func (s *Supervisor) MemberRouting(name string) (category, model string) {
+	if m, ok := s.members[name]; ok {
+		return m.routedCategory, m.routedModel
+	}
+	return "", ""
 }
 
 // CancelMember requests cancellation of ONE member by name: it fires the member's

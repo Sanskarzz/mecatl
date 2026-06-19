@@ -31,7 +31,7 @@ import (
 func teamService(t *testing.T, llm *mockllm.Provider) *server.Service {
 	t.Helper()
 	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
-	memberEngine := func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
+	memberEngine := func(tm *team.Team, spec agent.MemberSpec, _ string) agent.MemberBuild {
 		cat := tool.NewCatalog()
 		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
 			cat.MustRegister(tl)
@@ -69,7 +69,7 @@ func teamServiceWithStore(t *testing.T, llm *mockllm.Provider) (*server.Service,
 	t.Helper()
 	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 	store := memstore.New()
-	memberEngine := func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
+	memberEngine := func(tm *team.Team, spec agent.MemberSpec, _ string) agent.MemberBuild {
 		cat := tool.NewCatalog()
 		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
 			cat.MustRegister(tl)
@@ -152,7 +152,7 @@ func usageTurn(text string, in int) mockllm.Turn {
 func teamServicePerMember(t *testing.T, providers map[string]*mockllm.Provider, budget int) *server.Service {
 	t.Helper()
 	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
-	memberEngine := func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
+	memberEngine := func(tm *team.Team, spec agent.MemberSpec, _ string) agent.MemberBuild {
 		llm := providers[spec.Name]
 		if llm == nil {
 			t.Fatalf("no provider scripted for member %q", spec.Name)
@@ -216,7 +216,7 @@ func budgetTripProviders() map[string]*mockllm.Provider {
 func teamServiceWithBudget(t *testing.T, llm *mockllm.Provider, budget int) *server.Service {
 	t.Helper()
 	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
-	memberEngine := func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
+	memberEngine := func(tm *team.Team, spec agent.MemberSpec, _ string) agent.MemberBuild {
 		cat := tool.NewCatalog()
 		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
 			cat.MustRegister(tl)
@@ -340,7 +340,7 @@ func teamServiceWithGoalTrust(t *testing.T, llm *mockllm.Provider, goalUntrusted
 	t.Helper()
 	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 	store := memstore.New()
-	memberEngine := func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
+	memberEngine := func(tm *team.Team, spec agent.MemberSpec, _ string) agent.MemberBuild {
 		cat := tool.NewCatalog()
 		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
 			cat.MustRegister(tl)
@@ -633,7 +633,7 @@ func TestUnknownTeamNotFound(t *testing.T) {
 func teamServiceMaxTeams(t *testing.T, llm *mockllm.Provider, maxTeams int) *server.Service {
 	t.Helper()
 	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
-	memberEngine := func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
+	memberEngine := func(tm *team.Team, spec agent.MemberSpec, _ string) agent.MemberBuild {
 		cat := tool.NewCatalog()
 		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
 			cat.MustRegister(tl)

@@ -489,7 +489,7 @@ type SubagentPayload struct {
 //
 // Which fields are set depends on the event kind:
 //   - EvParallelStart:                       ParentCallID, Join, BranchCount.
-//   - EvParallelBranch (Kind=branch_start):  ParentCallID, Kind, BranchIndex, ChildID, BranchLabel, Goal.
+//   - EvParallelBranch (Kind=branch_start):  ParentCallID, Kind, BranchIndex, ChildID, BranchLabel, Goal, [RoutedCategory, RoutedModel].
 //   - EvParallelBranch (Kind=branch_tool):   ParentCallID, Kind, BranchIndex, ToolName, IsError, ToolCount.
 //   - EvParallelBranch (Kind=branch_end):    ParentCallID, Kind, BranchIndex, ChildID, ToolCount, Stop, Usage, DurationMs, Failed, Workspace.
 //   - EvParallelEnd:                         ParentCallID, Join, BranchCount, Winner, WinnerWorkspace, Usage (run total), Stop.
@@ -527,6 +527,18 @@ type ParallelPayload struct {
 	// model-authored branch prompt — the parent's own instruction, NOT branch content).
 	// Set on the branch_start kind. Clamped identically to SubagentPayload.Goal.
 	Goal string
+	// RoutedCategory / RoutedModel are the OPT-IN semantic model router's classification
+	// for this branch (ADR 0031 / ADR 0034): the chosen CATEGORY label and the concrete
+	// MODEL id the branch was minted on. Set on the branch_start kind ONLY when the router
+	// was wired AND classified this branch (both empty otherwise — no router, a fail-soft
+	// miss that inherited the default branch model, or a branch cancelled before it started).
+	// Like SubagentPayload.RoutedCategory/RoutedModel they are BARE METADATA — a category
+	// label and a model id, never the branch prompt or the classifier's reasoning — so they
+	// are gauntlet-#7 safe (no branch content, no model-influenced free text crosses). They
+	// ride the proto/client wire end-to-end (parallel.branch_start: Parallel.routed_category
+	// = field 19 / routed_model = field 20), surfaced via the server mapper — see ADR 0034.
+	RoutedCategory string
+	RoutedModel    string
 
 	// ToolName is the name of a branch's child tool that just ran. Set on the
 	// branch_tool kind only. It is the tool NAME alone — never branch args/result.
@@ -579,6 +591,19 @@ type TeamMemberSpec struct {
 	Mutating bool
 	// Lead marks the coordinating member.
 	Lead bool
+	// RoutedCategory / RoutedModel are the OPT-IN semantic model router's classification
+	// for this member (ADR 0031 / ADR 0034): the chosen CATEGORY label and the concrete
+	// MODEL id the member's engine was minted on. Set on the EvTeamStart roster entry ONLY
+	// when the router was wired AND classified this member (both empty otherwise — no
+	// router, a fail-soft miss that inherited the default member model, or a DEFINED member
+	// whose agent def pinned its own model so the router never fired). Like the Subagent and
+	// Parallel routed fields they are BARE METADATA — a category label and a model id, never
+	// the member's role/prompt or the classifier's reasoning — so they are gauntlet-#7 safe
+	// (no member content crosses). They ride the proto/client wire end-to-end (team.start
+	// roster: TeamMemberSpec.routed_category = field 5 / routed_model = field 6), surfaced
+	// via the server mapper — see ADR 0034.
+	RoutedCategory string
+	RoutedModel    string
 }
 
 // TeamTaskSnapshot is one entry in the team's shared task list, projected onto the

@@ -154,6 +154,8 @@ func toProtoParallel(p session.ParallelPayload) *mecatlv1.Parallel {
 		ChildId:         p.ChildID,
 		BranchLabel:     p.BranchLabel,
 		Goal:            p.Goal,
+		RoutedCategory:  p.RoutedCategory,
+		RoutedModel:     p.RoutedModel,
 		ToolName:        p.ToolName,
 		IsError:         p.IsError,
 		ToolCount:       clampInt32(p.ToolCount),
@@ -176,10 +178,12 @@ func toProtoTeam(p session.TeamPayload) *mecatlv1.Team {
 	roster := make([]*mecatlv1.TeamMemberSpec, 0, len(p.Roster))
 	for _, m := range p.Roster {
 		roster = append(roster, &mecatlv1.TeamMemberSpec{
-			Name:     m.Name,
-			Role:     m.Role,
-			Mutating: m.Mutating,
-			Lead:     m.Lead,
+			Name:           m.Name,
+			Role:           m.Role,
+			Mutating:       m.Mutating,
+			Lead:           m.Lead,
+			RoutedCategory: m.RoutedCategory,
+			RoutedModel:    m.RoutedModel,
 		})
 	}
 	tasks := make([]*mecatlv1.TeamTask, 0, len(p.Tasks))

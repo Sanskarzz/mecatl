@@ -39,7 +39,13 @@ const maxTeamPreview = 200
 // member's agent-definition permissionMode reaches the supervisor's per-member
 // session — it is the exact shape server.MemberEngineFactory has, so one factory
 // serves both paths.
-type TeamMemberEngineFactory func(t *team.Team, spec MemberSpec) MemberBuild
+//
+// routedModel is the OPT-IN model router's classification (ADR 0034) — the
+// ALREADY-RESOLVED concrete model id for an UNDEFINED member, "" otherwise. The factory
+// substitutes it for the default child model on the undefined branch only; a DEFINED
+// member's factory ignores it (its def pins the model). The supervisor owns the route
+// decision (it holds the parent caps) and threads the result through.
+type TeamMemberEngineFactory func(t *team.Team, spec MemberSpec, routedModel string) MemberBuild
 
 // TeamMemberArg is one roster entry the model supplies in a Team call. It maps
 // 1:1 onto MemberSpec: Name → Name, Role → InitialPrompt, Mutating → Mutating.
@@ -298,7 +304,7 @@ func (t *TeamTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 
 	teamID := string(call.ID)
 	tm := team.New(teamID)
-	factory := func(spec MemberSpec) MemberBuild { return t.factory(tm, spec) }
+	factory := func(spec MemberSpec, routedModel string) MemberBuild { return t.factory(tm, spec, routedModel) }
 
 	opts := []SupervisorOption{
 		// Thread the goal so it frames every member's round-0 turn and the lead's
@@ -354,6 +360,15 @@ func (t *TeamTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 	}
 
 	if emit != nil {
+		// Project each member's OPT-IN model-router classification (ADR 0034) onto its
+		// roster entry: AddMember routed each undefined member once and recorded the bare
+		// category/model metadata, which MemberRouting reads back by name. A defined member
+		// (its def pinned the model) and a router miss both leave the fields empty. This is
+		// the ONLY mutation of the roster the router introduces; everything else stays the
+		// metadata-only teamRoster projection (gauntlet #7 — no member content crosses).
+		for i := range roster {
+			roster[i].RoutedCategory, roster[i].RoutedModel = sup.MemberRouting(roster[i].Name)
+		}
 		emit(session.Event{Type: session.EvTeamStart, Team: &session.TeamPayload{
 			ParentCallID: string(call.ID),
 			TeamID:       teamID,

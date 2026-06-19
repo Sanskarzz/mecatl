@@ -41,7 +41,9 @@ func TestMemberMutatingDefKeepsEditWhenMutating(t *testing.T) {
 	factory := memberFactoryForTest(cfg, editCall(), hookexec.New(nil), regOf(def), nil, nil, false, nil)
 
 	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"),
-		func(spec agent.MemberSpec) agent.MemberBuild { return factory(tm, spec) },
+		func(spec agent.MemberSpec, routedModel string) agent.MemberBuild {
+			return factory(tm, spec, routedModel)
+		},
 		agent.WithForker(memfsForker{}))
 	if err := sup.AddMember(context.Background(), agent.MemberSpec{
 		Name: "w", AgentType: "writer", Mutating: true, InitialPrompt: "edit it",
@@ -68,7 +70,9 @@ func TestMemberReadOnlyDefDropsMutating(t *testing.T) {
 	factory := memberFactoryForTest(cfg, editCall(), hookexec.New(nil), regOf(def), nil, nil, false, nil)
 
 	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"),
-		func(spec agent.MemberSpec) agent.MemberBuild { return factory(tm, spec) })
+		func(spec agent.MemberSpec, routedModel string) agent.MemberBuild {
+			return factory(tm, spec, routedModel)
+		})
 	// A read-only member with a mutating-tool def must be ACCEPTED (tools dropped),
 	// not rejected with ErrReadOnlyMemberMutating.
 	if err := sup.AddMember(context.Background(), agent.MemberSpec{
@@ -94,14 +98,14 @@ func TestMemberPerMemberPlanMode(t *testing.T) {
 	tm := team.New("t")
 	factory := memberFactoryForTest(cfg, mockllm.New(mockllm.TextTurn("x")), hookexec.New(nil), regOf(planDef), nil, nil, false, nil)
 
-	build := factory(tm, agent.MemberSpec{Name: "planner", AgentType: "planner"})
+	build := factory(tm, agent.MemberSpec{Name: "planner", AgentType: "planner"}, "")
 	if build.Mode != session.ModePlan {
 		t.Fatalf("planner member mode = %q, want %q", build.Mode, session.ModePlan)
 	}
 
 	// A member without a def (or a default-mode def) returns the empty Mode, so the
 	// supervisor falls back to the team default.
-	noDefBuild := factory(tm, agent.MemberSpec{Name: "other"})
+	noDefBuild := factory(tm, agent.MemberSpec{Name: "other"}, "")
 	if noDefBuild.Mode != "" {
 		t.Fatalf("member with no def mode = %q, want empty (team default)", noDefBuild.Mode)
 	}
@@ -118,12 +122,12 @@ func TestMemberDefLimitsOnBuild(t *testing.T) {
 	tm := team.New("t")
 	factory := memberFactoryForTest(cfg, mockllm.New(mockllm.TextTurn("x")), hookexec.New(nil), regOf(boundedDef, plainDef), nil, nil, false, nil)
 
-	bounded := factory(tm, agent.MemberSpec{Name: "bounded", AgentType: "bounded"})
+	bounded := factory(tm, agent.MemberSpec{Name: "bounded", AgentType: "bounded"}, "")
 	if bounded.Limits != (session.Limits{MaxTurns: 2, MaxToolCalls: 9}) {
 		t.Fatalf("bounded MemberBuild.Limits = %+v, want only the def-set fields {MaxTurns:2 MaxToolCalls:9}", bounded.Limits)
 	}
 
-	plain := factory(tm, agent.MemberSpec{Name: "plain", AgentType: "plain"})
+	plain := factory(tm, agent.MemberSpec{Name: "plain", AgentType: "plain"}, "")
 	if plain.Limits != (session.Limits{}) {
 		t.Fatalf("plain MemberBuild.Limits = %+v, want zero (use the team default)", plain.Limits)
 	}
@@ -143,7 +147,9 @@ func TestMemberReadOnlyAllowlistedToolDispatches(t *testing.T) {
 	factory := memberFactoryForTest(cfg, grepCall, hookexec.New(nil), regOf(def), nil, nil, false, nil)
 
 	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"),
-		func(spec agent.MemberSpec) agent.MemberBuild { return factory(tm, spec) })
+		func(spec agent.MemberSpec, routedModel string) agent.MemberBuild {
+			return factory(tm, spec, routedModel)
+		})
 	if err := sup.AddMember(context.Background(), agent.MemberSpec{
 		Name: "searcher", AgentType: "searcher", InitialPrompt: "search it",
 	}); err != nil {
@@ -165,7 +171,7 @@ func TestMemberUnknownAgentTypeFallsBack(t *testing.T) {
 	tm := team.New("t")
 	factory := memberFactoryForTest(cfg, mockllm.New(mockllm.TextTurn("x")), hookexec.New(nil), regOf(), nil, nil, false, nil)
 
-	build := factory(tm, agent.MemberSpec{Name: "ghost", AgentType: "does-not-exist"})
+	build := factory(tm, agent.MemberSpec{Name: "ghost", AgentType: "does-not-exist"}, "")
 	if build.Engine == nil {
 		t.Fatal("unknown AgentType should fall back to a default engine, got nil")
 	}
@@ -174,7 +180,9 @@ func TestMemberUnknownAgentTypeFallsBack(t *testing.T) {
 	}
 
 	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"),
-		func(spec agent.MemberSpec) agent.MemberBuild { return factory(tm, spec) })
+		func(spec agent.MemberSpec, routedModel string) agent.MemberBuild {
+			return factory(tm, spec, routedModel)
+		})
 	if err := sup.AddMember(context.Background(), agent.MemberSpec{Name: "ghost", AgentType: "does-not-exist"}); err != nil {
 		t.Fatalf("unknown AgentType member should still enrol, got %v", err)
 	}

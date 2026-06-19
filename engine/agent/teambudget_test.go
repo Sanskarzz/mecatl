@@ -363,7 +363,7 @@ var _ = permpolicy.NewPolicy
 func teamBudgetToolFactory(t *testing.T, providers map[string]*mockllm.Provider) agent.TeamMemberEngineFactory {
 	t.Helper()
 	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
-	return func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
+	return func(tm *team.Team, spec agent.MemberSpec, _ string) agent.MemberBuild {
 		prov, ok := providers[spec.Name]
 		if !ok {
 			t.Fatalf("teamBudgetToolFactory: no provider scripted for member %q", spec.Name)

@@ -116,6 +116,16 @@ type ParallelTool struct {
 	// parent Engine.
 	childEngine *Engine
 
+	// engineFactory, when non-nil, mints a per-branch child engine for an OPT-IN
+	// model-router-classified model (ADR 0034), exactly the WithSubagentEngineFactory
+	// shape: a composition closure that RE-DERIVES the override branch engine's
+	// Compactor/TokenCounter/Env.Model/ContextWindow for the routed model (never a
+	// clone-and-swap). It is consulted ONLY when the parent run wired routeTask AND the
+	// classifier hit (maybeRouteBranchModel); a nil factory, an unwired routeTask, or a
+	// classifier miss falls through to the shared childEngine — byte-identical to a
+	// deployment with no router. nil by default (WithParallelEngineFactory injects it).
+	engineFactory func(model string) (*Engine, bool)
+
 	// forker isolates each branch's workspace from the shared base.
 	forker tool.WorkspaceForker
 
@@ -239,6 +249,18 @@ func WithWinnerReaper(s PreservedForkStore) ParallelOption {
 // no layering rule is crossed.
 func WithParallelStore(store port.SessionStore) ParallelOption {
 	return func(t *ParallelTool) { t.store = store }
+}
+
+// WithParallelEngineFactory injects the composition-supplied factory that mints a per-branch
+// child engine on an OPT-IN model-router-classified model (ADR 0034). It is the EXACT shape
+// WithSubagentEngineFactory takes (func(model string)(*Engine,bool)); the factory re-derives
+// the override branch engine's Compactor/TokenCounter/Env.Model/ContextWindow for the routed
+// model through the contamination-safe per-provider path (never a clone-and-swap). nil (the
+// default) disables per-branch routing — every branch runs on the shared childEngine,
+// byte-identical to today. engine/agent stays model-string-only: the factory takes an opaque
+// model id and composition owns the category→model→engine mapping.
+func WithParallelEngineFactory(f func(model string) (*Engine, bool)) ParallelOption {
+	return func(t *ParallelTool) { t.engineFactory = f }
 }
 
 // NewParallelTool constructs the Parallel fan-out tool over a pre-built child *Engine
@@ -442,18 +464,23 @@ func (e branchEmitter) start(join string, branchCount int) {
 	}})
 }
 
-// branchStart emits a parallel.branch{branch_start} event for branch i.
-func (e branchEmitter) branchStart(i int, goal string) {
+// branchStart emits a parallel.branch{branch_start} event for branch i. routedCategory
+// and routedModel are the OPT-IN model router's bare-metadata classification for this
+// branch (both empty when the router was off, missed, or the branch never started); they
+// ride the branch_start event exactly as SubagentPayload's routed fields ride subagent.start.
+func (e branchEmitter) branchStart(i int, goal, routedCategory, routedModel string) {
 	if !e.active() {
 		return
 	}
 	e.emit(session.Event{Type: session.EvParallelBranch, Parallel: &session.ParallelPayload{
-		ParentCallID: e.parentCallID,
-		Kind:         session.ParallelBranchStart,
-		BranchIndex:  i,
-		ChildID:      e.branchChildID(i),
-		BranchLabel:  branchLabel(i),
-		Goal:         truncateGoal(strings.TrimSpace(goal)),
+		ParentCallID:   e.parentCallID,
+		Kind:           session.ParallelBranchStart,
+		BranchIndex:    i,
+		ChildID:        e.branchChildID(i),
+		BranchLabel:    branchLabel(i),
+		Goal:           truncateGoal(strings.TrimSpace(goal)),
+		RoutedCategory: routedCategory,
+		RoutedModel:    routedModel,
 	}})
 }
 
@@ -735,7 +762,10 @@ func cancelledBeforeStart(i int, be branchEmitter, clientCancelled bool) branchR
 	// zero-value-emitter unit tests — acceptable since a never-started branch created no
 	// session and so is never persisted/inspectable.
 	res := branchResult{index: i, label: branchLabel(i), failed: true, failReason: reason, childID: be.branchChildID(i)}
-	be.branchStart(i, "")
+	// A branch cancelled before it ever started was never routed, so the routed metadata
+	// is empty (a router miss and a never-routed branch are indistinguishable on the wire
+	// — both carry no category/model, which is correct: the branch ran on nothing).
+	be.branchStart(i, "", "", "")
 	be.branchEnd(res, session.StopCancelled, session.Usage{}, 0, 0)
 	return res
 }
@@ -818,11 +848,27 @@ func (t *ParallelTool) runBranch(ctx context.Context, callID session.ToolCallID,
 	// same id the registry/emitter use and WithParallelStore persists under.
 	res := branchResult{index: i, label: label, childID: string(t.childSessionID(callID, i))}
 
+	// OPT-IN model router (ADR 0034): classify this branch's composed prompt ONCE (each
+	// branch routes at most once — this is the only call site, on the per-branch
+	// goroutine) and select the engine the branch runs on. routedCategory/routedModel are
+	// bare metadata for branch_start; branchEngine is the routed override engine on a hit
+	// or the shared childEngine on a miss/unwired (fail-soft, byte-identical when off). The
+	// routeTask closure holds the per-run breaker mutex, so the concurrent branch
+	// classifications + the classifier-usage fold into the parent session are serialised.
+	prompt := composePrompt(shared, task)
+	routedCategory, routedModel := t.maybeRouteBranchModel(ctx, caps, prompt)
+	branchEngine := t.childEngine
+	if routedModel != "" && t.engineFactory != nil {
+		if eng, found := t.engineFactory(routedModel); found && eng != nil {
+			branchEngine = eng
+		}
+	}
+
 	// Bracket the branch on the observability stream: branch_start carries the
-	// (truncated, model-authored) goal; branch_end (below) carries the redacted terminal
-	// metadata. A fork-failed branch still gets its branch_end so EVERY branch is
-	// represented (no missing event).
-	be.branchStart(i, composePrompt(shared, task))
+	// (truncated, model-authored) goal + the routed metadata; branch_end (below) carries
+	// the redacted terminal metadata. A fork-failed branch still gets its branch_end so
+	// EVERY branch is represented (no missing event).
+	be.branchStart(i, prompt, routedCategory, routedModel)
 	start := time.Now()
 
 	// The Parallel branch forker is force-copy (copyTree carries the parent's dirty
@@ -846,7 +892,7 @@ func (t *ParallelTool) runBranch(ctx context.Context, callID session.ToolCallID,
 		time.Now(),
 	)
 
-	run := t.childEngine.Run(ctx, childSess, child, composePrompt(shared, task))
+	run := branchEngine.Run(ctx, childSess, child, prompt)
 	// A Parallel branch always runs in its OWN isolated fork, so its Bash asks are eligible
 	// for the A2 worktree-safe auto-approve; the parent caps carry surface/headless
 	// posture (threaded from Execute → runBranches → runBranch). We REUSE
@@ -899,6 +945,27 @@ func (t *ParallelTool) runBranch(ctx context.Context, callID session.ToolCallID,
 	}
 	be.branchEnd(res, stop, usage, toolCount, time.Since(start))
 	return res, stop
+}
+
+// maybeRouteBranchModel consults the OPT-IN semantic model router (ADR 0034) for a branch
+// and returns the classified category + the ALREADY-RESOLVED concrete model id the branch
+// should run on (both empty when not routed). It mirrors maybeRouteModel (the Subagent
+// gate): GATING — a branch has no per-call model and no agent def, so the only precondition
+// is that the parent wired BOTH the routeTask closure AND a branch engine factory (an
+// unwired factory means there is no way to mint the routed engine, so classifying would be
+// wasted spend). FAIL-SOFT: a router miss (ok=false) returns empty strings and the caller
+// inherits the shared childEngine. ctx is the branch's run ctx, threaded to routeTask so a
+// Run.Cancel propagates into the classifier turn (issue #94). routeTask is nil on a child
+// run (no nesting — a Parallel branch child has no Parallel tool) and when no router is
+// wired (the byte-identical default).
+func (t *ParallelTool) maybeRouteBranchModel(ctx context.Context, caps parentCaps, prompt string) (category, model string) {
+	if t.engineFactory == nil || caps.routeTask == nil {
+		return "", ""
+	}
+	if cat, m, ok := caps.routeTask(ctx, prompt); ok {
+		return cat, strings.TrimSpace(m)
+	}
+	return "", ""
 }
 
 // fireSubagentStop runs the SubagentStop hook for a finished branch run
