@@ -9,7 +9,7 @@ The covered surface is the seven core packages (`session`, `governance`, `tool`,
 `prompt`, `port`, `team`, `agent`); their committed API snapshots live in
 [`engine/api/`](./api/).
 
-## [Unreleased]
+## [0.0.2] - 2026-06-20
 
 ### Added
 
