@@ -36,8 +36,10 @@ import (
 // e2e/README.md), so a Write ask would never fire and the budget turns would not
 // run. harness.DefaultModel() honours the env override, so it is deliberately NOT
 // used by these specs. (Same value + rationale as approveAfterKillModel, shared
-// here so the three restart specs cannot drift on the lane.)
-const haikuLane = "anthropic/claude-3.5-haiku"
+// here so the three restart specs cannot drift on the lane.) The name is historic
+// — the lane was anthropic/claude-3.5-haiku until it EOL'd on AWS Bedrock and was
+// repointed to anthropic/claude-haiku-4.5 (same family, same lane rationale).
+const haikuLane = "anthropic/claude-haiku-4.5"
 
 // driveToWriteAsk drains the stream msgs channel until the FIRST Write permission
 // ask, returning that ask's id AND the Write tool.call id. The tool.call id

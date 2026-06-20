@@ -136,6 +136,16 @@ USER-vs-PROJECT provenance + `--trust-project` gate + USER-WINS precedence are d
 source — `prompt` neither knows nor cares which provenance won (the `SoulSource` interface is
 unchanged).
 
+**Host-pluggable system prompt (issue #127).** The MAIN loop's system prompt is resolved via
+`agent.Deps.PromptBuilder` (`prompt.Builder` = `func(Config) Layered`); nil → `prompt.Build`,
+byte-identical to v0.0.1. A host embedding the engine for a non-coding agent supplies its own
+builder to fully own the role/tone/safety/tool-inventory with no coding-agent defaults (it
+receives the same `Config` the loop builds — `Tools` + volatile `Env` filled per turn — and may
+reuse `prompt.Build`'s helpers if it wants the inventory/env back). Only `buildRequest` routes
+through it; the compaction summarizer (`engine/agent/cascade.go`) builds its own
+`prompt.Layered{StablePrefix: summarizerSystemPrompt}` directly and is explicitly NOT routed
+through the host builder (the summarizer's structured-output contract is host-independent).
+
 ## Port — `engine/port/`
 
 The PORT interfaces the loop consumes (`LLMProvider`, `SessionStore`, `HookRunner`,

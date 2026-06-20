@@ -11,6 +11,16 @@ The covered surface is the seven core packages (`session`, `governance`, `tool`,
 
 ## [Unreleased]
 
+### Added
+
+- `prompt`: `Builder` func type (`func(Config) Layered`) — the system-prompt
+  assembly seam. `agent.Deps.PromptBuilder` (optional; nil → `prompt.Build`,
+  byte-identical to v0.0.1) lets a host embedding the engine for a non-coding
+  agent fully own the system prompt (role, tone, safety, tool inventory) with no
+  coding-agent defaults and no `Available tools:` block. Only the MAIN loop's
+  `buildRequest` routes through it; the compaction summarizer (`cascade.go`)
+  builds its own `prompt.Layered` directly and is unaffected. (#127)
+
 ## [0.0.1] - 2026-06-19
 
 This is the **initial baseline** (tagged `engine/v0.0.1`). The entries below record the establishment of

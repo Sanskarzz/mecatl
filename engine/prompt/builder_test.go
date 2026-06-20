@@ -348,3 +348,19 @@ func mustWrite(t *testing.T, ws tool.Workspace, path, content string) {
 		t.Fatalf("write %s: %v", path, err)
 	}
 }
+
+// TestBuildSatisfiesBuilder pins that the default builder is directly
+// assignable to the Builder seam a host plugs into agent.Deps.PromptBuilder
+// (issue #127). If Build's signature ever drifts from func(Config) Layered, the
+// whole seam's premise breaks and this fails at compile time.
+func TestBuildSatisfiesBuilder(t *testing.T) {
+	var _ prompt.Builder = prompt.Build
+	// Also exercise it through the seam so the assertion is not purely
+	// compile-time: a Builder value holding Build must produce the same Layered
+	// as a direct call.
+	cfg := prompt.Config{Tools: sampleTools()}
+	var b prompt.Builder = prompt.Build
+	if got := b(cfg); got != prompt.Build(cfg) {
+		t.Fatalf("Builder holding Build diverged from direct prompt.Build call")
+	}
+}

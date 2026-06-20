@@ -35,7 +35,7 @@ import (
 // snapshot written by the live gRPC relay (Persist-on-ask), survives the abrupt
 // death, and a fresh process reads + resumes it over a separate HTTP listener.
 //
-// LANE: HARD-PINNED to anthropic/claude-3.5-haiku (the haiku lane constant
+// LANE: HARD-PINNED to anthropic/claude-haiku-4.5 (the haiku lane constant
 // below), independent of the MECATL_E2E_MODEL env override. This scenario
 // REQUIRES a real tool call (Write) to raise the ask, and the OpenAI-family lane
 // content-filters tool-bearing mecatl-shaped requests (finding F2; full trail in

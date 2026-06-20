@@ -14,6 +14,14 @@ type Layered struct {
 	VolatileSuffix string
 }
 
+// Builder assembles a Layered system prompt from a Config. prompt.Build is the
+// default implementation; a host that embeds the engine for a non-coding agent
+// can supply its own to fully own the system prompt (role, tone, safety, tool
+// inventory) with no coding-agent defaults. The result's StablePrefix MUST be
+// byte-stable across turns for a given Config so the LLM adapter can cache it
+// (gauntlet #6); only the VolatileSuffix may vary per turn (e.g. from cfg.Env).
+type Builder func(Config) Layered
+
 // Render concatenates the stable prefix and volatile suffix into the full system
 // prompt string. The two are joined with a blank line when both are non-empty;
 // an empty component contributes nothing (and no separator).

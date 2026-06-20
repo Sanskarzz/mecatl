@@ -30,7 +30,7 @@ Environment knobs (all optional):
 | Variable | Default | Meaning |
 |---|---|---|
 | `MECATL_E2E_TARGET` | (unset → spawn local) | `host:port` of an existing mecated; skips the local spawn |
-| `MECATL_E2E_MODEL` | `anthropic/claude-3.5-haiku` | default-lane model for all tool scenarios (see "Prompt phrasing vs the upstream prompt filter" for why the OpenAI-family lane was demoted) |
+| `MECATL_E2E_MODEL` | `anthropic/claude-haiku-4.5` | default-lane model for all tool scenarios (see "Prompt phrasing vs the upstream prompt filter" for why the OpenAI-family lane was demoted) |
 | `MECATL_E2E_MODEL_SECONDARY` | `openai/gpt-4.1-mini` | second lane (single-turn smoke only); `skip` disables it |
 | `MECATL_E2E_MAX_RUN_TOKENS` | `50000` | `--max-run-tokens` for the spawned server (a single full-catalog turn is ~5-6k input tokens; a runaway brake, not a cost control — raised 20k→50k for multi-turn + cross-restart headroom against live-model verbosity drift) |
 | `MECATL_E2E_MAX_TEAM_TOKENS` | `60000` | `--max-team-tokens` for the spawned server |
@@ -209,7 +209,7 @@ The same text WITHOUT mecatl's tool catalog passes — it is a joint score over
 the whole request. Worse: the filter also hits MODEL-AUTHORED child prompts
 (the parent paraphrases Subagent goals into the child's first turn), so no
 amount of suite-side prompt rewording makes the OpenAI-family lane reliable.
-That is why the **default lane is `anthropic/claude-3.5-haiku`** (Bedrock
+That is why the **default lane is `anthropic/claude-haiku-4.5`** (Bedrock
 endpoints, no such filter observed) and the OpenAI-family lane is the
 single-turn secondary smoke. If you edit a prompt and a scenario starts
 failing instantly with `content_filter`, phrasing is the first suspect.

@@ -30,6 +30,7 @@ func NewMultiAssembler(assemblers ...InstructionAssembler) MultiAssembler
 func NewMultiExpander(expanders ...CommandExpander) *MultiExpander
 func NewSourceExpander(src CommandSource) *SourceExpander
 func ValidCommandName(name string) bool
+type Builder func(Config) Layered
 type Command struct{Name string; Description string}
 type CommandExpander interface{Expand(ctx context.Context, ws tool.Workspace, input string) (string, bool, error)}
 type CommandLister interface{List(ctx context.Context, ws tool.Workspace) ([]Command, error)}

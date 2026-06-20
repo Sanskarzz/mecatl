@@ -78,7 +78,7 @@ func NewTarget() (Target, error) {
 // Env knobs (all optional; defaults are the verified-cheap lanes):
 //
 //	MECATL_E2E_TARGET           host:port of an existing mecated (skips Local spawn)
-//	MECATL_E2E_MODEL            default-lane model id (default anthropic/claude-3.5-haiku)
+//	MECATL_E2E_MODEL            default-lane model id (default anthropic/claude-haiku-4.5)
 //	MECATL_E2E_MODEL_SECONDARY  second-lane model id (default openai/gpt-4.1-mini; "skip" disables)
 //	MECATL_E2E_MAX_RUN_TOKENS   --max-run-tokens for the local server (default 50000)
 //	MECATL_E2E_MAX_TEAM_TOKENS  --max-team-tokens for the local server (default 60000)
@@ -97,8 +97,11 @@ func NewTarget() (Target, error) {
 //     ("Do not use any tools", "Never call Subagent", …) with `response
 //     incomplete: content_filter` — including MODEL-AUTHORED child prompts
 //     (subagent goals), which no amount of suite-side rewording can control.
-//   - anthropic/claude-3.5-haiku (Bedrock endpoints): no such filter observed;
-//     tools verified working through the same openrouter provider id.
+//   - anthropic/claude-haiku-4.5 (Bedrock endpoints): no such filter observed;
+//     tools verified working through the same openrouter provider id. (The
+//     original lane was anthropic/claude-3.5-haiku, which reached end-of-life
+//     on AWS Bedrock and started 404-ing; haiku-4.5 is the same family, same
+//     lane rationale, not EOL'd.)
 //
 // So the multi-turn tool scenarios run on the anthropic-family lane and the
 // OpenAI-family lane is the secondary single-turn smoke (which always passed).
@@ -106,7 +109,7 @@ func DefaultModel() string {
 	if m := os.Getenv("MECATL_E2E_MODEL"); m != "" {
 		return m
 	}
-	return "anthropic/claude-3.5-haiku"
+	return "anthropic/claude-haiku-4.5"
 }
 
 // SecondaryModel returns the second-lane (OpenAI-family) model id, or "" when

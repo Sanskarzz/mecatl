@@ -139,6 +139,15 @@ type Deps struct {
 	// PromptConfig seeds the cache-stable system prompt (role/tone/safety). The
 	// loop fills in Tools and the volatile Env per turn.
 	PromptConfig prompt.Config
+	// PromptBuilder assembles the layered system prompt each turn. nil →
+	// prompt.Build (the v1 default: coding-agent role/tone/safety + tool
+	// inventory), byte-identical to v0.0.1. A host that needs a fully host-owned
+	// system prompt (e.g. a non-coding agent) supplies a prompt.Builder here; it
+	// receives the same Config the loop builds (Tools + volatile Env filled per
+	// turn) and returns the Layered prompt. Only the MAIN loop's buildRequest
+	// routes through this field — the compaction summarizer (cascade.go) builds
+	// its own prompt.Layered directly and is unaffected.
+	PromptBuilder prompt.Builder
 
 	// Model is the provider model identifier sent on every request.
 	Model string
@@ -1522,8 +1531,15 @@ func (e *Engine) buildRequest(r *Run, sess *session.Session) port.LLMRequest {
 	if cfg.Env.Cwd == "" {
 		cfg.Env.Cwd = sess.Workspace
 	}
+	// PromptBuilder (issue #127): a host-supplied builder replaces prompt.Build
+	// when non-nil, so a host embedding the engine for a non-coding agent can
+	// fully own the system prompt. nil → prompt.Build (byte-identical to v0.0.1).
+	build := e.deps.PromptBuilder
+	if build == nil {
+		build = prompt.Build
+	}
 	return port.LLMRequest{
-		System:   prompt.Build(cfg),
+		System:   build(cfg),
 		Messages: sess.Conversation.Messages,
 		Tools:    cfg.Tools,
 		Model:    e.deps.Model,
