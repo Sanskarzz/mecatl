@@ -11,6 +11,8 @@ The covered surface is the seven core packages (`session`, `governance`, `tool`,
 
 ## [Unreleased]
 
+## [0.0.4] - 2026-06-21
+
 ### Added
 
 - `tool.ForkMerger` — an OPTIONAL port (`Merge(ctx, forkRoot, parentWS) error`)
