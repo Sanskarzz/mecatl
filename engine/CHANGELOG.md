@@ -11,6 +11,8 @@ The covered surface is the seven core packages (`session`, `governance`, `tool`,
 
 ## [Unreleased]
 
+## [0.0.3] - 2026-06-21
+
 ### Hygiene
 
 - `go.mod`: the `go` directive is now the minor version `go 1.26`, not the patch
