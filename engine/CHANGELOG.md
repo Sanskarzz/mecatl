@@ -9,6 +9,20 @@ The covered surface is the seven core packages (`session`, `governance`, `tool`,
 `prompt`, `port`, `team`, `agent`); their committed API snapshots live in
 [`engine/api/`](./api/).
 
+## [Unreleased]
+
+### Hygiene
+
+- `go.mod`: the `go` directive is now the minor version `go 1.26`, not the patch
+  `go 1.26.4`. A library's `go` directive sets the language version it requires,
+  and Go raises a consumer's own directive to match the highest one in its module
+  graph — so a patch-level directive forces every consumer to a patch directive
+  too. The engine uses no Go 1.26.4-specific language feature, so `go 1.26` is the
+  correct floor. This unblocks consumers (e.g. a downstream consumer) whose CI forbids a
+  patch-level `go` directive. No public-API change. (A `toolchain` directive, if
+  ever added, may stay patch-pinned — only the `go` language directive must be
+  minor.)
+
 ## [0.0.2] - 2026-06-20
 
 ### Added
