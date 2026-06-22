@@ -11,6 +11,8 @@ The covered surface is the seven core packages (`session`, `governance`, `tool`,
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-06-22
+
 ### Changed
 
 - **Behaviour (no API change): turn-0 instruction fragments are now EPHEMERAL.** The
