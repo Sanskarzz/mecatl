@@ -292,7 +292,7 @@ func TestSubmitResultOverlayWinsAndIsAdvertised(t *testing.T) {
 
 	overlaySchema := json.RawMessage(`{"type":"object","title":"OVERLAY"}`)
 	submit := newSubmitResultTool(overlaySchema)
-	r := &Run{opts: RunOptions{ExtraTools: []tool.Tool{submit}}}
+	r := &Run{opts: RunOptions{ExtraTools: []tool.Tool{submit}}, diag: engine.deps.Diagnostics}
 
 	// (a) lookupTool resolves the OVERLAY, not the catalog decoy.
 	got, ok := engine.lookupTool(r, submitResultToolName)
@@ -305,7 +305,7 @@ func TestSubmitResultOverlayWinsAndIsAdvertised(t *testing.T) {
 
 	// (b) buildRequest advertises the OVERLAY's spec for the colliding name, exactly once.
 	sess := session.New("s1", session.ModeDefault, "/ws", session.Limits{}, time.Now())
-	req := engine.buildRequest(r, sess)
+	req := engine.buildRequest(context.Background(), r, sess, memfs.NewWorkspace("/ws"))
 	count, sawOverlay := 0, false
 	for _, spec := range req.Tools {
 		if spec.Name == submitResultToolName {

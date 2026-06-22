@@ -1,11 +1,92 @@
 package agent
 
 import (
+	"context"
 	"strings"
 	"testing"
 
+	"github.com/stacklok/mecatl/engine/prompt"
 	"github.com/stacklok/mecatl/engine/session"
+	"github.com/stacklok/mecatl/engine/tool"
 )
+
+// internalSoulSrc / internalIndexSrc are minimal turn-0 sources for the internal
+// (package agent) tests, used to render REAL fragments via the live prompt
+// assemblers — so the genuine-user predicate is exercised against the same bytes
+// the loop injects (never a hand-copied header literal). A header reword that broke
+// the predicate would turn these helpers' callers red.
+type internalSoulSrc struct{ body string }
+
+func (s internalSoulSrc) Load(context.Context) (string, error) { return s.body, nil }
+
+type internalIndexSrc struct{ entries []tool.MemoryEntry }
+
+func (s internalIndexSrc) Index(context.Context) ([]tool.MemoryEntry, error) {
+	return s.entries, nil
+}
+
+func injectedSoulFragment(t *testing.T) session.Message {
+	t.Helper()
+	msgs, err := (prompt.SoulAssembler{Src: internalSoulSrc{body: "terse engineer"}}).Assemble(context.Background(), nil)
+	if err != nil || len(msgs) != 1 {
+		t.Fatalf("render soul fragment: msgs=%d err=%v", len(msgs), err)
+	}
+	return msgs[0]
+}
+
+func injectedMemoryFragment(t *testing.T) session.Message {
+	t.Helper()
+	entries := []tool.MemoryEntry{{Key: "pref/runner", Description: "preferred test runner"}}
+	msgs, err := (prompt.MemoryIndexAssembler{Src: internalIndexSrc{entries: entries}}).Assemble(context.Background(), nil)
+	if err != nil || len(msgs) != 1 {
+		t.Fatalf("render memory fragment: msgs=%d err=%v", len(msgs), err)
+	}
+	return msgs[0]
+}
+
+// TestIsGenuineUserTurnSkipsInjectedFragments pins that the genuine-user predicate
+// (the shared anchor for the compaction pin, the back-snap, and the resume gate)
+// recognises a real user instruction but skips harness-injected turn-0 fragments
+// (rendered via the live assemblers) AND synthesised compaction summaries.
+func TestIsGenuineUserTurnSkipsInjectedFragments(t *testing.T) {
+	genuine := session.NewUserMessage("rename Foo to Bar")
+	if !isGenuineUserTurn(genuine) {
+		t.Fatalf("a real user instruction must be a genuine user turn")
+	}
+	for _, m := range []session.Message{
+		injectedSoulFragment(t),
+		injectedMemoryFragment(t),
+		session.NewUserMessage(compactionSummaryMarker + " earlier turns…"),
+		session.NewUserMessage(tier4SummaryMarker + "\n## Goal"),
+		session.NewAssistantMessage("not a user turn", "", nil),
+	} {
+		if isGenuineUserTurn(m) {
+			t.Fatalf("isGenuineUserTurn must skip non-genuine message: %q", m.Text)
+		}
+	}
+}
+
+// TestFirstUserAndFloorAnchorPastInjectedFragments is the unit-level pin-fix
+// guard: with leading system + injected soul/memory fragments BEFORE the genuine
+// goal, firstUser returns the GENUINE goal (not the injected fragment) and
+// userSnapFloor lands one PAST the genuine goal's index — so the back-snap can
+// never pull the goal into the tail nor anchor on a fragment.
+func TestFirstUserAndFloorAnchorPastInjectedFragments(t *testing.T) {
+	msgs := []session.Message{
+		session.NewSystemMessage("system rules"),   // 0
+		injectedSoulFragment(t),                    // 1 (RoleUser, injected)
+		injectedMemoryFragment(t),                  // 2 (RoleUser, injected)
+		session.NewUserMessage("THE REAL GOAL"),    // 3 (genuine)
+		session.NewAssistantMessage("ok", "", nil), // 4
+	}
+	got, ok := firstUser(msgs)
+	if !ok || got.Text != "THE REAL GOAL" {
+		t.Fatalf("firstUser anchored on the wrong message: ok=%v text=%q", ok, got.Text)
+	}
+	if floor := userSnapFloor(msgs); floor != 4 {
+		t.Fatalf("userSnapFloor = %d, want 4 (one past the genuine goal at index 3)", floor)
+	}
+}
 
 // TestSnapCutToRecentUserTurn is the direct unit test of the back-snap's pure index
 // arithmetic, exercising each of its three exits (recentUserTurnsKept reached /

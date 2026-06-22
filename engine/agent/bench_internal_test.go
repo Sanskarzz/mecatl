@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stacklok/mecatl/engine/adapter/memfs"
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/prompt"
 	"github.com/stacklok/mecatl/engine/session"
@@ -54,12 +55,14 @@ func BenchmarkBuildRequest(b *testing.B) {
 	_ = sess.RecordUserPrompt("now summarise", nil)
 
 	// A zero-value Run carries empty RunOptions (no per-run ExtraTools) — the legacy
-	// run shape buildRequest sees on the common path.
-	r := &Run{}
+	// run shape buildRequest sees on the common path. diag is Nop-safe via the engine.
+	r := &Run{diag: e.deps.Diagnostics}
 
+	ctx := context.Background()
+	ws := memfs.NewWorkspace("/ws")
 	b.ReportAllocs()
 	for b.Loop() {
-		sinkRequest = e.buildRequest(r, sess)
+		sinkRequest = e.buildRequest(ctx, r, sess, ws)
 	}
 }
 

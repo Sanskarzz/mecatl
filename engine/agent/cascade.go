@@ -54,10 +54,11 @@ Produce a Markdown summary with exactly these sections, in this order:
 ## Open questions and known errors
 ## Next steps
 
-Under "## User instructions and intent": enumerate every user directive in order — the original request, any modifications, and the current ask — quoting each directly, and note where the user's intent CHANGED or a later instruction superseded an earlier one.
+Under "## User instructions and intent": enumerate every user directive in order — the original request, any modifications, and the current ask — quoting each directly, and note where the user's intent CHANGED or a later instruction superseded an earlier one. Any UNCOMPLETED task or CONDITIONAL/DEFERRED instruction (e.g. "when I later say X, do Y", "remember to do Z before finishing") MUST be preserved verbatim — these are the agent's ONLY memory of work still to be done.
 
 Rules:
 - This summary is the agent's ONLY memory of the dropped turns: every user directive MUST be preserved verbatim — losing a user instruction loses the task.
+- PENDING and DEFERRED work survives nowhere else: any task not yet done, any constraint that must persist, and any conditional instruction ("when X happens, do Y") MUST be carried over verbatim — dropping it loses the deferred work permanently.
 - PRESERVE verbatim: file paths, identifiers, commands, and error messages.
 - DROP: raw file contents, verbose tool output, stale grep results, and old stack traces.
 - Write "None." under any section with nothing to report.
@@ -386,9 +387,17 @@ func mediaPlaceholder(p session.Content) string {
 	return fmt.Sprintf("[%s: %s, %dKB]", p.Kind, p.MIMEType, (len(p.Data)+1023)/1024)
 }
 
-// preservedHead returns the leading system messages plus the first user goal,
-// together with the set of source indices they occupy (so middleMessages can
+// preservedHead returns the leading system messages plus the first GENUINE user
+// goal, together with the set of source indices they occupy (so middleMessages can
 // exclude them). The head is preserved verbatim across every tier.
+//
+// The user pin skips harness-injected turn-0 fragments (project instructions /
+// soul / memory index / user model) and synthesised summaries via
+// isGenuineUserTurn, so it anchors on the user's REAL first instruction — not on
+// an injected fragment, which with a soul/memory deployment precedes the goal.
+// Injected fragments left out of the head fall into the middle and are
+// summarised/dropped, which is correct: they are regenerated fresh at the start of
+// each run, never load-bearing history.
 func preservedHead(msgs []session.Message) (head []session.Message, idx []int) {
 	for i, m := range msgs {
 		if m.Role == session.RoleSystem {
@@ -397,7 +406,7 @@ func preservedHead(msgs []session.Message) (head []session.Message, idx []int) {
 		}
 	}
 	for i, m := range msgs {
-		if m.Role == session.RoleUser {
+		if isGenuineUserTurn(m) {
 			head = append(head, m)
 			idx = append(idx, i)
 			break

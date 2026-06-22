@@ -5,7 +5,11 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/stacklok/mecatl/engine/adapter/memfs"
+	"github.com/stacklok/mecatl/engine/adapter/mockllm"
+	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/memory"
@@ -29,26 +33,37 @@ func drainRun(run interface {
 	return final
 }
 
-// TestUserModelE2E is the headline (R8) Phase-2a proof through the FULL composition
-// (app.Build → server.Service):
+// TestUserModelE2E is the headline (R8) Phase-2a proof:
 //
 //   - "Session A" writes a fact through the REAL RememberUser tool the catalog wires
 //     (memory.NewUserModelTools over the configured user-model dir) — exercising the
 //     enforced "user/" prefix, the write-time injection scan, and persistence.
-//   - A Service built over the SAME user-model dir then runs a session and asserts
-//     the turn-0 conversation contains the <user-model> fence with the saved fact —
-//     proving the cross-session store round-trips and the UserModelAssembler injects
-//     it on a subsequent session's turn 0.
+//   - The same composition wiring (buildInstructionAssembler → prompt.UserModelAssembler
+//     over a SEPARATE memory.Store opened on the SAME dir) is wired into a main engine
+//     whose provider OBSERVES the request, and a run asserts the turn-0 REQUEST carries
+//     the <user-model> fence with the saved fact — proving the cross-session store
+//     round-trips and the assembler injects it on a subsequent session's turn 0.
+//   - A THIRD section drives the FULL composition (app.Build → server.Service) over the
+//     same user-model dir and asserts the per-session engine does NOT PERSIST the fence
+//     into the conversation — the composition-level ephemeral guard (a composition-only
+//     re-persist regression, e.g. recordPrompt re-acquiring the fragments, would be
+//     caught here even though the Build mock provider is not request-observable).
 //
-// (The canned mock provider cannot be scripted to emit a tool call through Build,
-// so session A's WRITE is driven via the tool directly — the same tool.Execute the
-// model would invoke; the injection HALF runs through the full Build→Service→run
-// path. The agent-driven RememberUser write is covered end to end in the agent
+// As of ADR 0043 the turn-0 instruction fragments are EPHEMERAL: they are prepended
+// to the LLMRequest per-run, NEVER persisted into Conversation.Messages. So the proof
+// is the fence on the REQUEST the provider received (observed via mockllm's request
+// observer), and the test ALSO asserts it never lands in the persisted conversation
+// (both at the engine layer AND through the full Service path).
+//
+// (The canned mock provider cannot be scripted to emit a tool call, so session A's
+// WRITE is driven via the tool directly — the same tool.Execute the model would
+// invoke. The agent-driven RememberUser write is covered end to end in the agent
 // reviewer unit test and the adapter tool tests.)
 //
 // All offline: mock provider, real temp dirs.
 func TestUserModelE2E(t *testing.T) {
 	ctx := context.Background()
+
 	workspace := t.TempDir()
 	userModelDir := t.TempDir()
 
@@ -75,13 +90,65 @@ func TestUserModelE2E(t *testing.T) {
 
 	// Persistence to disk: the write is durable under the dir (storeA released its
 	// lock after the op). The cross-PROCESS round-trip is then proven below by the
-	// SEPARATE store the Service's Build opens over the SAME dir.
+	// SEPARATE store opened over the SAME dir.
 	if _, ok, _ := storeA.Recall(ctx, "user/comm-style"); !ok {
 		t.Fatalf("RememberUser did not persist to the user-model store")
 	}
 
-	// --- Session B: a Service over the SAME user-model dir; turn 0 must carry the --
-	// <user-model> fence with the saved fact.
+	// --- Session B: the SAME composition wiring (buildInstructionAssembler over a
+	// fresh store on the SAME dir) injected into a request-observing main engine. The
+	// turn-0 REQUEST must carry the <user-model> fence with the saved fact, and the
+	// fact must NOT be persisted into the conversation (ephemeral, ADR 0043).
+	storeB, err := memory.New(userModelDir)
+	if err != nil {
+		t.Fatalf("memory.New (session B store): %v", err)
+	}
+	// soulSrc + project memStore nil — isolate the user-model block (matches the old
+	// NoSoul:true). The cast mirrors composition (the adapter satisfies the port).
+	asm := buildInstructionAssembler(nil, nil, storeB)
+
+	obs := &observedReq{}
+	prov := mockllm.NewWith([]mockllm.Option{mockllm.WithRequestObserver(obs.observer())}, mockllm.TextTurn("done"))
+	eng := agent.NewEngine(agent.Deps{
+		LLM:          prov,
+		Catalog:      tool.NewCatalog(),
+		Instructions: asm,
+	})
+
+	sess := session.New("sB", session.ModeDefault, "/ws", session.Limits{MaxTurns: 3}, time.Now())
+	run := eng.Run(ctx, sess, memfs.NewWorkspace("/ws"), "hello")
+	for ev := range run.Events() {
+		_ = ev
+	}
+
+	// The fence rode the REQUEST (a prepended turn-0 user fragment).
+	func() {
+		obs.mu.Lock()
+		defer obs.mu.Unlock()
+		var foundInReq bool
+		for _, um := range obs.userMsgs {
+			if strings.Contains(um, "<user-model>") && strings.Contains(um, "comm-style") {
+				foundInReq = true
+				break
+			}
+		}
+		if !foundInReq {
+			t.Fatalf("turn-0 request is missing the <user-model> fence with the saved fact:\n%+v", obs.userMsgs)
+		}
+	}()
+	// Ephemeral: the fence must NOT be persisted into the conversation.
+	for _, m := range sess.Conversation.Messages {
+		if m.Role == session.RoleUser && strings.Contains(m.Text, "<user-model>") {
+			t.Fatalf("the <user-model> fence must NOT be persisted into the conversation (it is ephemeral):\n%+v", messageTexts(sess.Conversation.Messages))
+		}
+	}
+
+	// --- Section 3: the FULL composition (app.Build → server.Service) over the same
+	// user-model dir. The composition wires the SAME UserModelAssembler; after a run,
+	// the per-session engine's PERSISTED conversation must carry ZERO turn-0 fragments
+	// — the composition-level ephemeral guard. (The Build mock provider is not
+	// request-observable, so the request-side prepend proof stays at the engine layer
+	// above; here we guard the persistence side end to end through the Service.)
 	built, err := Build(ctx, Config{
 		Workspace:    workspace,
 		UseMock:      true,
@@ -94,29 +161,24 @@ func TestUserModelE2E(t *testing.T) {
 	defer built.Close()
 
 	svc := built.Service
-	sess, err := svc.CreateSession(ctx, workspace, session.ModeDefault, defaultLimits())
+	svcSess, err := svc.CreateSession(ctx, workspace, session.ModeDefault, defaultLimits())
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	run, err := svc.StartRun(ctx, sess.ID, "hello")
+	svcRun, err := svc.StartRun(ctx, svcSess.ID, "hello")
 	if err != nil {
 		t.Fatalf("StartRun: %v", err)
 	}
-	drainRun(run)
+	drainRun(svcRun)
 
-	got, err := svc.GetSession(ctx, sess.ID)
+	got, err := svc.GetSession(ctx, svcSess.ID)
 	if err != nil {
 		t.Fatalf("GetSession: %v", err)
 	}
-	var found bool
 	for _, m := range got.Conversation.Messages {
-		if m.Role == session.RoleUser && strings.Contains(m.Text, "<user-model>") && strings.Contains(m.Text, "comm-style") {
-			found = true
-			break
+		if m.Role == session.RoleUser && strings.Contains(m.Text, "<user-model>") {
+			t.Fatalf("composition path PERSISTED the <user-model> fence into the conversation (it must be ephemeral, ADR 0043):\n%+v", messageTexts(got.Conversation.Messages))
 		}
-	}
-	if !found {
-		t.Fatalf("session turn-0 conversation is missing the <user-model> fence with the saved fact:\n%+v", messageTexts(got.Conversation.Messages))
 	}
 }
 

@@ -511,6 +511,18 @@ type Run struct {
 	// per session" / no-clone-swap discipline applied to run-scoped knobs). The zero
 	// value is the legacy run (no override, no extras), so Run/RunContent are unchanged.
 	opts RunOptions
+	// fragments are the EPHEMERAL turn-0 instruction fragments (project instructions /
+	// soul / memory index / user model, produced by Deps.Instructions) prepended to the
+	// LLMRequest.Messages on EVERY turn of this run (incl. resume) but NEVER persisted into
+	// Conversation.Messages, event-carried, or snapshotted (ADR 0043). They are assembled
+	// ONCE PER RUN (fragmentsOnce, in buildRequest's first turn) and reused on every
+	// subsequent turn, so the message prefix stays byte-stable within the run (preserving
+	// the prompt cache) without re-assembling per turn. Assembly is fail-soft: an
+	// Instructions.Assemble error leaves fragments nil and the run continues. They are
+	// written once (under fragmentsOnce) and read on every turn of the SAME goroutine
+	// (the run loop is single-goroutine for buildRequest), so the Once is belt-and-braces.
+	fragments     []session.Message
+	fragmentsOnce sync.Once
 }
 
 // runSerial mints the process-unique Run.serial discriminator (see Run.serial).
@@ -948,7 +960,7 @@ func (e *Engine) runLoop(ctx context.Context, r *Run, sess *session.Session, ws 
 		e.maybeCompact(ctx, r, sess, turnIdx)
 
 		// Step 4: build the request and consume the model stream.
-		asst, usage, streamStop, timing, err := e.runTurn(ctx, r, sess, turnIdx)
+		asst, usage, streamStop, timing, err := e.runTurn(ctx, r, sess, ws, turnIdx)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 				e.terminate(ctx, r, sess, session.StopCancelled, lastText, total, nil)
@@ -1309,15 +1321,14 @@ func (e *Engine) recordPrompt(ctx context.Context, r *Run, sess *session.Session
 	if blocked {
 		return false, reason, nil
 	}
-	var instr []session.Message
-	if sess.Counters.Turns == 0 {
-		discovered, aerr := e.deps.Instructions.Assemble(ctx, ws)
-		if aerr != nil {
-			return false, "", fmt.Errorf("agent: assemble instructions: %w", aerr)
-		}
-		instr = discovered
-	}
-	if rerr := sess.RecordUserPromptWithParts(finalText, parts, instr); rerr != nil {
+	// The turn-0 context fragments (project instructions / soul / memory index /
+	// user model) are NO LONGER persisted into the conversation (ADR 0043). They are
+	// assembled once per run and prepended to LLMRequest.Messages EPHEMERALLY in
+	// buildRequest, so they are present on every run (incl. resume) without bloating
+	// the persisted history or recreating the compaction-pin ambiguity. Only the
+	// GENUINE prompt (+ media parts) is recorded here; instr is nil (the param stays a
+	// valid seam for callers that DO want to persist instructions, e.g. tests).
+	if rerr := sess.RecordUserPromptWithParts(finalText, parts, nil); rerr != nil {
 		return false, "", fmt.Errorf("agent: record user prompt: %w", rerr)
 	}
 	// Emit the durable, log-only EvUserPrompt so the EventLog records WHAT THE USER
@@ -1375,8 +1386,8 @@ type turnTiming struct {
 // the inter-token gaps (those carry no user-perceived token). A turn with zero
 // content chunks reports no TTFT; a turn with one content chunk reports a TTFT
 // but no inter-token summary (there is no gap).
-func (e *Engine) runTurn(ctx context.Context, r *Run, sess *session.Session, turnIdx int) (session.Message, session.Usage, session.StopReason, turnTiming, error) {
-	req := e.buildRequest(r, sess)
+func (e *Engine) runTurn(ctx context.Context, r *Run, sess *session.Session, ws tool.Workspace, turnIdx int) (session.Message, session.Usage, session.StopReason, turnTiming, error) {
+	req := e.buildRequest(ctx, r, sess, ws)
 	seq, err := e.deps.LLM.Stream(ctx, req)
 	if err != nil {
 		return session.Message{}, session.Usage{}, session.StopNone, turnTiming{}, fmt.Errorf("agent: start stream: %w", err)
@@ -1494,8 +1505,17 @@ func (e *Engine) runTurn(ctx context.Context, r *Run, sess *session.Session, tur
 
 // buildRequest assembles the provider-neutral LLMRequest for the current turn:
 // the layered system prompt (cache-stable prefix + volatile env suffix), the
+// EPHEMERAL turn-0 instruction fragments prepended ahead of the persisted
 // conversation history, and the mode-filtered tool specs.
-func (e *Engine) buildRequest(r *Run, sess *session.Session) port.LLMRequest {
+//
+// The instruction fragments (project instructions / soul / memory index / user
+// model) are assembled ONCE per run (r.fragmentsOnce, fail-soft) and prepended to
+// Messages on EVERY turn — they are never written into Conversation.Messages, so
+// they cost no persisted-history bloat and converge the snapshot + event-sourced
+// rehydration paths (ADR 0043). Messages is a FRESH slice each call
+// (fragments ++ conversation); Conversation.Messages is never mutated. Assembling
+// once per run keeps the message prefix byte-stable within the run (prompt cache).
+func (e *Engine) buildRequest(ctx context.Context, r *Run, sess *session.Session, ws tool.Workspace) port.LLMRequest {
 	cfg := e.deps.PromptConfig
 	// Progressive disclosure (pattern 9): when enabled, advertise lightweight
 	// specs (full spec for non-disclosable tools, including the ToolSearch tool
@@ -1538,9 +1558,32 @@ func (e *Engine) buildRequest(r *Run, sess *session.Session) port.LLMRequest {
 	if build == nil {
 		build = prompt.Build
 	}
+	// Assemble the ephemeral turn-0 instruction fragments ONCE per run, then prepend
+	// them ahead of the persisted conversation on EVERY turn (incl. resume). Assembly
+	// is fail-soft: an Instructions.Assemble error (or a nil assembler) leaves
+	// r.fragments nil and the run proceeds without fragments rather than aborting.
+	r.fragmentsOnce.Do(func() {
+		if e.deps.Instructions == nil {
+			return
+		}
+		discovered, aerr := e.deps.Instructions.Assemble(ctx, ws)
+		if aerr != nil {
+			r.diag.Log(ctx, port.LevelWarn, "instruction-fragment assembly failed; continuing without turn-0 fragments", "error", aerr)
+			return
+		}
+		r.fragments = discovered
+	})
+	// Build a NEW slice — fragments first, then the persisted conversation — so
+	// Conversation.Messages is never mutated and the prefix is byte-stable per run.
+	msgs := sess.Conversation.Messages
+	if len(r.fragments) > 0 {
+		msgs = make([]session.Message, 0, len(r.fragments)+len(sess.Conversation.Messages))
+		msgs = append(msgs, r.fragments...)
+		msgs = append(msgs, sess.Conversation.Messages...)
+	}
 	return port.LLMRequest{
 		System:   build(cfg),
-		Messages: sess.Conversation.Messages,
+		Messages: msgs,
 		Tools:    cfg.Tools,
 		Model:    e.deps.Model,
 	}

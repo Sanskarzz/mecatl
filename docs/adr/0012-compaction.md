@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026
 - Scope: `engine/agent` (compaction trigger, HeuristicCompactor, CascadeCompactor), `engine/session` (ReplaceHistory, ValidateToolPairing), `internal/app` (buildCompactor wiring).
+- Superseded by: [ADR 0043](./0043-ephemeral-turn0-instruction-fragments.md) (turn-0 fragment persistence → ephemeral; the compaction pin's injected-fragment skip is now defense-in-depth, and the "once-per-session injection" related-fix note below is replaced by per-run ephemeral prepend).
 
 ## Context
 
@@ -205,12 +206,35 @@ compactors share the same contract, partitioning the history into a preserved
   verbatim (`engine/agent/compaction.go` (`Compact`); `engine/agent/cascade.go`
   (`preservedHead`)).
 
-- **The FIRST user message — the goal — pinned.** `engine/agent/compaction.go`
+- **The first GENUINE user message — the goal — pinned.** `engine/agent/compaction.go`
   (`firstUser`) preserves it verbatim, and the cascade includes it in
-  `preservedHead`. This is the deliberate divergence from Claude Code, whose
-  research note warns "the first user message is summarized away" — put durable rules
-  in CLAUDE.md, not the first prompt (`docs/harnesses/03-claude-code-architecture.md`).
-  mecatl pins it instead. Prior art: Cline / Roo-Code pin the original task.
+  `preservedHead`. The pin anchors on the first **genuine** user instruction,
+  skipping the harness-injected turn-0 context fragments (project instructions /
+  soul / memory index / user model) that the `InstructionAssembler` chain records as
+  `RoleUser` messages BEFORE the user's real prompt — mirroring the
+  `isSynthesisedSummary` skip for compaction summaries. `engine/agent/compaction.go`
+  (`isGenuineUserTurn`) is the shared predicate (composing `engine/prompt/turn0.go`
+  (`IsInjectedTurn0Fragment`) — the assemblers' own headers are its source of truth —
+  with `isSynthesisedSummary`); `firstUser`, `userSnapFloor`, and `engine/agent/cascade.go`
+  (`preservedHead`) all use it, so the three pin/floor sites stay in lockstep. Without
+  this skip the pin anchored on the first `RoleUser` message — which, with a
+  soul/memory/user-model deployment, is an injected fragment, not the goal — so the
+  genuine first instruction fell into the summarised middle and was dropped. The
+  count of leading injected fragments is config-variable (0–4+), so a positional
+  "first N" cannot work; the anchor must be content-identified. This is the
+  deliberate divergence from Claude Code, whose research note warns "the first user
+  message is summarized away" — put durable rules in CLAUDE.md, not the first prompt
+  (`docs/harnesses/03-claude-code-architecture.md`). mecatl pins it instead. Prior
+  art: Cline / Roo-Code pin the original task.
+
+  > **Once-per-session injection (related fix).** The turn-0 context fragments are
+  > injected ONCE per session lifetime, gated in `engine/agent/loop.go` (`recordPrompt`)
+  > on `engine/agent/compaction.go` (`hasGenuineUserTurn`) — "no genuine user turn
+  > recorded yet" — rather than on `Counters.Turns == 0`. `Reopen`/`Interrupt`/`Recover`
+  > zero `Counters`, so a turn-counter gate re-fired the injection on every resumed run
+  > and re-appended soul/AGENTS.md/memory/user-model into the persisted history (prompt
+  > bloat that also recreated the pin ambiguity). The genuine-user-turn gate fires the
+  > injection exactly once at the true session start and skips it on every resume.
 
 - **The MOST-RECENT user instructions — the user-turn-boundary back-snap.** The
   verbatim tail is not a blind last-N slice. `engine/agent/compaction.go`
@@ -228,10 +252,12 @@ compactors share the same contract, partitioning the history into a preserved
   Prior art: Codex and gemini-cli keep the recent user turns verbatim rather than
   summarising them (`docs/harnesses/07-context-and-mcp.md` §4;
   `docs/harnesses/08-design-considerations.md` §8 and §12). `engine/agent/compaction.go`
-  (`isRecentUserTurn`) ensures the back-snap anchors only on **genuine** user turns,
-  skipping BOTH synthesised summary messages — the paths-summary AND the tier-4 LLM
-  summary — via `engine/agent/compaction.go` (`isSynthesisedSummary`) (see §6, the
-  re-compaction footgun).
+  (`isRecentUserTurn`) (an alias of `isGenuineUserTurn`) ensures the back-snap anchors
+  only on **genuine** user turns, skipping BOTH the harness-injected turn-0 context
+  fragments (via `engine/prompt/turn0.go` (`IsInjectedTurn0Fragment`)) AND the
+  synthesised summary messages — the paths-summary AND the tier-4 LLM summary — via
+  `engine/agent/compaction.go` (`isSynthesisedSummary`) (see §6, the re-compaction
+  footgun).
 
   > **Live guard.** `e2e/compaction_test.go` drives a **real model across a real
   > compaction** (spawning its own mecated with `--context-window-override` to force a

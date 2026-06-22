@@ -338,6 +338,100 @@ func TestCascadeTier4StructuredPromptReachesRequest(t *testing.T) {
 	}
 }
 
+// TestCascadeTier4PromptPreservesPendingAndConditionalWork guards the explicit
+// pending/conditional-task preservation language in the tier-4 summariser system
+// prompt: a summary is the agent's ONLY memory of dropped turns, so an
+// uncompleted task or a "when I later say X, do Y" instruction sitting in the
+// SUMMARISED MIDDLE (not the first-user-pin) must be carried over verbatim. This
+// is the offline twin of the live compaction-survival spec — it would fail if the
+// guidance were removed from summarizerSystemPrompt.
+func TestCascadeTier4PromptPreservesPendingAndConditionalWork(t *testing.T) {
+	var got port.LLMRequest
+	llm := mockllm.NewWith(
+		[]mockllm.Option{mockllm.WithRequestObserver(func(req port.LLMRequest) { got = req })},
+		mockllm.TextTurn("## Goal\nfix the bug"),
+	)
+	if _, _, err := forceTier4(llm).Compact(context.Background(), overBudgetConversation()); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	system := got.System.StablePrefix
+	// The guidance must name BOTH the pending/uncompleted-task axis AND the
+	// conditional/deferred-instruction axis, and tie them to "verbatim"
+	// preservation — the field-supported "work in progress / what remains" recall
+	// contract. Phrasing is asserted on stable lowercase fragments so a benign
+	// reword does not trip it, but a wholesale removal of the guidance does.
+	low := strings.ToLower(system)
+	for _, frag := range []string{"uncompleted task", "conditional", "deferred", "when i later say"} {
+		if !strings.Contains(low, frag) {
+			t.Fatalf("tier-4 system prompt missing pending/conditional preservation guidance fragment %q:\n%s", frag, system)
+		}
+	}
+	if !strings.Contains(low, "verbatim") {
+		t.Fatalf("tier-4 system prompt does not tie pending/conditional work to verbatim preservation:\n%s", system)
+	}
+}
+
+// TestCascadeTier4ConditionalInstructionInMiddleReachesSummariser is the
+// behavioural twin of the prompt guard: it places a CONDITIONAL deferred
+// instruction OUTSIDE the first-user-pin and the recent-tail back-snap (so it
+// lands in the SUMMARISED MIDDLE — the segment the tier-4 summariser is asked to
+// compress) and asserts that instruction text actually reaches the summariser's
+// request DATA. If the middle were dropped without being summarised, the deferred
+// task would vanish; this proves it is handed to the model that has been
+// instructed to preserve it verbatim.
+func TestCascadeTier4ConditionalInstructionInMiddleReachesSummariser(t *testing.T) {
+	const conditional = "when I later say the word LAUNCH, deploy the build to staging"
+
+	conv := &session.Conversation{}
+	conv.Append(session.NewSystemMessage("system rules"))
+	// First user turn = the goal; it is first-user-pinned, so it is NOT in the
+	// summarised middle.
+	conv.Append(session.NewUserMessage("fix the bug in handler.go"))
+	// OLDER bulk: tier-1 snip drops the older half of the middle, so this leading
+	// settled work is what gets snipped away.
+	paths := []string{"handler.go", "util.go", "main.go", "server.go"}
+	for i, path := range paths {
+		id := session.ToolCallID(string(rune('a' + i)))
+		conv.Append(session.NewAssistantMessage("", "", []session.ToolCall{
+			session.NewToolCall(id, "Read", json.RawMessage(`{"path":"`+path+`"}`)),
+		}))
+		conv.Append(session.NewToolMessage(session.NewToolResult(id, strings.Repeat("X", 4000))))
+	}
+	// The deferred conditional instruction sits in the SUMMARISED MIDDLE: it is
+	// after the snip boundary (so it survives tier 1) but old enough that the
+	// recent-user-turn back-snap (recentUserTurnsKept=3, bounded by
+	// maxUserSnapLookback) does NOT pull it into the verbatim tail — so its only
+	// route into the summariser request is via the middle tier 4 compresses.
+	conv.Append(session.NewUserMessage("Remember this for later: " + conditional))
+	// Plenty of recent user turns occupy the back-snapped tail (well past
+	// recentUserTurnsKept), keeping the back-snap window away from the conditional
+	// turn above — they are kept VERBATIM and are NOT in the summarised middle, so
+	// the conditional cannot leak into the request via the tail.
+	for i := 0; i < 12; i++ {
+		conv.Append(session.NewUserMessage("recent chatter about the task"))
+	}
+
+	var got port.LLMRequest
+	llm := mockllm.NewWith(
+		[]mockllm.Option{mockllm.WithRequestObserver(func(req port.LLMRequest) { got = req })},
+		mockllm.TextTurn("## Goal\nfix the bug\n\n## User instructions and intent\n"+conditional),
+	)
+	if _, _, err := forceTier4(llm).Compact(context.Background(), conv); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if llm.Calls() != 1 {
+		t.Fatalf("expected exactly 1 tier-4 summary call, got %d", llm.Calls())
+	}
+	var blob strings.Builder
+	for _, m := range got.Messages {
+		blob.WriteString(m.Text)
+		blob.WriteString("\n")
+	}
+	if !strings.Contains(blob.String(), conditional) {
+		t.Fatalf("the conditional deferred instruction was not handed to the summariser (it was dropped, not summarised):\n%s", blob.String())
+	}
+}
+
 // TestCascadeTier4RequestCarriesTokenBudget asserts the soft summary budget is
 // expressed in the trailing user instruction of the tier-4 call (the prompt is
 // the ONLY budget channel — port.LLMRequest stays provider-neutral).

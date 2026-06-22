@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026
 - Scope: `engine/tool` (MemoryStore interface), `engine/prompt` (MemoryIndexAssembler), `internal/adapter/memory` (store, tools), `internal/app` (composition wiring).
+- Superseded by (injection mechanism only): [ADR 0043](./0043-ephemeral-turn0-instruction-fragments.md) — the tier-0 index (like all turn-0 fragments) is no longer "recorded once at turn 0 as a persisted user message"; it is assembled once per run and PREPENDED to the request EPHEMERALLY, never persisted into the conversation. The "always in context, computed once per run, after the cache breakpoint, fenced as data" semantics are unchanged — only the persistence is dropped.
 
 ## Context
 

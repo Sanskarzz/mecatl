@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026
 - Scope: `engine/prompt` (SoulSource port, SoulAssembler), `internal/adapter/soul`, `internal/app` (soul selection, drift detection, user-model review hook), `internal/adapter/memory` (user-model partition).
+- Superseded by (injection mechanism only): [ADR 0043](./0043-ephemeral-turn0-instruction-fragments.md) — the soul fragment and the `<user-model>` block (like all turn-0 fragments) are no longer "injected as a persisted turn-0 user message"; they are assembled once per run and PREPENDED to the request EPHEMERALLY, never persisted into the conversation. The data-fenced, after-the-cache-breakpoint, agent-read-only semantics are unchanged — only the persistence is dropped.
 
 ## Context
 

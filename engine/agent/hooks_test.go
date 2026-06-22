@@ -369,9 +369,10 @@ func (a *fakeAssembler) Assemble(_ context.Context, _ tool.Workspace) ([]session
 }
 
 // TestLoopUsesInjectedAssembler asserts the loop calls the injected
-// InstructionAssembler instead of the default.
+// InstructionAssembler instead of the default and prepends its output to the
+// request (ephemerally — fragments are not persisted; ADR 0043).
 func TestLoopUsesInjectedAssembler(t *testing.T) {
-	llm := mockllm.New(mockllm.TextTurn("done"))
+	llm, firstReq := captureFirstRequest(t, mockllm.TextTurn("done"))
 	asm := &fakeAssembler{msg: "INJECTED INSTRUCTIONS"}
 	cat := catalogWith(t, &fakeTool{name: "Read", readOnly: true, exec: okExec})
 	e := newEngine(agent.Deps{LLM: llm, Catalog: cat, Instructions: asm})
@@ -381,31 +382,41 @@ func TestLoopUsesInjectedAssembler(t *testing.T) {
 	if asm.called != 1 {
 		t.Fatalf("assembler invoked %d times, want 1", asm.called)
 	}
-	// The injected instruction message must be in the conversation.
+	req, ok := firstReq()
+	if !ok {
+		t.Fatal("provider never received a request")
+	}
+	// The injected instruction message must be in the REQUEST, never the conversation.
 	found := false
-	for _, m := range sess.Conversation.Messages {
+	for _, m := range req.Messages {
 		if m.Text == "INJECTED INSTRUCTIONS" {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("injected instruction message not recorded in conversation")
+		t.Fatalf("injected instruction message not prepended to the request")
+	}
+	for _, m := range sess.Conversation.Messages {
+		if m.Text == "INJECTED INSTRUCTIONS" {
+			t.Fatalf("injected instruction message must NOT be persisted into the conversation (it is ephemeral)")
+		}
 	}
 }
 
 // TestTurn0InjectsMemoryIndexAfterAgentsMD is the D2 end-to-end proof: with a
 // non-empty per-project memory store and the composed MultiAssembler
-// (RootAssembler + MemoryIndexAssembler), the turn-0 conversation contains the
-// memory index as a USER message, ordered AFTER the AGENTS.md instruction message
-// and before the user prompt — and the index is conversation content, never the
-// system prefix (proven separately in engine/prompt).
+// (RootAssembler + MemoryIndexAssembler), the turn-0 REQUEST contains the memory
+// index as a USER message, ordered AFTER the AGENTS.md instruction message and
+// before the user prompt. As of ADR 0043 the fragments are EPHEMERAL — prepended to
+// the LLMRequest per-run, NEVER persisted into the conversation — so the ordering is
+// observed on the request the provider received, not on sess.Conversation.Messages.
 func TestTurn0InjectsMemoryIndexAfterAgentsMD(t *testing.T) {
 	ctx := context.Background()
 	store := fakeIndexSrc{entries: []tool.MemoryEntry{{
 		Key: "pref/test-runner", Value: "gotestsum", Description: "preferred test runner",
 	}}}
 
-	llm := mockllm.New(mockllm.TextTurn("done"))
+	llm, firstReq := captureFirstRequest(t, mockllm.TextTurn("done"))
 	cat := catalogWith(t, &fakeTool{name: "Read", readOnly: true, exec: okExec})
 	asm := prompt.NewMultiAssembler(prompt.RootAssembler{}, prompt.MemoryIndexAssembler{Src: store})
 	e := newEngine(agent.Deps{LLM: llm, Catalog: cat, Instructions: asm})
@@ -417,9 +428,14 @@ func TestTurn0InjectsMemoryIndexAfterAgentsMD(t *testing.T) {
 	sess := newSession(t, session.Limits{})
 	drain(e.Run(ctx, sess, ws, "the user prompt"))
 
-	// Find the order of the three turn-0 user messages.
+	req, ok := firstReq()
+	if !ok {
+		t.Fatal("provider never received a request")
+	}
+
+	// Find the order of the three turn-0 user messages in the REQUEST.
 	var agentsIdx, memoryIdx, promptIdx = -1, -1, -1
-	for i, m := range sess.Conversation.Messages {
+	for i, m := range req.Messages {
 		if m.Role != session.RoleUser {
 			continue
 		}
@@ -438,6 +454,10 @@ func TestTurn0InjectsMemoryIndexAfterAgentsMD(t *testing.T) {
 	if agentsIdx >= memoryIdx || memoryIdx >= promptIdx {
 		t.Fatalf("turn-0 order wrong: agents=%d memory=%d prompt=%d (want agents < memory < prompt)", agentsIdx, memoryIdx, promptIdx)
 	}
+	// The fragments are ephemeral: none persist into the conversation.
+	if n := countInjected(sess); n != 0 {
+		t.Fatalf("%d injected fragments PERSISTED in history, want 0 (fragments are ephemeral)", n)
+	}
 }
 
 // fakeSoulSrc is a scripted prompt.SoulSource for the e2e ordering test.
@@ -447,16 +467,18 @@ func (f fakeSoulSrc) Load(context.Context) (string, error) { return f.body, nil 
 
 // TestTurn0InjectsSoulAfterAgentsMD is the issue #14 end-to-end proof: with a
 // composed MultiAssembler (RootAssembler + SoulAssembler + MemoryIndexAssembler),
-// the turn-0 conversation contains the persona/soul as a USER message, ordered
-// AFTER the AGENTS.md instruction message, BEFORE the memory index (identity
-// before saved facts), and all before the user prompt.
+// the turn-0 REQUEST contains the persona/soul as a USER message, ordered AFTER the
+// AGENTS.md instruction message, BEFORE the memory index (identity before saved
+// facts), and all before the user prompt. As of ADR 0043 the fragments are
+// EPHEMERAL — observed on the request the provider received, not on the persisted
+// conversation.
 func TestTurn0InjectsSoulAfterAgentsMD(t *testing.T) {
 	ctx := context.Background()
 	store := fakeIndexSrc{entries: []tool.MemoryEntry{{
 		Key: "pref/test-runner", Value: "gotestsum", Description: "preferred test runner",
 	}}}
 
-	llm := mockllm.New(mockllm.TextTurn("done"))
+	llm, firstReq := captureFirstRequest(t, mockllm.TextTurn("done"))
 	cat := catalogWith(t, &fakeTool{name: "Read", readOnly: true, exec: okExec})
 	asm := prompt.NewMultiAssembler(
 		prompt.RootAssembler{},
@@ -472,9 +494,14 @@ func TestTurn0InjectsSoulAfterAgentsMD(t *testing.T) {
 	sess := newSession(t, session.Limits{})
 	drain(e.Run(ctx, sess, ws, "the user prompt"))
 
-	// Find the order of the four turn-0 user messages.
+	req, ok := firstReq()
+	if !ok {
+		t.Fatal("provider never received a request")
+	}
+
+	// Find the order of the four turn-0 user messages in the REQUEST.
 	var agentsIdx, soulIdx, memoryIdx, promptIdx = -1, -1, -1, -1
-	for i, m := range sess.Conversation.Messages {
+	for i, m := range req.Messages {
 		if m.Role != session.RoleUser {
 			continue
 		}
@@ -495,12 +522,17 @@ func TestTurn0InjectsSoulAfterAgentsMD(t *testing.T) {
 	if agentsIdx >= soulIdx || soulIdx >= memoryIdx || memoryIdx >= promptIdx {
 		t.Fatalf("turn-0 order wrong: agents=%d soul=%d memory=%d prompt=%d (want agents < soul < memory < prompt)", agentsIdx, soulIdx, memoryIdx, promptIdx)
 	}
+	// The fragments are ephemeral: none persist into the conversation.
+	if n := countInjected(sess); n != 0 {
+		t.Fatalf("%d injected fragments PERSISTED in history, want 0 (fragments are ephemeral)", n)
+	}
 }
 
 // TestDefaultAssemblerWhenNil asserts NewEngine defaults the assembler so a run
-// with no Instructions field set still discovers root instructions.
+// with no Instructions field set still discovers root instructions and prepends
+// them to the request (ephemerally — they are not persisted; ADR 0043).
 func TestDefaultAssemblerWhenNil(t *testing.T) {
-	llm := mockllm.New(mockllm.TextTurn("done"))
+	llm, firstReq := captureFirstRequest(t, mockllm.TextTurn("done"))
 	cat := catalogWith(t, &fakeTool{name: "Read", readOnly: true, exec: okExec})
 	e := newEngine(agent.Deps{LLM: llm, Catalog: cat}) // Instructions nil → RootAssembler
 	sess := newSession(t, session.Limits{})
@@ -510,14 +542,18 @@ func TestDefaultAssemblerWhenNil(t *testing.T) {
 	}
 	drain(e.Run(context.Background(), sess, ws, "hi"))
 
+	req, ok := firstReq()
+	if !ok {
+		t.Fatal("provider never received a request")
+	}
 	found := false
-	for _, m := range sess.Conversation.Messages {
+	for _, m := range req.Messages {
 		if m.Role == session.RoleUser && strings.Contains(m.Text, "project rule") {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("default RootAssembler did not discover AGENTS.md")
+		t.Fatalf("default RootAssembler did not discover AGENTS.md (it must be prepended to the request)")
 	}
 }
 

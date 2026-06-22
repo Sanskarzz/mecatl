@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/stacklok/mecatl/engine/prompt"
 	"github.com/stacklok/mecatl/engine/session"
 )
 
@@ -241,18 +242,51 @@ func snapCutToRecentUserTurn(msgs []session.Message, cut int, floor int) int {
 	return best
 }
 
-// isRecentUserTurn reports whether m is a genuine user instruction the back-snap
-// should anchor the verbatim tail on — a RoleUser message that is NOT a synthesised
-// compaction summary (those are harness-authored context, see isSynthesisedSummary:
-// both the paths-summary and the tier-4 LLM summary are skipped).
-func isRecentUserTurn(m session.Message) bool {
-	return m.Role == session.RoleUser && !isSynthesisedSummary(m.Text)
+// isGenuineUserTurn reports whether m is a GENUINE user instruction — the thing
+// the compaction pin and the verbatim-tail back-snap must anchor on — as opposed
+// to the two classes of harness-authored RoleUser message that can ride in the same
+// history:
+//
+//   - synthesised compaction summaries (the paths-summary and the tier-4 LLM
+//     summary), recognised by isSynthesisedSummary — this arm is LOAD-BEARING: a
+//     re-compaction must not anchor the pin/back-snap on a PRIOR summary;
+//   - turn-0 context fragments (project instructions / soul / memory index / user
+//     model), recognised by prompt.IsInjectedTurn0Fragment. As of ADR 0043 these
+//     fragments are EPHEMERAL — prepended to the request per-run, never persisted
+//     into Conversation.Messages — so they normally do not appear here at all. This
+//     arm is therefore DEFENSE-IN-DEPTH: it keeps the predicate correct for any
+//     legacy/persisted history that still carries injected fragments (e.g. a
+//     session snapshotted before the ephemeral cutover) so the pin never anchors on
+//     a stray fragment instead of the user's real goal.
+//
+// Without the synthesised-summary skip the pin anchored on the FIRST RoleUser
+// message — which on a re-compaction could be a prior summary, and historically
+// (with a persisted soul/memory deployment) an injected fragment — so the genuine
+// first instruction fell into the summarised middle and was dropped (the "I don't
+// have the original task" bug). The count of leading injected fragments was
+// config-variable (0–4+), so a positional "first N" cannot work; the anchor must be
+// content-identified.
+func isGenuineUserTurn(m session.Message) bool {
+	return m.Role == session.RoleUser &&
+		!prompt.IsInjectedTurn0Fragment(m.Text) &&
+		!isSynthesisedSummary(m.Text)
 }
 
-// firstUser returns the first user-role message in msgs.
+// isRecentUserTurn reports whether m is a genuine user instruction the back-snap
+// should anchor the verbatim tail on. It is isGenuineUserTurn (kept as a named
+// alias because the back-snap's doc-comments speak of "recent user turns").
+func isRecentUserTurn(m session.Message) bool {
+	return isGenuineUserTurn(m)
+}
+
+// firstUser returns the first GENUINE user-role message in msgs (the goal),
+// skipping harness-injected turn-0 fragments and synthesised summaries via
+// isGenuineUserTurn. Anchoring on the genuine goal — not the first injected
+// fragment — is what makes buildSummary's "original goal … preserved verbatim"
+// claim true again.
 func firstUser(msgs []session.Message) (session.Message, bool) {
 	for _, m := range msgs {
-		if m.Role == session.RoleUser {
+		if isGenuineUserTurn(m) {
 			return m, true
 		}
 	}
@@ -260,14 +294,16 @@ func firstUser(msgs []session.Message) (session.Message, bool) {
 }
 
 // userSnapFloor returns the back-snap floor for the heuristic compactor: one PAST
-// the first user message's index, so snapCutToRecentUserTurn never pulls the
-// first-user pin (the goal, preserved separately) into the verbatim tail — which
-// would both double-emit it and, when it is the ONLY user turn, drag the whole
-// history into the tail and defeat compaction. When there is no user message the
-// floor is 0 (the back-snap is a no-op anyway: nothing to snap to).
+// the first GENUINE user message's index, so snapCutToRecentUserTurn never pulls
+// the first-user pin (the goal, preserved separately) into the verbatim tail —
+// which would both double-emit it and, when it is the ONLY user turn, drag the
+// whole history into the tail and defeat compaction. It skips harness-injected
+// turn-0 fragments (isGenuineUserTurn) so the floor lands past the genuine goal,
+// not past an injected soul/memory fragment. When there is no genuine user message
+// the floor is 0 (the back-snap is a no-op anyway: nothing to snap to).
 func userSnapFloor(msgs []session.Message) int {
 	for i, m := range msgs {
-		if m.Role == session.RoleUser {
+		if isGenuineUserTurn(m) {
 			return i + 1
 		}
 	}

@@ -128,7 +128,14 @@ Two-layer prompt assembly + AGENTS.md/CLAUDE.md discovery; the turn-0 `Instructi
 chain and its consumer-local ports (`MemoryIndexSource`, `SoulSource` — issue #14 Phase 1's
 read-only persona seam, `UserModelSource` — issue #14 Phase 2's cross-project operator-FACTS
 seam). Turn-0 ORDER is soul → memory index → user model (identity → saved project facts →
-operator model), all on the volatile turn-0 user-message seam (never `StablePrefix`).
+operator model), all on the volatile turn-0 user-message seam (never `StablePrefix`). As of
+[ADR 0043](../adr/0043-ephemeral-turn0-instruction-fragments.md) these fragments are
+EPHEMERAL: `engine/agent/loop.go` (`buildRequest`) assembles the chain ONCE per run (cached
+on the `Run`), PREPENDS the fragments ahead of `Conversation.Messages` on every turn
+(including resume), and NEVER persists them into the conversation, event-carries them, or
+snapshots them — `recordPrompt` records only the genuine prompt. The fragments are present on
+every run unconditionally, and the snapshot + event-sourced rehydration paths converge
+fragment-free.
 
 **`SoulSource` stays trust-/provenance-UNAWARE** (issue #14 Phase 3 Item 2): the soul's
 USER-vs-PROJECT provenance + `--trust-project` gate + USER-WINS precedence are decided in
@@ -1837,15 +1844,33 @@ instruction fell into the dropped/summarised head and was lost after compaction 
 replied "I don't have the original task/goal… please resend the specific change"). Only the
 FIRST user message was pinned. The fix FOLLOWS PRIOR ART (Codex, gemini-cli keep the recent
 user turns verbatim; Claude Code's "All user messages" + "changing intent", Cline's "Task
-Evolution"): pin the first user message (unchanged) + snap the verbatim TAIL backward to the
-recent user turns + summarise older/superseded intent in tier-4 + honest wording. It does NOT
+Evolution"): pin the first GENUINE user message (see below) + snap the verbatim TAIL backward to
+the recent user turns + summarise older/superseded intent in tier-4 + honest wording. It does NOT
 preserve every user message verbatim.
 
+- **Genuine-user predicate (the pin anchor).** `firstUser`, `userSnapFloor`, `preservedHead`, and
+  the back-snap's `isRecentUserTurn` all anchor on the first GENUINE user instruction via the
+  SHARED `isGenuineUserTurn`: a `RoleUser` message that is NEITHER a synthesised compaction summary
+  (`isSynthesisedSummary` — the LOAD-BEARING arm: a re-compaction must not anchor on a prior
+  summary) NOR a harness-injected turn-0 fragment (`prompt.IsInjectedTurn0Fragment` —
+  project-instructions/soul/memory-index/user-model, recognised by the assemblers' own headers,
+  the source of truth). The fragment arm is now DEFENSE-IN-DEPTH: as of
+  [ADR 0043](../adr/0043-ephemeral-turn0-instruction-fragments.md) the turn-0 fragments are
+  EPHEMERAL (prepended to the request per-run, never persisted), so they normally do not appear in
+  the history at all — the arm only protects legacy history snapshotted before that cutover.
+  Without the synthesised-summary skip the pin anchored on the first `RoleUser` message, which on a
+  re-compaction could be a prior summary (and historically, with a persisted soul/memory
+  deployment, an injected fragment); the genuine instruction then fell into the summarised middle
+  and was dropped. The count of leading fragments was config-variable (0–4+), so a positional
+  "first N" is wrong — the anchor must be content-identified. (Related: `recordPrompt` no longer
+  records the turn-0 fragments at all; `buildRequest` assembles them once per run and prepends them
+  ephemerally — see ADR 0043 — which fixes the resume bloat structurally, so a resumed run cannot
+  re-inject soul/AGENTS.md/memory into the persisted history.)
 - **The back-snap.** The shared unexported `snapCutToRecentUserTurn(msgs, cut, floor)` moves the
   cut BACKWARD so the tail BEGINS at a recent user turn, keeping the most-recent user
   instruction(s) verbatim instead of summarising them. It walks backward from `cut-1` toward
-  `floor`, counting genuine user turns (`isRecentUserTurn`: a `RoleUser` message that is NOT a
-  synthesised compaction summary — `isSynthesisedSummary` recognises BOTH the paths-summary
+  `floor`, counting genuine user turns (`isRecentUserTurn` = `isGenuineUserTurn`, above:
+  `isSynthesisedSummary` recognises BOTH the paths-summary
   (`compactionSummaryMarker`) AND the cascade tier-4 LLM summary (`tier4SummaryMarker`); both are
   harness-authored context, skipped so a RE-compaction can't anchor on a prior summary and drag
   the whole post-summary history into the tail), and stops at the FIRST of: `recentUserTurnsKept`
@@ -1856,10 +1881,10 @@ preserve every user message verbatim.
   (back-snap only moves toward 0) and never below `floor`.
 - **Ordering (both compactors): count-cut → back-snap → forward-snap, forward-snap LAST.**
   `HeuristicCompactor.Compact`: `cut = len-keep`; `cut = snapCutToRecentUserTurn(msgs, cut, userSnapFloor(msgs))`
-  (floor = one PAST the first-user index, so the first-user pin stays out of the tail — neither
-  double-emitted nor, when it is the only user turn, able to drag everything into the tail);
+  (floor = one PAST the first GENUINE-user index, so the first-user pin stays out of the tail —
+  neither double-emitted nor, when it is the only user turn, able to drag everything into the tail);
   `cut = snapCutToTurnBoundary(msgs, cut)`. `CascadeCompactor.Compact`: same order and the SAME
-  `userSnapFloor(msgs)` (ONE definition of "one past the first-user pin" shared by both compactors;
+  `userSnapFloor(msgs)` (ONE definition of "one past the first GENUINE-user pin" shared by both compactors;
   it equals `len(headIdx)` for the contiguous system+first-user head but stays correct if they
   diverge). The forward `snapCutToTurnBoundary` stays LAST so the tool-pairing orphan guarantee
   above always holds.
