@@ -301,10 +301,10 @@ func lastUserText(req port.LLMRequest) string {
 // routerE2ECfg is the shared router-on Build config for the e2e tests.
 func routerE2ECfg(workspace string, parentCtor func() port.LLMProvider, enable func(*Config)) Config {
 	cfg := Config{
-		Workspace:           workspace,
-		NoSoul:              true,
-		Model:               "gpt-5",
-		SubagentModelRouter: true,
+		Workspace: workspace,
+		NoSoul:    true,
+		Model:     "gpt-5",
+		// ADR 0042: the taxonomy is the enable — no flag needed to turn the router on.
 		RouterCategories: []permconfig.RouterCategory{
 			{Name: "small", Description: "trivial mechanical tasks", Model: routerSmall},
 			{Name: "large", Description: "deep reasoning and architecture", Model: routerLarge},
@@ -379,7 +379,7 @@ func TestTeamRouterOffByteIdenticalE2E(t *testing.T) {
 
 	cfg := routerE2ECfg(workspace, func() port.LLMProvider { return prov },
 		func(c *Config) { c.EnableTeams = true })
-	cfg.SubagentModelRouter = false // OFF
+	cfg.RouterDisabled = true // OFF via the ADR 0042 kill-switch
 	built, err := Build(ctx, cfg)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
@@ -459,7 +459,7 @@ func TestParallelRouterOffByteIdenticalE2E(t *testing.T) {
 
 	cfg := routerE2ECfg(workspace, func() port.LLMProvider { return prov },
 		func(c *Config) { c.EnableParallel = true })
-	cfg.SubagentModelRouter = false
+	cfg.RouterDisabled = true // OFF via the ADR 0042 kill-switch
 	built, err := Build(ctx, cfg)
 	if err != nil {
 		t.Fatalf("Build: %v", err)

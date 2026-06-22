@@ -334,6 +334,41 @@ jobs:
         with:
           persist-credentials: false
 
+      # The config-reference + skeleton generator is a Go program; the matlatl
+      # composite action below brings its own toolchain but does not expose one to
+      # later steps, so provision Go here for the freshness gate. Pinned to the same
+      # SHA as the other jobs (house rule).
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            engine/go.sum
+
+      # Freshness gate for the generated configuration reference + the embedded
+      # config-init skeleton: regenerate both to a temp dir and fail if they differ
+      # from what's committed (the same generate->commit->diff discipline as
+      # llms.txt). The error names the exact regen command.
+      - name: configuration reference is up to date
+        shell: bash
+        run: |
+          set -euo pipefail
+          go run ./internal/configgen/cmd/configref \
+            --skeleton "${RUNNER_TEMP}/settings.skeleton.yaml" \
+            --reference "${RUNNER_TEMP}/configuration-reference.md"
+          stale=0
+          if ! diff -u internal/configgen/settings.skeleton.yaml "${RUNNER_TEMP}/settings.skeleton.yaml"; then
+            stale=1
+          fi
+          if ! diff -u docs/configuration-reference.md "${RUNNER_TEMP}/configuration-reference.md"; then
+            stale=1
+          fi
+          if [ "$stale" -ne 0 ]; then
+            echo "::error file=docs/configuration-reference.md::config reference / settings skeleton is out of date — run 'task docs:configref' and commit the result."
+            exit 1
+          fi
+
       # matlatl's composite action builds the gate from ITS OWN checkout, so
       # there is no binary step and no extra credentials here — only org Actions
       # access to stacklok/matlatl (granted org-wide). strict also fails on

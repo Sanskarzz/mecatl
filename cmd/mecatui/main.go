@@ -336,19 +336,24 @@ func embeddedConfig(cfg config, diag port.Diagnostics) app.Config {
 		SubagentAskReviewerModel:     cfg.subagentAskReviewer,
 		SubagentAskReviewerMaxDenies: cfg.subagentAskReviewerMaxDenies,
 		SubagentAskReviewerPolicy:    cfg.subagentAskReviewerPolicy,
-		UseMock:                      cfg.mock,
-		Shell:                        "/bin/sh",
-		NoBash:                       cfg.noBash,
-		Compaction:                   "heuristic",
-		Tokenizer:                    "heuristic",
-		LLMMaxAttempts:               3,
-		LLMPerAttemptTimeout:         cfg.llmPerAttemptTimeout,
-		LLMStreamIdleTimeout:         cfg.llmStreamIdleTimeout,
-		LLMBreakerThreshold:          5,
-		LLMBreakerCooldown:           30 * time.Second,
-		EnableParallel:               true,
-		EnableTeams:                  true,
-		AgentsConventional:           true,
+		// Subagent model router (ADR 0042): kill-switch. =false forces the router OFF
+		// (RouterDisabled); a bare flag / =true is a harmless no-op (the router stays
+		// governed by the taxonomy); unset leaves routing governed by the operator-tier
+		// models.router: taxonomy. Idempotent: safe to compute on both calls.
+		RouterDisabled:       cfg.subagentModelRouterSet && !cfg.subagentModelRouter,
+		UseMock:              cfg.mock,
+		Shell:                "/bin/sh",
+		NoBash:               cfg.noBash,
+		Compaction:           "heuristic",
+		Tokenizer:            "heuristic",
+		LLMMaxAttempts:       3,
+		LLMPerAttemptTimeout: cfg.llmPerAttemptTimeout,
+		LLMStreamIdleTimeout: cfg.llmStreamIdleTimeout,
+		LLMBreakerThreshold:  5,
+		LLMBreakerCooldown:   30 * time.Second,
+		EnableParallel:       true,
+		EnableTeams:          true,
+		AgentsConventional:   true,
 		// Memory is ON by default, per-project. MemoryConsolidateInterval is left
 		// at 0 (off) deliberately: the "dream" distiller spawns a goroutine that
 		// calls the real provider on a timer, so a default-on interval would

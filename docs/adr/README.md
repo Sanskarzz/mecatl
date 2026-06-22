@@ -50,9 +50,10 @@ Documentation/citation conventions are in [`docs/design/README.md`](../design/RE
 - [0016 — Multi-provider](./0016-multi-provider.md)
 - [0017 — OpenAI Responses API](./0017-openai-responses-api.md) *(research)*
 - [0030 — Layered model-selection heuristics](./0030-model-selection-heuristics.md)
-- [0031 — Semantic subagent model router](./0031-subagent-model-router.md)
+- [0031 — Semantic subagent model router](./0031-subagent-model-router.md) *(enable model superseded by 0042)*
 - [0034 — Extend the model router to team members and Parallel branches](./0034-team-parallel-model-routing.md)
 - [0035 — Surface the per-delegation model for ALL children, not just routed ones](./0035-per-delegation-model-surface.md)
+- [0042 — Taxonomy-gated subagent model router (enable by config, not a flag)](./0042-taxonomy-gated-model-router.md)
 
 ### Performance & diagnostics
 - [0018 — Perf observability](./0018-perf-observability.md)

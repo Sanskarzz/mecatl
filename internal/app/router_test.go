@@ -28,8 +28,7 @@ const (
 
 func routerTaxonomyCfg() Config {
 	return Config{
-		Model:               "session-model",
-		SubagentModelRouter: true,
+		Model: "session-model",
 		RouterCategories: []permconfig.RouterCategory{
 			{Name: "small", Description: "trivial mechanical tasks", Model: routerSmall},
 			{Name: "large", Description: "deep reasoning, architecture", Model: routerLarge},
@@ -38,22 +37,31 @@ func routerTaxonomyCfg() Config {
 	}
 }
 
-// OFF: with the flag unset (or no categories) buildModelRouterTask returns nil — the
-// engine then carries no router and the run() hook's routeTask is nil (byte-identical).
+// OFF (ADR 0042): the TAXONOMY is the enable, with a kill-switch override. A non-empty
+// taxonomy that is NOT disabled returns a non-nil closure; an empty taxonomy OR the
+// kill-switch (RouterDisabled) returns nil — the engine then carries no router and the
+// run() hook's routeTask is nil (byte-identical to no router).
 func TestBuildModelRouterTaskOffWhenDisabled(t *testing.T) {
 	prov := mockllm.New()
 	reg := regForTest(prov, providerAnthropic, "session-model")
 
-	cfg := routerTaxonomyCfg()
-	cfg.SubagentModelRouter = false // flag off
-	if fn := buildModelRouterTask(cfg, reg, prov, providerAnthropic, cfg.Model); fn != nil {
-		t.Fatal("router task must be nil when the enable flag is off")
+	// Taxonomy present, not disabled → ON (non-nil): the enable is the taxonomy.
+	if fn := buildModelRouterTask(routerTaxonomyCfg(), reg, prov, providerAnthropic, "session-model"); fn == nil {
+		t.Fatal("router task must be non-nil when a taxonomy is present and not disabled (taxonomy is the enable)")
 	}
 
-	cfg = routerTaxonomyCfg()
-	cfg.RouterCategories = nil // flag on but no taxonomy
+	// Empty taxonomy → OFF (byte-identical OFF-when-unconfigured).
+	cfg := routerTaxonomyCfg()
+	cfg.RouterCategories = nil
 	if fn := buildModelRouterTask(cfg, reg, prov, providerAnthropic, cfg.Model); fn != nil {
-		t.Fatal("router task must be nil when there is no taxonomy (flag without categories cannot route)")
+		t.Fatal("router task must be nil when there is no taxonomy")
+	}
+
+	// Kill-switch: a taxonomy is present but RouterDisabled forces it OFF.
+	cfg = routerTaxonomyCfg()
+	cfg.RouterDisabled = true
+	if fn := buildModelRouterTask(cfg, reg, prov, providerAnthropic, cfg.Model); fn != nil {
+		t.Fatal("router task must be nil when the kill-switch (RouterDisabled) is set despite a taxonomy")
 	}
 }
 
@@ -157,7 +165,7 @@ func TestBuildModelRouterTaskFailSoftOnUnresolvableTarget(t *testing.T) {
 
 // foldOperatorModelRouter with no resolver (or no router block) is a no-op.
 func TestFoldOperatorModelRouterNoOpWithoutResolver(t *testing.T) {
-	cfg := Config{Model: "m", SubagentModelRouter: true}
+	cfg := Config{Model: "m"}
 	if got := foldOperatorModelRouter(cfg); got.RouterCategories != nil {
 		t.Fatal("foldOperatorModelRouter with no resolver must be a no-op")
 	}
@@ -220,39 +228,91 @@ models:
 	}
 }
 
-// logModelRouterFacts: enabled + no taxonomy → a WARN (the real operator-misconfig
-// signal); enabled + taxonomy → the ACTIVE INFO naming the category count + classifier.
+// foldOperatorModelRouter ORs the YAML `disabled:` kill-switch into cfg.RouterDisabled
+// (ADR 0042, mirroring foldOperatorGuardrails). A regression dropping the OR fails here.
+func TestFoldOperatorModelRouterFoldsDisabled(t *testing.T) {
+	const yamlCfg = `
+models:
+  router:
+    disabled: true
+    categories:
+      - name: good
+        description: a valid category
+        model: gpt-4o-mini
+`
+	path := filepath.Join(t.TempDir(), "router.yaml")
+	if err := os.WriteFile(path, []byte(yamlCfg), 0o600); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+	res := permconfig.New(permconfig.Options{ExplicitFiles: []string{path}})
+	if res == nil {
+		t.Fatal("resolver should be non-nil")
+	}
+	cfg := foldOperatorModelRouter(Config{Model: "m", permResolver: res})
+	if !cfg.RouterDisabled {
+		t.Fatal("models.router.disabled: true must OR into cfg.RouterDisabled")
+	}
+	if len(cfg.RouterCategories) != 1 {
+		t.Fatalf("the taxonomy must still fold (disabled is the kill-switch, not a parse drop); got %d categories", len(cfg.RouterCategories))
+	}
+
+	// A CLI kill-switch already set must STAY set when the YAML does not disable.
+	const enabledYAML = `
+models:
+  router:
+    categories:
+      - name: good
+        description: a valid category
+        model: gpt-4o-mini
+`
+	path2 := filepath.Join(t.TempDir(), "router2.yaml")
+	if err := os.WriteFile(path2, []byte(enabledYAML), 0o600); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+	res2 := permconfig.New(permconfig.Options{ExplicitFiles: []string{path2}})
+	cfg2 := foldOperatorModelRouter(Config{Model: "m", RouterDisabled: true, permResolver: res2})
+	if !cfg2.RouterDisabled {
+		t.Fatal("a CLI-set RouterDisabled must survive a fold of a non-disabled YAML (the two OR together)")
+	}
+}
+
+// logModelRouterFacts (ADR 0042): no taxonomy → SILENT; taxonomy + disabled → a one-time
+// DISABLED WARN; taxonomy + not disabled → the ACTIVE INFO (category count + classifier).
 func TestLogModelRouterFacts(t *testing.T) {
-	t.Run("flag set, no taxonomy → WARN", func(t *testing.T) {
+	t.Run("no taxonomy → silent", func(t *testing.T) {
 		diag := newCapturingDiagnostics()
-		logModelRouterFacts(Config{Model: "m", SubagentModelRouter: true, Diagnostics: diag})
-		if n := diag.countContaining("no models.router categories are configured"); n != 1 {
-			t.Fatalf("want 1 no-taxonomy WARN, got %d", n)
+		logModelRouterFacts(Config{Model: "m", Diagnostics: diag})
+		if n := diag.countContaining("model router"); n != 0 {
+			t.Fatalf("no taxonomy must be silent (byte-identical OFF), got %d lines", n)
+		}
+	})
+	t.Run("taxonomy + disabled → DISABLED WARN", func(t *testing.T) {
+		diag := newCapturingDiagnostics()
+		logModelRouterFacts(Config{
+			Model:            "m",
+			RouterDisabled:   true,
+			Diagnostics:      diag,
+			RouterCategories: []permconfig.RouterCategory{{Name: "small", Description: "x", Model: "gpt-4o-mini"}},
+		})
+		if n := diag.countContaining("subagent model router is DISABLED"); n != 1 {
+			t.Fatalf("want 1 DISABLED WARN when a taxonomy is kill-switched, got %d", n)
 		}
 		if n := diag.countContaining("model router ACTIVE"); n != 0 {
-			t.Fatalf("must NOT narrate ACTIVE without a taxonomy, got %d", n)
+			t.Fatalf("must NOT narrate ACTIVE when disabled, got %d", n)
 		}
 	})
-	t.Run("OFF → silent", func(t *testing.T) {
-		diag := newCapturingDiagnostics()
-		logModelRouterFacts(Config{Model: "m", SubagentModelRouter: false, Diagnostics: diag})
-		if n := diag.countContaining("model router"); n != 0 {
-			t.Fatalf("router OFF must be silent, got %d lines", n)
-		}
-	})
-	t.Run("enabled + taxonomy → ACTIVE naming the classifier model", func(t *testing.T) {
+	t.Run("taxonomy + not disabled → ACTIVE naming the classifier model", func(t *testing.T) {
 		// Use a slogdiag buffer (not the message-only capturingDiagnostics) so the
 		// structured `classifier` arg is rendered into the asserted line — the L1
 		// alignment fix is that the LOGGED classifier matches what a session classifies on.
 		var buf bytes.Buffer
 		diag := slogdiag.New(&buf, false, port.LevelDebug)
 		cfg := Config{
-			Model:               "session-model",
-			SubagentModelRouter: true,
-			Diagnostics:         diag,
-			ModelSlots:          map[string]string{slotRouter: "tiny"},
-			ModelAliases:        map[string]string{"tiny": "classifier-id-1.0"},
-			RouterCategories:    []permconfig.RouterCategory{{Name: "small", Description: "x", Model: "gpt-4o-mini"}},
+			Model:            "session-model",
+			Diagnostics:      diag,
+			ModelSlots:       map[string]string{slotRouter: "tiny"},
+			ModelAliases:     map[string]string{"tiny": "classifier-id-1.0"},
+			RouterCategories: []permconfig.RouterCategory{{Name: "small", Description: "x", Model: "gpt-4o-mini"}},
 		}
 		logModelRouterFacts(cfg)
 		log := buf.String()
@@ -264,6 +324,16 @@ func TestLogModelRouterFacts(t *testing.T) {
 		}
 		if !strings.Contains(log, "categories=1") {
 			t.Fatalf("the ACTIVE INFO must name the category count; got:\n%s", log)
+		}
+		// The ACTIVE line must carry the per-delegation spend hint (the silently-flipped-on
+		// operator's one cost signal).
+		if !strings.Contains(log, "extra classifier") {
+			t.Fatalf("the ACTIVE INFO must name the extra per-delegation classifier spend; got:\n%s", log)
+		}
+		// The DISABLED WARN must NOT fire on the enabled path (symmetry with the DISABLED
+		// subtree above, which asserts ACTIVE does not fire).
+		if strings.Contains(log, "subagent model router is DISABLED") {
+			t.Fatalf("the DISABLED WARN must NOT fire when a taxonomy is present and not disabled; got:\n%s", log)
 		}
 	})
 }
@@ -324,10 +394,10 @@ func TestRouterRoutesChildToClassifiedModelE2E(t *testing.T) {
 		models []string
 	)
 	built, err := Build(ctx, Config{
-		Workspace:           workspace,
-		NoSoul:              true,
-		Model:               "gpt-5",
-		SubagentModelRouter: true,
+		Workspace: workspace,
+		NoSoul:    true,
+		Model:     "gpt-5",
+		// ADR 0042: the taxonomy is the enable — no flag needed to turn the router on.
 		RouterCategories: []permconfig.RouterCategory{
 			{Name: "small", Description: "trivial tasks", Model: routerSmall},
 			{Name: "large", Description: "deep reasoning", Model: routerLarge},
@@ -380,9 +450,9 @@ func TestRouterRoutesChildToClassifiedModelE2E(t *testing.T) {
 	}
 }
 
-// END-TO-END byte-identical-when-OFF: with the router OFF (no flag), the SAME script
-// runs without a classifier turn — the child inherits the session model and NO request
-// carries a routed model. Proves OFF ⇒ no classifier call.
+// END-TO-END byte-identical-when-OFF: with the router OFF (no taxonomy, ADR 0042), the
+// SAME script runs without a classifier turn — the child inherits the session model and
+// NO request carries a routed model. Proves OFF ⇒ no classifier call.
 func TestRouterOffIsByteIdenticalE2E(t *testing.T) {
 	ctx := context.Background()
 	workspace := t.TempDir()
@@ -391,10 +461,10 @@ func TestRouterOffIsByteIdenticalE2E(t *testing.T) {
 		models []string
 	)
 	built, err := Build(ctx, Config{
-		Workspace:           workspace,
-		NoSoul:              true,
-		Model:               "gpt-5",
-		SubagentModelRouter: false, // OFF
+		Workspace: workspace,
+		NoSoul:    true,
+		Model:     "gpt-5",
+		// OFF (ADR 0042): no taxonomy ⇒ byte-identical to no router (no classifier call).
 		AllowAllTools:       true,
 		envDetector:         fakeEnv(map[string]string{"OPENAI_API_KEY": "sk-x"}),
 		liveModelHTTPClient: offlineHTTPClient(),

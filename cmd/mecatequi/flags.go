@@ -96,10 +96,14 @@ type flags struct {
 	subagentAskReviewerPolicyFile string
 	subagentAskReviewerPolicy     string
 
-	// Subagent model router (ADR 0031): OPT-IN enable gate for the semantic model
-	// router. The category taxonomy is operator-tier YAML (models.router:); this flag
-	// only turns it on. DEFAULT off (byte-identical to no router).
-	subagentModelRouter bool
+	// Subagent model router (ADR 0031; enable model per ADR 0042): the router is ENABLED
+	// by the operator-tier models.router: taxonomy (the guardrails-parity enable model).
+	// The --subagent-model-router flag is a KILL-SWITCH: subagentModelRouter holds its
+	// value, subagentModelRouterSet records whether it was given. =false sets
+	// RouterDisabled; a bare flag / =true is a harmless no-op (the router stays governed
+	// by the taxonomy); unset leaves routing governed by taxonomy presence.
+	subagentModelRouter    bool
+	subagentModelRouterSet bool
 
 	// Posture ladder (strict < trusted < auto < yolo). postureFlagSet records an
 	// explicit --posture so composition lets CLI out-rank the settings.yaml key.
@@ -154,7 +158,7 @@ func parseFlags(argv []string) (flags, error) {
 	fs.StringVar(&f.guardrailsMode, "guardrails", "", "GUARDRAILS master switch: pass --guardrails=off to force the checker OFF regardless of --guardrails-model / the YAML config")
 
 	fs.StringVar(&f.subagentAskReviewer, "subagent-ask-reviewer", "", "OPT-IN headless ask reviewer (issue #31): model id / alias of a tool-less one-turn reviewer adjudicating a child permission ask the headless auto-deny would otherwise reject. Empty disables it")
-	fs.BoolVar(&f.subagentModelRouter, "subagent-model-router", false, "OPT-IN semantic model router (ADR 0031): a tiny classifier on the `router` slot picks the child model per plain Subagent delegation from the operator-tier models.router: taxonomy. Fires before the child is minted (decide-once, same-provider); fail-soft to the inherited model on any miss. This flag is the ENABLE gate only; the taxonomy is operator-tier YAML. Default off (byte-identical to no router)")
+	fs.BoolVar(&f.subagentModelRouter, "subagent-model-router", false, "Semantic model router KILL-SWITCH (ADR 0042, superseding 0031's enable model): the router is ENABLED by an operator-tier models.router: category taxonomy (configure = enable, guardrails-parity), NOT by this flag. Pass --subagent-model-router=false to force it OFF despite a taxonomy (also models.router.disabled: true in YAML). When enabled, a tiny classifier on the `router` slot picks the child model per plain Subagent delegation before the child is minted (decide-once, same-provider); fail-soft to the inherited model on any miss")
 	fs.IntVar(&f.subagentAskReviewerMaxDenies, "subagent-ask-reviewer-max-denies", agent.DefaultAskReviewMaxDenies, "circuit breaker for --subagent-ask-reviewer: consecutive non-allow outcomes that disable the reviewer for the rest of the run; <=0 uses the default (3)")
 	fs.StringVar(&f.subagentAskReviewerPolicyFile, "subagent-ask-reviewer-policy", "", "path to a TRUSTED policy rubric file for --subagent-ask-reviewer; its CONTENT replaces the built-in rubric. Read once at startup; an unreadable file fails startup")
 
@@ -169,8 +173,13 @@ func parseFlags(argv []string) (flags, error) {
 	// Record whether --posture was set EXPLICITLY (vs the empty default) so
 	// composition lets CLI out-rank the operator-global settings.yaml posture: key.
 	fs.Visit(func(fl *flag.Flag) {
-		if fl.Name == "posture" {
+		switch fl.Name {
+		case "posture":
 			f.postureFlagSet = true
+		case "subagent-model-router":
+			// Tri-state kill-switch (ADR 0042): record that the flag was given so
+			// appConfig can distinguish unset / =false (kill-switch) / =true (inert).
+			f.subagentModelRouterSet = true
 		}
 	})
 
@@ -302,8 +311,11 @@ func appConfig(f flags, diag port.Diagnostics) app.Config {
 		GuardrailsModel:    f.guardrailsModel,
 		GuardrailsDisabled: f.guardrailsOff,
 
-		SubagentAskReviewerModel:     f.subagentAskReviewer,
-		SubagentModelRouter:          f.subagentModelRouter,
+		SubagentAskReviewerModel: f.subagentAskReviewer,
+		// Subagent model router (ADR 0042): kill-switch. =false forces the router OFF
+		// (RouterDisabled); a bare flag / =true is a harmless no-op (the router stays
+		// governed by the taxonomy); unset leaves routing governed by the taxonomy.
+		RouterDisabled:               f.subagentModelRouterSet && !f.subagentModelRouter,
 		SubagentAskReviewerMaxDenies: f.subagentAskReviewerMaxDenies,
 		SubagentAskReviewerPolicy:    f.subagentAskReviewerPolicy,
 

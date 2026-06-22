@@ -83,6 +83,18 @@ type config struct {
 	subagentAskReviewerMaxDenies  int
 	subagentAskReviewerPolicyFile string
 	subagentAskReviewerPolicy     string
+	// Subagent model router (ADR 0031; enable model per ADR 0042, embedded server
+	// only): the router is ENABLED by an operator-tier models.router: taxonomy in the
+	// user-global settings.yaml (the guardrails-parity enable model). The
+	// --subagent-model-router flag is a KILL-SWITCH: subagentModelRouter holds its value
+	// and subagentModelRouterSet records whether it was given. =false sets
+	// app.Config.RouterDisabled (forces the router OFF despite a taxonomy); a bare flag /
+	// =true is a harmless no-op (the router stays governed by the taxonomy); unset leaves
+	// routing governed by taxonomy presence. UNLIKE the ask-reviewer, the router is
+	// MEANINGFUL under mecatui — it picks the child's model before it runs, in both
+	// interactive and headless modes.
+	subagentModelRouter    bool
+	subagentModelRouterSet bool
 	// providerFlags holds the shared provider base-URL flags (cliconfig), applied onto
 	// app.Config when the embedded server is built. The resolved credential keys below
 	// are read via cliconfig too (one definition of the env-var names across the mains).
@@ -263,6 +275,7 @@ func parseFlags(args []string) (config, error) {
 	fs.StringVar(&cfg.subagentAskReviewer, "subagent-ask-reviewer", "", "embedded server only: OPT-IN headless ask reviewer (issue #31), accepted for symmetry with mecated but INERT under mecatui — mecatui runs INTERACTIVE (a human sits at the approval modal), so a subagent/member/branch permission ask SURFACES to that modal, never reaching the reviewer (which only fires on a headless server with no human). Model id of a tool-less ONE-TURN reviewer; empty (default) disables it; an unusable model id FAILS STARTUP. To actually use the reviewer, run a headless `mecated --headless --subagent-ask-reviewer ...` and point mecatui at it with --server")
 	fs.IntVar(&cfg.subagentAskReviewerMaxDenies, "subagent-ask-reviewer-max-denies", agent.DefaultAskReviewMaxDenies, "embedded server only: circuit breaker for --subagent-ask-reviewer (INERT under mecatui — see that flag). <=0 uses the default (3)")
 	fs.StringVar(&cfg.subagentAskReviewerPolicyFile, "subagent-ask-reviewer-policy", "", "embedded server only: path to a TRUSTED policy rubric file for --subagent-ask-reviewer (INERT under mecatui — see that flag). Empty keeps the built-in rubric. Read once at startup; an unreadable file FAILS STARTUP")
+	fs.BoolVar(&cfg.subagentModelRouter, "subagent-model-router", false, "embedded server only: Semantic model router KILL-SWITCH (ADR 0042, superseding 0031's enable model): the router is ENABLED by an operator-tier models.router: category taxonomy in the user-global settings.yaml (configure = enable, guardrails-parity), NOT by this flag. Pass --subagent-model-router=false to force it OFF despite a taxonomy (also models.router.disabled: true in YAML). When enabled, a tiny classifier on the `router` slot picks the child model per plain Subagent delegation before the child is minted (decide-once, same-provider); fail-soft to the inherited model on any miss. UNLIKE --subagent-ask-reviewer, the router IS meaningful under mecatui (it picks a model before the child runs, interactive and headless alike)")
 	// Shared provider base-URL flags (cliconfig); mecatui keeps its own help wording.
 	cfg.providerFlags = cliconfig.RegisterProviderFlags(fs, cliconfig.ProviderFlagHelp{
 		OpenAIBaseURL:     "override the OpenAI API base URL for the embedded server (compatible endpoints)",
@@ -309,8 +322,14 @@ func parseFlags(args []string) (config, error) {
 	// Record an explicit --posture so CLI out-ranks the operator-global settings.yaml
 	// posture: key (mirrors mecated).
 	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "posture" {
+		switch f.Name {
+		case "posture":
 			cfg.postureFlagSet = true
+		case "subagent-model-router":
+			// Kill-switch (ADR 0042): record that the flag was given so embeddedConfig can
+			// distinguish unset (router governed by the taxonomy) from =false (kill-switch)
+			// and =true/bare (a harmless no-op, the router stays governed by the taxonomy).
+			cfg.subagentModelRouterSet = true
 		}
 	})
 

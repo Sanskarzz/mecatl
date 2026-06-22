@@ -121,11 +121,14 @@ type ModelsSection struct {
 	// with a WARN (a project cannot widen its own cap).
 	Allowlist []string `yaml:"allowlist"`
 	// Router is the OPERATOR-TIER semantic Subagent model-router taxonomy (ADR 0031,
-	// Phase 5): a classifier slot, the routing categories, and the default category. It
-	// is operator-tier ONLY — a project-tier router: sub-block is STRIPPED with a WARN
-	// (the taxonomy is an autonomous-spend/capability decision the operator owns, like
-	// the allowlist). nil/absent = no taxonomy (the --subagent-model-router flag then
-	// WARNs once and stays OFF). The flag is the ENABLE gate; this is the taxonomy.
+	// Phase 5; enable model superseded by ADR 0042): a classifier slot, the routing
+	// categories, the default category, and the YAML kill-switch. It is operator-tier
+	// ONLY — a project-tier router: sub-block is STRIPPED with a WARN (the taxonomy is
+	// an autonomous-spend/capability decision the operator owns, like the allowlist).
+	// nil/absent = no taxonomy ⇒ the router is OFF (byte-identical, silent). Per ADR
+	// 0042 the TAXONOMY is the enable: a non-empty router: with categories turns the
+	// router ON unless `disabled: true` (or the CLI kill-switch) forces it off — the
+	// guardrails-parity enable model, replacing 0031's flag-to-enable.
 	Router *RouterSection `yaml:"router"`
 }
 
@@ -146,6 +149,12 @@ type RouterSection struct {
 	// DefaultCategory is the category the classifier is told to choose when none clearly
 	// fits (advisory to the classifier; the real safety net is the fail-soft inherit).
 	DefaultCategory string `yaml:"default-category"`
+	// Disabled is the YAML-level kill switch (ADR 0042, mirroring
+	// GuardrailsSection.Disabled): per ADR 0042 a non-empty taxonomy ENABLES the router,
+	// so `disabled: true` is the "taxonomy defined but temporarily off" override. The
+	// CLI kill-switch --subagent-model-router=false also sets it (the two OR together).
+	// Default false ⇒ the router is enabled whenever categories are present.
+	Disabled bool `yaml:"disabled"`
 }
 
 // RouterCategory is one routing category in the operator taxonomy (ADR 0031): a name,
@@ -164,36 +173,52 @@ type RouterCategory struct {
 	Model string `yaml:"model"`
 }
 
-// UnmarshalYAML decodes the models.router: mapping STRICTLY (ADR 0031): an unknown key
-// inside the router subtree is a parse error (same rationale as ModelsSection).
-func (r *RouterSection) UnmarshalYAML(node *yaml.Node) error {
-	return decodeStrictMapping(node, "models.router", map[string]any{
+// strictFields is the single binding map for the models.router: subtree — the ONE
+// authoritative key set both UnmarshalYAML (the parser) and the configgen drift guard
+// (via the test-only KnownKeys accessor) read, so they cannot diverge.
+func (r *RouterSection) strictFields() map[string]any {
+	return map[string]any{
 		"classifier-slot":  &r.ClassifierSlot,
 		"categories":       &r.Categories,
 		"default-category": &r.DefaultCategory,
-	})
+		"disabled":         &r.Disabled,
+	}
+}
+
+// UnmarshalYAML decodes the models.router: mapping STRICTLY (ADR 0031): an unknown key
+// inside the router subtree is a parse error (same rationale as ModelsSection).
+func (r *RouterSection) UnmarshalYAML(node *yaml.Node) error {
+	return decodeStrictMapping(node, "models.router", r.strictFields())
+}
+
+func (c *RouterCategory) strictFields() map[string]any {
+	return map[string]any{
+		"name":        &c.Name,
+		"description": &c.Description,
+		"model":       &c.Model,
+	}
 }
 
 // UnmarshalYAML decodes a router category mapping STRICTLY.
 func (c *RouterCategory) UnmarshalYAML(node *yaml.Node) error {
-	return decodeStrictMapping(node, "models.router.categories[]", map[string]any{
-		"name":        &c.Name,
-		"description": &c.Description,
-		"model":       &c.Model,
-	})
+	return decodeStrictMapping(node, "models.router.categories[]", c.strictFields())
+}
+
+func (m *ModelsSection) strictFields() map[string]any {
+	return map[string]any{
+		"slots":     &m.Slots,
+		"aliases":   &m.Aliases,
+		"default":   &m.Default,
+		"allowlist": &m.Allowlist,
+		"router":    &m.Router,
+	}
 }
 
 // UnmarshalYAML decodes the models: mapping STRICTLY (ADR 0030): an unknown key
 // inside the models subtree is a parse error — a typo like `slotz:` or `aliasez:`
 // must not silently drop a whole binding map. Same rationale as GuardrailsSection.
 func (m *ModelsSection) UnmarshalYAML(node *yaml.Node) error {
-	return decodeStrictMapping(node, "models", map[string]any{
-		"slots":     &m.Slots,
-		"aliases":   &m.Aliases,
-		"default":   &m.Default,
-		"allowlist": &m.Allowlist,
-		"router":    &m.Router,
-	})
+	return decodeStrictMapping(node, "models", m.strictFields())
 }
 
 // GuardrailsSection is the operator-tier `guardrails:` YAML subtree (issue #27): a
@@ -232,24 +257,32 @@ type GuardrailRuleSpec struct {
 // inside the guardrails subtree is a parse error — a typo like `moddel:` or `rulez:`
 // must not silently disable a guardrail. Same rationale as Permissions.UnmarshalYAML.
 func (g *GuardrailsSection) UnmarshalYAML(node *yaml.Node) error {
-	return decodeStrictMapping(node, "guardrails", map[string]any{
+	return decodeStrictMapping(node, "guardrails", g.strictFields())
+}
+
+func (g *GuardrailsSection) strictFields() map[string]any {
+	return map[string]any{
 		"model":           &g.Model,
 		"maxChecks":       &g.MaxChecks,
 		"minContentBytes": &g.MinContentBytes,
 		"disabled":        &g.Disabled,
 		"rules":           &g.Rules,
-	})
+	}
 }
 
-// UnmarshalYAML decodes a guardrails rule mapping STRICTLY.
-func (r *GuardrailRuleSpec) UnmarshalYAML(node *yaml.Node) error {
-	return decodeStrictMapping(node, "guardrails.rules[]", map[string]any{
+func (r *GuardrailRuleSpec) strictFields() map[string]any {
+	return map[string]any{
 		"match":      &r.Match,
 		"phases":     &r.Phases,
 		"mode":       &r.Mode,
 		"prompt":     &r.Prompt,
 		"failClosed": &r.FailClosed,
-	})
+	}
+}
+
+// UnmarshalYAML decodes a guardrails rule mapping STRICTLY.
+func (r *GuardrailRuleSpec) UnmarshalYAML(node *yaml.Node) error {
+	return decodeStrictMapping(node, "guardrails.rules[]", r.strictFields())
 }
 
 // Permissions is the three-bucket rule-spec set plus the child-scoped
@@ -298,22 +331,30 @@ type SubagentPermissions struct {
 // ignored config (a typo like `alow:` or `subagnet:` would otherwise disable a
 // whole rule list without a trace). The top level of Config stays lenient.
 func (p *Permissions) UnmarshalYAML(node *yaml.Node) error {
-	return decodeStrictMapping(node, "permissions", map[string]any{
+	return decodeStrictMapping(node, "permissions", p.strictFields())
+}
+
+func (p *Permissions) strictFields() map[string]any {
+	return map[string]any{
 		"allow":    &p.Allow,
 		"ask":      &p.Ask,
 		"deny":     &p.Deny,
 		"subagent": &p.Subagent,
-	})
+	}
+}
+
+func (s *SubagentPermissions) strictFields() map[string]any {
+	return map[string]any{
+		"allow": &s.Allow,
+		"ask":   &s.Ask,
+		"deny":  &s.Deny,
+	}
 }
 
 // UnmarshalYAML decodes the permissions.subagent: mapping STRICTLY — same
 // rationale as Permissions.UnmarshalYAML.
 func (s *SubagentPermissions) UnmarshalYAML(node *yaml.Node) error {
-	return decodeStrictMapping(node, "permissions.subagent", map[string]any{
-		"allow": &s.Allow,
-		"ask":   &s.Ask,
-		"deny":  &s.Deny,
-	})
+	return decodeStrictMapping(node, "permissions.subagent", s.strictFields())
 }
 
 // decodeStrictMapping walks a YAML mapping node and decodes each known key's

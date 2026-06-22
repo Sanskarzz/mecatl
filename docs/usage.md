@@ -350,7 +350,7 @@ mailbox). See the delegation-capabilities note below.
 | `--subagent-ask-reviewer` | `""` | **OPT-IN headless ask reviewer**: model id or `--model-alias` of a tool-less ONE-TURN reviewer that adjudicates a **headless** subagent/member/branch permission ask the 4-step model would otherwise blanket auto-deny. **Requires `--headless`** (on an interactive server — including the `mecatui` embedded server — it is inert: asks surface to the client/modal instead). An allow approves **this call only** (never learned); a deny — or any reviewer error/timeout/ambiguity — keeps the call denied (**fail-safe**); each adjudication is **one extra LLM call** on the reviewer model. Configured `deny`/`ask` rules always win. The gRPC `RunTeam`-direct path is **excluded** (it runs zero-caps — no reviewer). Resolved on the **session's provider** (same-provider only). Empty (default) disables it; an unusable model id **fails startup** (validated even when inert). Deliberately a **server flag, not a permission-config key** — see the permissions section. A configured `ask-reviewer` **model slot** (`--model-slot ask-reviewer=…`) **supersedes** this flag's model, but the flag stays the on/off gate. `mecatui` accepts the same flag for its embedded server but it is inert there (the embedded server is interactive). |
 | `--subagent-ask-reviewer-max-denies` | `3` | circuit breaker for the reviewer: after this many **consecutive** non-allow reviewer outcomes (denies/failures/timeouts) within one run, further asks skip the reviewer and fall through to the plain auto-deny; an allow resets the count. |
 | `--subagent-ask-reviewer-policy` | `""` | path to a **TRUSTED** policy rubric file; its content replaces the built-in rubric the reviewer applies. The built-in rubric (allow only clearly read-only or standard build/vet/test commands; deny anything that mutates shared state, touches the network/credentials, or whose effect is unclear) lives in `defaultAskReviewPolicy` (`engine/agent/askadjudicator.go`); a custom file is **plain prose** in the same style. Read once at startup; an unreadable file **fails startup**. |
-| `--subagent-model-router` | `false` | **OPT-IN semantic model router** ([ADR 0031](adr/0031-subagent-model-router.md), extended to team members + Parallel branches by [ADR 0034](adr/0034-team-parallel-model-routing.md)): when set, a tiny one-turn classifier (on the `router` model slot) reads a delegation's task prompt and the operator's category taxonomy and picks which model the child runs on — for a **plain** `Subagent` delegation, for each **plain undefined agent-team member** (classified once at enrolment off its role briefing; a member with an agent def pins its own model), and for each **Parallel branch**. The taxonomy (categories + per-category model + a default) lives in the **operator-tier** `settings.yaml` `models.router:` subtree (a project-tier `router:` is stripped with a WARN); this flag is **only the enable gate**. It fires **before** the child is minted (decide-once, commit-for-lifetime, same-provider) and **only** to fill the gap — an explicit per-call `model`/`agent`, a `fork`, a `resume`, or a member's agent def already pins the engine (precedence: per-call `model` > agent-def `Model` > fork/resume > router > inherited default). **Fail-soft**: any classifier failure, an unknown category, an unresolvable target, or a per-run circuit breaker (3 consecutive misses, **shared** across all three families) → the inherited default model. Runs in **both** interactive and headless deployments; the gRPC `RunTeam` direct path is zero-caps and never routes. Empty/false (default) = **OFF, byte-identical** to no router. Deliberately a **server flag, not a permission-config key** — autonomous per-delegation model selection is an operator deployment decision. `mecatui` accepts the same flag for its embedded server. |
+| `--subagent-model-router` | _(kill-switch)_ | **Semantic model router KILL-SWITCH** ([ADR 0042](adr/0042-taxonomy-gated-model-router.md), superseding [ADR 0031](adr/0031-subagent-model-router.md)'s enable model; extended to team members + Parallel branches by [ADR 0034](adr/0034-team-parallel-model-routing.md)). The router is **enabled by configuring** a `models.router:` category taxonomy in the **operator-tier** `settings.yaml` (the guardrails-parity model — configure = enable), **not** by this flag. Pass **`--subagent-model-router=false`** to force the router OFF despite a taxonomy (the kill-switch; equivalently `models.router.disabled: true` in YAML — the two combine). A **bare `--subagent-model-router` / `=true`** is a harmless no-op: it still parses but neither enables nor disables (the router stays governed by the taxonomy). When enabled, a tiny one-turn classifier (on the `router` model slot) reads a delegation's task prompt and the operator's category taxonomy and picks which model the child runs on — for a **plain** `Subagent` delegation, for each **plain undefined agent-team member** (classified once at enrolment off its role briefing; a member with an agent def pins its own model), and for each **Parallel branch**. It fires **before** the child is minted (decide-once, commit-for-lifetime, same-provider) and **only** to fill the gap — an explicit per-call `model`/`agent`, a `fork`, a `resume`, or a member's agent def already pins the engine (precedence: per-call `model` > agent-def `Model` > fork/resume > router > inherited default). **Fail-soft**: any classifier failure, an unknown category, an unresolvable target, or a per-run circuit breaker (3 consecutive misses, **shared** across all three families) → the inherited default model. Runs in **both** interactive and headless deployments; the gRPC `RunTeam` direct path is zero-caps and never routes. No taxonomy (default) = **OFF, byte-identical** to no router. `mecatui` accepts the same flag for its embedded server (a taxonomy in the operator-global `settings.yaml` enables it for every binary, no per-binary flag needed), and honours `--subagent-model-router=false` for the embedded server too, for parity. |
 | `--agents-dir` | `""` | directory of named **agent definitions** (`<name>.md` + YAML frontmatter — `name`/`description`/`tools`/`model`/`provider`/`permissionMode`/`maxTurns`/`maxToolCalls`/`color`/`skills`/`mcpServers`/`hooks`/`memory`; full reference in `docs/adr/0013-agent-definitions.md`), reusable as a `Subagent(agent=<name>)` delegate and as a team-member role (repeatable; highest precedence). **TRUST BOUNDARY:** a def body steers the model like `AGENTS.md`/`CLAUDE.md`. A `memory: user\|project` field (issue #33) injects a per-agent `MEMORY.md` head into the def's prompt at startup (READ-ONLY in v1); the **project** tier is **`--trust-project`-gated** (it points into the attacker-controllable workspace). |
 | `--agents-conventional` | `true` | also discover agent defs from the conventional locations (`<workspace>/.mecatl/agents`, `<workspace>/.claude/agents`, `$XDG_CONFIG_HOME/mecatl/agents`, `~/.claude/agents`; lower precedence than `--agents-dir`). ON and **inert** until such a dir exists. Project-tier defs are **trust-gated** (`--trust-project`). |
 | `--model-alias` | `""` | model alias mapping `name=model-id` (repeatable), resolved only in composition — an agent def's `model: <alias>`, a `--model-slot` selector, and `--subagent-model` all resolve through this map (then the built-in sonnet/opus/haiku aliases). |
@@ -1108,7 +1108,7 @@ Model selection is a stack of independent mechanisms. Pick the one(s) you need:
 | Short names for models you reference often | `models.aliases:` |
 | Cheaper compaction / guardrail / ask-reviewer calls | `models.slots:` (`compaction`/`guardrail`/`ask-reviewer`) |
 | Plan on a strong model, execute on a cheaper one | `models.slots: plan:` (the opusplan pattern) |
-| Pick a subagent's model per task automatically | `--subagent-model-router` + `models.router:` |
+| Pick a subagent's model per task automatically | `models.router:` (a taxonomy enables it; `--subagent-model-router=false` is the off-switch) |
 | Let a trusted repo re-bind models within your cap | `models.allowlist:` + a project `.mecatl/settings.yaml` |
 
 A complete tiered setup on one provider (here, OpenRouter — model selection only
@@ -1128,7 +1128,8 @@ models:
     ask-reviewer: quick
     plan: heavy            # plan-mode turns swap to the heavy model
     router: quick          # the classifier itself
-  router:                  # pick a subagent's model per task (needs --subagent-model-router)
+  router:                  # pick a subagent's model per task (a taxonomy enables it; ADR 0042)
+    # disabled: true        # optional kill-switch: keep the taxonomy but turn routing off
     default-category: medium
     categories:
       - name: large
@@ -1142,12 +1143,15 @@ models:
         model: quick
 ```
 
-Launch with `mecated --subagent-model-router` (the flag is the router's enable gate).
-With nothing configured, every call keeps the session model — the default is
-byte-identical.
+Defining the `models.router:` taxonomy above is all it takes to enable the router
+(ADR 0042 — configure = enable, the guardrails-parity model). To keep the taxonomy but
+turn routing off, set `models.router.disabled: true` or launch with
+`mecated --subagent-model-router=false` (the kill-switch). With no `models.router:` block
+at all, every call keeps the session model — the default is byte-identical.
 
 **Verifying it's wired.** On startup mecated logs one build-once fact per active slot
-(`model slot ACTIVE`) and, when the router is enabled, `subagent model router ACTIVE`.
+(`model slot ACTIVE`) and, when the router is enabled, `subagent model router ACTIVE`
+(or a `DISABLED` WARN if a taxonomy is present but the kill-switch is set).
 Check the mecated log (stderr, or `$XDG_STATE_HOME/mecatl/mecatui.log` under mecatui)
 for those lines. A slot that failed to resolve WARNs and degrades to the session model,
 so a missing `ACTIVE` line is the signal something didn't bind.
@@ -1206,11 +1210,14 @@ models:
   allowlist (next subsection). Team synthesis is a later ADR-0030 layer, not yet wired;
   the subagent **router** shipped in Phase 5 (below).
 
-#### The subagent model router (`models.router:`, ADR 0031)
+#### The subagent model router (`models.router:`, ADR 0031, enable model ADR 0042)
 
-The **OPT-IN semantic model router** picks which model a `Subagent` delegation runs on,
-**per task**, from a category menu you define. Turn it on with the
-`--subagent-model-router` flag (the enable gate); define the taxonomy in the
+The **semantic model router** picks which model a `Subagent` delegation runs on,
+**per task**, from a category menu you define. **Defining the `models.router:` taxonomy
+enables it** ([ADR 0042](adr/0042-taxonomy-gated-model-router.md) — configure = enable,
+the same model as guardrails); there is no enable flag to forget. To keep the taxonomy but
+turn routing off, set `disabled: true` in the subtree (or launch with
+`--subagent-model-router=false` — the two combine). Define the taxonomy in the
 **operator-tier** `models.router:` subtree:
 
 ```yaml
@@ -1222,6 +1229,7 @@ models:
   slots:
     router: cheap            # the CLASSIFIER itself runs on this slot (default: cheap tier)
   router:
+    # disabled: true         # optional kill-switch: keep the taxonomy but turn routing off (ADR 0042)
     classifier-slot: cheap   # optional; overrides the `router` slot for the classifier model
     default-category: small  # what the classifier picks when none clearly fits
     categories:
@@ -1246,10 +1254,12 @@ models:
   alias map (operator targets are **uncapped** — the operator is authoritative).
 - **Fail-soft + breaker**: any classifier failure, an unknown/hallucinated category, or
   an unresolvable target → the inherited default model; a per-run breaker (3 consecutive
-  misses) skips the classifier for the rest of the run. **OFF (no flag / no taxonomy) is
-  byte-identical** to no router.
+  misses) skips the classifier for the rest of the run. **OFF (no taxonomy, or the
+  kill-switch) is byte-identical** to no router.
 - It runs in **both** interactive and headless deployments, and the gRPC `RunTeam`-direct
-  path is excluded (zero-caps). See [ADR 0031](adr/0031-subagent-model-router.md).
+  path is excluded (zero-caps). See [ADR 0031](adr/0031-subagent-model-router.md) (the
+  router) and [ADR 0042](adr/0042-taxonomy-gated-model-router.md) (the taxonomy-gated
+  enable model).
 - **Cost note (CWE-770):** an untrusted/peer-injected task prompt can **steer** the
   classifier toward your most-expensive category (the breaker only counts *misses*, not
   steered-but-valid classifications). It is **bounded** — the router can only pick from
@@ -2241,6 +2251,23 @@ only JSON-RPC frames.
 
 ## 6. Configuration
 
+### Scaffolding a settings file (`config init`)
+
+The operator-tier config lives at `<XDG_CONFIG_HOME>/mecatl/settings.yaml`
+(default `~/.config/mecatl/settings.yaml`). To scaffold a fully-commented
+skeleton with every subtree and its exact enable semantics:
+
+```console
+$ mecated config init            # writes ~/.config/mecatl/settings.yaml (refuses if it exists)
+$ mecated config init --print    # print the skeleton to stdout, write nothing
+$ mecated config init --force    # overwrite an existing file
+```
+
+For the exhaustive, auto-generated key/type/default/tier table, see the
+[configuration reference](configuration-reference.md). The inline examples in
+this guide are illustrative; the reference page is the complete source of truth
+(generated from the schema, so it never drifts).
+
 ### Workspace
 
 `--workspace` (server-wide default) and the per-session `workspace` field set
@@ -3209,6 +3236,7 @@ $ jq . DIR/8867….events.jsonl
 
 ## See also
 
+- [Configuration reference](configuration-reference.md) — the exhaustive, auto-generated `settings.yaml` key/type/default/tier table.
 - [Architecture guide](architecture.md) — how the harness works under these flags: layers, the loop, ports, the API surface.
 - [mecatui terminal UI](tui.md) — the terminal client for the server this guide runs.
 - [ADR 0001 — the ACP adapter](adr/0001-acp-adapter.md) — the editor (`--acp`) wire surface in depth.

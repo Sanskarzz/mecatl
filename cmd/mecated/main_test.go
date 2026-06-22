@@ -85,23 +85,46 @@ func TestRunSkillsPromote(t *testing.T) {
 	})
 }
 
-// sanity: the skills-draft-dir flag parses and the threshold default is wired.
-// TestParseFlagsSubagentModelRouter asserts the ADR 0031 enable gate parses (default
-// OFF; --subagent-model-router sets it).
+// TestParseFlagsSubagentModelRouter asserts the ADR 0042 kill-switch parses:
+// unset → not set (router governed by taxonomy); a bare flag / =true still PARSES and is
+// a harmless no-op (router stays governed by taxonomy); =false maps to RouterDisabled via
+// appConfig.
 func TestParseFlagsSubagentModelRouter(t *testing.T) {
 	def, err := parseFlags(nil)
 	if err != nil {
 		t.Fatalf("parseFlags(nil): %v", err)
 	}
-	if def.subagentModelRouter {
-		t.Error("subagentModelRouter default = true, want false (OFF, byte-identical)")
+	if def.subagentModelRouterSet {
+		t.Error("subagentModelRouterSet default = true, want false (flag not given → router governed by taxonomy)")
 	}
-	on, err := parseFlags([]string{"--subagent-model-router"})
+
+	// A bare invocation must still PARSE without error.
+	bare, err := parseFlags([]string{"--subagent-model-router"})
 	if err != nil {
-		t.Fatalf("parseFlags: %v", err)
+		t.Fatalf("bare --subagent-model-router must parse: %v", err)
 	}
-	if !on.subagentModelRouter {
-		t.Error("--subagent-model-router must set subagentModelRouter true")
+	if !bare.subagentModelRouterSet || !bare.subagentModelRouter {
+		t.Error("--subagent-model-router (bare) must record set=true value=true")
+	}
+	// A bare flag / =true is a no-op: it must NOT disable the router (taxonomy governs).
+	if cfg := appConfig(bare, nil, nil, nil, nil); cfg.RouterDisabled {
+		t.Error("a bare --subagent-model-router must leave RouterDisabled false")
+	}
+
+	// =false is the kill-switch: it must map to RouterDisabled in app.Config.
+	off, err := parseFlags([]string{"--subagent-model-router=false"})
+	if err != nil {
+		t.Fatalf("parseFlags --subagent-model-router=false: %v", err)
+	}
+	if !off.subagentModelRouterSet || off.subagentModelRouter {
+		t.Error("--subagent-model-router=false must record set=true value=false")
+	}
+	if cfg := appConfig(off, nil, nil, nil, nil); !cfg.RouterDisabled {
+		t.Error("--subagent-model-router=false must set RouterDisabled (the kill-switch)")
+	}
+	// Unset → RouterDisabled false (router governed by taxonomy presence).
+	if cfg := appConfig(def, nil, nil, nil, nil); cfg.RouterDisabled {
+		t.Error("an unset --subagent-model-router must leave RouterDisabled false")
 	}
 }
 

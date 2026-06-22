@@ -273,22 +273,27 @@ never capped (the operator is authoritative). See
 
 ## The semantic model router (Phase 5)
 
-The **OPT-IN semantic model router** ([ADR 0031](../adr/0031-subagent-model-router.md),
-extended by [ADR 0034](../adr/0034-team-parallel-model-routing.md)) picks which model a
-delegation runs on, **per task**, from an operator-defined menu. ADR 0031 shipped it for
-the `Subagent` family; ADR 0034 extended it to **agent-team members** and **Parallel
-branches** — the same operator taxonomy and `--subagent-model-router` enable flag govern all
-three. It is the Phase-5 realisation of ADR 0030's deferred "Layer 3b" — built as a sibling
-of the headless ask reviewer and the guardrail checker, not as new architecture.
+The **semantic model router** ([ADR 0031](../adr/0031-subagent-model-router.md), enable
+model [ADR 0042](../adr/0042-taxonomy-gated-model-router.md), extended by
+[ADR 0034](../adr/0034-team-parallel-model-routing.md)) picks which model a delegation runs
+on, **per task**, from an operator-defined menu. ADR 0031 shipped it for the `Subagent`
+family; ADR 0034 extended it to **agent-team members** and **Parallel branches** — the same
+operator taxonomy and enable model govern all three. It is the Phase-5 realisation of ADR
+0030's deferred "Layer 3b" — built as a sibling of the headless ask reviewer and the
+guardrail checker, not as new architecture.
 
-**Taxonomy + enable gate.** The operator defines categories in the user-global
-`settings.yaml` `models.router:` subtree — each a `name`, a one-line `description` the
-classifier reads, and a `model` selector (alias / slot / concrete id). A
-`--subagent-model-router` **flag** is the enable gate (deliberately NOT a permconfig key —
-autonomous per-delegation model selection is an operator deployment decision, the same
-posture as `--subagent-ask-reviewer`). A project-tier `models.router:` is **stripped with a
-WARN** (operator-tier only). The classifier itself runs on the `router` model slot
-(default `cheap` tier; an operator `classifier-slot` overrides) — a tiny one-turn call.
+**Taxonomy enables; a kill-switch disables (ADR 0042).** The operator defines categories
+in the user-global `settings.yaml` `models.router:` subtree — each a `name`, a one-line
+`description` the classifier reads, and a `model` selector (alias / slot / concrete id).
+**Defining a non-empty taxonomy ENABLES the router** — the guardrails-parity model
+(configure = enable), replacing ADR 0031's flag-to-enable gate. To keep the taxonomy but
+turn routing off, set `disabled: true` in the subtree or pass
+`--subagent-model-router=false` (the two combine into `cfg.RouterDisabled`); a bare
+`--subagent-model-router` / `=true` is a harmless no-op (it still parses but neither
+enables nor disables — the router stays governed by the taxonomy). A project-tier
+`models.router:` is **stripped with a WARN**
+(operator-tier only). The classifier itself runs on the `router` model slot (default
+`cheap` tier; an operator `classifier-slot` overrides) — a tiny one-turn call.
 
 **How it fires.** For a **plain** default delegation only (no per-call `model`, no `agent`,
 no `fork`, no `resume` — those already pin the engine), the `Subagent` `run()` hook calls a
@@ -311,8 +316,8 @@ delegation inherits the default explorer model. A per-run circuit breaker (defau
 consecutive misses, mirroring the ask-reviewer breaker) opens after repeated misses and
 skips the classifier for the rest of the run; a success resets it. Its mutex serialises
 classifications within a run, so a Subagent fan-out cannot multiply classifier spend.
-**OFF (no flag / no taxonomy) is byte-identical** — no classifier call, the inherited
-model. **No nesting:** a child has no `Subagent` tool, and `childEngineDepsForProvider`
+**OFF (no taxonomy, or the kill-switch) is byte-identical** — no classifier call, the
+inherited model. **No nesting:** a child has no `Subagent` tool, and `childEngineDepsForProvider`
 forces `Deps.SubagentModelRouter` nil. It runs in **both** interactive and headless
 deployments (it is orthogonal to the ask-review path).
 

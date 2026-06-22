@@ -490,9 +490,11 @@ func capResolve(cfg Config, sel string, allowed map[string]struct{}) (string, bo
 // captureProjectModels). It is FAIL-SOFT: a category with an empty name OR an empty
 // description OR an empty model selector is WARN-dropped (a category the classifier
 // cannot name/describe, or that maps to nothing, is useless) — the rest still load.
-// cfg.SubagentModelRouter (the --subagent-model-router enable FLAG) is untouched here:
-// this fold only supplies the taxonomy; the flag gates ON/OFF. A no-taxonomy operator
-// (no router: block) leaves cfg byte-identical. cfg is taken/returned by value.
+// ADR 0042 (superseding 0031's enable model): the TAXONOMY enables the router, so this
+// fold ALSO ORs the YAML `disabled:` kill-switch onto cfg.RouterDisabled (mirroring
+// foldOperatorGuardrails' Disabled handling) — the CLI kill-switch sets the same field,
+// the two combine. A no-taxonomy operator (no router: block) leaves cfg byte-identical.
+// cfg is taken/returned by value.
 func foldOperatorModelRouter(cfg Config) Config {
 	res, ok := cfg.permResolver.(*permconfig.Resolver)
 	if !ok || res == nil {
@@ -503,6 +505,11 @@ func foldOperatorModelRouter(cfg Config) Config {
 		return cfg
 	}
 	router := policy.Router
+	// Disabled: OR the YAML kill-switch with the CLI one (either disables) — ADR 0042,
+	// mirroring foldOperatorGuardrails.
+	if router.Disabled {
+		cfg.RouterDisabled = true
+	}
 	cfg.RouterClassifierSlot = strings.TrimSpace(router.ClassifierSlot)
 	cfg.RouterDefaultCategory = strings.TrimSpace(router.DefaultCategory)
 	cfg.RouterCategories = nil
@@ -592,20 +599,26 @@ func logSlotConfigFacts(cfg Config) {
 	}
 }
 
-// logModelRouterFacts emits the build-once Subagent-model-router fact (ADR 0031)
-// EXACTLY ONCE through cfg.diag(): an INFO "model router ACTIVE" when the enable flag is
-// set AND a taxonomy exists, or a one-time WARN when the flag is set but NO taxonomy was
-// configured (a flag without categories cannot route — it stays OFF). When the flag is
-// OFF it logs nothing (byte-identical to pre-feature). Build-once ONLY (never per-engine
-// — the no-per-derivation-duplication rule; the "loop emits exactly THREE lines"
-// invariant holds, this is a Build fact not a loop line).
+// logModelRouterFacts emits the build-once Subagent-model-router fact (ADR 0031; enable
+// model per ADR 0042) EXACTLY ONCE through cfg.diag(). Per ADR 0042 the TAXONOMY is the
+// enable, so:
+//   - no taxonomy (len(RouterCategories)==0)        → SILENT (byte-identical OFF; the
+//     0031 "flag set but no taxonomy" WARN is GONE — there is no enable flag anymore).
+//   - taxonomy present + cfg.RouterDisabled          → a one-time WARN: the taxonomy is
+//     configured but the kill-switch (CLI --subagent-model-router=false or the YAML
+//     models.router.disabled) forces it OFF, so no routing happens.
+//   - taxonomy present + not disabled                → the "subagent model router ACTIVE"
+//     INFO (category count + classifier model).
+//
+// Build-once ONLY (never per-engine — the no-per-derivation-duplication rule; the "loop
+// emits exactly THREE lines" invariant holds, this is a Build fact not a loop line).
 func logModelRouterFacts(cfg Config) {
-	if !cfg.SubagentModelRouter {
-		return // OFF: byte-identical, silent.
-	}
 	if len(cfg.RouterCategories) == 0 {
+		return // No taxonomy: byte-identical, silent (ADR 0042 — taxonomy is the enable).
+	}
+	if cfg.RouterDisabled {
 		cfg.diag().Log(context.Background(), port.LevelWarn,
-			"--subagent-model-router was set but no models.router categories are configured; the router is OFF (set models.router in your user-global settings.yaml)")
+			"models.router taxonomy is configured but the subagent model router is DISABLED (kill-switch: --subagent-model-router=false or models.router.disabled: true); no per-delegation routing happens")
 		return
 	}
 	// Resolve the classifier model the SAME way buildModelRouterTask does (shared
@@ -616,7 +629,7 @@ func logModelRouterFacts(cfg Config) {
 	// shared-engine narration, like logSlotConfigFacts).
 	classifier := resolveRouterClassifierModel(cfg, cfg.Model)
 	cfg.diag().Log(context.Background(), port.LevelInfo,
-		"subagent model router ACTIVE: a tiny classifier picks the child model per delegation from the operator taxonomy",
+		"subagent model router ACTIVE: a tiny classifier picks the child model per delegation from the operator taxonomy — this adds one extra classifier LLM call per plain delegation (bounded by --max-run-tokens; set models.router.disabled or --subagent-model-router=false to turn it off)",
 		"categories", len(cfg.RouterCategories), "classifier", classifier, "default_category", cfg.RouterDefaultCategory)
 }
 

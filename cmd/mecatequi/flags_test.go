@@ -227,22 +227,31 @@ func TestAppConfigMapping(t *testing.T) {
 		}
 	})
 
-	t.Run("subagent-model-router flag", func(t *testing.T) {
-		// Default OFF.
+	t.Run("subagent-model-router kill-switch (ADR 0042)", func(t *testing.T) {
+		// Unset → router governed by the taxonomy (RouterDisabled false).
 		f, err := parseFlags([]string{"--prompt", "x"})
 		if err != nil {
 			t.Fatalf("parseFlags: %v", err)
 		}
-		if appConfig(f, newDiagnostics()).SubagentModelRouter {
-			t.Error("SubagentModelRouter must default OFF")
+		if appConfig(f, newDiagnostics()).RouterDisabled {
+			t.Error("an unset --subagent-model-router must leave RouterDisabled false (router governed by taxonomy)")
 		}
-		// Set ON.
+		// A bare invocation must still PARSE; it is a harmless no-op and must NOT disable
+		// the router (taxonomy governs).
 		f, err = parseFlags([]string{"--prompt", "x", "--subagent-model-router"})
 		if err != nil {
-			t.Fatalf("parseFlags: %v", err)
+			t.Fatalf("bare --subagent-model-router must parse: %v", err)
 		}
-		if !appConfig(f, newDiagnostics()).SubagentModelRouter {
-			t.Error("--subagent-model-router must set SubagentModelRouter true")
+		if appConfig(f, newDiagnostics()).RouterDisabled {
+			t.Error("a bare --subagent-model-router must NOT set RouterDisabled")
+		}
+		// =false is the kill-switch → RouterDisabled.
+		f, err = parseFlags([]string{"--prompt", "x", "--subagent-model-router=false"})
+		if err != nil {
+			t.Fatalf("parseFlags --subagent-model-router=false: %v", err)
+		}
+		if !appConfig(f, newDiagnostics()).RouterDisabled {
+			t.Error("--subagent-model-router=false must set RouterDisabled (the kill-switch)")
 		}
 	})
 

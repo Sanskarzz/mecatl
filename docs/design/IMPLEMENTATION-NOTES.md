@@ -574,8 +574,9 @@ the session struct + a per-classification INFO + the proto/client wire
 gRPC + HTTP and rendered by mecatui).
 
 COMPOSITION half: `buildModelRouterTask` (`internal/app/build.go`, sibling of `buildAskAdjudicator`)
-returns the `Deps.SubagentModelRouter` closure — nil when OFF (`!cfg.SubagentModelRouter ||
-len(cfg.RouterCategories)==0`, byte-identical). It resolves the classifier model via the SHARED
+returns the `Deps.SubagentModelRouter` closure — nil when OFF (`cfg.RouterDisabled ||
+len(cfg.RouterCategories)==0`, byte-identical; ADR 0042 — the TAXONOMY is the enable, a
+kill-switch disables). It resolves the classifier model via the SHARED
 `resolveRouterClassifierModel(cfg, parentModel)` (classifier-slot wins; else the `router` slot,
 default cheap; else parentModel) — the SAME helper `logModelRouterFacts` calls so the logged
 classifier matches what a session classifies on. ENGINE LIFETIME deviation from the ask-adjudicator:
@@ -588,20 +589,33 @@ calls `RunModelRouter`, then maps the category's `Model` selector through `looku
 like `attachAskAdjudicator`;
 `childEngineDepsForProvider` forces `Deps.SubagentModelRouter` nil (no nesting — the classifier is
 built through that path). `foldOperatorModelRouter` (`internal/app/slots.go`) folds the operator-tier
-`models.router:` (categories/default/classifier-slot) onto cfg, WARN-dropping a malformed category;
-the `slotRouter` slot is added to `knownSlotNames`/`slotDefaultTier`(cheap)/`logSlotConfigFacts`;
-`logModelRouterFacts` is the Build-once ACTIVE/inert narration. CONFIG: `permconfig.ModelsSection`
-gains `Router *RouterSection` (strict-parsed; `RouterSection`/`RouterCategory` strict too); a
-PROJECT-tier `router:` is stripped with a WARN in `captureProjectModels` (operator-tier only). The
-`--subagent-model-router` FLAG (both mains) is the enable gate, deliberately NOT a permconfig key.
+`models.router:` (categories/default/classifier-slot) onto cfg, WARN-dropping a malformed category,
+AND (ADR 0042) ORs the YAML `disabled:` kill-switch onto `cfg.RouterDisabled` (mirroring
+`foldOperatorGuardrails`); the `slotRouter` slot is added to
+`knownSlotNames`/`slotDefaultTier`(cheap)/`logSlotConfigFacts`; `logModelRouterFacts` is the
+Build-once narration — SILENT with no taxonomy, a DISABLED WARN when a taxonomy is kill-switched,
+the ACTIVE INFO otherwise (the old "flag set but no taxonomy → WARN" state is GONE). CONFIG:
+`permconfig.ModelsSection` gains `Router *RouterSection` (strict-parsed; `RouterSection` now carries
+`Disabled bool` `yaml:"disabled"` mirroring `GuardrailsSection.Disabled`; `RouterCategory` strict
+too); a PROJECT-tier `router:` is stripped with a WARN in `captureProjectModels` (operator-tier only).
+**ENABLE MODEL (ADR 0042, superseding 0031):** the TAXONOMY is the enable (configure = enable,
+guardrails-parity). `app.Config` carries `RouterDisabled` (NOT a `SubagentModelRouter` enable bool —
+that field was REMOVED as dead code) = OR of the YAML `disabled:` key and the CLI kill-switch. The
+`--subagent-model-router` FLAG (both mains) is a KILL-SWITCH detected via `fs.Visit`:
+unset ⇒ governed by the taxonomy; `=false` ⇒ `RouterDisabled=true`; bare/`=true` ⇒ a harmless
+no-op (the router stays governed by the taxonomy — the feature is PRE-ADOPTION, so no
+deprecation/backward-compat concern; the bare form neither enables nor disables).
 Guards: `engine/agent` `TestRunModelRouter*` + `TestRun(RouteTask|ExplicitModel|Fork|NilRouteTask)*`
 + `TestRunNamedAgentBeatsRouter` + `TestRunResumeDoesNotRoute` (the precedence-gate guards) +
 `TestRouterBreaker*` (incl. `TestRouterBreakerSerializesConcurrentCalls` under -race); `app`
-`TestBuildModelRouterTask*` + `TestFoldOperatorModelRouterDropsMalformed` + `TestLogModelRouterFacts`
+`TestBuildModelRouterTask*` (incl. `TestBuildModelRouterTaskOffWhenDisabled` — taxonomy ON,
+empty/kill-switch OFF) + `TestFoldOperatorModelRouterDropsMalformed` +
+`TestFoldOperatorModelRouterFoldsDisabled` + `TestLogModelRouterFacts` (silent/DISABLED/ACTIVE)
 + `TestRouterClassifierRunsOnSlotModel` + `TestRouterRoutesChildToClassifiedModelE2E` (asserts the
 parent→classifier→child→parent request POSITIONS) + `TestRouterOffIsByteIdenticalE2E`; `permconfig`
-`TestOperatorRouterParsed` + `TestProjectRouterStrippedWithWarn` + `TestRouterStrictUnknownKeyRejected`;
-flag parse `TestParseFlagsSubagentModelRouter` (mecated) + the mecatequi router subtest.
+`TestOperatorRouterParsed` + `TestOperatorRouterDisabledParsed` + `TestProjectRouterStrippedWithWarn`
++ `TestRouterStrictUnknownKeyRejected`; flag parse `TestParseFlagsSubagentModelRouter` (mecated,
+kill-switch) + the mecatequi router kill-switch subtest.
 
 **Extending the router to team members + Parallel branches (ADR 0034).** The router PRIMITIVE
 is family-agnostic: the ONE `parentCaps.routeTask` closure (above) is bound per run by the
@@ -2091,6 +2105,29 @@ engine pins the server root) — a child's forked worktree/copy root never drive
 discovery. A strict-parse skip WARN names the per-effect rule counts the skipped file loses
 (`lostRuleCounts`, lenient best-effort re-read) — a typo'd key drops the file's deny/ask too,
 so the loosening is made loud.
+
+### `configgen` (the settings.yaml single source — issue #140)
+
+`internal/configgen` is the SINGLE source of truth for the operator `settings.yaml`
+surface. It builds ONE model of the four permconfig subtrees (`permissions`,
+`guardrails`, `posture`, `models`) and renders BOTH operator-facing artifacts from it —
+the commented skeleton `mecated config init` writes (`RenderSkeleton`) and the Markdown
+`docs/configuration-reference.md` table (`RenderReference`) — so the two surfaces cannot
+drift from each other, and because the model is built by REFLECTING over the
+`permconfig.*Section` structs and harvesting their field doc-comments, neither can drift
+from the code. **Flag-driven features (soul/memory/commands/user-model/session-lease) are
+OUT of the YAML reference by design** — they are configured via CLI flags + their own
+files, so the reference carries only a hand-written pointer block to `usage.md`, not an
+auto-harvested flag dump.
+
+The go/ast doc-comment harvest lives ONLY in the build-time generator
+(`internal/configgen/cmd/configref`, run by `task docs:configref`); it emits the two
+COMMITTED artifacts, and `config init` ships by `//go:embed`-ing the committed
+skeleton — so the shipped `mecated` binary never imports go/ast (the matlatl
+llms.txt generate→commit→CI-diff-guard pattern; the docs job fails on drift). The
+write path (`config init`) and the read path (the resolver's `loadUserRules`) share the
+ONE relative-path const (`permconfig.UserSettingsRelPath`, re-exported as
+`configgen.SettingsRelPath`), so they provably resolve the same file.
 
 ### `modelhook` (guardrails — LLM-backed tool-content checker, issue #27 — see `GUARDRAILS.md`)
 

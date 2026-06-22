@@ -94,6 +94,36 @@ func TestOperatorRouterParsed(t *testing.T) {
 	if m.Router.Categories[1].Name != "large" || m.Router.Categories[1].Model != "gpt-5" {
 		t.Fatalf("category not parsed faithfully: %+v", m.Router.Categories[1])
 	}
+	// The taxonomy above sets no kill-switch, so Disabled defaults false.
+	if m.Router.Disabled {
+		t.Fatal("router.Disabled must default false when the disabled: key is absent")
+	}
+}
+
+// TestOperatorRouterDisabledParsed pins the ADR 0042 YAML kill-switch: `disabled: true`
+// inside models.router: parses to RouterSection.Disabled (mirroring guardrails: disabled).
+func TestOperatorRouterDisabledParsed(t *testing.T) {
+	const yamlCfg = `
+models:
+  router:
+    disabled: true
+    categories:
+      - name: small
+        description: trivial tasks
+        model: gpt-4o-mini
+`
+	env := envWithExplicit("/etc/mecatl/router-off.yaml", yamlCfg)
+	r := newWithEnv(Options{ExplicitFiles: []string{"/etc/mecatl/router-off.yaml"}}, env)
+	m := r.OperatorModelPolicy()
+	if m == nil || m.Router == nil {
+		t.Fatal("operator-tier models.router must be honoured")
+	}
+	if !m.Router.Disabled {
+		t.Fatal("models.router.disabled: true must parse to RouterSection.Disabled")
+	}
+	if len(m.Router.Categories) != 1 {
+		t.Fatalf("the taxonomy must still parse when disabled (disabled is the kill-switch, not a parse drop); got %d", len(m.Router.Categories))
+	}
 }
 
 // TestProjectRouterStrippedWithWarn pins ADR 0031: a project-tier models.router: is

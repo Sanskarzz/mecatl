@@ -29,8 +29,15 @@ const (
 	projectFileClaude = ".claude/settings.json"
 	// projectFileClaudeLocal is the Claude-Code-compatible LOCAL project settings file.
 	projectFileClaudeLocal = ".claude/settings.local.json"
-	// userSubdirMecatl is the user-level YAML config under the XDG config dir.
-	userSubdirMecatl = "mecatl/settings.yaml" // joined under <config>/...
+	// UserSettingsRelPath is the user-level (operator-tier) YAML config location,
+	// relative to the XDG config base (joined under <XDG_CONFIG_HOME>/...). It is the
+	// SINGLE definition of where the operator settings.yaml lives: the resolver READS
+	// it here (loadUserRules), and `mecated config init` WRITES it via this same const
+	// (re-exported through internal/configgen), so the read and write paths can never
+	// resolve different files.
+	UserSettingsRelPath = "mecatl/settings.yaml"
+	// userSubdirMecatl is the historical internal alias for UserSettingsRelPath.
+	userSubdirMecatl = UserSettingsRelPath // joined under <config>/...
 	// userSubdirClaude is the Claude-Code-compatible user-level settings file,
 	// rooted at the home directory (~/.claude/settings.json).
 	userSubdirClaude = ".claude/settings.json"

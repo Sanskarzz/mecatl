@@ -1,0 +1,144 @@
+#| mecatl operator settings.yaml — GENERATED commented skeleton.
+#|
+#| Written by 'mecated config init'. Place at <XDG_CONFIG_HOME>/mecatl/settings.yaml
+#| (default ~/.config/mecatl/settings.yaml) — the operator-tier config the server
+#| reads. Uncomment a subtree to enable it; read the inline notes for the EXACT
+#| enable semantics of each opt-in feature.
+#|
+#| NOTE: the values shown below (e.g. default: sonnet, posture: trusted) are
+#| ILLUSTRATIVE EXAMPLES, not the built-in defaults. An ABSENT key keeps the
+#| harness's built-in default — see the Default column in
+#| docs/configuration-reference.md for what each key falls back to when unset.
+#|
+#| This skeleton is GENERATED from the permconfig YAML schema (the single source of
+#| truth). Do not hand-edit the committed copy — run 'task docs:configref'. See
+#| docs/configuration-reference.md for the exhaustive key/type/default/tier table.
+
+#| === permissions === (tier: operator + project)
+#| Allow/ask/deny rule-spec lists. Each entry is "Tool(pattern)" or a bare "Tool". Deny
+#| is deny-dominant and binds children too; allow/ask bind the main engine; the subagent
+#| block binds child engines. A project allow is trust-gated.
+# permissions:
+#   # Allow lists rule specs that GRANT a tool call (effect Allow) on the MAIN engine.
+#   # Under an untrusted project these are DROPPED by the trust gate (see Resolver).
+#   allow: []
+#   # Ask lists rule specs that REQUIRE approval (effect Ask) on the MAIN engine. Always
+#   # honoured.
+#   ask: []
+#   # Deny lists rule specs that BLOCK a tool call (effect Deny) EVERYWHERE — main
+#   # engine and subagents (a deny only tightens). Always honoured.
+#   deny: []
+#   # Subagent holds the child-scoped rule-spec lists (issue #32): rules that bind ONLY
+#   # subagent/member/branch engines, resolved through the child-ask model (a subagent
+#   # allow can clear a substitution-floored ask; a subagent ask surfaces to the human or
+#   # auto-denies; a subagent deny blocks).
+#   subagent:
+#     # Allow lists child-scoped rule specs with effect Allow (trust-gated for project
+#     # tiers).
+#     allow: []
+#     # Ask lists child-scoped rule specs with effect Ask (always honoured). A configured
+#     # subagent Ask is NEVER auto-approved by the isolation carve-out — it surfaces to
+#     # a human or auto-denies.
+#     ask: []
+#     # Deny lists child-scoped rule specs with effect Deny (always honoured).
+#     deny: []
+#|
+#| Example:
+#|   permissions:
+#|     allow:
+#|       - "Bash(go test*)"
+#|     ask:
+#|       - "Bash(git push*)"
+#|     deny:
+#|       - "Read(./.git/**)"
+
+#| === guardrails === (tier: operator)
+#| OPERATOR-TIER LLM content-checker (issue #27). Parsed strictly. A project-tier
+#| guardrails: block is IGNORED with a WARN (a project cannot weaken a security
+#| checker).
+#| ENABLE: Configuring `model:` ENABLES guardrails; `disabled: true` is the kill-switch
+#| (the CLI --guardrails=off also sets it).
+# guardrails:
+#   # Model is the checker model id / alias. Empty leaves the CLI --guardrails-model to
+#   # supply it; a value here is overridden by the CLI flag when both are set.
+#   # ENABLE: Setting a model here ENABLES guardrails (the guardrails-parity enable
+#   # model). A configured model with no rules runs the default advisory set. Leave empty
+#   # (and pass no --guardrails-model) to keep guardrails OFF.
+#   model: claude-haiku-4-6
+#   # MaxChecks is the per-session checker-call cap. 0 = unbounded.
+#   maxChecks: 0
+#   # MinContentBytes skips the checker for content shorter than this. 0 = check all.
+#   minContentBytes: 0
+#   # Disabled is the YAML-level kill switch (the CLI --guardrails=off also sets it).
+#   disabled: false
+#   # Rules is the guardrail rule list.
+#   rules:
+#     - match: ""
+#       phases: []
+#       mode: ""
+#       prompt: ""
+#       failClosed: false
+
+#| === posture === (tier: operator)
+#| OPERATOR-TIER posture-ladder scalar: strict < trusted < auto < yolo (the graduated
+#| trust/automation tier). A project-tier posture: is IGNORED with a WARN (a project
+#| cannot raise the automation posture). Empty = keep the CLI/default.
+# posture: trusted
+
+#| === models === (tier: operator + project)
+#| Per-slot/alias/default model config (ADR 0030) + the operator allowlist cap and the
+#| semantic Subagent model-router taxonomy (ADR 0031/0042). At the operator tier all
+#| fields are honoured; a project tier honours slots/aliases/default within the operator
+#| allowlist on a trusted workspace (router/allowlist are operator-only).
+# models:
+#   # Slots binds a slot name (a call-slot "compaction"/"ask-reviewer"/"guardrail" or a
+#   # tier "cheap"/"fast"/"reasoning") to a model selector (alias or concrete id).
+#   slots: {}
+#   # Aliases binds a short alias to a concrete model id (merged onto the CLI
+#   # --model-alias map, CLI winning per key).
+#   aliases: {}
+#   # Default is the session-default model selector (alias or concrete id). It is the
+#   # project-overridable session default (ADR 0030 Phase 4) — within the operator
+#   # allowlist; the operator's own Default is uncapped. Empty = absent.
+#   default: sonnet
+#   # Allowlist is the OPERATOR-TIER, non-wideable cap (ADR 0030 Phase 4): the set of
+#   # model selectors (alias names and/or concrete ids) a PROJECT-tier models: block may
+#   # bind to. An empty/absent allowlist means project models stay WARN-ignored (the
+#   # opt-in: no cap ⇒ no project override, byte-identical to pre-Phase-4). It is
+#   # honoured ONLY from the operator tiers; a project-tier allowlist: key is ignored with
+#   # a WARN (a project cannot widen its own cap).
+#   allowlist: []
+#   # Router is the OPERATOR-TIER semantic Subagent model-router taxonomy (ADR 0031, Phase
+#   # 5; enable model superseded by ADR 0042): a classifier slot, the routing categories,
+#   # the default category, and the YAML kill-switch. It is operator-tier ONLY — a
+#   # project-tier router: sub-block is STRIPPED with a WARN (the taxonomy is an
+#   # autonomous-spend/capability decision the operator owns, like the allowlist).
+#   # nil/absent = no taxonomy ⇒ the router is OFF (byte-identical, silent). Per ADR
+#   # 0042 the TAXONOMY is the enable: a non-empty router: with categories turns the
+#   # router ON unless `disabled: true` (or the CLI kill-switch) forces it off — the
+#   # guardrails-parity enable model, replacing 0031's flag-to-enable.
+#   # ENABLE: A non-empty `categories` list ENABLES the router (taxonomy-presence enable,
+#   # ADR 0042 — NOT a CLI enable-flag); `disabled: true` (or
+#   # --subagent-model-router=false) is the kill-switch. Operator-tier only.
+#   router:
+#     # ClassifierSlot names the model slot the CLASSIFIER itself runs on (the tiny, cheap
+#     # one-turn classification call). Empty falls through to the `router` slot's default
+#     # tier (cheap) — the classifier is housekeeping, not the routed work.
+#     classifier-slot: ""
+#     # Categories are the routing choices. Each carries a Name (the classifier's verdict
+#     # key), a Description (the classifier's only signal — make them distinct), and a
+#     # Model selector (an alias / slot / concrete id, resolved through the operator-
+#     # merged alias map; operator taxonomy targets are UNCAPPED).
+#     categories:
+#       - name: refactor
+#         description: "large multi-file refactors"
+#         model: reasoning
+#     # DefaultCategory is the category the classifier is told to choose when none clearly
+#     # fits (advisory to the classifier; the real safety net is the fail-soft inherit).
+#     default-category: ""
+#     # Disabled is the YAML-level kill switch (ADR 0042, mirroring
+#     # GuardrailsSection.Disabled): per ADR 0042 a non-empty taxonomy ENABLES the router,
+#     # so `disabled: true` is the "taxonomy defined but temporarily off" override. The
+#     # CLI kill-switch --subagent-model-router=false also sets it (the two OR together).
+#     # Default false ⇒ the router is enabled whenever categories are present.
+#     disabled: false

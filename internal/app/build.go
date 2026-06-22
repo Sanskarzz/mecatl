@@ -422,19 +422,19 @@ type Config struct {
 	// A tiny one-turn classifier (on the `router` slot) reads a plain Subagent
 	// delegation's task prompt + an operator-defined category taxonomy and picks which
 	// CATEGORY of model should run it; composition maps the category to a concrete model
-	// and mints the child on it. OFF by default (SubagentModelRouter false OR no
-	// categories ⇒ byte-identical to no router). It is OPERATOR-TIER ONLY: the taxonomy
-	// is read from the user-global settings.yaml `models.router:` subtree (a project-tier
-	// router: is stripped with a WARN); the enable gate is a CLI FLAG, deliberately NOT a
-	// permconfig key (it grants an autonomous spend/capability decision the operator owns,
-	// the same posture as --subagent-ask-reviewer).
+	// and mints the child on it. OFF by default (no categories ⇒ byte-identical to no
+	// router; ADR 0042). It is OPERATOR-TIER ONLY: the taxonomy is read from the
+	// user-global settings.yaml `models.router:` subtree (a project-tier router: is
+	// stripped with a WARN). Per ADR 0042 (superseding 0031's enable model) the TAXONOMY
+	// is the enable — a non-empty RouterCategories turns the router ON unless explicitly
+	// disabled — mirroring the guardrails precedent (configure-a-model = enable).
 
-	// SubagentModelRouter is the ENABLE gate (--subagent-model-router). It is a FLAG, not
-	// a permconfig key: turning on autonomous per-delegation model selection is an
-	// operator deployment decision. false (the default) ⇒ no router, byte-identical. A
-	// true flag with no taxonomy (RouterCategories empty) WARNs once at Build and stays
-	// OFF (a flag without categories cannot route).
-	SubagentModelRouter bool
+	// RouterDisabled is the master kill-switch for the subagent model router (ADR 0042):
+	// when true the router is forced OFF regardless of the taxonomy. It is the OR of the
+	// CLI kill-switch (--subagent-model-router=false) and the YAML `models.router.disabled`
+	// key (folded by foldOperatorModelRouter), documented like GuardrailsDisabled. Default
+	// false ⇒ the router is ON iff RouterCategories is non-empty.
+	RouterDisabled bool
 	// RouterCategories is the operator-defined routing taxonomy (name + description +
 	// model selector per category), folded from the operator-tier `models.router:`
 	// subtree by foldOperatorModelRouter. Empty ⇒ no router. Each entry's Model selector
@@ -985,11 +985,13 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	// narration all see the final merged maps). No-op (byte-identical) when there is no
 	// operator allowlist, an untrusted workspace, or no project models block.
 	cfg = foldProjectModelBindings(cfg, cliModelKeys)
-	// Subagent model router taxonomy (ADR 0031, Phase 5): fold the OPERATOR-TIER
-	// `models.router:` categories/default/classifier-slot onto cfg. OPERATOR-TIER ONLY
+	// Subagent model router taxonomy (ADR 0031, Phase 5; enable model per ADR 0042): fold
+	// the OPERATOR-TIER `models.router:` categories/default/classifier-slot onto cfg, plus
+	// the YAML `disabled:` kill-switch (OR'd into cfg.RouterDisabled). OPERATOR-TIER ONLY
 	// (a project router: was stripped at capture) and FAIL-SOFT (a malformed category is
-	// WARN-dropped). It only supplies the taxonomy; the --subagent-model-router FLAG
-	// (cfg.SubagentModelRouter) gates ON/OFF. No-op (byte-identical) when no router block.
+	// WARN-dropped). Per ADR 0042 the taxonomy ENABLES the router (no flag); the router
+	// is ON iff RouterCategories is non-empty AND !cfg.RouterDisabled. No-op
+	// (byte-identical) when no router block.
 	cfg = foldOperatorModelRouter(cfg)
 	// SubagentModel (issue #35): validate + resolve the alias ONCE here — FAIL-FAST
 	// on a value that doesn't resolve to a usable model id (the --agent-source-url
@@ -1031,10 +1033,12 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	// FAIL-SOFT (no fail-fast normalize): a broken slot already WARNed in
 	// resolveSlotModel and degrades to the session model. No-op when no slot configured.
 	logSlotConfigFacts(cfg)
-	// Subagent model router (ADR 0031): the build-once ACTIVE/inert fact. The flag is
-	// the enable gate; a flag with no taxonomy WARNs once and stays OFF; OFF (no flag) is
-	// silent (byte-identical). Build-once ONLY (never a per-engine line — the
-	// no-per-derivation-duplication rule + the "exactly THREE loop lines" invariant).
+	// Subagent model router (ADR 0031; enable model per ADR 0042): the build-once
+	// ACTIVE/DISABLED fact. The TAXONOMY is the enable — a non-empty taxonomy narrates
+	// ACTIVE unless cfg.RouterDisabled (the kill-switch) forces it OFF (a one-time
+	// DISABLED WARN); no taxonomy is silent (byte-identical). Build-once ONLY (never a
+	// per-engine line — the no-per-derivation-duplication rule + the "exactly THREE loop
+	// lines" invariant).
 	logModelRouterFacts(cfg)
 
 	// Slash-command driver source (Phase C2): ONE dial + Probe at build time
@@ -4128,9 +4132,11 @@ func attachAskAdjudicator(deps agent.Deps, cfg Config, provReg *providerRegistry
 // FAIL-SOFT everywhere: any error / unknown category / unresolvable target → ok=false,
 // and the Subagent run() hook then inherits the default explorer model.
 //
-// Returns nil when the router is OFF (the flag is unset OR no taxonomy is configured) —
-// the engine then carries no SubagentModelRouter and the run() hook's routeTask is nil,
-// byte-identical to a deployment with no router. It is assigned at BOTH main-engine deps
+// Returns nil when the router is OFF — per ADR 0042 that is no taxonomy (empty
+// RouterCategories) OR the kill-switch (cfg.RouterDisabled, from the CLI
+// --subagent-model-router=false or the YAML models.router.disabled). The engine then
+// carries no SubagentModelRouter and the run() hook's routeTask is nil, byte-identical
+// to a deployment with no router. It is assigned at BOTH main-engine deps
 // sites (buildEngine + sessionEngineFactory), like attachAskAdjudicator, so a per-session
 // engine re-derives the closure on the session's resolved provider/model — never
 // clone-and-swap.
@@ -4145,8 +4151,8 @@ func attachAskAdjudicator(deps agent.Deps, cfg Config, provReg *providerRegistry
 // closure already closes over the right (provider, parentModel), so each call re-derives
 // the contamination-safe deps for the classifier model.
 func buildModelRouterTask(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string) func(ctx context.Context, taskPrompt string) (category, model string, usage session.Usage, ok bool) {
-	if !cfg.SubagentModelRouter || len(cfg.RouterCategories) == 0 {
-		return nil // OFF: no router, byte-identical.
+	if cfg.RouterDisabled || len(cfg.RouterCategories) == 0 {
+		return nil // OFF: no taxonomy or kill-switched (ADR 0042); byte-identical.
 	}
 	// Resolve the CLASSIFIER model once per closure build (per session) via the SHARED
 	// resolveRouterClassifierModel — the SAME resolution logModelRouterFacts narrates, so

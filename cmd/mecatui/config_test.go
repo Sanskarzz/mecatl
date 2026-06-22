@@ -820,6 +820,52 @@ func TestEmbeddedConfigMapsPosture(t *testing.T) {
 	}
 }
 
+// TestParseFlagsSubagentModelRouter covers the --subagent-model-router kill-switch
+// (ADR 0042) end-to-end through mecatui's embeddedConfig: the router is enabled by the
+// models.router: taxonomy, so the bool flag only sets RouterDisabled when given as
+// =false. Unset → set==false → RouterDisabled==false (taxonomy governs); bare/=true →
+// set==true/value==true, RouterDisabled stays false (a harmless no-op, does NOT disable);
+// =false → the kill-switch, set==true/value==false, RouterDisabled==true. The
+// RouterDisabled assertions would fail if the mapping inverted.
+func TestParseFlagsSubagentModelRouter(t *testing.T) {
+	// Default: flag never given → not set, router governed by the taxonomy (not disabled).
+	def, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags(nil): %v", err)
+	}
+	if def.subagentModelRouterSet {
+		t.Errorf("defaults: subagentModelRouterSet = true, want false (unset)")
+	}
+	if dc := embeddedConfig(config{workspace: "/ws", model: "m", mock: true}, port.NopDiagnostics{}); dc.RouterDisabled {
+		t.Errorf("unset: embeddedConfig.RouterDisabled = true, want false (taxonomy governs)")
+	}
+
+	// Bare --subagent-model-router (==true): parses, set==true, value==true; this is a
+	// harmless no-op — it must NOT disable the router (taxonomy governs).
+	bare, err := parseFlags([]string{"-subagent-model-router"})
+	if err != nil {
+		t.Fatalf("parseFlags(-subagent-model-router): %v", err)
+	}
+	if !bare.subagentModelRouterSet || !bare.subagentModelRouter {
+		t.Errorf("bare flag: set=%v value=%v, want true/true", bare.subagentModelRouterSet, bare.subagentModelRouter)
+	}
+	if ac := embeddedConfig(bare, port.NopDiagnostics{}); ac.RouterDisabled {
+		t.Errorf("bare flag: embeddedConfig.RouterDisabled = true, want false (no-op does not disable)")
+	}
+
+	// --subagent-model-router=false: the kill-switch. set==true, value==false → disabled.
+	off, err := parseFlags([]string{"-subagent-model-router=false"})
+	if err != nil {
+		t.Fatalf("parseFlags(-subagent-model-router=false): %v", err)
+	}
+	if !off.subagentModelRouterSet || off.subagentModelRouter {
+		t.Errorf("=false: set=%v value=%v, want true/false", off.subagentModelRouterSet, off.subagentModelRouter)
+	}
+	if ac := embeddedConfig(off, port.NopDiagnostics{}); !ac.RouterDisabled {
+		t.Errorf("=false: embeddedConfig.RouterDisabled = false, want true (kill-switch)")
+	}
+}
+
 // TestPostureRefusalReason proves the generalised root-refusal (the exported
 // app.PostureRefusalReason) gates auto AND yolo (both waive the mutate-ask floor) while
 // strict/trusted are NEVER refused (they suppress no prompt), and only when PRIVILEGED.

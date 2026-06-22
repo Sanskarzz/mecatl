@@ -14,14 +14,14 @@ import (
 	"github.com/stacklok/mecatl/e2e/harness"
 )
 
-// modelRouterSpecs covers the OPT-IN semantic subagent model router (ADR 0031) LIVE: a
-// mecated spawned with --subagent-model-router and a models.router taxonomy must, on a
-// real plain Subagent delegation, classify the task and mint the child on the chosen
-// category's model.
+// modelRouterSpecs covers the semantic subagent model router (ADR 0031; enable model
+// ADR 0042) LIVE: a mecated whose operator settings.yaml defines a models.router taxonomy
+// (the taxonomy is the enable — no flag needed) must, on a real plain Subagent delegation,
+// classify the task and mint the child on the chosen category's model.
 //
 // OWN SPAWN: like modelSlotSpecs it owns its OWN mecated (NOT the shared suite target)
-// because it needs the --subagent-model-router flag plus a router taxonomy, which the
-// shared target is not started with. Local-only by construction.
+// because it needs a router taxonomy in its config, which the shared target is not started
+// with. Local-only by construction.
 //
 // HOW THE ASSERTION WORKS. The harness observes the routed model on the wire:
 // `RoutedCategory`/`RoutedModel` ride the `subagent.start` event payload
@@ -49,7 +49,7 @@ func modelRouterSpecs() {
 			ginkgo.FlakeAttempts(2), ginkgo.SpecTimeout(8*time.Minute),
 			func(ctx ginkgo.SpecContext) {
 				if !target.IsLocal() {
-					ginkgo.Skip("remote target: cannot spawn with --subagent-model-router / a router taxonomy")
+					ginkgo.Skip("remote target: cannot spawn with a router taxonomy in its config")
 				}
 
 				// The router taxonomy lives in the OPERATOR-TIER settings.yaml; write a
@@ -87,11 +87,11 @@ func modelRouterSpecs() {
 					"        model: large-cat\n"
 				gomega.Expect(os.WriteFile(settings, []byte(cfg), 0o600)).To(gomega.Succeed())
 
+				// ADR 0042: the taxonomy in settings.yaml enables the router — no flag.
 				spawn, err := harness.NewLocalWith(
 					"--permission-config", settings,
-					"--subagent-model-router",
 				)
-				gomega.Expect(err).NotTo(gomega.HaveOccurred(), "spawn local mecated with --subagent-model-router")
+				gomega.Expect(err).NotTo(gomega.HaveOccurred(), "spawn local mecated with a router taxonomy")
 				defer func() { _ = spawn.Close() }()
 
 				drv := harness.NewDriver(spawn)
