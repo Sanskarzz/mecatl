@@ -608,6 +608,20 @@ type Config struct {
 	// (CLI out-ranks YAML) and resolvePosture WARNs if an alias raised above the
 	// explicit value. Set by the cmd mains alongside Posture.
 	PostureFlagSet bool
+	// OutputEconomy is the operator-tier output-economy token (ADR 0041): "" (unset
+	// → the default tone already carries the ADR 0041 economy contract), "normal"
+	// (explicit default, a no-op), or "terse" (adds the answer-length clause for
+	// explanatory turns — the most over-steer-prone rule, so opt-in). It is folded
+	// from the operator-YAML output-economy: key by foldOperatorOutputEconomy (CLI
+	// out-ranks YAML, mirroring posture) and applied as a TONE delta in promptConfig
+	// (composition only — the prompt package stays economy-agnostic). Operator-tier
+	// only: a project-tier output-economy: key is WARN-ignored by permconfig.
+	OutputEconomy string
+	// OutputEconomyFlagSet records whether the operator passed an explicit
+	// --output-economy flag. When true, foldOperatorOutputEconomy leaves the
+	// operator-YAML value alone (CLI out-ranks YAML). Set by the cmd mains alongside
+	// OutputEconomy.
+	OutputEconomyFlagSet bool
 	// Privileged is the cmd-computed predicate "running as root WITHOUT a declared
 	// sandbox" (euid 0 && MECATL_SANDBOX/IS_SANDBOX unset). It is the input to the
 	// authoritative posture root-refusal: Build calls PostureRefusalReason AFTER the
@@ -876,6 +890,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	// the TrustProject floor.
 	cfg.permResolver = buildPermResolver(cfg)
 	cfg = foldOperatorPosture(cfg)
+	cfg = foldOperatorOutputEconomy(cfg)
 	cfg.Posture = resolvePosture(cfg, postureNoCeiling)
 	cfg = applyPosture(cfg)
 	// AUTHORITATIVE root/no-sandbox refusal: applied HERE, after the full posture fold,
@@ -4942,7 +4957,61 @@ func promptConfig(cfg Config, gitStatus string) prompt.Config {
 	if d := agencyDelta(cfg.Model); d != "" {
 		pc.Role = prompt.DefaultRole() + "\n\n" + d
 	}
+	// The output-economy TONE delta is supplied HERE (the prompt package stays
+	// economy-tier-agnostic); fold it onto the default tone. The default tone
+	// already carries the ADR 0041 economy contract (prose scope, ladder, safety
+	// carveout); "terse" adds the answer-length clause for explanatory turns — the
+	// most over-steer-prone rule, so opt-in. "normal"/"" are no-ops.
+	if d := outputEconomyToneDelta(cfg.OutputEconomy); d != "" {
+		pc.Tone = d
+	}
 	return pc
+}
+
+// outputEconomyToneDelta returns the tone override for the operator-tier
+// output-economy setting (ADR 0041). "" and "normal" return "" (no override — the
+// default defaultTone already carries the economy contract, so Build falls through
+// to it). "terse" returns the default tone PLUS the answer-length clause for
+// explanatory turns, the most over-steer-prone rule (so it is opt-in, not the
+// always-on default). An unknown token WARN-falls to "" (no override) — fail-soft,
+// never a boot refusal.
+func outputEconomyToneDelta(token string) string {
+	switch strings.ToLower(strings.TrimSpace(token)) {
+	case "", "normal":
+		return ""
+	case "terse":
+		// The terse delta is the default tone (ADR 0041) PLUS the answer-length
+		// clause — the one rule too over-steer-prone for the always-on default.
+		// Built from prompt.DefaultTone() so it never drifts from the default.
+		return prompt.DefaultTone() + "\n\n" +
+			"For a purely explanatory answer (no code change requested), answer in " +
+			"at most a few sentences unless the asker requests depth. Offer to " +
+			"elaborate rather than elaborating unprompted."
+	default:
+		return ""
+	}
+}
+
+// foldOperatorOutputEconomy merges the OPERATOR-TIER `output-economy:` YAML scalar
+// (read by the permconfig resolver from the user-global + CLI tiers ONLY — never the
+// project file, which is IGNORED with a WARN) onto cfg.OutputEconomy. A CLI
+// --output-economy (cfg.OutputEconomyFlagSet) OUT-RANKS the YAML value. It is a no-op
+// when no operator-tier output-economy: key was configured. Mirrors
+// foldOperatorPosture. cfg is taken and returned by value.
+func foldOperatorOutputEconomy(cfg Config) Config {
+	if cfg.OutputEconomyFlagSet {
+		return cfg // CLI wins; YAML cannot override an explicit flag.
+	}
+	res, ok := cfg.permResolver.(*permconfig.Resolver)
+	if !ok || res == nil {
+		return cfg
+	}
+	yamlEconomy := strings.TrimSpace(res.OperatorOutputEconomy())
+	if yamlEconomy == "" {
+		return cfg
+	}
+	cfg.OutputEconomy = yamlEconomy
+	return cfg
 }
 
 // agencyDelta returns the emphatic task-persistence contract appended to the

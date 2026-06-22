@@ -39,6 +39,12 @@ The covered surface is the seven core packages (`session`, `governance`, `tool`,
   recognises each fragment by the header its renderer prepends (the shared
   source-of-truth constants in `engine/prompt/turn0.go`), so a header reword is
   reflected automatically. Additive function in `engine/prompt`. See ADR 0012.
+- `prompt.DefaultTone() string` — returns the built-in tone/style block `Build`
+  uses when `Config.Tone` is empty. Mirrors `DefaultRole()`; lets the composition
+  layer compose an output-economy tier delta (ADR 0041: the "terse" posture
+  appends an answer-length clause) onto the SAME default tone the prompt package
+  uses, rather than carrying a private verbatim copy that could silently diverge.
+  Additive; no frozen domain type changes.
 
 ### Removed
 

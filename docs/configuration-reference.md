@@ -70,6 +70,16 @@ OPERATOR-TIER posture-ladder scalar: strict < trusted < auto < yolo (the graduat
 | --- | --- | --- | --- |
 | `posture` | `string` | `(empty)` | Posture is the OPERATOR-TIER posture-ladder scalar (the graduated trust/ automation tier: strict/trusted/auto/yolo). Like Guardrails it is honoured ONLY from the user-global + CLI tiers; a project-tier file's posture: key is IGNORED with a WARN (a project repo RAISING the automation posture — e.g. posture: yolo — is a security DOWNGRADE the tighten-only project gate forbids, the fail-closed core of this feature). Empty = absent (the resolver returns "" and composition keeps the CLI/default). The composition layer parses the string; permconfig only reads the scalar. |
 
+## `output-economy`
+
+Tier: **operator**
+
+OPERATOR-TIER output-economy scalar (ADR 0041): "" / "normal" / "terse". "terse" slims the agent's prose (the ladder + prose scope + safety carveout); a project-tier output-economy: is IGNORED with a WARN (a project cannot raise the automation posture). Empty = keep the CLI/default tone.
+
+| Value | Type | Default | Description |
+| --- | --- | --- | --- |
+| `output-economy` | `string` | `(empty)` | OutputEconomy is the OPERATOR-TIER output-economy scalar (ADR 0041: "" / "normal" / "terse"). Like Posture it is honoured ONLY from the user-global + CLI tiers; a project-tier file's output-economy: key is IGNORED with a WARN (operator-tier only, for consistency with posture/guardrails). Empty = absent (the resolver returns "" and composition keeps the default tone). The composition layer interprets the token; permconfig only reads the scalar. |
+
 ## `models`
 
 Tier: **operator + project**

@@ -25,7 +25,7 @@ record; current behaviour is in the linked [architecture](../architecture.md) do
 | Tiered memory (tier-0 index + BM25) | ✅ tier-0 index + BM25 `SearchMemory` · ⛔ semantic / embedding recall | [MEMORY-TIERING.md](../adr/0009-tiered-memory.md) · [MEMORY-TIER2.md](../adr/0010-semantic-memory-recall.md) | [memory](../architecture/memory.md) |
 | Soul / persona + user-model | ✅ Phase 1 + 2a + 2b + Phase 3 items 1–3 | [SOUL-SPIKE.md](../adr/0011-soul-and-user-model.md) | — |
 | Compaction (heuristic + cascade) | ✅ shipped | [COMPACTION.md](../adr/0012-compaction.md) | [context & compaction](../architecture/context-and-compaction.md) |
-| System-prompt enhancement | ✅ §7a shipped (`agencyDelta`, tool-discipline hints, `<env>`) | [SYSTEM-PROMPT-RESEARCH.md](../adr/0024-system-prompt-research.md) | — |
+| System-prompt enhancement | ✅ §7a shipped (`agencyDelta`, tool-discipline hints, `<env>`) · ✅ output-economy default (`defaultTone` rewrite, ADR 0041) | [SYSTEM-PROMPT-RESEARCH.md](../adr/0024-system-prompt-research.md) · [OUTPUT-ECONOMY.md](../adr/0041-output-economy-default-prompt.md) | — |
 | Guardrails (LLM-backed tool-content inspection) | ✅ shipped | [GUARDRAILS.md](../adr/0021-guardrails.md) | [hooks & guardrails](../architecture/hooks-and-guardrails.md) |
 | Allow-all / posture ladder | ✅ shipped · ⛔ managed-scope kill-switch · ⛔ `auto`+reviewer posture | [ALLOW-ALL-POSTURE.md](../adr/0022-allow-all-posture.md) | [deployment & hardening](../architecture/deployment-and-hardening.md) |
 | Workspace trust | ✅ Phases 0/1/2a/2b/2c · ⛔ Phase 3 (descoped) | [WORKSPACE-TRUST-SPIKE.md](../adr/0023-workspace-trust.md) | [deployment & hardening](../architecture/deployment-and-hardening.md) |

@@ -86,6 +86,13 @@ type Config struct {
 	// slot keys fail-soft). A nil Models means the key was absent. The composition
 	// layer reads the maps; permconfig only carries them.
 	Models *ModelsSection `yaml:"models"`
+	// OutputEconomy is the OPERATOR-TIER output-economy scalar (ADR 0041: "" / "normal"
+	// / "terse"). Like Posture it is honoured ONLY from the user-global + CLI tiers; a
+	// project-tier file's output-economy: key is IGNORED with a WARN (operator-tier
+	// only, for consistency with posture/guardrails). Empty = absent (the resolver
+	// returns "" and composition keeps the default tone). The composition layer
+	// interprets the token; permconfig only reads the scalar.
+	OutputEconomy string `yaml:"output-economy"`
 }
 
 // ModelsSection is the `models:` YAML subtree (ADR 0030): a per-slot model-binding

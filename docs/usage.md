@@ -309,6 +309,7 @@ $ go run ./cmd/mecated --openai --workspace "$PWD"
 | `--permission-config` | `""` | path to a YAML permission-config file loaded at the **user (fully-trusted) scope** (**repeatable**). Always loaded regardless of `--permissions-conventional`. |
 | `--posture` | `strict` | **OPERATOR POSTURE LADDER.** One ordered tier governs the whole prompt/trust posture: `strict` (default, fail-closed: prompt for the mutate-ask floor, no project trust) → `trusted` (honour the project authority set; still prompts) → `auto` (allow-all main + children, but the **child prompt-injection defence stays ON** — the recommended **unattended** default) → `yolo` (everything `auto` does **plus** the child substitution floor loosened — defence OFF). `--yolo` and `--trust-project` are **aliases** (for `yolo` and `trusted`); when both a `--posture` value and an alias are given the **higher tier wins** (with a `WARN`). An unknown `--posture` value fails closed to `strict` with a `WARN`. CLI out-ranks the user-global `posture:` setting. **See the allow-all/posture note below.** |
 | `--print-posture` | `false` | (mecated) print the resolved posture tier and the per-defence breakdown (allow-all, main/child substitution loosening, project-trust floor) to stdout and exit, without starting the server. Useful for confirming what a given flag/env/settings combination resolves to. |
+| `--output-economy` | `normal` | **OPERATOR OUTPUT-ECONOMY TIER** (ADR 0041). `normal` (default): the system prompt already carries the prose-economy scope, the minimum-code ladder, and the safety carveout. `terse`: additionally caps purely-explanatory answers to a few sentences, offering to elaborate rather than elaborating unprompted — the most over-steer-prone rule, so opt-in. Empty = unset (honours the operator-global `output-economy:` setting if present). Operator-tier only: a project-tier `output-economy:` key is ignored with a `WARN` (a project can still influence prose style via `AGENTS.md`). CLI out-ranks the user-global setting. An unknown value fail-softs to the default with a `WARN`. |
 | `--yolo` | `false` | **Alias for `--posture yolo`** (the top tier). **OPERATOR POSTURE (dangerous).** Suppress permission prompts for the built-in mutate-ask floor (`Bash`/`Edit`/`Write`/`Team`/`SkillDraft`) **server-wide**, for the main agent **and** its children (subagents/team members/parallel branches) — for ephemeral, isolated, single-tenant deployments only. **Behaviour change (see the posture note):** `--yolo` now **also waives the child substitution floor** — a subagent/team-member/parallel-branch `$(...)`/backtick/heredoc command **auto-runs** (the child prompt-injection defence is **OFF**). For allow-all with the child defence kept **ON**, use `--posture auto` instead. A `Deny` in **any** scope and any **deliberately configured** `Ask` (managed/project/user) still apply at every tier. **Refused when running as root** (euid 0) unless `MECATL_SANDBOX=1` (or `IS_SANDBOX=1`) is set. **See the allow-all/posture note below.** |
 | `--metrics-addr` | `127.0.0.1:9090` | loopback **admin/observability** listener (empty disables). Serves `/metrics` and the runtime-introspection endpoints — **see the observability note below**. |
 | `--otlp-endpoint` | `""` | OTLP collector endpoint for trace export (empty → tracing is a no-op; metrics are always on via `/metrics`). |
@@ -1096,6 +1097,22 @@ repo dropping `.mecatl/settings.yaml` with `posture: yolo` must never be honoure
 a **project-tier `posture:` is ignored with a WARN** (security-critical fail-closed).
 A `--posture` flag (or its `--yolo`/`--trust-project` aliases) **out-ranks** the YAML
 value; an unknown value fails closed to `strict` with a WARN.
+
+#### The operator-global `output-economy:` setting
+
+The output-economy tier (ADR 0041) can likewise be set once in the **user-global**
+`settings.yaml`, via an optional top-level `output-economy:` string:
+
+```yaml
+# ~/.config/mecatl/settings.yaml  (user-global only)
+output-economy: terse   # normal | terse
+```
+
+Like `posture:`/`guardrails:`, it is **operator-tier ONLY** — read from the user-global
+`settings.yaml` + the CLI, **never** the project-tier file (a project-tier
+`output-economy:` is ignored with a WARN, for consistency with posture/guardrails; a
+project can still influence prose style via `AGENTS.md`). A `--output-economy` flag
+**out-ranks** the YAML value; an unknown value fail-softs to the default with a WARN.
 
 ### Per-slot models (`models:`, ADR 0030)
 

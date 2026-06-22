@@ -409,6 +409,16 @@ type config struct {
 	// postureFlagSet is true when --posture was passed explicitly (set after parse via
 	// fs.Visit), so composition lets CLI out-rank the settings.yaml posture: key.
 	postureFlagSet bool
+	// outputEconomy is the operator-tier output-economy token (ADR 0041): "" (unset
+	// → the default tone already carries the economy contract), "normal" (explicit
+	// no-op), or "terse" (adds the answer-length clause for explanatory turns). An
+	// unknown value fail-softs to "" with a WARN. Operator-tier only: the
+	// operator-global settings.yaml output-economy: key folds in, a project-tier key
+	// is WARN-ignored.
+	outputEconomy string
+	// outputEconomyFlagSet is true when --output-economy was passed explicitly, so
+	// composition lets CLI out-rank the settings.yaml output-economy: key.
+	outputEconomyFlagSet bool
 }
 
 // mcpServerList is a repeatable flag.Value collecting --mcp-server name=URL
@@ -934,7 +944,11 @@ func appConfig(cfg config, sink port.EventSink, recorder port.ToolCallRecorder, 
 		// YAML-only allow-all tier cannot escape it.
 		Posture:        app.ParsePosture(cfg.posture),
 		PostureFlagSet: cfg.postureFlagSet,
-		Privileged:     privilegedProcess(),
+		// Output-economy tier (ADR 0041): operator-tier only; outputEconomyFlagSet
+		// lets CLI out-rank the operator-global settings.yaml output-economy: key.
+		OutputEconomy:        cfg.outputEconomy,
+		OutputEconomyFlagSet: cfg.outputEconomyFlagSet,
+		Privileged:           privilegedProcess(),
 		// mecated serves the bidi Converse + HTTP-SSE surfaces, whose clients CAN
 		// answer a permission ask (ResumeApproval) — so by default a subagent's
 		// unresolved Bash ask is SURFACED to the attached human rather than
@@ -1182,6 +1196,9 @@ func parseFlags(argv []string) (config, error) {
 		"OPERATOR POSTURE LADDER (strict < trusted < auto < yolo): strict (default) prompts every mutate; trusted honours a project's ALLOW rules (= --trust-project); auto adds allow-all + main substitution loosening (recommended UNATTENDED default, child injection-defense ON); yolo additionally auto-runs $()/backtick/heredoc in CHILDREN (injection-defense OFF, isolated single-tenant only). --yolo/--trust-project are aliases. auto/yolo are refused as root outside MECATL_SANDBOX. An unknown value fails closed to strict with a WARN.")
 	fs.BoolVar(&cfg.printPosture, "print-posture", false, "print the resolved operator posture tier and a plain-English line per defense, then exit (does not start the server)")
 
+	fs.StringVar(&cfg.outputEconomy, "output-economy", "",
+		"OPERATOR OUTPUT-ECONOMY TIER (ADR 0041): normal (default — the system prompt already carries the prose-economy + minimum-code ladder + safety carveout) or terse (additionally caps purely-explanatory answers to a few sentences, offering to elaborate rather than elaborating unprompted — the most over-steer-prone rule, so opt-in). Empty = unset (honours the operator-global settings.yaml output-economy: key if present). Operator-tier only; a project-tier output-economy: key is ignored with a WARN. An unknown value fail-softs to the default with a WARN.")
+
 	fs.BoolVar(&cfg.acp, "acp", false, "serve the Agent Client Protocol (ACP) over stdio for an editor that spawned mecated as a subprocess (JSON-RPC 2.0 on stdin/stdout). Skips the TCP/HTTP listeners; the single session workspace is the editor-provided cwd. No TLS/auth/rate-limit (stdio is a local, parent-process trust boundary)")
 
 	fs.StringVar(&cfg.authToken, "auth-token", "", "bearer token required on every gRPC/HTTP request (or MECATL_AUTH_TOKEN; empty disables auth)")
@@ -1221,6 +1238,9 @@ func parseFlags(argv []string) (config, error) {
 			// appConfig can distinguish "unset" (router governed by the taxonomy) from
 			// "=false" (kill-switch); "=true/bare" is inert (the taxonomy still governs).
 			cfg.subagentModelRouterSet = true
+		}
+		if f.Name == "output-economy" {
+			cfg.outputEconomyFlagSet = true
 		}
 	})
 

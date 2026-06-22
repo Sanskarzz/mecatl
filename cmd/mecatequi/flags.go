@@ -109,6 +109,10 @@ type flags struct {
 	// explicit --posture so composition lets CLI out-rank the settings.yaml key.
 	posture        string
 	postureFlagSet bool
+	// Output-economy tier (ADR 0041). outputEconomyFlagSet records an explicit
+	// --output-economy so composition lets CLI out-rank the settings.yaml key.
+	outputEconomy        string
+	outputEconomyFlagSet bool
 }
 
 // parseFlags turns argv into a flags value, resolving env-derived defaults and
@@ -163,6 +167,7 @@ func parseFlags(argv []string) (flags, error) {
 	fs.StringVar(&f.subagentAskReviewerPolicyFile, "subagent-ask-reviewer-policy", "", "path to a TRUSTED policy rubric file for --subagent-ask-reviewer; its CONTENT replaces the built-in rubric. Read once at startup; an unreadable file fails startup")
 
 	fs.StringVar(&f.posture, "posture", "", "OPERATOR POSTURE LADDER (strict < trusted < auto < yolo): strict (default) prompts every mutate — and a headless single-shot run has NO approver, so a main-agent ask CANCELS the run (exit 1). For an autonomous CI run use --posture auto (allow-all, child injection-defense ON) or trusted/yolo. trusted honours a project's ALLOW rules; auto adds allow-all + main substitution loosening; yolo additionally auto-runs $()/backtick/heredoc in children. An unknown value fails closed to strict")
+	fs.StringVar(&f.outputEconomy, "output-economy", "", "OPERATOR OUTPUT-ECONOMY TIER (ADR 0041): normal (default — the system prompt already carries the prose-economy + minimum-code ladder + safety carveout) or terse (additionally caps purely-explanatory answers to a few sentences, offering to elaborate rather than elaborating unprompted). Empty = unset (honours the operator-global settings.yaml output-economy: key if present). Operator-tier only; a project-tier key is ignored with a WARN. An unknown value fail-softs to the default with a WARN")
 
 	fs.Usage = usageEpilogue(fs)
 
@@ -180,6 +185,9 @@ func parseFlags(argv []string) (flags, error) {
 			// Tri-state kill-switch (ADR 0042): record that the flag was given so
 			// appConfig can distinguish unset / =false (kill-switch) / =true (inert).
 			f.subagentModelRouterSet = true
+		}
+		if fl.Name == "output-economy" {
+			f.outputEconomyFlagSet = true
 		}
 	})
 
@@ -321,7 +329,11 @@ func appConfig(f flags, diag port.Diagnostics) app.Config {
 
 		Posture:        app.ParsePosture(f.posture),
 		PostureFlagSet: f.postureFlagSet,
-		Privileged:     privilegedProcess(),
+		// Output-economy tier (ADR 0041): operator-tier only; outputEconomyFlagSet
+		// lets CLI out-rank the operator-global settings.yaml output-economy: key.
+		OutputEconomy:        f.outputEconomy,
+		OutputEconomyFlagSet: f.outputEconomyFlagSet,
+		Privileged:           privilegedProcess(),
 
 		// Interactive = !headless: the deliberate inversion. mecatequi defaults
 		// headless=true (no approver), so a child's unresolved ask is auto-denied /

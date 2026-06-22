@@ -433,7 +433,11 @@ func embeddedConfig(cfg config, diag port.Diagnostics) app.Config {
 		// escape it.
 		Posture:        app.ParsePosture(cfg.posture),
 		PostureFlagSet: cfg.postureFlagSet,
-		Privileged:     embeddedPrivileged(),
+		// Output-economy tier (ADR 0041): operator-tier only; outputEconomyFlagSet
+		// lets CLI out-rank the operator-global settings.yaml output-economy: key.
+		OutputEconomy:        cfg.outputEconomy,
+		OutputEconomyFlagSet: cfg.outputEconomyFlagSet,
+		Privileged:           embeddedPrivileged(),
 		// INTERACTIVE: mecatui IS the interactive client — a human sits at the
 		// approval modal. So the embedded server runs interactive (Interactive=true),
 		// and a subagent/team-member/branch child's unresolved permission ask is

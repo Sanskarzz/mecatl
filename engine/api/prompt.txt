@@ -23,6 +23,7 @@
 const MaxCommandDescriptionRunes untyped int = 80
 func Build(cfg Config) Layered
 func DefaultRole() string
+func DefaultTone() string
 func DiscoverInstructions(ctx context.Context, ws tool.Workspace) ([]session.Message, error)
 func EnvBlock(env Env) string
 func IsInjectedTurn0Fragment(text string) bool

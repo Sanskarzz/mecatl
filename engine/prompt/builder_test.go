@@ -264,6 +264,39 @@ func TestEnvBlockGitStatusSubBlock(t *testing.T) {
 	}
 }
 
+// TestDefaultToneOutputEconomy pins the output-economy contract (ADR 0041) in the
+// default StablePrefix. It asserts the four load-bearing clauses are present:
+// (1) the prose-economy scope ("PROSE ONLY") that separates brevity from
+// investigation depth — the Claude Code #32508 failure mode; (2) the minimum-code
+// ladder (the upward "does this need to exist / stdlib / dep / one line / minimum"
+// rungs) — the ponytail-measured biggest lever; (3) the safety carveout that is
+// measured to be load-bearing against the "one-liner drops a guard" failure
+// (ponytail Axis 2); (4) the Edit-over-Write nudge — the mecatl-native economy
+// lever. All four live in StablePrefix (cache-stable, gauntlet #6). If any clause
+// is silently dropped or weakened in a future tone rewrite, this fails.
+func TestDefaultToneOutputEconomy(t *testing.T) {
+	got := prompt.Build(prompt.Config{Tools: sampleTools()}).StablePrefix
+
+	for _, want := range []string{
+		// (1) Prose-economy scope: brevity applies to PROSE, not cognition.
+		"applies to PROSE ONLY",
+		"it does not mean read less",
+		// (2) Minimum-code ladder.
+		"stop at the first rung that holds",
+		"does the standard library do it",
+		"already-imported dependency",
+		// (3) Safety carveout — never cut these.
+		"Never cut these to hit a smaller line count",
+		"input validation at trust boundaries",
+		// (4) Edit-over-Write economy nudge.
+		"Prefer Edit (emit only the change) over Write",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output-economy clause missing %q\nprefix=%q", want, got)
+		}
+	}
+}
+
 func TestDiscoverInstructionsAgentsPresent(t *testing.T) {
 	ws := memfs.NewWorkspace("/proj")
 	mustWrite(t, ws, "AGENTS.md", "Use tabs, not spaces.")

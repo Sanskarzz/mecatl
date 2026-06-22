@@ -142,6 +142,14 @@ type Resolver struct {
 	// files) out-ranks user-global (first-non-empty keeps CLI).
 	operatorPosture string
 
+	// operatorOutputEconomy is the OPERATOR-TIER output-economy: scalar (ADR 0041),
+	// read ONCE at construction from the user-global + CLI tiers ONLY. A project-tier
+	// file's output-economy: key is deliberately IGNORED (operator-tier only, for
+	// consistency with posture/guardrails — loadProjectRules WARNs when it sees one).
+	// Empty when no operator-tier file carried an output-economy: scalar. CLI
+	// (explicit files) out-ranks user-global (first-non-empty keeps CLI).
+	operatorOutputEconomy string
+
 	// operatorModels is the OPERATOR-TIER models: subtree (ADR 0030), read ONCE at
 	// construction from the user-global + CLI tiers ONLY (the SOLE capture path is
 	// captureModels from loadUserRules; there is no second capture path). It carries
@@ -177,6 +185,18 @@ func (r *Resolver) OperatorPosture() string {
 		return ""
 	}
 	return r.operatorPosture
+}
+
+// OperatorOutputEconomy returns the operator-tier output-economy: scalar (user-global
+// + CLI only), or "" when none was configured (ADR 0041). It is the SOLE accessor the
+// composition layer uses to read output-economy from config — by construction it never
+// returns a project-tier value (a project output-economy: is ignored with a WARN in
+// loadProjectRules). nil-safe.
+func (r *Resolver) OperatorOutputEconomy() string {
+	if r == nil {
+		return ""
+	}
+	return r.operatorOutputEconomy
 }
 
 // OperatorModelSlots returns the operator-tier models: subtree (user-global + CLI
@@ -405,6 +425,17 @@ func (r *Resolver) loadProjectRules(ws tool.WorkspaceReader) ([]governance.Rule,
 				"posture: IGNORING a project-tier posture: scalar (operator-tier only — a project repo cannot raise the automation posture; set posture in your user-global settings.yaml or via --posture)",
 				"file", src.path, "root", ws.Root(), "ignored_value", strings.TrimSpace(cfg.Posture))
 		}
+		// OutputEconomy is OPERATOR-TIER ONLY (ADR 0041), for consistency with posture/
+		// guardrails: a project file's output-economy: scalar is IGNORED with a loud
+		// WARN. It is a style/cost preference, not a security control, but keeping it
+		// operator-tier-only matches the established pattern and prevents a project
+		// from silently changing agent output behavior; a project can still influence
+		// prose style via AGENTS.md.
+		if strings.TrimSpace(cfg.OutputEconomy) != "" {
+			r.diag.Log(context.Background(), port.LevelWarn,
+				"output-economy: IGNORING a project-tier output-economy: scalar (operator-tier only — set output-economy in your user-global settings.yaml or via --output-economy)",
+				"file", src.path, "root", ws.Root(), "ignored_value", strings.TrimSpace(cfg.OutputEconomy))
+		}
 		// models: is project-overridable WITHIN AN OPERATOR ALLOWLIST (ADR 0030 Phase 4),
 		// otherwise IGNORED. captureProjectModels applies the full gate (allowlist key
 		// stripped + WARN; opt-in by operator allowlist; trust gate) and merges the
@@ -559,6 +590,8 @@ func (r *Resolver) loadUserRules(report *Report) []governance.Rule {
 		r.captureGuardrails(cfg.Guardrails)
 		// Operator-tier posture: same first-non-empty-keeps-CLI discipline as guardrails.
 		r.capturePosture(cfg.Posture)
+		// Operator-tier output-economy (ADR 0041): same discipline as posture.
+		r.captureOutputEconomy(cfg.OutputEconomy)
 		// Operator-tier models: same first-non-nil-keeps-CLI discipline (ADR 0030).
 		r.captureModels(cfg.Models)
 	}
@@ -582,6 +615,8 @@ func (r *Resolver) loadUserRules(report *Report) []governance.Rule {
 				r.captureGuardrails(cfg.Guardrails)
 				// User-global posture: captured only if no higher CLI file already did.
 				r.capturePosture(cfg.Posture)
+				// User-global output-economy (ADR 0041): same discipline as posture.
+				r.captureOutputEconomy(cfg.OutputEconomy)
 				// User-global models: captured only if no higher CLI file already did.
 				r.captureModels(cfg.Models)
 			}
@@ -631,6 +666,22 @@ func (r *Resolver) capturePosture(p string) {
 		return
 	}
 	r.operatorPosture = strings.TrimSpace(p)
+}
+
+// captureOutputEconomy records the FIRST operator-tier output-economy: scalar seen
+// during construction (CLI files are parsed before user-global, so CLI wins on
+// first-non-empty). It is called only from loadUserRules — the operator (user-global
+// + CLI) tiers — never from loadProjectRules, so a project file can never supply
+// output-economy (operator-tier only, for consistency with posture/guardrails). A
+// whitespace-only value is treated as absent.
+func (r *Resolver) captureOutputEconomy(p string) {
+	if r.operatorOutputEconomy != "" {
+		return
+	}
+	if strings.TrimSpace(p) == "" {
+		return
+	}
+	r.operatorOutputEconomy = strings.TrimSpace(p)
 }
 
 // captureModels records the FIRST operator-tier models: block seen during
