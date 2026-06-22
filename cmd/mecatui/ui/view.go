@@ -93,7 +93,7 @@ func (m Model) View() tea.View {
 		// unchanged.)
 		body = m.renderZeroState()
 	default:
-		body = m.vp.View()
+		body = m.rend.vpView(m.vp)
 	}
 
 	// The full vertical region stack — header, body, the conditional inline

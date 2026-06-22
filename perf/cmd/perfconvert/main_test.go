@@ -96,19 +96,23 @@ func TestConvert_RenderAllocsAdvisorySplit(t *testing.T) {
 		{SchemaVersion: kpi.SchemaVersion, Name: "compaction_cycle", Sample: 0, AllocsPerOp: 4200},
 		{SchemaVersion: kpi.SchemaVersion, Name: "tui_scrollback_view", Sample: 0, AllocsPerOp: 6200},
 		{SchemaVersion: kpi.SchemaVersion, Name: "tui_scrollback_view_steady", Sample: 0, AllocsPerOp: 51},
+		{SchemaVersion: kpi.SchemaVersion, Name: "tui_spinner_tick_vpview", Sample: 0, AllocsPerOp: 12},
 	}
 
 	smaller, _, render := convert(rows)
 
-	// render: EXACTLY the two render-alloc points and nothing else.
+	// render: EXACTLY the three render-alloc points and nothing else.
 	if _, ok := pointByName(render, "tui_scrollback_view/allocs_per_op"); !ok {
 		t.Error("tui_scrollback_view/allocs_per_op missing from render suite")
 	}
 	if _, ok := pointByName(render, "tui_scrollback_view_steady/allocs_per_op"); !ok {
 		t.Error("tui_scrollback_view_steady/allocs_per_op missing from render suite")
 	}
-	if len(render) != 2 {
-		t.Errorf("render suite has %d points, want exactly 2 (the two render-alloc points)", len(render))
+	if _, ok := pointByName(render, "tui_spinner_tick_vpview/allocs_per_op"); !ok {
+		t.Error("tui_spinner_tick_vpview/allocs_per_op missing from render suite")
+	}
+	if len(render) != 3 {
+		t.Errorf("render suite has %d points, want exactly 3 (the three render-alloc points)", len(render))
 	}
 
 	// The render benches' allocs_per_op must NOT be in the gated smaller suite.
@@ -118,9 +122,12 @@ func TestConvert_RenderAllocsAdvisorySplit(t *testing.T) {
 	if _, ok := pointByName(smaller, "tui_scrollback_view_steady/allocs_per_op"); ok {
 		t.Error("tui_scrollback_view_steady/allocs_per_op must NOT be in the gated smaller suite (it is advisory)")
 	}
+	if _, ok := pointByName(smaller, "tui_spinner_tick_vpview/allocs_per_op"); ok {
+		t.Error("tui_spinner_tick_vpview/allocs_per_op must NOT be in the gated smaller suite (it is advisory)")
+	}
 
 	// The render benches' DETERMINISTIC metrics stay in the gated smaller suite.
-	for _, name := range []string{"tui_scrollback_view", "tui_scrollback_view_steady"} {
+	for _, name := range []string{"tui_scrollback_view", "tui_scrollback_view_steady", "tui_spinner_tick_vpview"} {
 		for _, suffix := range []string{"/tokens_total", "/goroutine_delta"} {
 			if _, ok := pointByName(smaller, name+suffix); !ok {
 				t.Errorf("smaller suite missing %s%s", name, suffix)

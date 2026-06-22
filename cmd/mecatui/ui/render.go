@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"charm.land/bubbles/v2/viewport"
 	"charm.land/glamour/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -177,6 +178,25 @@ type renderer struct {
 	// same ones blockCache already retains, so it pins nothing extra.
 	joinScratch []string
 
+	// vpViewCache/vpViewValid memoize the rendered VIEWPORT OUTPUT — the OUTERMOST
+	// render layer, above blockCache and joinCache. View() calls vp.View() which runs
+	// lipgloss's per-line grapheme-width pad on the full visible window (~40 lines at
+	// a time). On a spinner-only frame (no content/scroll/geometry change) this work
+	// is pure waste: the viewport output is identical to the previous frame. The memo
+	// is DIRTY-FLAGGED (not key-based) because it is invalidated at every site that
+	// changes viewport content, scroll offset, or geometry — those sites are fewer and
+	// easier to enumerate than reconstructing a key from the viewport's full internal
+	// state (vp.View has no stable comparable key exposed). invalidateVPView must be
+	// called at every such site; vpView serves from cache otherwise. Update-goroutine-only.
+	//
+	// One nuance on the "scroll offset" part of that contract: scrollLines invalidates
+	// only on OBSERVED YOffset movement (its gate is `m.vp.YOffset() != before`), so a
+	// scroll that does not actually move YOffset does not invalidate — a future scroll
+	// behaviour that changes the rendered output WITHOUT moving YOffset (e.g. a
+	// horizontal/partial-line offset) would need to add its own invalidation site.
+	vpViewCache string
+	vpViewValid bool
+
 	// joinPrefixLines / joinPrefixN / joinPrefixKey are the INCREMENTAL-join state
 	// powering renderConversationLines: the streaming-frame fast path that skips the
 	// O(scrollback) rejoin the whole-join memo (joinCache, above) cannot help with —
@@ -295,11 +315,35 @@ func (r *renderer) resetBlockCaches() {
 	r.joinPrefixLines = r.joinPrefixLines[:0]
 	r.joinPrefixN = 0
 	r.joinPrefixKey = joinPrefixState{}
+	// Drop the viewport-output memo too (defense-in-depth): every CURRENT resetSession
+	// caller calls refreshView() afterwards (which invalidateVPView()s), but clearing it
+	// here makes that ordering non-load-bearing — a future caller that forgets refreshView
+	// can never serve a stale vpView against a reset/empty conversation.
+	r.vpViewValid = false
 }
 
 // setWidth records the current wrap width. Width changes are handled by the
 // cache key, so no explicit invalidation is needed.
 func (r *renderer) setWidth(w int) { r.width = w }
+
+// invalidateVPView marks the vpView cache as stale. Call at every site that
+// changes viewport content, scroll offset, or geometry.
+func (r *renderer) invalidateVPView() {
+	r.vpViewValid = false
+}
+
+// vpView returns the rendered viewport output, serving from cache when the
+// viewport's content/scroll/geometry haven't changed since the last render.
+// This avoids the per-frame lipgloss grapheme-width pad during spinner-only frames.
+// The caller passes the current viewport model by value — it is not mutated.
+func (r *renderer) vpView(vp viewport.Model) string {
+	if r.vpViewValid {
+		return r.vpViewCache
+	}
+	r.vpViewCache = vp.View()
+	r.vpViewValid = true
+	return r.vpViewCache
+}
 
 // markdown renders src to ANSI through a width-cached glamour renderer themed by
 // the active theme. On any glamour error it falls back to the raw text so the

@@ -777,6 +777,10 @@ func (m Model) onResize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	m.width = msg.Width
 	m.height = msg.Height
 	m.vp.SetWidth(m.width)
+	// Viewport geometry changed: the vpView cache is stale regardless of relayout's
+	// height-equality guard (relayout calls refreshView, which also invalidates, but
+	// onResize must invalidate here too in case relayout short-circuits on height match).
+	m.rend.invalidateVPView()
 	m.ta.SetWidth(m.width)
 	m.rend.setWidth(m.width)
 	// relayout sizes the viewport height from the measured layout (header + transients
@@ -1961,6 +1965,9 @@ func (m Model) endRun(stop string) Model {
 func (m Model) onMouseWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.vp, cmd = m.vp.Update(msg)
+	// A wheel event changes the scroll offset: invalidate the vpView cache so the
+	// next View() renders the new position rather than the stale pre-wheel output.
+	m.rend.invalidateVPView()
 	m.syncStuck()
 	return m, cmd
 }
@@ -2273,7 +2280,13 @@ func (m *Model) scrollLines(dir autoScrollDir, n int) bool {
 	default:
 		return false
 	}
-	return m.vp.YOffset() != before
+	changed := m.vp.YOffset() != before
+	if changed {
+		// Scroll offset changed: the vpView cache must be invalidated so the next
+		// View() renders the new scroll position rather than the stale one.
+		m.rend.invalidateVPView()
+	}
+	return changed
 }
 
 // extendHeadToEdge sets the selection head to the content line now at the scrolled
@@ -2362,6 +2375,9 @@ func snapshotSelection(m *Model) {
 	if !m.sel.active {
 		return
 	}
+	// snapshotSelection calls vp.SetContent (re-splicing the highlight), so the
+	// vpView cache must be invalidated so the next View() reflects the new content.
+	m.rend.invalidateVPView()
 	base := m.selBase
 	if base == "" {
 		// Defensive: no base captured (e.g. a test that set raw viewport content then
@@ -2451,6 +2467,9 @@ func (m Model) onScrollKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	default: // ScrollU / ScrollD
 		m.vp, cmd = m.vp.Update(msg)
 	}
+	// Any scroll-key changes the scroll offset: invalidate the vpView cache so the
+	// next View() renders the new position rather than the stale pre-scroll output.
+	m.rend.invalidateVPView()
 	m.syncStuck()
 	return m, cmd
 }
@@ -2471,10 +2490,16 @@ func (m Model) onScrollKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // tail block) — settled blocks join from cache — and memoizes the WHOLE joined
 // string (joinCache), so a frame that changed no block (a cursor move, scroll, or
 // the twice-per-message renderInput) reuses the join verbatim instead of rebuilding
-// it. The residual O(scrollback) per-frame cost is now only vp.SetContent's line
-// split/measure of the full content; trimming that is a follow-up, out of scope here.
+// it. The residual O(scrollback) per-frame cost is vp.SetContent's line
+// split/measure of the full content. On TOP of refreshView, View() memoizes the
+// vp.View() output (renderer.vpView) so a spinner-only frame that does NOT call
+// refreshView skips the lipgloss grapheme-width pad entirely (issue #139).
 func (m *Model) refreshView() {
 	m.viewDirty = false
+	// Any refreshView call changes the viewport content, so the vpView cache must be
+	// invalidated — the caller may be a spinner-only frame that skips refreshView
+	// entirely, in which case the vpView cache correctly serves the prior content.
+	m.rend.invalidateVPView()
 	// FAST PATH: the line-slice handoff. When no selection is active AND the
 	// changed-files footer is not in play (it renders only under the global expand
 	// toggle), feed vp.SetContentLines directly with the incrementally-joined line

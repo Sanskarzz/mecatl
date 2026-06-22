@@ -90,6 +90,7 @@ background_subagents      ~1,307 allocs/op    ~258 KB/op    goroutines Δ=0
 compaction_cycle          ~4,204 allocs/op    ~570 KB/op    goroutines Δ=0   (39 compactions/40 turns; cache-hit 0 by design)
 tui_scrollback_view        ~3,560 allocs/op   ~33.4 MB/op   (400 blocks; STREAMING worst case — live block REVISED every op with a fixed-size body, join always rebuilds; allocs/op b.N-independent)
 tui_scrollback_view_steady    ~51 allocs/op    ~137 KB/op   (400 blocks; UNCHANGED frame — join cache serves the memoized string; was ~94 allocs / ~32.5 MB/op pre-cache)
+tui_spinner_tick_vpview    ~1,088 allocs/op   ~133 KB/op   (400 blocks; full Update→View frame on a spinner-only tick — viewport body served from vpViewCache, skipping vp.View()'s lipgloss grapheme-width pad; ~1,088 allocs/op cached vs ~24,840 un-cached, ~133 KB vs ~622 KB B/op; issue #139)
 ```
 
 > **tui-scrollback hotspot (2026-06-15).** A heap profile of the render path pinned
@@ -106,6 +107,40 @@ tui_scrollback_view_steady    ~51 allocs/op    ~137 KB/op   (400 blocks; UNCHANG
 > twice-per-message `renderInput`): `tui_scrollback_view_steady` falls from
 > ~32.5 MB/op to ~137 KB/op (−99.6% B/op; the residual is `vp.SetContent`'s line
 > split, the named follow-up).
+
+> **viewport render-output cache (2026-06-22).** Issue #139: `View()` calls
+> `m.vp.View()` which runs lipgloss's per-line grapheme-width pad on the full visible
+> window on every Bubble Tea frame — including spinner-only frames where the
+> conversation content, scroll offset, and geometry are all unchanged. The fix adds a
+> dirty-flag memo (`renderer.vpViewValid` / `renderer.vpViewCache`) to
+> [`cmd/mecatui/ui/render.go`](../../cmd/mecatui/ui/render.go): `View()` calls
+> `m.rend.vpView(m.vp)` instead of `m.vp.View()` directly; `refreshView`,
+> `snapshotSelection`, `scrollLines`, `onMouseWheel`, `onScrollKey`, and `onResize`
+> each call `invalidateVPView()` so the cache is dropped at every content/scroll/
+> geometry change. A spinner-only tick (the motivating case) now returns the cached
+> string verbatim. The new `tui_spinner_tick_vpview` KPI measures this scenario; it is
+> wired into `task perf:scenarios` (the bench regex matches both `BenchmarkScrollbackView`
+> and `BenchmarkSpinnerTickVPView`) and routed to the ADVISORY render-allocs suite (like
+> its `tui_scrollback_view*` siblings), NOT hard-gated, because its `allocs/op` carries
+> the same `runtime.ReadMemStats` background noise that false-positives a gated threshold.
+> Three mutation tests in `render_cache_test.go` (positive + negative pairs for
+> content, scroll, and geometry) prove the dirty-flag discipline — the NEGATIVE halves
+> show that a missed `invalidateVPView()` at a site would serve stale content; a fourth,
+> `TestVPViewInvalidatedByEveryViewportHandler`, enforces the per-handler invalidation
+> convention as an invariant (one RED subtest per deleted `invalidateVPView()` call) — and
+> now covers the HEIGHT/relayout resize path explicitly (a height-only `WindowSizeMsg`), not
+> just width — alongside `TestResetBlockCachesInvalidatesVPView`, which pins the
+> defense-in-depth `vpViewValid` clear in `resetBlockCaches`.
+>
+> The `tui_spinner_tick_vpview` bench drives the REAL Bubble Tea Update→View cycle each op
+> (`m.Update(spinner tick)` then `m.View()`), so its `allocs/op` measures the cached-View
+> steady-state frame — the viewport body served from `vpViewCache` (~1,088 allocs/op vs
+> ~24,840 with the memo disabled). Note this is NOT the in-turn STREAMING frame cost: a real
+> streaming flush changes the conversation, calls `refreshView` → `invalidateVPView`, and so
+> still pays the un-cached `vp.View()` re-pad by design (the content changed every flush). The
+> memo's win is specifically the spinner-tick frames BETWEEN content flushes (a run with no
+> active tool, or a slow tool), where the viewport is unchanged — do not read the bench's
+> `allocs/op` as the in-turn streaming-frame cost.
 
 > **tui-scrollback bench determinism + advisory render suite (2026-06-17).** The
 > streaming bench originally APPENDED a byte to the live block every op, so the block
@@ -227,10 +262,12 @@ baseline. `task bench` is deliberately NOT part of `task test` — same posture 
   repeatedly). Each records a `kpi.ScenarioResult`; a `TestMain` flushes them to
   `$MECATL_PERF_JSON` when set.
 - [`cmd/mecatui/ui/scrollback_bench_test.go`](../../cmd/mecatui/ui/scrollback_bench_test.go)
-  — `BenchmarkScrollbackView` (streaming worst case) and
-  `BenchmarkScrollbackViewSteady` (unchanged frame), the TUI scrollback render path
-  (`refreshView` → `renderConversation`'s join, the profile-confirmed O(scrollback)
-  hotspot — now memoized; see the tui-scrollback note above). It is an internal
+  — `BenchmarkScrollbackView` (streaming worst case), `BenchmarkScrollbackViewSteady`
+  (unchanged frame), and `BenchmarkSpinnerTickVPView` (full Update→View frame on a
+  spinner-only tick, with the viewport body served from the `vpView` memo — issue #139),
+  the TUI scrollback render path (`refreshView` → `renderConversation`'s join, the
+  profile-confirmed O(scrollback) hotspot — now memoized; see the tui-scrollback notes
+  above). It is an internal
   `_test` file so it can reach the unexported render path; `perf/kpi` is imported
   ONLY in the test file — the production `ui` package stays free of the perf
   dependency. Its rows MERGE into the same `$MECATL_PERF_JSON` (two metric families,

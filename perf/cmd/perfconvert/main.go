@@ -82,6 +82,7 @@ var cacheHitWhitelist = map[string]bool{
 var renderAllocAdvisory = map[string]bool{
 	"tui_scrollback_view":        true,
 	"tui_scrollback_view_steady": true,
+	"tui_spinner_tick_vpview":    true,
 }
 
 func main() {

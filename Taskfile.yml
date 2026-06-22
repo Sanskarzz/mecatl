@@ -239,7 +239,9 @@ tasks:
         - ./perf/scenarios/      — single-session-long, team-fanout,
                                    background-subagents, compaction-cycle.
         - ./cmd/mecatui/ui/      — BenchmarkScrollbackView (the SetContent
-                                   O(scrollback) class).
+                                   O(scrollback) class) and
+                                   BenchmarkSpinnerTickVPView (the spinner-tick
+                                   vp.View() memo class).
 
       Override the sample count with BENCHCOUNT (default 6). Set MECATL_PERF_JSON
       to a path to also emit the per-scenario JSON KPIs (tokens, cache-hit-rate,
@@ -271,7 +273,7 @@ tasks:
       # MERGES its rows into it. Offline only — mockllm + memfs/memstore. Both runs
       # get the SAME MECATL_PERF_SHA so the two metric families share a SHA.
       - MECATL_PERF_JSON='{{.PERF_JSON_ABS}}' MECATL_PERF_SHA='{{.PERF_SHA}}' go test -bench=. -benchmem -count={{.BENCHCOUNT}} -run='^$' ./perf/scenarios/
-      - MECATL_PERF_JSON='{{.PERF_JSON_ABS}}' MECATL_PERF_SHA='{{.PERF_SHA}}' go test -bench=BenchmarkScrollbackView -benchmem -count={{.BENCHCOUNT}} -run='^$' ./cmd/mecatui/ui/
+      - MECATL_PERF_JSON='{{.PERF_JSON_ABS}}' MECATL_PERF_SHA='{{.PERF_SHA}}' go test -bench='BenchmarkScrollbackView|BenchmarkSpinnerTickVPView' -benchmem -count={{.BENCHCOUNT}} -run='^$' ./cmd/mecatui/ui/
 
   pgo:collect:
     desc: |
