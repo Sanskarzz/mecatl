@@ -273,11 +273,13 @@ type config struct {
 
 	// Guardrails (issue #27): guardrailsModel names the tool-less checker model that
 	// inspects PreToolUse (outbound-args exfil) and PostToolUse (inbound-result
-	// injection) tool content; empty disables guardrails. guardrailsOff is the master
-	// kill-switch (--guardrails=off) that forces guardrails off regardless of config.
-	// The RULE LIST + cost knobs live in the OPERATOR-TIER `guardrails:` subtree of the
-	// user-global settings.yaml (a flag cannot express a rule list); they are NEVER
-	// read from the project-tier file (a security downgrade).
+	// injection) tool content. Configuring a model here OR via a bound `guardrail`
+	// model slot ENABLES guardrails (configure = enable, ADR 0046); empty + no slot
+	// disables them. guardrailsOff is the master kill-switch (--guardrails=off) that
+	// forces guardrails off regardless of config. The RULE LIST + cost knobs live in
+	// the OPERATOR-TIER `guardrails:` subtree of the user-global settings.yaml (a flag
+	// cannot express a rule list); they are NEVER read from the project-tier file (a
+	// security downgrade).
 	guardrailsModel string
 	guardrailsMode  string // the raw --guardrails value ("off" → guardrailsOff)
 	guardrailsOff   bool
@@ -1164,8 +1166,8 @@ func parseFlags(argv []string) (config, error) {
 	fs.StringVar(&cfg.subagentAskReviewerPolicyFile, "subagent-ask-reviewer-policy", "", "path to a TRUSTED policy rubric file for --subagent-ask-reviewer; its CONTENT replaces the built-in read-only/verification rubric the reviewer applies. Empty keeps the built-in rubric. Read once at startup; an unreadable file FAILS STARTUP")
 	fs.BoolVar(&cfg.subagentModelRouter, "subagent-model-router", false, "Semantic model router KILL-SWITCH (ADR 0042, superseding 0031's enable model): the router is ENABLED by configuring a `models.router:` category taxonomy in the OPERATOR-TIER user-global settings.yaml (the guardrails-parity enable model — configure = enable), NOT by this flag. Pass --subagent-model-router=false to force the router OFF despite a taxonomy (the kill-switch; also expressible as models.router.disabled: true in YAML). When ENABLED, a tiny one-turn classifier (on the `router` model slot) reads each plain Subagent delegation's task prompt + the operator taxonomy and picks the child's model BEFORE the child is minted (decide-once, same-provider; only for a plain delegation — no per-call model/agent, no fork/resume). FAIL-SOFT: any classifier failure, unknown category, or the per-run breaker (3 consecutive misses) inherits the default model")
 	fs.BoolVar(&cfg.headless, "headless", false, "run NON-interactive: declare that clients drive sessions but never answer permission prompts (autonomous / CI deployments). A child subagent/member/branch permission ask is then NOT surfaced to the client (nobody would answer it — it would park until run-end) but resolved by the auto-deny path / the opt-in --subagent-ask-reviewer. DEFAULT off: a normal mecated serving an interactive client (mecatui, an IDE) surfaces asks for a human. Setting --subagent-ask-reviewer WITHOUT --headless has no effect (asks surface to the client instead) — a startup WARNING says so")
-	fs.StringVar(&cfg.guardrailsModel, "guardrails-model", "", "GUARDRAILS (issue #27): model id or --model-alias of a tool-less checker that inspects OUTBOUND tool-call args (PreToolUse, data exfil) and INBOUND tool results (PostToolUse, prompt injection) and enforces a verdict per the operator-tier `guardrails:` rule list. Empty (default) disables guardrails. A value that does not resolve to a usable model id FAILS STARTUP. The RULE LIST + cost knobs live in the user-global settings.yaml `guardrails:` subtree (operator-tier ONLY — a project repo cannot configure or weaken a checker); --guardrails-model overrides the YAML model")
-	fs.StringVar(&cfg.guardrailsMode, "guardrails", "", "GUARDRAILS master switch: pass `--guardrails=off` to force the issue-#27 content checker OFF regardless of --guardrails-model / the guardrails: YAML config (the kill-switch). Any other value (or unset) leaves guardrails governed by the model + rule config")
+	fs.StringVar(&cfg.guardrailsModel, "guardrails-model", "", "GUARDRAILS (issue #27): model id or --model-alias of a tool-less checker that inspects OUTBOUND tool-call args (PreToolUse, data exfil) and INBOUND tool results (PostToolUse, prompt injection) and enforces a verdict per the operator-tier `guardrails:` rule list. Configuring a model here OR via a bound `guardrail` model slot (--model-slot guardrail=… / models.slots.guardrail) ENABLES guardrails (configure = enable, the router-parity model of ADR 0042; see ADR 0046) — empty + no slot disables them. A value that does not resolve to a usable model id FAILS STARTUP. A bound `guardrail` slot SUPERSEDES this flag's model when both are set (this flag then supplies only the enable gate). The RULE LIST + cost knobs live in the user-global settings.yaml `guardrails:` subtree (operator-tier ONLY — a project repo cannot configure or weaken a checker); --guardrails-model overrides the YAML model")
+	fs.StringVar(&cfg.guardrailsMode, "guardrails", "", "GUARDRAILS master switch (the KILL-SWITCH only): pass `--guardrails=off` to force the issue-#27 content checker OFF regardless of --guardrails-model / the `guardrail` model slot / the guardrails: YAML config. The POSITIVE enable path is configuring a checker model — via `--guardrails-model` OR a bound `guardrail` model slot (--model-slot guardrail=… / models.slots.guardrail) — NOT this flag (configure = enable, ADR 0046). Any other value is a startup error")
 
 	fs.StringVar(&cfg.commandsDir, "commands-dir", "", "directory of slash-command templates (<name>.md); setting it enables command expansion. Empty + --enable-commands uses the defaults (.mecatl/commands, .claude/commands)")
 	fs.BoolVar(&cfg.enableCommands, "enable-commands", false, "enable slash-command expansion using the default directories (.mecatl/commands, .claude/commands) when --commands-dir is empty")
@@ -1303,7 +1305,7 @@ func parseFlags(argv []string) (config, error) {
 	case "off":
 		cfg.guardrailsOff = true
 	default:
-		return config{}, fmt.Errorf("--guardrails %q: only \"off\" is accepted (the kill-switch); to ENABLE guardrails set --guardrails-model (and a guardrails: rule list in your user-global settings.yaml). Leave --guardrails unset to keep guardrails governed by the model/rule config", cfg.guardrailsMode)
+		return config{}, fmt.Errorf("--guardrails %q: only \"off\" is accepted (the kill-switch); to ENABLE guardrails set --guardrails-model OR bind the `guardrail` model slot (--model-slot guardrail=… / models.slots.guardrail) — configuring a checker model is the enable (ADR 0046). Leave --guardrails unset to keep guardrails governed by the model/slot config", cfg.guardrailsMode)
 	}
 	// WebSearch master switch (issue #26): only `--websearch=off` is meaningful (the
 	// kill switch — it forces web search off regardless of the backend ladder). An

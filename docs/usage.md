@@ -355,9 +355,9 @@ mailbox). See the delegation-capabilities note below.
 | `--agents-dir` | `""` | directory of named **agent definitions** (`<name>.md` + YAML frontmatter — `name`/`description`/`tools`/`model`/`provider`/`permissionMode`/`maxTurns`/`maxToolCalls`/`color`/`skills`/`mcpServers`/`hooks`/`memory`; full reference in `docs/adr/0013-agent-definitions.md`), reusable as a `Subagent(agent=<name>)` delegate and as a team-member role (repeatable; highest precedence). **TRUST BOUNDARY:** a def body steers the model like `AGENTS.md`/`CLAUDE.md`. A `memory: user\|project` field (issue #33) injects a per-agent `MEMORY.md` head into the def's prompt at startup (READ-ONLY in v1); the **project** tier is **`--trust-project`-gated** (it points into the attacker-controllable workspace). |
 | `--agents-conventional` | `true` | also discover agent defs from the conventional locations (`<workspace>/.mecatl/agents`, `<workspace>/.claude/agents`, `$XDG_CONFIG_HOME/mecatl/agents`, `~/.claude/agents`; lower precedence than `--agents-dir`). ON and **inert** until such a dir exists. Project-tier defs are **trust-gated** (`--trust-project`). |
 | `--model-alias` | `""` | model alias mapping `name=model-id` (repeatable), resolved only in composition — an agent def's `model: <alias>`, a `--model-slot` selector, and `--subagent-model` all resolve through this map (then the built-in sonnet/opus/haiku aliases). |
-| `--model-slot` | `""` | **PER-SLOT MODELS** ([ADR 0030](adr/0030-model-selection-heuristics.md)): bind an internal lightweight LLM call to its own model as `slot=selector` (**repeatable**), e.g. `--model-slot compaction=cheap --model-alias cheap=gpt-4o-mini`. The routed slots are `compaction` (the compaction summary call), `ask-reviewer` (the headless child-ask reviewer), `guardrail` (the content checker), `plan` (plan-mode → model re-resolution, the opusplan pattern, [ADR 0030](adr/0030-model-selection-heuristics.md) Layer 3), and `router` (the subagent model-router classifier, [ADR 0031](adr/0031-subagent-model-router.md)); a **tier** key (`cheap`/`fast`/`reasoning`) gives a default a slot falls through to (the four internal-call slots — including `router` — default to `cheap`, but **`plan` defaults to `reasoning`**). The selector is a `--model-alias` or a concrete id, resolved on the **session's provider**. Empty (no `--model-slot`) keeps every call on the **session model** (**byte-identical default**). **Fail-soft**: a typo'd slot or an alias meaning *inherit* WARNs and keeps the session model — it never wedges the call. For `ask-reviewer`/`guardrail` the slot **supersedes the model** of `--subagent-ask-reviewer`/`--guardrails-model` but does **not** enable them (those flags stay the on/off gate). The YAML twin is the `settings.yaml` `models.slots:` subtree: operator-tier by default, and project-overridable **within an operator `models.allowlist`** on a trusted repo (ADR 0030 Phase 4 — see the per-slot models section); with no allowlist a project `models:` block is ignored with a WARN. `mecatui` accepts the same flag (and `--model-alias`) for its embedded server. |
-| `--guardrails-model` | `""` | **GUARDRAILS** (issue #27): model id / `--model-alias` of a tool-less checker that inspects **outbound** tool-call args (`PreToolUse`, exfil) and **inbound** tool results (`PostToolUse`, prompt injection) and enforces a verdict. Empty (default) **disables** guardrails; an unusable model id **fails startup**. Configuring a model is the **opt-in to spend** — with **no rule list** it takes the **default advisory rule set** (WebSearch/WebFetch/mcp__\*, observe-only). The optional **rule list** + cost knobs live in the **user-global** `settings.yaml` `guardrails:` subtree (operator-tier **only** — a project repo cannot configure or weaken a checker; a project-tier block is ignored with a WARN); an explicit rule list replaces the defaults. `--guardrails-model` overrides the YAML model; a configured `guardrail` **model slot** (`--model-slot guardrail=…`) **supersedes** the checker model (this flag stays the on/off gate). Fires on the main loop regardless of `--headless`. **See the guardrails section below + `docs/adr/0021-guardrails.md`.** |
-| `--guardrails` | `""` | guardrails master switch: pass `--guardrails=off` to force the checker **off** regardless of `--guardrails-model` / the `guardrails:` YAML (the kill-switch). Leave it unset to keep guardrails governed by the model + rule config. **Only `off` is accepted** — any other value (e.g. `--guardrails=on`, which does NOT enable: set `--guardrails-model` for that) **fails startup** rather than silently doing nothing. |
+| `--model-slot` | `""` | **PER-SLOT MODELS** ([ADR 0030](adr/0030-model-selection-heuristics.md)): bind an internal lightweight LLM call to its own model as `slot=selector` (**repeatable**), e.g. `--model-slot compaction=cheap --model-alias cheap=gpt-4o-mini`. The routed slots are `compaction` (the compaction summary call), `ask-reviewer` (the headless child-ask reviewer), `guardrail` (the content checker), `plan` (plan-mode → model re-resolution, the opusplan pattern, [ADR 0030](adr/0030-model-selection-heuristics.md) Layer 3), and `router` (the subagent model-router classifier, [ADR 0031](adr/0031-subagent-model-router.md)); a **tier** key (`cheap`/`fast`/`reasoning`) gives a default a slot falls through to (the four internal-call slots — including `router` — default to `cheap`, but **`plan` defaults to `reasoning`**). The selector is a `--model-alias` or a concrete id, resolved on the **session's provider**. Empty (no `--model-slot`) keeps every call on the **session model** (**byte-identical default**). **Fail-soft**: a typo'd slot or an alias meaning *inherit* WARNs and keeps the session model — it never wedges the call. For `ask-reviewer` the slot **supersedes the model** of `--subagent-ask-reviewer` but does **not** enable it (that flag stays the on/off gate); for `guardrail` the slot **supersedes the model** of `--guardrails-model` AND **enables** guardrails (ADR 0046 — configure = enable). The YAML twin is the `settings.yaml` `models.slots:` subtree: operator-tier by default, and project-overridable **within an operator `models.allowlist`** on a trusted repo (ADR 0030 Phase 4 — see the per-slot models section); with no allowlist a project `models:` block is ignored with a WARN. `mecatui` accepts the same flag (and `--model-alias`) for its embedded server. |
+| `--guardrails-model` | `""` | **GUARDRAILS** (issue #27): model id / `--model-alias` of a tool-less checker that inspects **outbound** tool-call args (`PreToolUse`, exfil) and **inbound** tool results (`PostToolUse`, prompt injection) and enforces a verdict. Configuring a model here OR via a bound **`guardrail` model slot** (`--model-slot guardrail=…` / `models.slots.guardrail`) **ENABLES** guardrails (configure = enable, [ADR 0046](adr/0046-guardrails-slot-enable.md) — the [ADR 0042](adr/0042-taxonomy-gated-model-router.md) router-parity model); empty + no slot **disables** them. An unusable model id **fails startup**. Configuring a model is the **opt-in to spend** — with **no rule list** it takes the **default advisory rule set** (WebSearch/WebFetch/mcp__\*, observe-only). A bound `guardrail` **model slot supersedes** the checker model (this flag then supplies only the enable gate). The optional **rule list** + cost knobs live in the **user-global** `settings.yaml` `guardrails:` subtree (operator-tier **only** — a project repo cannot configure or weaken a checker; a project-tier block is ignored with a WARN); an explicit rule list replaces the defaults. `--guardrails-model` overrides the YAML model. Fires on the main loop regardless of `--headless`. Build prints one `guardrails: ON\|OFF …` posture line (resolved model + provenance). **See the guardrails section below + `docs/adr/0021-guardrails.md` + `docs/adr/0046-guardrails-slot-enable.md`.** |
+| `--guardrails` | `""` | guardrails **kill-switch only**: pass `--guardrails=off` to force the checker **off** regardless of `--guardrails-model` / the `guardrail` slot / the `guardrails:` YAML. The **positive enable path** is configuring a checker model (`--guardrails-model` OR the `guardrail` slot), NOT this flag. **Only `off` is accepted** — any other value (e.g. `--guardrails=on`, which does NOT enable) **fails startup** rather than silently doing nothing. |
 
 > **Delegation capabilities (Subagent / Parallel / Team).** Beyond the shared
 > `--max-run-tokens` budget (**default: unlimited**), every delegation supports: an explicit **child-concurrency
@@ -1012,11 +1012,16 @@ tool-less checker model** and enforce a verdict — the *dual-LLM quarantine*. T
 catch **outbound exfiltration** (a secret in `PreToolUse` args) and **inbound prompt
 injection** (instruction-like content in a `PostToolUse` result). **OFF until a
 checker model is configured** — configuring a model is the opt-in to spend. Full
-rationale + threat model: `docs/adr/0021-guardrails.md`.
+rationale + threat model: `docs/adr/0021-guardrails.md`; the slot-enables widening is
+`docs/adr/0046-guardrails-slot-enable.md`.
 
-**The minimal config is just a model.** With `--guardrails-model X` (and no rule
-list) guardrails are ON with the **default advisory rule set** — observe-only for the
-network/MCP surfaces, off for local tools:
+**The minimal config is just a checker model — via `--guardrails-model` OR a bound
+`guardrail` model slot.** Configuring a checker model ENABLES guardrails (configure =
+enable, the router-parity model of [ADR 0042](adr/0042-taxonomy-gated-model-router.md),
+extended to the guardrail slot by [ADR 0046](adr/0046-guardrails-slot-enable.md)): a
+`guardrail` slot no longer merely routes an already-enabled checker, it turns it ON.
+With a model and no rule list, guardrails are ON with the **default advisory rule set**
+— observe-only for the network/MCP surfaces, off for local tools:
 
 | Tool matcher | Phases | Mode |
 | --- | --- | --- |
@@ -1035,14 +1040,26 @@ tighten-only project gate: a project repo disabling or weakening a security chec
 is a *downgrade*, so a project-tier `guardrails:` block is **ignored with a WARN**.
 The subtree is parsed **strictly** (an unknown sub-key is an error, like
 `permissions:`) so a typo cannot silently disable a guardrail. Set the checker model
-with `--guardrails-model` (overrides the YAML `model:`); force off with
+with `--guardrails-model` (overrides the YAML `model:`) OR bind the `guardrail` model
+slot (`--model-slot guardrail=…` / `models.slots.guardrail`); a bound slot
+**supersedes** the `--guardrails-model`/YAML model when both are set; force off with
 `--guardrails=off`.
+
+**Startup posture.** Build prints exactly one `guardrails: ON|OFF …` line carrying the
+RESOLVED checker model + its provenance (via `--guardrails-model`, via the `guardrail`
+slot, or via the slot superseding a differing gate value), the effective rule mode, the
+rule count, and the per-session `maxChecks`. OFF is explicit, not inferred from silence
+— either `OFF (kill-switch active …)` or `OFF (no checker model configured; …)` with
+the enable hint.
 
 ```yaml
 # ~/.config/mecatl/settings.yaml  (user-global only — NOT a checked-in project file)
 guardrails:
   model: gpt-5-mini          # the checker model (or a --model-alias). With NO rules below,
                              # the default advisory set applies (the model is the opt-in).
+                             # A bound `guardrail` model slot (--model-slot guardrail=… /
+                             # models.slots.guardrail) SUPERSEDES this model AND enables
+                             # guardrails on its own (ADR 0046 — configure = enable).
   maxChecks: 50              # per-session checker-call cap — bounded SEPARATELY from
                              # --max-run-tokens so infra spend can't starve the agent.
                              # OMITTING maxChecks = NO cap (but the DEFAULT rule set, used when
@@ -1215,9 +1232,12 @@ models:
   machinery** as `--model-alias` / an agent def's `model:`.
 - For the **compaction** slot, ONLY the summary LLM call's model changes — the
   session's own model, token counter, prompt, and context window stay put. For
-  **ask-reviewer** / **guardrail** the slot **supersedes the model** of
-  `--subagent-ask-reviewer` / `--guardrails-model`, but those flags stay the **on/off
-  gate** (a slot alone never enables them).
+  **ask-reviewer** the slot **supersedes the model** of `--subagent-ask-reviewer`, but
+  that flag stays the **on/off gate** (a slot alone never enables the reviewer — the
+  sibling trap, out of scope for #159). For **guardrail** the slot **supersedes the
+  model** of `--guardrails-model` AND (per [ADR 0046](adr/0046-guardrails-slot-enable.md),
+  configure = enable) **also enables** guardrails — a bound `guardrail` slot alone turns
+  the checker ON; the flag is no longer the sole enable gate.
 - **Fail-soft**: a typo'd slot key or an alias that means *inherit* WARNs and degrades
   to the session model — a broken housekeeping slot never wedges the call.
 - **Operator-tier by default, project-overridable within an allowlist (Phase 4).** The
@@ -2946,7 +2966,7 @@ The minting itself happens inside the reusable workflow's `publish` job (via
 `mention` (default `@mecatequi`), `model`, `default-provider`, `posture` (default `auto`),
 `max-run-tokens`, `max-turns` (per-run turn cap; empty uses the deployment default),
 `timeout` (default `40m`), `openai-base-url` (for an OpenAI-compatible
-endpoint), `guardrails-model` (issue #27 checker model; empty disables), `setup-script`
+endpoint), `guardrails-model` (issue #27 checker model; configuring it OR a bound `guardrail` model slot enables guardrails, ADR 0046; empty + no slot disables), `setup-script`
 (multi-line shell run before the binary to install a project toolchain beyond the always-on
 `task` + golangci-lint — see the toolchain note above), `base-branch`, `pr-body-template`,
 `pr-title-template`. The escape-hatch-only knobs (`default-model`,

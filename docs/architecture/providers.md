@@ -194,9 +194,11 @@ The single choke point is **`resolveSlotModel`** (`internal/app/slots.go`): an e
 selector is mapped THROUGH `lookupModelAlias`, so a slot value is itself an alias or a
 literal id. For the compaction slot, ONLY the summary LLM call's model (and its
 token-counter) is swapped — the engine's own Model / TokenCounter / PromptConfig /
-ContextWindow stay on the session model. For `ask-reviewer` and `guardrail` the slot
-**supersedes the model** of `--subagent-ask-reviewer` / `--guardrails-model`, but those
-flags stay the **on/off gate** (a slot alone never enables them).
+ContextWindow stay on the session model. For `ask-reviewer` the slot **supersedes the
+model** of `--subagent-ask-reviewer`, but that flag stays the **on/off gate** (a slot
+alone never enables the reviewer). For `guardrail` the slot **supersedes the model**
+of `--guardrails-model` AND **enables** guardrails (ADR 0046 — configure = enable); the
+flag is no longer the sole enable gate.
 
 Posture is **fail-soft** and the default is **byte-identical**: with no slot configured
 every routed call keeps the session model; a typo'd slot key or an alias meaning inherit

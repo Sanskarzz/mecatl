@@ -211,16 +211,83 @@ func effectiveGuardrailSpecs(cfg Config) (specs []modelhook.RuleSpec, usedDefaul
 	return out, true
 }
 
-// guardrailsConfigured reports whether guardrails are switched on: a model is
-// configured AND the master kill-switch is not set. A model with NO explicit rules
-// is still ON — it takes the default advisory rule set (effectiveGuardrailSpecs),
-// honouring the headline default. The kill-switch (--guardrails=off →
-// GuardrailsDisabled) wins over any config.
+// guardrailsConfigured reports whether guardrails are switched on: a checker model
+// is configured — via --guardrails-model OR a bound `guardrail` model slot (ADR 0046,
+// configure = enable, the router-parity model of ADR 0042) — AND the master kill-switch
+// is not set. A model with NO explicit rules is still ON — it takes the default advisory
+// rule set (effectiveGuardrailSpecs), honouring the headline default. The kill-switch
+// (--guardrails=off → GuardrailsDisabled) wins over any config. Resolution precedence
+// is unchanged: a bound slot SUPERSEDES the gate value's model (see
+// resolveGuardrailsCheckerModel).
 func guardrailsConfigured(cfg Config) bool {
 	if cfg.GuardrailsDisabled {
 		return false
 	}
-	return cfg.GuardrailsModel != ""
+	return cfg.GuardrailsModel != "" || selectorForSlot(cfg, slotGuardrail) != ""
+}
+
+// guardrailSource is the provenance of the resolved checker model — the single axis the
+// build-once posture line (logGuardrailsPosture) narrates alongside the resolved id. It
+// is the composition source of truth for "where did the checker model come from", shared
+// by buildGuardrailsChecker (which only needs the resolved id) and the posture line.
+type guardrailSource int
+
+const (
+	// srcNone: no checker model resolves (guardrails OFF — nothing configured, or the
+	// configured slot/gate is unresolvable AND there is no usable literal).
+	srcNone guardrailSource = iota
+	// srcGate: the checker model came from the gate value (--guardrails-model / the
+	// guardrails.model YAML), with no slot superseding it.
+	srcGate
+	// srcSlot: the checker model came from a bound `guardrail` model slot (incl. its
+	// cheap-tier fallthrough), with no non-empty gate value differing from it.
+	srcSlot
+	// srcSlotSupersedingGate: a bound `guardrail` slot resolved AND a non-empty gate
+	// value (--guardrails-model) is present but differs from the slot's resolved model —
+	// the slot won, the gate value is inert for routing. The posture line names both so
+	// an operator who set both sees the precedence honestly.
+	srcSlotSupersedingGate
+)
+
+// resolveGuardrailsCheckerModel is the SINGLE source of truth for the resolved guardrail
+// checker model + its provenance. It is PURE (no diagnostics, no provider) so the
+// build-once posture line (logGuardrailsPosture) and the per-session checker builder
+// (buildGuardrailsChecker) read the SAME resolution and cannot drift. Precedence mirrors
+// the pre-#46 buildGuardrailsChecker exactly:
+//
+//  1. slot: resolveSlotModel(cfg, slotGuardrail, "") → if ok, model = that; src = srcSlot
+//     (or srcSlotSupersedingGate when cfg.GuardrailsModel != "" AND differs from the
+//     slot's resolved model — a same-id gate value stays srcSlot, no "superseding").
+//  2. else gate: sel := cfg.GuardrailsModel; resolved, _ := lookupModelAlias(cfg, sel);
+//     src = srcGate. Under UseMock an unresolved gate value passes through as the literal
+//     sel verbatim (matching the old buildGuardrailsChecker:245-251 fail-soft).
+//  3. else nothing: model = "", src = srcNone.
+//
+// configured = src != srcNone. A slot that is bound but unresolvable falls through to the
+// gate value (today's fail-soft — a broken slot never wedges the checker).
+func resolveGuardrailsCheckerModel(cfg Config) (model string, src guardrailSource, configured bool) {
+	if gm, ok := resolveSlotModel(cfg, slotGuardrail, ""); ok && gm != "" {
+		src = srcSlot
+		if g := strings.TrimSpace(cfg.GuardrailsModel); g != "" && g != gm {
+			src = srcSlotSupersedingGate
+		}
+		return gm, src, true
+	}
+	sel := strings.TrimSpace(cfg.GuardrailsModel)
+	if sel == "" {
+		return "", srcNone, false
+	}
+	resolved, _ := lookupModelAlias(cfg, sel)
+	if resolved == "" {
+		// UseMock (or a bare-token passthrough) takes the literal verbatim; an empty
+		// resolve here is the defensive fail-soft path (Build normalized the value
+		// fail-fast for non-mock).
+		resolved = sel
+	}
+	if resolved == "" {
+		return "", srcNone, false
+	}
+	return resolved, srcGate, true
 }
 
 // buildGuardrailsChecker constructs the engine-backed VerdictChecker over the
@@ -229,27 +296,9 @@ func guardrailsConfigured(cfg Config) bool {
 // new metrics label), the no-progress nudge disabled. Returns nil when the model
 // does not resolve (defensive — Build already failed fast via
 // normalizeGuardrailsModel).
-func buildGuardrailsChecker(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string) modelhook.VerdictChecker {
-	sel := strings.TrimSpace(cfg.GuardrailsModel)
-	if sel == "" {
-		// GuardrailsModel STAYS the enable gate: empty ⇒ no checker, byte-identical.
-		return nil
-	}
-	// GUARDRAIL SLOT (ADR 0030, Phase 2): a configured `guardrail` slot SUPERSEDES the
-	// --guardrails-model value (the model field still gates ON/OFF). Otherwise resolve
-	// the configured model through the alias machinery exactly as before.
-	var resolved string
-	if gm, ok := resolveSlotModel(cfg, slotGuardrail, parentModel); ok {
-		resolved = gm
-	} else {
-		resolved, _ = lookupModelAlias(cfg, sel)
-	}
-	if resolved == "" {
-		// UseMock passes the literal through; an empty resolve here is the defensive
-		// unreachable path (Build normalized the value fail-fast).
-		resolved = sel
-	}
-	if resolved == "" {
+func buildGuardrailsChecker(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, _ string) modelhook.VerdictChecker {
+	resolved, _, configured := resolveGuardrailsCheckerModel(cfg)
+	if !configured {
 		return nil
 	}
 	windowFn := childWindowFor(cfg, provReg, parentProviderID, resolved)
