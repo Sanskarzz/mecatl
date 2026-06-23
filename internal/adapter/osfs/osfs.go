@@ -1,20 +1,45 @@
 // Package osfs implements tool.FileSystem over the real operating-system
 // filesystem and a tool.Workspace that scopes every path under a single session
-// root. All Workspace paths are interpreted relative to the root; paths that
-// resolve outside the root (via "..", absolute paths, or symlink-style escapes)
-// are rejected as a correctness invariant.
+// root. The canonical path forms a Workspace method accepts are:
 //
-// The ONE deliberate carve-out is the explicit READ-ONLY allowed roots
-// (WithReadRoots): absolute directories — in practice the per-skill directories
-// of discovered skills, which may live outside the workspace (~/.claude/skills/…)
-// — that Read and Stat, and ONLY Read and Stat, may serve by absolute path. Each
-// allowed root gets its own os.Root, so symlinks inside it that escape it are
-// refused exactly like workspace escapes. Write, Glob, Grep, and the Edit ledger's
-// mutation path stay workspace-only.
+//   - session-RELATIVE paths (the usual form), interpreted relative to the root;
+//   - ABSOLUTE paths that canonicalize INSIDE the workspace root (the same
+//     physical file a relative path would reach, addressed by its absolute
+//     alias) — accepted by all five FS tools (Read/Write/Stat and, via the Edit
+//     read-ledger, Edit/Glob/Grep's callers); and
+//   - for Read/Stat ONLY, an absolute path under an explicit READ-ONLY allowed
+//     root (WithReadRoots) — in practice the per-skill directories of discovered
+//     skills, which may live outside the workspace (~/.claude/skills/…).
+//
+// Every other path is rejected as a correctness invariant: an absolute path that
+// resolves OUTSIDE the workspace root, any ".." traversal that climbs out, and a
+// symlink that escapes (whether addressed relatively or absolutely) all fail with
+// ErrPathEscape.
+//
+// Absolute-path acceptance is canonicalize-then-reject: an absolute path is
+// EvalSymlinks-resolved against the deepest EXISTING ancestor (so a not-yet-
+// existing leaf being Written is still vetted through its real parent), and the
+// resulting real path is compared against the (already EvalSymlinks-resolved at
+// construction) workspace root. A symlink inside the workspace whose target
+// resolves OUTSIDE the workspace is rejected at resolution time, BEFORE the path
+// reaches *os.Root — defense-in-depth on top of *os.Root's own containment. On
+// accept the path is reduced to its slash-separated root-relative form and flows
+// through the SAME *os.Root as a relative path, so the os.Root symlink
+// containment for in-root paths is preserved.
+//
+// The ONE other carve-out is the explicit READ-ONLY allowed roots
+// (WithReadRoots) described above: each gets its own os.Root, so symlinks inside
+// it that escape it are refused exactly like workspace escapes. Write, Glob,
+// Grep, and the Edit ledger's mutation path stay workspace-only (Glob/Grep never
+// route patterns through absolute resolution — patterns are not paths; a leading
+// "/" in a pattern is stripped as before).
 //
 // The Workspace also carries the per-session Edit read-ledger
 // (RecordRead/WasReadUnchanged) backed by a sha256 content fingerprint, the seam
-// WP7's Edit tool uses to enforce read-before-edit-and-unchanged.
+// WP7's Edit tool uses to enforce read-before-edit-and-unchanged. The ledger
+// NORMALIZES its keys via resolvePath, so a file read by absolute path and then
+// edited by relative path (or vice versa) matches — the key is the canonical
+// root-relative form, not the verbatim argument.
 package osfs
 
 import (
@@ -61,14 +86,17 @@ const defaultCommandWaitDelay = 5 * time.Second
 const maxCommandOutput = 1 << 20 // 1 MiB
 
 // FileSystem implements tool.FileSystem over the real OS filesystem, rooted at a
-// session workspace directory. All paths passed to its methods are treated as
-// relative to root and are validated against escape.
+// session workspace directory. The canonical path forms its methods accept are
+// session-relative paths, absolute paths that resolve inside the workspace root
+// (reduced to their root-relative form via resolveInRoot), and — for Read/Stat
+// only — absolute paths under an explicit read-only allowed root.
 //
 // Every file operation goes through an *os.Root opened on the workspace root,
 // which refuses both lexical ".." escapes and symlink traversal that would leave
 // the root. This closes the gap a purely lexical cleanPath left open: the model
 // can create a symlink inside the workspace (via Bash `ln -s /etc/passwd evil`),
-// and os.Root refuses to follow it out of the root.
+// and both resolveInRoot (for absolute addresses) and os.Root (for all
+// in-root paths) refuse to follow it out of the root.
 type FileSystem struct {
 	root string
 	r    *os.Root
@@ -169,18 +197,72 @@ func NewFileSystem(root string, opts ...Option) (*FileSystem, error) {
 // Root returns the absolute workspace root.
 func (f *FileSystem) Root() string { return f.root }
 
-// rootRelative converts a session-relative path into the slash-cleaned form
-// os.Root expects, rejecting absolute paths up front. Symlink and ".." escapes
-// that survive this lexical check are caught by os.Root at operation time and
-// mapped to ErrPathEscape via mapEscape.
-func rootRelative(path string) (string, error) {
+// resolvePath maps a caller-supplied path onto the slash-cleaned, os.Root-ready
+// root-relative form. A session-relative path (one that is neither absolute nor
+// slash-prefixed) is cleaned lexically — the lexical ".." check and *os.Root's
+// containment catch relative escapes. An ABSOLUTE path (or a slash-prefixed one)
+// is canonicalized by resolveInRoot: if it resolves inside the workspace root it
+// is reduced to its root-relative form; otherwise it fails with ErrPathEscape
+// (out-of-root absolute paths, including escaping symlinks addressed absolutely).
+//
+// Read/Stat consult the read-only allowed roots (WithReadRoots) for absolute
+// paths that resolve OUTSIDE the workspace root — see resolveRead, which layers
+// that carve-out on top of resolvePath.
+func (f *FileSystem) resolvePath(path string) (string, error) {
 	if path == "" {
 		return ".", nil
 	}
-	if filepath.IsAbs(path) || strings.HasPrefix(path, "/") {
-		return "", fmt.Errorf("%w: %q is absolute", ErrPathEscape, path)
+	if !filepath.IsAbs(path) && !strings.HasPrefix(path, "/") {
+		return filepath.Clean(filepath.FromSlash(path)), nil
 	}
-	return filepath.Clean(filepath.FromSlash(path)), nil
+	return f.resolveInRoot(path)
+}
+
+// resolveInRoot canonicalizes an ABSOLUTE path and, if it resolves inside the
+// workspace root, returns its slash-separated root-relative form. It mirrors
+// internal/adapter/acp/fsworkspace.go:confineSymlinks exactly in shape: for a
+// not-yet-existing leaf (a file being Written) it resolves the deepest EXISTING
+// ancestor's symlinks and re-appends the unresolved tail, so a symlinked PARENT
+// component that escapes is caught at resolution time. f.root is already
+// EvalSymlinks-resolved at construction, so the comparison is canonical-to-
+// canonical. Out-of-root → ErrPathEscape; a non-ErrNotExist stat error on an
+// ancestor fails safe (reject).
+func (f *FileSystem) resolveInRoot(abs string) (string, error) {
+	// Find the deepest existing ancestor and resolve it.
+	existing := abs
+	var tail []string
+	for {
+		if _, err := os.Lstat(existing); err == nil {
+			break
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			// An ambiguous stat error on an ancestor: fail safe (reject) rather
+			// than operate on a path we cannot vet.
+			return "", fmt.Errorf("%w: %q cannot be verified: %v", ErrPathEscape, abs, err)
+		}
+		parent := filepath.Dir(existing)
+		if parent == existing {
+			// Reached the filesystem root without an existing ancestor; the
+			// workspace root itself exists, so this means the absolute path is
+			// wholly outside it — reject as an escape.
+			return "", fmt.Errorf("%w: %q", ErrPathEscape, abs)
+		}
+		tail = append([]string{filepath.Base(existing)}, tail...)
+		existing = parent
+	}
+	resolved, err := filepath.EvalSymlinks(existing)
+	if err != nil {
+		return "", fmt.Errorf("%w: %q resolving: %v", ErrPathEscape, abs, err)
+	}
+	realPath := resolved
+	if len(tail) > 0 {
+		realPath = filepath.Join(append([]string{resolved}, tail...)...)
+	}
+	// Canonical-to-canonical: f.root is EvalSymlinks-resolved at construction.
+	if realPath != f.root && !strings.HasPrefix(realPath, f.root+string(filepath.Separator)) {
+		return "", fmt.Errorf("%w: %q", ErrPathEscape, abs)
+	}
+	rel, _ := filepath.Rel(f.root, realPath) // cannot error: realPath is under f.root
+	return filepath.ToSlash(rel), nil
 }
 
 // mapEscape rewrites os.Root's escape/insecure-path errors to the package's
@@ -223,15 +305,17 @@ func (f *FileSystem) Read(_ context.Context, path string) ([]byte, error) {
 	return data, nil
 }
 
-// resolveRead maps a Read/Stat path onto the os.Root that serves it: the
-// workspace root for the ordinary session-relative form, or — for an ABSOLUTE
-// path — the explicit read-only allowed root containing it (WithReadRoots).
-// Any other absolute path fails with the exact ErrPathEscape rootRelative
-// produced before allowed roots existed (byte-identical message). Read and Stat
-// are the ONLY callers; Write/Glob/Grep stay on rootRelative and never see an
-// allowed root.
+// resolveRead maps a Read/Stat path onto the os.Root that serves it. It tries
+// resolvePath first: a relative path, and an absolute path that resolves INSIDE
+// the workspace root, both land on the workspace os.Root. An absolute path that
+// resolves OUTSIDE the workspace root may still be served by an explicit
+// read-only allowed root (WithReadRoots) — the skills carve-out — so on a
+// resolvePath error resolveRead falls through to allowedReadRoot. Only if that
+// too declines is the original escape error returned. Read and Stat are the ONLY
+// callers; Write routes through resolvePath directly (in-root absolute only, no
+// allowed-root carve-out for writes), and Glob/Grep never resolve paths at all.
 func (f *FileSystem) resolveRead(path string) (*os.Root, string, error) {
-	rel, err := rootRelative(path)
+	rel, err := f.resolvePath(path)
 	if err == nil {
 		return f.r, rel, nil
 	}
@@ -266,7 +350,7 @@ func (f *FileSystem) allowedReadRoot(path string) (*os.Root, string, bool) {
 // Write replaces the contents of the file at the session-relative path, creating
 // it and any parent directories if needed.
 func (f *FileSystem) Write(_ context.Context, path string, data []byte) error {
-	rel, err := rootRelative(path)
+	rel, err := f.resolvePath(path)
 	if err != nil {
 		return err
 	}
@@ -707,11 +791,29 @@ func (r *CommandRunner) Run(ctx context.Context, command, workdir string) (tool.
 	return res, nil
 }
 
+// ledgerKey normalizes a ledger path to its canonical root-relative form so a
+// file read by absolute path and then edited by relative path (or vice versa)
+// matches in the ledger. It resolves through fs.resolvePath; an in-root absolute
+// path is reduced to its root-relative form, a relative path is cleaned, and an
+// out-of-root absolute path (a skills-base read served by an allowed root, which
+// has no root-relative form) falls back to the cleaned slash form. The key is
+// stable across the two cross-form call sites (RecordRead and WasReadUnchanged)
+// because both apply the same normalization.
+func (w *Workspace) ledgerKey(path string) string {
+	if rel, err := w.fs.resolvePath(path); err == nil {
+		return rel
+	}
+	return filepath.Clean(filepath.ToSlash(path))
+}
+
 // RecordRead stores the current on-disk fingerprint of path under the session
 // ledger. The version argument is accepted for interface conformance but the
 // adapter computes and stores its own authoritative fingerprint so that
-// WasReadUnchanged can compare against the live file.
+// WasReadUnchanged can compare against the live file. The ledger key is the
+// canonical root-relative form (see ledgerKey), so an absolute path and the
+// equivalent relative path share one entry.
 func (w *Workspace) RecordRead(path string, version string) {
+	key := w.ledgerKey(path)
 	fp, err := w.fingerprint(path)
 	if err != nil {
 		// Record the caller-supplied token as a best-effort fallback so a later
@@ -719,16 +821,19 @@ func (w *Workspace) RecordRead(path string, version string) {
 		fp = version
 	}
 	w.mu.Lock()
-	w.ledger[path] = fp
+	w.ledger[key] = fp
 	w.mu.Unlock()
 }
 
 // WasReadUnchanged reports whether path was previously recorded via RecordRead
 // and its current on-disk fingerprint still equals the recorded one. It returns
-// false if path was never read or if the file changed (or vanished) since.
+// false if path was never read or if the file changed (or vanished) since. The
+// lookup uses the same canonical ledger key as RecordRead, so a read by absolute
+// path and a check by relative path (or the reverse) agree.
 func (w *Workspace) WasReadUnchanged(_ context.Context, path string) (bool, error) {
+	key := w.ledgerKey(path)
 	w.mu.Lock()
-	recorded, ok := w.ledger[path]
+	recorded, ok := w.ledger[key]
 	w.mu.Unlock()
 	if !ok {
 		return false, nil

@@ -606,3 +606,149 @@ func TestFSWorkspaceReadTimeoutSane(t *testing.T) {
 		t.Fatalf("Read: %v", err)
 	}
 }
+
+// --- absolute in-root path acceptance (issue #154 / ADR 0047 parity) ---------
+
+// TestFSWorkspaceAbsoluteInRootReadWriteStat pins that an ABSOLUTE in-root path
+// is now accepted by the ACP workspace's Read/Write/Stat (the absPath change had
+// ZERO coverage). The ACP workspace delegates Read/Write through the editor
+// buffer map keyed by the absolute path absPath computes; Stat delegates to the
+// composed osfs view, which accepts the same absolute in-root form. Content must
+// round-trip across the two path forms (write by absolute, read by relative and
+// vice versa).
+func TestFSWorkspaceAbsoluteInRootReadWriteStat(t *testing.T) {
+	ctx := context.Background()
+	ws, peer, root := newTestFSWorkspace(t, map[string]string{"rel.go": "package main\n"})
+
+	// Read by the ABSOLUTE in-root alias of a buffer seeded by relative path.
+	abs := filepath.Join(root, "rel.go")
+	got, err := ws.Read(ctx, abs)
+	if err != nil {
+		t.Fatalf("Read(absolute in-root): %v", err)
+	}
+	if string(got) != "package main\n" {
+		t.Errorf("Read(absolute) = %q, want %q", got, "package main\n")
+	}
+
+	// Write by ABSOLUTE in-root path, read back by RELATIVE.
+	if err := ws.Write(ctx, abs, []byte("package main // edited\n")); err != nil {
+		t.Fatalf("Write(absolute in-root): %v", err)
+	}
+	if v, _ := peer.get(abs); v != "package main // edited\n" {
+		t.Fatalf("peer buffer after absolute Write = %q, want edited", v)
+	}
+	got, err = ws.Read(ctx, "rel.go")
+	if err != nil {
+		t.Fatalf("Read(relative after absolute Write): %v", err)
+	}
+	if string(got) != "package main // edited\n" {
+		t.Errorf("content after absolute Write = %q", got)
+	}
+
+	// Stat by ABSOLUTE in-root path must succeed (delegated to the osfs view,
+	// which now accepts in-root absolutes); the file exists on disk because the
+	// osfs view is rooted at the same tempdir — but the ACP workspace does NOT
+	// write to disk, so seed a disk file Stat will see.
+	disk := filepath.Join(root, "disk.txt")
+	if err := os.WriteFile(disk, []byte("on disk\n"), 0o644); err != nil {
+		t.Fatalf("seed disk file: %v", err)
+	}
+	fi, err := ws.Stat(ctx, disk)
+	if err != nil {
+		t.Fatalf("Stat(absolute in-root disk file): %v", err)
+	}
+	if fi.Name != "disk.txt" {
+		t.Errorf("Stat(absolute).Name = %q, want disk.txt", fi.Name)
+	}
+
+	// An OUT-of-root ABSOLUTE path (a sibling tempdir) is still rejected.
+	other := filepath.Join(t.TempDir(), "other", "file")
+	if err := os.MkdirAll(filepath.Dir(other), 0o755); err != nil {
+		t.Fatalf("mkdir other: %v", err)
+	}
+	if err := os.WriteFile(other, []byte("out"), 0o644); err != nil {
+		t.Fatalf("write other: %v", err)
+	}
+	for _, bad := range []string{"/etc/passwd", other} {
+		if _, err := ws.Read(ctx, bad); err == nil {
+			t.Errorf("Read(%q) should be rejected as an escape", bad)
+		}
+		if err := ws.Write(ctx, bad, []byte("x")); err == nil {
+			t.Errorf("Write(%q) should be rejected as an escape", bad)
+		}
+	}
+}
+
+// TestFSWorkspaceAbsPathUnit is the direct unit test of the changed resolver:
+// an in-root absolute is accepted and returned cleaned; an out-of-root absolute
+// and a relative-escape are rejected. Drives absPath without the editor conn.
+func TestFSWorkspaceAbsPathUnit(t *testing.T) {
+	ws, _, root := newTestFSWorkspace(t, nil)
+
+	in := filepath.Join(root, "sub", "file.go")
+	got, err := ws.absPath(in)
+	if err != nil {
+		t.Fatalf("absPath(in-root absolute): %v", err)
+	}
+	if got != in {
+		t.Errorf("absPath(in-root absolute) = %q, want %q", got, in)
+	}
+	// The relative form must canonicalize to the SAME absolute key.
+	relGot, err := ws.absPath(filepath.ToSlash(filepath.Join("sub", "file.go")))
+	if err != nil {
+		t.Fatalf("absPath(relative): %v", err)
+	}
+	if relGot != got {
+		t.Errorf("absPath(relative) = %q, want %q (same as absolute)", relGot, got)
+	}
+
+	for _, bad := range []string{
+		"/etc/passwd",
+		filepath.Join(t.TempDir(), "sibling"),
+		"../escape",
+		"a/../../b",
+	} {
+		if _, err := ws.absPath(bad); err == nil {
+			t.Errorf("absPath(%q) should be rejected as an escape", bad)
+		}
+	}
+}
+
+// TestFSWorkspaceLedgerCrossForm pins Finding 1's fix: the ACP ledger key is
+// normalized via ledgerKey (absPath), so a read by absolute path and a check by
+// relative path (and the reverse) share ONE entry. A mutation via Write on
+// EITHER form flips WasReadUnchanged to false for BOTH. Without the fix, a
+// Read(abs) then WasReadUnchanged(rel) was a ledger MISS (false) even though the
+// buffer was unchanged — breaking the exact invariant ADR 0047 point 3 protects.
+func TestFSWorkspaceLedgerCrossForm(t *testing.T) {
+	ctx := context.Background()
+	ws, _, root := newTestFSWorkspace(t, map[string]string{"led.txt": "original"})
+	rel := "led.txt"
+	abs := filepath.Join(root, "led.txt")
+
+	// Read by ABSOLUTE, check by RELATIVE → unchanged.
+	ws.RecordRead(abs, "")
+	if ok, err := ws.WasReadUnchanged(ctx, rel); err != nil || !ok {
+		t.Fatalf("read abs / check rel: (%v,%v), want (true,nil)", ok, err)
+	}
+	// Mutate by RELATIVE → check by ABSOLUTE → changed.
+	if err := ws.Write(ctx, rel, []byte("mutated")); err != nil {
+		t.Fatalf("Write(rel) mutation: %v", err)
+	}
+	if ok, err := ws.WasReadUnchanged(ctx, abs); err != nil || ok {
+		t.Fatalf("after relative mutation, check abs: (%v,%v), want (false,nil)", ok, err)
+	}
+
+	// Reverse: read by RELATIVE, check by ABSOLUTE → unchanged.
+	ws.RecordRead(rel, "")
+	if ok, err := ws.WasReadUnchanged(ctx, abs); err != nil || !ok {
+		t.Fatalf("read rel / check abs: (%v,%v), want (true,nil)", ok, err)
+	}
+	// Mutate by ABSOLUTE → check by RELATIVE → changed.
+	if err := ws.Write(ctx, abs, []byte("mutated again")); err != nil {
+		t.Fatalf("Write(abs) mutation: %v", err)
+	}
+	if ok, err := ws.WasReadUnchanged(ctx, rel); err != nil || ok {
+		t.Fatalf("after absolute mutation, check rel: (%v,%v), want (false,nil)", ok, err)
+	}
+}

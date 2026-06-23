@@ -71,7 +71,7 @@ type fsWorkspace struct {
 	callTimeout time.Duration
 
 	mu     sync.Mutex
-	ledger map[string]string // session-relative path -> sha256 of last fs/read content
+	ledger map[string]string // ledgerKey(path) -> sha256 of last fs/read content
 }
 
 // Compile-time assertion that fsWorkspace satisfies the tool.Workspace port.
@@ -100,14 +100,15 @@ func newFSWorkspace(conn *Conn, sessionID, root string) (*fsWorkspace, error) {
 // (Read/Write) operations address the same files.
 func (w *fsWorkspace) Root() string { return w.local.Root() }
 
-// absPath confines a session-relative path under the root and returns the
-// ABSOLUTE path the ACP fs/* contract requires. The model is UNTRUSTED even
-// though the editor is trusted, so escapes are rejected here, BEFORE the path is
-// handed to the editor — never delegate an unvalidated "../../etc/passwd".
+// absPath confines a session-relative (or absolute in-root) path under the root
+// and returns the ABSOLUTE path the ACP fs/* contract requires. The model is
+// UNTRUSTED even though the editor is trusted, so escapes are rejected here,
+// BEFORE the path is handed to the editor — never delegate an unvalidated
+// "../../etc/passwd".
 //
 // Confinement guarantee (stated honestly — this is NOT os.Root-grade):
-//  1. LEXICAL: reject absolute paths and any ".." that climbs out of the root
-//     after Clean. This is the same lexical check osfs.rootRelative applies.
+//  1. LEXICAL: reject any ".." that climbs out of the root after Clean. This is
+//     the same lexical check osfs.resolvePath applies to relative paths.
 //  2. SYMLINK (best-effort, on the on-disk tree): EvalSymlinks the deepest
 //     EXISTING ancestor of the joined target and re-verify the resolved real path
 //     is still within the EvalSymlinks-resolved Root(); reject if it escapes. This
@@ -115,15 +116,25 @@ func (w *fsWorkspace) Root() string { return w.local.Root() }
 //     /etc/passwd evil` via Bash) and then reading/writing it — without this the
 //     editor would receive "<root>/evil" and might follow it out of root.
 //
-// Unlike osfs (every op flows through *os.Root, which refuses symlink traversal
-// at the kernel level), this is a best-effort filesystem-side re-confinement: it
-// resolves the existing parent for a buffer-only/non-existent leaf, so a
-// not-yet-created path is still checked against its real parent. The editor is a
-// trusted-local process and owns final filesystem policy; this layer rejects the
-// obviously-escaping shapes the untrusted model can construct.
+// An ABSOLUTE path is accepted iff confineSymlinks confirms it resolves inside
+// Root() (mirroring osfs.resolveInRoot, so the ACP and osfs workspaces treat
+// absolute in-root paths identically). A relative path takes the lexical + symlink
+// check. Unlike osfs (every op flows through *os.Root, which refuses symlink
+// traversal at the kernel level), this is a best-effort filesystem-side
+// re-confinement: it resolves the existing parent for a buffer-only/non-existent
+// leaf, so a not-yet-created path is still checked against its real parent. The
+// editor is a trusted-local process and owns final filesystem policy; this layer
+// rejects the obviously-escaping shapes the untrusted model can construct.
 func (w *fsWorkspace) absPath(path string) (string, error) {
 	if filepath.IsAbs(path) || strings.HasPrefix(path, "/") {
-		return "", fmt.Errorf("acp: fs workspace: %q is absolute (paths must be session-relative)", path)
+		// An absolute path is accepted iff it canonicalizes inside the workspace
+		// root (mirroring osfs.resolveInRoot); an out-of-root absolute path
+		// escapes and is rejected by confineSymlinks. No relative join happens.
+		abs := filepath.Clean(path)
+		if err := w.confineSymlinks(abs); err != nil {
+			return "", err
+		}
+		return abs, nil
 	}
 	clean := filepath.Clean(filepath.FromSlash(path))
 	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
@@ -344,14 +355,35 @@ func (w *fsWorkspace) Grep(ctx context.Context, pattern, pathGlob string) ([]too
 	return w.local.Grep(ctx, pattern, pathGlob)
 }
 
+// ledgerKey normalizes a ledger path to its canonical absolute form so a file
+// read by absolute path and then edited by relative path (or vice versa) matches
+// in the ledger. It resolves through absPath; an in-root absolute path is left as
+// its canonical absolute form (absPath canonicalizes BOTH relative and absolute
+// in-root inputs to the SAME <root>/<rel> absolute form — the editor buffer
+// address), a relative path is joined under Root() to that same absolute form,
+// and an escaping path absPath rejects falls back to filepath.Clean's slash form
+// (mirroring osfs.ledgerKey's fallback; these paths are never edited, so the key
+// shape only needs both call sites to agree). The key is stable across the two
+// cross-form call sites (RecordRead and WasReadUnchanged) because both apply the
+// same normalization.
+func (w *fsWorkspace) ledgerKey(path string) string {
+	if abs, err := w.absPath(path); err == nil {
+		return abs
+	}
+	return filepath.Clean(filepath.ToSlash(path))
+}
+
 // RecordRead stores the buffer-keyed fingerprint of path: it re-reads through
 // fs/read_text_file and records the sha256 of the editor's buffer content. The
 // caller-supplied version is ignored (the adapter computes its own authoritative
 // fingerprint, exactly like osfs) — but here the authority is the BUFFER, not
 // disk, so WasReadUnchanged compares against what the editor would actually
 // overwrite. A delegation fault leaves the path unrecorded (so a later edit is
-// refused as "not read", fail-safe).
+// refused as "not read", fail-safe). The ledger key is the canonical absolute
+// form (see ledgerKey), so an absolute path and the equivalent relative path
+// share one entry.
 func (w *fsWorkspace) RecordRead(path string, version string) {
+	key := w.ledgerKey(path)
 	fp, err := w.fingerprint(context.Background(), path)
 	if err != nil {
 		// Best effort: fall back to the caller's token so an unchanged-comparison can
@@ -359,7 +391,7 @@ func (w *fsWorkspace) RecordRead(path string, version string) {
 		fp = version
 	}
 	w.mu.Lock()
-	w.ledger[path] = fp
+	w.ledger[key] = fp
 	w.mu.Unlock()
 }
 
@@ -367,9 +399,12 @@ func (w *fsWorkspace) RecordRead(path string, version string) {
 // editor's current buffer content still matches the recorded fingerprint. It
 // returns false if never recorded or if the buffer changed (or the read now
 // faults), mirroring osfs's "vanished file is changed, not an error" semantics.
+// The lookup uses the same canonical ledger key as RecordRead, so a read by
+// absolute path and a check by relative path (or the reverse) agree.
 func (w *fsWorkspace) WasReadUnchanged(ctx context.Context, path string) (bool, error) {
+	key := w.ledgerKey(path)
 	w.mu.Lock()
-	recorded, ok := w.ledger[path]
+	recorded, ok := w.ledger[key]
 	w.mu.Unlock()
 	if !ok {
 		return false, nil

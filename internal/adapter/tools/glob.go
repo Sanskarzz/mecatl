@@ -23,6 +23,7 @@ Arguments:
 - pattern (required): a shell-style glob, e.g. "*.go", "cmd/*/main.go".
   "*" matches within a single path segment; "**" matches across directories
   recursively, so "**/*.go" finds every Go file at any depth under the root.
+  A leading "/" is stripped (patterns are root-relative, not absolute paths).
 
 Example:
   {"pattern": "internal/adapter/*/*.go"}
@@ -52,7 +53,7 @@ func (GlobTool) Spec() tool.ToolSpec {
 		Schema: schema(`{
   "type": "object",
   "properties": {
-    "pattern": {"type": "string", "description": "Shell-style glob pattern to match file paths."}
+    "pattern": {"type": "string", "description": "Shell-style glob pattern to match file paths (root-relative; a leading '/' is stripped)."}
   },
   "required": ["pattern"]
 }`),

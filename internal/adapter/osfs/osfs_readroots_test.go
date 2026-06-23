@@ -3,7 +3,6 @@ package osfs
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,8 +14,9 @@ import (
 // invariants pinned here:
 //
 //   - only Read/Stat consult the allowlist (Write/Glob/Grep stay workspace-only);
-//   - matching is exact-root containment; any other absolute path fails with the
-//     byte-identical pre-carve-out "is absolute" ErrPathEscape;
+//   - matching is exact-root containment; any other out-of-root absolute path
+//     fails with ErrPathEscape (in-root absolutes are accepted via resolveInRoot,
+//     so the rejection reason is "escapes the workspace root", not "is absolute");
 //   - each allowed root is served through its own os.Root, so a symlink inside
 //     an allowed root that escapes it is refused like a workspace escape.
 
@@ -97,10 +97,13 @@ func TestReadRootsAbsoluteReadAndStat(t *testing.T) {
 	}
 }
 
-// Any absolute path NOT under an allowed root must keep failing with the exact
-// pre-carve-out error: ErrPathEscape with the `"is absolute"` message — a
-// sibling skill dir, an unrelated system-shaped path, and a prefix-sharing
-// directory name (allowed root + suffix without a separator).
+// Any absolute path NOT under an allowed root AND NOT inside the workspace root
+// must keep failing with ErrPathEscape: a sibling skill dir, an unrelated
+// system-shaped path, and a prefix-sharing directory name (allowed root + suffix
+// without a separator). These are out-of-root absolute paths; resolveInRoot
+// rejects them with ErrPathEscape (the message now states the path escapes the
+// workspace root, not merely that it "is absolute" — in-root absolutes are now
+// accepted, so "is absolute" would be a lie).
 func TestReadRootsNonAllowedAbsoluteStillEscapes(t *testing.T) {
 	ws, allowed, sibling := newReadRootsWorkspace(t)
 	ctx := context.Background()
@@ -122,11 +125,6 @@ func TestReadRootsNonAllowedAbsoluteStillEscapes(t *testing.T) {
 		if !errors.Is(err, ErrPathEscape) {
 			t.Errorf("Read(%q) error = %v, want ErrPathEscape", p, err)
 			continue
-		}
-		// Byte-identical to the pre-carve-out rootRelative message.
-		want := fmt.Sprintf("%v: %q is absolute", ErrPathEscape, p)
-		if err.Error() != want {
-			t.Errorf("Read(%q) error message = %q, want %q", p, err.Error(), want)
 		}
 		if _, err := ws.Stat(ctx, p); !errors.Is(err, ErrPathEscape) {
 			t.Errorf("Stat(%q) error = %v, want ErrPathEscape", p, err)
@@ -232,10 +230,13 @@ func TestCommandRunnerExecutesAbsoluteScript(t *testing.T) {
 	}
 }
 
-// The workspace root itself never becomes an allowlist entry: passing it as a
-// read root must not grant absolute-path reads into the workspace (relative
-// paths remain the contract there).
-func TestReadRootsWorkspaceRootNotAllowlisted(t *testing.T) {
+// An absolute path that resolves INSIDE the workspace root is now accepted (it
+// is the same physical file a relative path reaches, addressed by its absolute
+// alias — see resolveInRoot). Passing the workspace root as a read root still
+// does not create an allowlist entry (it is dedup'd at construction), but the
+// absolute in-root path no longer needs one: resolveInRoot reduces it to the
+// root-relative form and serves it through the workspace os.Root.
+func TestReadRootsWorkspaceRootAbsoluteAccepted(t *testing.T) {
 	root := t.TempDir()
 	ws, err := NewWorkspace(root, WithReadRoots(root))
 	if err != nil {
@@ -246,7 +247,11 @@ func TestReadRootsWorkspaceRootNotAllowlisted(t *testing.T) {
 		t.Fatalf("Write: %v", err)
 	}
 	abs := filepath.Join(canon(t, root), "inside.txt")
-	if _, err := ws.Read(ctx, abs); !errors.Is(err, ErrPathEscape) {
-		t.Errorf("Read(absolute workspace path) error = %v, want ErrPathEscape (the root is never an allowed root)", err)
+	got, err := ws.Read(ctx, abs)
+	if err != nil {
+		t.Fatalf("Read(absolute workspace path) error = %v, want success (in-root absolutes are accepted)", err)
+	}
+	if string(got) != "x" {
+		t.Errorf("Read(absolute workspace path) = %q, want %q", got, "x")
 	}
 }

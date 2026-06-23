@@ -22,7 +22,8 @@ When NOT to use:
 Arguments:
 - pattern (required): a regular expression (RE2 syntax) to match per line.
 - path    (optional): a glob restricting which files are searched; empty means
-  search all files.
+  search all files. A leading "/" is stripped (the glob is root-relative, not an
+  absolute path).
 
 Example:
   {"pattern": "func New[A-Z]", "path": "internal/**/*.go"}
@@ -53,7 +54,7 @@ func (GrepTool) Spec() tool.ToolSpec {
   "type": "object",
   "properties": {
     "pattern": {"type": "string", "description": "RE2 regular expression to match per line."},
-    "path": {"type": "string", "description": "Optional glob restricting which files are searched."}
+    "path": {"type": "string", "description": "Optional glob restricting which files are searched (root-relative; a leading '/' is stripped)."}
   },
   "required": ["pattern"]
 }`),
