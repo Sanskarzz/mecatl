@@ -3,6 +3,7 @@ package mcpperf
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/internal/adapter/telemetry"
 )
 
@@ -698,5 +700,194 @@ func TestServerIdentityAndInstructions(t *testing.T) {
 	}
 	if !strings.Contains(init.Instructions, "reduced numeric summaries") {
 		t.Errorf("instructions missing the reduced-summary statement: %q", init.Instructions)
+	}
+}
+
+// TestMetricsSummaryRealExporterYieldsQuantiles is the issue #158 end-to-end proof
+// on the REAL exporter pipeline (NOT the hand-built fakeGatherer fixture): it stands
+// up telemetry.Setup (the same single MeterProvider + Prometheus reader + explicit-
+// bucket LatencyViews production uses, ADR 0045), records a spread of turn durations
+// through the real telemetry.Metrics adapter, then drives metricsSummary over a Deps
+// whose Gatherer IS the real prometheus registry. It asserts the latency entry
+// reports a real Count and a NON-DEGENERATE p50<=p90<=p99 — not all collapsed to a
+// single le="+Inf" ceiling, which is exactly the failure the superseded exponential
+// aggregation produced on the classic exposition.
+func TestMetricsSummaryRealExporterYieldsQuantiles(t *testing.T) {
+	providers, err := telemetry.Setup(context.Background(), telemetry.OTLPConfig{}) // metrics only
+	if err != nil {
+		t.Fatalf("telemetry.Setup: %v", err)
+	}
+	t.Cleanup(func() { _ = providers.Shutdown(context.Background()) })
+
+	m, err := telemetry.NewMetrics(providers.Meter)
+	if err != nil {
+		t.Fatalf("NewMetrics: %v", err)
+	}
+	// A spread of turn durations across the explicit ladder so the quantiles
+	// genuinely differ: many fast turns, a few slow ones, one minute-scale outlier.
+	spreadMs := []int64{5, 8, 12, 20, 35, 60, 90, 150, 400, 1500, 45000}
+	for _, ms := range spreadMs {
+		m.Emit(context.Background(), session.Event{Type: session.EvTurnEnd, TurnEnd: &session.TurnEndPayload{DurationMs: ms}})
+	}
+
+	d := fullDeps()
+	d.Gatherer = providers.Registry // the REAL exporter registry, not fakeGatherer.
+
+	entries, err := metricsSummary(d)
+	if err != nil {
+		t.Fatalf("metricsSummary: %v", err)
+	}
+	byName := map[string]MetricSummaryEntry{}
+	for _, e := range entries {
+		byName[e.Name] = e
+	}
+
+	turn, ok := byName["turn_duration_seconds"]
+	if !ok {
+		t.Fatalf("metricsSummary missing turn_duration_seconds entry")
+	}
+	if turn.Kind != "histogram" {
+		t.Fatalf("turn_duration_seconds Kind = %q, want histogram (the real exporter must expose classic buckets)", turn.Kind)
+	}
+	if turn.Count != uint64(len(spreadMs)) {
+		t.Errorf("turn_duration_seconds count = %d, want %d", turn.Count, len(spreadMs))
+	}
+
+	bounds := map[float64]float64{}
+	for _, q := range turn.Quantiles {
+		bounds[q.Quantile] = q.UpperBound
+	}
+	p50, p90, p99 := bounds[0.5], bounds[0.9], bounds[0.99]
+	// Every quantile must resolve to a FINITE bound (not the +Inf ceiling): the
+	// whole point of issue #158.
+	for q, v := range map[string]float64{"p50": p50, "p90": p90, "p99": p99} {
+		if v <= 0 {
+			t.Errorf("%s upper bound = %v, want a finite positive bound (quantiles unobtainable = #158 regression)", q, v)
+		}
+	}
+	// Monotone and STRICTLY meaningful: with this spread the tail bound must exceed
+	// the median bound — proving the buckets carry a real distribution, not one
+	// degenerate ceiling.
+	if !(p50 <= p90 && p90 <= p99) {
+		t.Errorf("quantiles not monotone: p50=%v p90=%v p99=%v", p50, p90, p99)
+	}
+	if !(p99 > p50) {
+		t.Errorf("p99 (%v) must exceed p50 (%v): the spread spans many buckets, so a single-ceiling collapse is the bug", p99, p50)
+	}
+	// The 45s outlier must actually land in a MINUTE-SCALE bucket — proving the
+	// widened 30–60–120–300 high end is exercised, not just "some spread". With
+	// count 11, p99→ceil(0.99*11)=11th obs = the 45s value, which falls in the
+	// (30,60] bucket → upper bound 60. Asserting >=30 pins the high-end ladder.
+	if p99 < 30 {
+		t.Errorf("p99 upper bound = %v, want >=30 (the 45s outlier must resolve to a minute-scale bucket, exercising the widened high end)", p99)
+	}
+}
+
+// realMetricsSummary stands up the real telemetry.Setup pipeline, records via the
+// supplied fn against a real telemetry.Metrics, and returns the metricsSummary over
+// the REAL prometheus registry indexed by short name. It is the shared harness for
+// the issue #158 real-exporter assertions (ms-scale resolution + overflow honesty).
+func realMetricsSummary(t *testing.T, record func(m *telemetry.Metrics)) map[string]MetricSummaryEntry {
+	t.Helper()
+	providers, err := telemetry.Setup(context.Background(), telemetry.OTLPConfig{}) // metrics only
+	if err != nil {
+		t.Fatalf("telemetry.Setup: %v", err)
+	}
+	t.Cleanup(func() { _ = providers.Shutdown(context.Background()) })
+
+	m, err := telemetry.NewMetrics(providers.Meter)
+	if err != nil {
+		t.Fatalf("NewMetrics: %v", err)
+	}
+	record(m)
+
+	d := fullDeps()
+	d.Gatherer = providers.Registry
+	entries, err := metricsSummary(d)
+	if err != nil {
+		t.Fatalf("metricsSummary: %v", err)
+	}
+	byName := map[string]MetricSummaryEntry{}
+	for _, e := range entries {
+		byName[e.Name] = e
+	}
+	return byName
+}
+
+// TestMetricsSummaryInterTokenMsScaleResolution proves the widened 0.001–0.005 low
+// end gives the INTER-TOKEN instrument (the ms-scale signal it was widened for) real
+// resolution through the REAL exporter — AND that the record path converts ms→s, since
+// a missing /1000 would put a 3ms gap at 0.003*1000=3s and collapse p50 to a
+// multi-second bucket. A single 3ms gap (InterTokenMeanMs=3 → 0.003s) must land in
+// the (0.0025,0.005] bucket, so p50's upper bound is a SMALL finite value <=0.01s.
+func TestMetricsSummaryInterTokenMsScaleResolution(t *testing.T) {
+	byName := realMetricsSummary(t, func(m *telemetry.Metrics) {
+		// TTFT/duration kept >0 so the turn records; the inter-token MEAN is the 3ms
+		// sub-10ms gap under test. InterTokenMaxMs also set so the max series exists.
+		m.Emit(context.Background(), session.Event{Type: session.EvTurnEnd, TurnEnd: &session.TurnEndPayload{
+			DurationMs: 50, TTFTMs: 10, InterTokenMeanMs: 3, InterTokenMaxMs: 4,
+		}})
+	})
+
+	inter, ok := byName["inter_token_seconds"]
+	if !ok || inter.Kind != "histogram" {
+		t.Fatalf("inter_token_seconds entry wrong: %+v (present=%v)", inter, ok)
+	}
+	if inter.Count != 1 {
+		t.Errorf("inter_token_seconds count = %d, want 1", inter.Count)
+	}
+	var p50 float64
+	var sawP50 bool
+	for _, q := range inter.Quantiles {
+		if q.Quantile == 0.5 {
+			p50 = q.UpperBound
+			sawP50 = true
+		}
+	}
+	if !sawP50 {
+		t.Fatalf("inter_token_seconds has no p50 quantile: %+v", inter.Quantiles)
+	}
+	// Finite, small, NOT bucket-0-collapsed-to-zero and NOT a multi-second bound
+	// (which a missing ms→s conversion would produce). 0.003s lands in (0.0025,0.005].
+	if p50 <= 0 {
+		t.Errorf("inter_token p50 = %v, want a finite positive bound (zero = bucket-0 collapse / no resolution)", p50)
+	}
+	if p50 > 0.01 {
+		t.Errorf("inter_token p50 = %v, want <=0.01s (a 3ms gap; a larger bound means the ms low-end ladder lacks resolution or the record path skipped ms→s)", p50)
+	}
+}
+
+// TestMetricsSummaryOverflowFoldsToLastFiniteStep pins the quantile-honesty contract
+// the whole fix rests on: a value ABOVE the top boundary (a 400s turn, > the 300s top
+// step) must report a FINITE reduced p99 (==300, the last finite ladder step) rather
+// than +Inf. classicLadder folds the +Inf bucket's count into the last finite step, so
+// an overflow observation is attributed to the 300s bound, never reported as +Inf.
+func TestMetricsSummaryOverflowFoldsToLastFiniteStep(t *testing.T) {
+	byName := realMetricsSummary(t, func(m *telemetry.Metrics) {
+		m.Emit(context.Background(), session.Event{Type: session.EvTurnEnd, TurnEnd: &session.TurnEndPayload{
+			DurationMs: 400_000, // 400s, above the 300s top boundary.
+		}})
+	})
+
+	turn, ok := byName["turn_duration_seconds"]
+	if !ok || turn.Kind != "histogram" || turn.Count != 1 {
+		t.Fatalf("turn_duration_seconds entry wrong: %+v (present=%v)", turn, ok)
+	}
+	var p99 float64
+	var sawP99 bool
+	for _, q := range turn.Quantiles {
+		if q.Quantile == 0.99 {
+			p99 = q.UpperBound
+			sawP99 = true
+		}
+	}
+	if !sawP99 {
+		t.Fatalf("turn_duration_seconds has no p99 quantile: %+v", turn.Quantiles)
+	}
+	if math.IsInf(p99, 1) {
+		t.Fatalf("overflow p99 reported as +Inf; the +Inf bucket must fold into the last finite step")
+	}
+	if p99 != 300 {
+		t.Errorf("overflow p99 upper bound = %v, want 300 (the last finite ladder step the +Inf count folds into)", p99)
 	}
 }

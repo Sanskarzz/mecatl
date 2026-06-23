@@ -86,10 +86,11 @@ type Providers struct {
 //
 // Metrics are ALWAYS installed: a prometheus-exporter reader registers the
 // domain instruments on a fresh prometheus.Registry (returned for /metrics), the
-// tool-duration histogram is configured as a base-2 exponential histogram via a
-// metric.View, and the runtime collector (go.goroutine.count, GC, heap, …) is
-// started against the MeterProvider. The MeterProvider is NOT installed globally
-// — it is returned in Providers.Meter for explicit injection into NewMetrics.
+// latency histograms are configured as explicit-bucket histograms via metric.Views
+// (ADR 0045 — so the classic text exposition carries real le= buckets / quantiles),
+// and the runtime collector (go.goroutine.count, GC, heap, …) is started against
+// the MeterProvider. The MeterProvider is NOT installed globally — it is returned
+// in Providers.Meter for explicit injection into NewMetrics.
 //
 // Tracing is installed only when cfg.Endpoint is non-empty: Setup builds an OTLP
 // span exporter and an SDK TracerProvider with a batch span processor, a
@@ -165,8 +166,8 @@ func Setup(ctx context.Context, cfg OTLPConfig) (Providers, error) {
 }
 
 // newMeterProvider builds the SDK MeterProvider with a prometheus-exporter reader
-// (registered on a fresh registry) and the base-2 exponential-histogram views for
-// every latency instrument (decision 2). It returns the provider and the registry
+// (registered on a fresh registry) and the explicit-bucket-histogram views for
+// every latency instrument (ADR 0045). It returns the provider and the registry
 // to serve at /metrics.
 func newMeterProvider(res *resource.Resource) (*sdkmetric.MeterProvider, *prometheus.Registry, error) {
 	reg := prometheus.NewRegistry()

@@ -19,9 +19,9 @@ import (
 )
 
 // newTestMetrics builds a Metrics adapter backed by a ManualReader so tests can
-// Collect() the recorded data points directly. It installs the same base-2
-// exponential-histogram view Setup uses for the tool-duration instrument, so the
-// tool-duration series collects as an ExponentialHistogram here too.
+// Collect() the recorded data points directly. It installs the same explicit-bucket
+// histogram views Setup uses for the latency instruments (ADR 0045), so the latency
+// series collect as classic Histogram[float64] here too.
 func newTestMetrics(t *testing.T) (*Metrics, *metric.ManualReader) {
 	t.Helper()
 	reader := metric.NewManualReader()
@@ -34,8 +34,8 @@ func newTestMetrics(t *testing.T) (*Metrics, *metric.ManualReader) {
 }
 
 // latencyViewOpts adapts the production LatencyViews() into MeterProvider options
-// so tests install the SAME exponential-histogram views the production pipeline
-// does — proving the latency series collect as exponential histograms here too.
+// so tests install the SAME explicit-bucket views the production pipeline does —
+// proving the latency series collect as classic explicit-bucket histograms here too.
 func latencyViewOpts() []metric.Option {
 	views := LatencyViews()
 	opts := make([]metric.Option, 0, len(views))
@@ -315,7 +315,7 @@ func TestMetricsPermissionAsks(t *testing.T) {
 	}
 }
 
-func TestMetricsToolCallExponentialHistogram(t *testing.T) {
+func TestMetricsToolCallExplicitBucketHistogram(t *testing.T) {
 	m, reader := newTestMetrics(t)
 
 	m.ToolCall("sess-1", session.NewToolCall("c1", "bash", nil),
@@ -332,43 +332,46 @@ func TestMetricsToolCallExponentialHistogram(t *testing.T) {
 		t.Errorf("tool.calls{error=true} = %d, want 1", got)
 	}
 
-	// The view must turn the tool-duration instrument into an exponential
-	// histogram (decision 2), with both observations on the single bash series.
-	exp, ok := data[toolDurationInstrument].(metricdata.ExponentialHistogram[float64])
-	if !ok {
-		t.Fatalf("tool.duration is %T, want ExponentialHistogram[float64]", data[toolDurationInstrument])
-	}
-	if len(exp.DataPoints) != 1 {
-		t.Fatalf("tool.duration series = %d, want 1 (one tool)", len(exp.DataPoints))
-	}
-	if exp.DataPoints[0].Count != 2 {
-		t.Errorf("tool.duration count = %d, want 2", exp.DataPoints[0].Count)
+	// The view must turn the tool-duration instrument into an explicit-bucket
+	// histogram (ADR 0045), with both observations on the single bash series.
+	dp := classicHist(t, data, toolDurationInstrument)
+	if dp.Count != 2 {
+		t.Errorf("tool.duration count = %d, want 2", dp.Count)
 	}
 	// Sum must be ~0.26s (250ms + 10ms recorded via took.Seconds()). This catches
 	// a unit regression (e.g. recording nanoseconds or milliseconds) that Count
 	// alone would not.
-	if got := exp.DataPoints[0].Sum; got < 0.259 || got > 0.261 {
+	if got := dp.Sum; got < 0.259 || got > 0.261 {
 		t.Errorf("tool.duration sum = %v, want ≈0.26", got)
+	}
+	// The explicit ladder must carry our boundaries (ADR 0045), so the classic
+	// le= exposition yields quantiles. Spot-check the low and high ends are present.
+	if len(dp.Bounds) != len(latencyBucketBoundaries) {
+		t.Errorf("tool.duration bounds = %d, want %d (latencyBucketBoundaries)", len(dp.Bounds), len(latencyBucketBoundaries))
+	}
+	if len(dp.Bounds) > 0 && (dp.Bounds[0] != latencyBucketBoundaries[0] || dp.Bounds[len(dp.Bounds)-1] != latencyBucketBoundaries[len(latencyBucketBoundaries)-1]) {
+		t.Errorf("tool.duration bounds endpoints = [%v..%v], want [%v..%v]",
+			dp.Bounds[0], dp.Bounds[len(dp.Bounds)-1], latencyBucketBoundaries[0], latencyBucketBoundaries[len(latencyBucketBoundaries)-1])
 	}
 }
 
-// expHist asserts the named instrument collected as an ExponentialHistogram and
-// returns its single data point, failing otherwise.
-func expHist(t *testing.T, data map[string]metricdata.Aggregation, name string) metricdata.ExponentialHistogramDataPoint[float64] {
+// classicHist asserts the named instrument collected as a classic explicit-bucket
+// Histogram (ADR 0045) and returns its single data point, failing otherwise.
+func classicHist(t *testing.T, data map[string]metricdata.Aggregation, name string) metricdata.HistogramDataPoint[float64] {
 	t.Helper()
-	exp, ok := data[name].(metricdata.ExponentialHistogram[float64])
+	h, ok := data[name].(metricdata.Histogram[float64])
 	if !ok {
-		t.Fatalf("%s is %T, want ExponentialHistogram[float64]", name, data[name])
+		t.Fatalf("%s is %T, want Histogram[float64]", name, data[name])
 	}
-	if len(exp.DataPoints) != 1 {
-		t.Fatalf("%s series = %d, want 1", name, len(exp.DataPoints))
+	if len(h.DataPoints) != 1 {
+		t.Fatalf("%s series = %d, want 1", name, len(h.DataPoints))
 	}
-	return exp.DataPoints[0]
+	return h.DataPoints[0]
 }
 
 // TestMetricsLatencyInstruments asserts the five latency instruments — turn
 // duration, TTFT, inter-token (mean), inter-token (max), and tool queue — all
-// collect as base-2 exponential histograms (decision 2) with sane unit-converted
+// collect as classic explicit-bucket histograms (ADR 0045) with sane unit-converted
 // values, and that the "not measured" zero-guards hold (a turn with no content
 // records turn duration only; a zero queue time still records on the queue
 // histogram since 0 is a real, immediate-dispatch observation there).
@@ -390,7 +393,7 @@ func TestMetricsLatencyInstruments(t *testing.T) {
 
 	data := collect(t, reader)
 
-	turn := expHist(t, data, turnDurationInstrument)
+	turn := classicHist(t, data, turnDurationInstrument)
 	if turn.Count != 2 { // both turns record a duration
 		t.Errorf("turn.duration count = %d, want 2", turn.Count)
 	}
@@ -398,7 +401,7 @@ func TestMetricsLatencyInstruments(t *testing.T) {
 		t.Errorf("turn.duration sum = %v, want ≈0.2", got)
 	}
 
-	ttft := expHist(t, data, ttftInstrument)
+	ttft := classicHist(t, data, ttftInstrument)
 	if ttft.Count != 1 { // only the measured turn
 		t.Errorf("ttft count = %d, want 1 (the no-content turn must not record)", ttft.Count)
 	}
@@ -406,7 +409,7 @@ func TestMetricsLatencyInstruments(t *testing.T) {
 		t.Errorf("ttft sum = %v, want ≈0.03", got)
 	}
 
-	inter := expHist(t, data, interTokenInstrument)
+	inter := classicHist(t, data, interTokenInstrument)
 	if inter.Count != 1 {
 		t.Errorf("inter_token count = %d, want 1", inter.Count)
 	}
@@ -414,7 +417,7 @@ func TestMetricsLatencyInstruments(t *testing.T) {
 		t.Errorf("inter_token sum = %v, want ≈0.025", got)
 	}
 
-	interMax := expHist(t, data, interTokenMaxInstrument)
+	interMax := classicHist(t, data, interTokenMaxInstrument)
 	if interMax.Count != 1 { // only the measured turn (max 40ms)
 		t.Errorf("inter_token.max count = %d, want 1", interMax.Count)
 	}
@@ -422,7 +425,7 @@ func TestMetricsLatencyInstruments(t *testing.T) {
 		t.Errorf("inter_token.max sum = %v, want ≈0.04", got)
 	}
 
-	queue := expHist(t, data, toolQueueInstrument)
+	queue := classicHist(t, data, toolQueueInstrument)
 	if queue.Count != 1 {
 		t.Errorf("tool.queue count = %d, want 1", queue.Count)
 	}
@@ -447,7 +450,7 @@ func TestMetricsLatencyGuardsIndependent(t *testing.T) {
 
 	data := collect(t, reader)
 
-	ttft := expHist(t, data, ttftInstrument)
+	ttft := classicHist(t, data, ttftInstrument)
 	if ttft.Count != 1 {
 		t.Errorf("ttft count = %d, want 1 (TTFT measured)", ttft.Count)
 	}
@@ -520,12 +523,14 @@ func TestMetricsScrapeThroughPrometheusExporter(t *testing.T) {
 // providers.Meter, records events, then scrapes MetricsHandler(providers.Registry).
 // This proves (a) the Meter and the Registry returned by Setup are the SAME
 // pipeline — a mecatl_* domain series only appears if NewMetrics's meter feeds the
-// registry's exporter — and (b) Setup installs the exponential-histogram view, so
-// the tool-duration series AND the newest latency series (inter_token.max) both
-// render as native/exponential histograms (a single le="+Inf" bucket) rather than
-// the default explicit buckets. Proving inter_token.max here confirms the
-// latencyInstruments-slice → LatencyViews() → Setup path covers a new instrument
-// automatically. Deleting LatencyViews from Setup would regress (b).
+// registry's exporter — and (b) Setup installs the explicit-bucket views (ADR
+// 0045), so the tool-duration series AND the newest latency series (inter_token.max)
+// both render as classic histograms with MULTIPLE finite le= buckets (the zero-config
+// quantile fix for issue #158) rather than collapsing to a single le="+Inf" bucket.
+// Proving inter_token.max here confirms the latencyInstruments-slice → LatencyViews()
+// → Setup path covers a new instrument automatically. Deleting LatencyViews from
+// Setup would regress (b) back to the SDK default ladder (a different, coarser set
+// of finite buckets), which the boundary-endpoint check below also catches.
 func TestMetricsThroughRealSetup(t *testing.T) {
 	providers, err := Setup(context.Background(), OTLPConfig{}) // metrics only
 	if err != nil {
@@ -563,42 +568,51 @@ func TestMetricsThroughRealSetup(t *testing.T) {
 		t.Errorf("/metrics missing mecatl_tool_duration_seconds_count")
 	}
 
-	// (b) The exponential view collapses each latency histogram to a single
-	// le="+Inf" bucket line. The default explicit-bucket histogram (no view) would
-	// instead emit many finite-le bucket lines (le="0.005", le="0.01", …). Counting
-	// the _bucket lines per series discriminates the two and breaks if the view is
-	// removed. Asserting it for inter_token.max (driven only by the
-	// latencyInstruments slice) proves a new instrument inherits the exponential
-	// view through Setup with no per-instrument wiring.
-	assertSingleInfBucket := func(prefix string) {
+	// (b) The explicit-bucket view (ADR 0045) emits one le= bucket line per
+	// configured boundary PLUS the le="+Inf" overflow line — so a finite le=
+	// boundary (e.g. le="0.25") is present and the quantile-bearing classic ladder
+	// is exposed. The base-2 exponential view we superseded would instead collapse
+	// to a single le="+Inf" line (issue #158). Asserting our specific boundaries
+	// (the low-end 0.001 and a mid-ladder 0.25) also distinguishes our ladder from
+	// the SDK default explicit buckets, so dropping LatencyViews from Setup regresses
+	// this too. Checked for inter_token.max (driven only by the latencyInstruments
+	// slice) to prove a new instrument inherits the view through Setup with no
+	// per-instrument wiring.
+	assertExplicitBuckets := func(prefix string) {
 		t.Helper()
-		var bucketLines int
+		var bucketLines, finiteLines int
+		var hasInf, hasLow, hasMid bool
 		for _, line := range strings.Split(body, "\n") {
-			if strings.HasPrefix(line, prefix+"_bucket{") {
-				bucketLines++
-				if !strings.Contains(line, `le="+Inf"`) {
-					t.Errorf("%s histogram has a finite-le bucket %q; exponential view not installed", prefix, line)
-				}
+			if !strings.HasPrefix(line, prefix+"_bucket{") {
+				continue
 			}
-		}
-		if bucketLines != 1 {
-			t.Errorf("%s _bucket lines = %d, want 1 (exponential view); explicit buckets imply the view was dropped", prefix, bucketLines)
-		}
-	}
-	assertSingleInfBucket("mecatl_inter_token_max_seconds")
-
-	var bucketLines int
-	for _, line := range strings.Split(body, "\n") {
-		if strings.HasPrefix(line, "mecatl_tool_duration_seconds_bucket{") {
 			bucketLines++
-			if !strings.Contains(line, `le="+Inf"`) {
-				t.Errorf("tool-duration histogram has a finite-le bucket %q; exponential view not installed", line)
+			switch {
+			case strings.Contains(line, `le="+Inf"`):
+				hasInf = true
+			default:
+				finiteLines++
+			}
+			if strings.Contains(line, `le="0.001"`) {
+				hasLow = true
+			}
+			if strings.Contains(line, `le="0.25"`) {
+				hasMid = true
 			}
 		}
+		if finiteLines < 2 {
+			t.Errorf("%s finite-le _bucket lines = %d, want ≥2 (explicit-bucket view; a single +Inf bucket means the exponential view regressed)", prefix, finiteLines)
+		}
+		if !hasInf {
+			t.Errorf("%s missing the le=+Inf overflow bucket", prefix)
+		}
+		if !hasLow || !hasMid {
+			t.Errorf("%s missing our explicit boundaries (le=0.001 present=%v, le=0.25 present=%v); ladder not the latencyBucketBoundaries", prefix, hasLow, hasMid)
+		}
+		_ = bucketLines
 	}
-	if bucketLines != 1 {
-		t.Errorf("tool-duration _bucket lines = %d, want 1 (exponential view); explicit buckets imply the view was dropped", bucketLines)
-	}
+	assertExplicitBuckets("mecatl_inter_token_max_seconds")
+	assertExplicitBuckets("mecatl_tool_duration_seconds")
 }
 
 func scrape(t *testing.T, h http.Handler) string {

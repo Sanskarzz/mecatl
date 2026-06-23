@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-06-03
 - Scope: how mecatl exposes its own runtime performance for measurement — by humans, by tooling, and by an AI agent over MCP
+- Superseded by: [ADR 0045](./0045-explicit-bucket-latency-histograms.md) — the histogram-aggregation choice (§5 decision 2) ONLY; the phased hybrid, the perf-MCP server, and the loopback posture are unchanged
 
 ## Context
 

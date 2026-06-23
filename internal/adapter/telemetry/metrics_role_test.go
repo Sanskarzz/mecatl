@@ -90,13 +90,13 @@ func TestMetricsRoleAttributeOnInstruments(t *testing.T) {
 		t.Errorf("active_runs{role=subagent} = %d, want 0", got)
 	}
 
-	// The latency histograms carry the role too.
-	exp, ok := data[turnDurationInstrument].(metricdata.ExponentialHistogram[float64])
+	// The latency histograms carry the role too (classic explicit-bucket, ADR 0045).
+	hist, ok := data[turnDurationInstrument].(metricdata.Histogram[float64])
 	if !ok {
-		t.Fatalf("turn.duration is %T, want ExponentialHistogram[float64]", data[turnDurationInstrument])
+		t.Fatalf("turn.duration is %T, want Histogram[float64]", data[turnDurationInstrument])
 	}
 	var sawSubagent bool
-	for _, dp := range exp.DataPoints {
+	for _, dp := range hist.DataPoints {
 		if attrsMatch(dp.Attributes, map[string]string{attrRole: RoleSubagent}) {
 			sawSubagent = true
 			if dp.Count != 1 {

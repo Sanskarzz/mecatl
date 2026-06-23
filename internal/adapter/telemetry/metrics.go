@@ -20,12 +20,15 @@ import (
 // recognisable (e.g. mecatl_events_total).
 const meterName = "github.com/stacklok/mecatl/internal/adapter/telemetry"
 
-// Latency-instrument names. Each is a base-2 exponential-histogram latency
-// instrument (decision 2 in docs/adr/0018-perf-observability.md §5). They are
-// exported as package constants because the MeterProvider installs an
-// exponential-histogram metric.View keyed on each exact name; the view and the
-// instrument name MUST agree, so views target instruments by these constants
-// rather than duplicated string literals.
+// Latency-instrument names. Each is an explicit-bucket-histogram latency
+// instrument (ADR 0045, superseding the base-2 exponential aggregation of ADR
+// 0018 §5 decision 2). They are exported as package constants because the
+// MeterProvider installs an explicit-bucket metric.View keyed on each exact
+// name; the view and the instrument name MUST agree, so views target
+// instruments by these constants rather than duplicated string literals. The
+// explicit ladder renders as classic Prometheus le= buckets in the text
+// exposition, so a plain `curl :9099/metrics` / promtool — and the perf-MCP
+// reducer's classicLadder path — yield p50/p90/p99 with zero scrape config.
 const (
 	// toolDurationInstrument is the per-tool execution wall-clock histogram.
 	toolDurationInstrument = "mecatl.tool.duration"
@@ -47,8 +50,8 @@ const (
 )
 
 // latencyInstruments is the single source of truth for which instruments are
-// aggregated as base-2 exponential histograms. LatencyViews builds one view per
-// entry, so adding a latency instrument here installs its exponential view
+// aggregated as explicit-bucket histograms. LatencyViews builds one view per
+// entry, so adding a latency instrument here installs its explicit-bucket view
 // everywhere the MeterProvider is assembled — no per-call-site duplication of the
 // aggregation literal.
 var latencyInstruments = []string{
@@ -60,23 +63,42 @@ var latencyInstruments = []string{
 	toolQueueInstrument,
 }
 
-// exponentialLatencyAggregation is the single aggregation spec shared by every
-// latency instrument. Defining it once keeps MaxSize/MaxScale from drifting
-// across instruments (the drift the prior tool-duration commit's single-source
-// lesson guards against).
-func exponentialLatencyAggregation() sdkmetric.AggregationBase2ExponentialHistogram {
-	return sdkmetric.AggregationBase2ExponentialHistogram{
-		MaxSize:  160,
-		MaxScale: 20,
-	}
+// latencyBucketBoundaries is the explicit upper-bound ladder (seconds) every
+// latency instrument shares. It deliberately spans from millisecond-scale gaps —
+// the .001–.005 low end gives inter_token / tool_queue real resolution — through
+// minute-scale turn durations (the 30–300 high end covers slow reasoning-model
+// turns, e.g. the 41s main turns observed in live monitoring). The otel→prometheus
+// exporter renders an explicit-bucket histogram as classic le= buckets in the text
+// exposition, so these bounds ARE the quantile resolution a plain scrape gets.
+var latencyBucketBoundaries = []float64{
+	0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300,
 }
 
-// LatencyViews returns the base-2 exponential-histogram views for EVERY latency
-// instrument (tool/turn duration, TTFT, inter-token, tool-queue; decision 2 in
-// docs/adr/0018-perf-observability.md §5). It is the single source of truth for the
+// latencyBucketAggregation is the single aggregation spec shared by every
+// latency instrument. Defining it once keeps the bucket ladder from drifting
+// across instruments (the drift the prior tool-duration commit's single-source
+// lesson guards against). The Boundaries slice is copied per call so a view never
+// shares the package-level slice's backing array.
+func latencyBucketAggregation() sdkmetric.AggregationExplicitBucketHistogram {
+	bounds := make([]float64, len(latencyBucketBoundaries))
+	copy(bounds, latencyBucketBoundaries)
+	return sdkmetric.AggregationExplicitBucketHistogram{Boundaries: bounds}
+}
+
+// LatencyViews returns the explicit-bucket-histogram views for EVERY latency
+// instrument (tool/turn duration, TTFT, inter-token, tool-queue; ADR 0045,
+// superseding ADR 0018 §5 decision 2). It is the single source of truth for the
 // latency aggregation: any MeterProvider feeding NewMetrics MUST install these
-// (sdkmetric.WithView(LatencyViews()...)), or the latency series degrade silently
-// to the default explicit-bucket histogram.
+// (sdkmetric.WithView(LatencyViews()...)), or the latency series fall back to the
+// SDK default explicit buckets (a coarser ladder that misses the ms low end and
+// the minute-scale high end the latencyBucketBoundaries cover).
+//
+// The explicit ladder renders as classic Prometheus le= buckets, so the text
+// /metrics exposition + promtool + the perf-MCP reducer's classicLadder path all
+// yield p50/p90/p99 with zero scrape config — the issue #158 fix. (OTLP push, were
+// it ever wired, would carry the same explicit buckets; the exponential-tail
+// precision OTLP could have aggregated is unconsumed today since no OTLP metrics
+// reader exists.)
 //
 // Aggregation choice is a view-on-the-provider/reader concern, NOT a
 // per-instrument hint, which is why it belongs to whoever assembles the
@@ -86,7 +108,7 @@ func LatencyViews() []sdkmetric.View {
 	for _, name := range latencyInstruments {
 		views = append(views, sdkmetric.NewView(
 			sdkmetric.Instrument{Name: name},
-			sdkmetric.Stream{Aggregation: exponentialLatencyAggregation()},
+			sdkmetric.Stream{Aggregation: latencyBucketAggregation()},
 		))
 	}
 	return views
@@ -151,7 +173,7 @@ type Metrics struct {
 	// mirroring the single-value semantics of the old client_golang Gauge.
 	cacheHit metric.Float64Gauge
 	// toolDuration is the tool execution wall-clock histogram (unit "s"). Setup
-	// installs a base-2 exponential-histogram view for it (toolDurationInstrument).
+	// installs an explicit-bucket-histogram view for it (toolDurationInstrument).
 	toolDuration metric.Float64Histogram
 	// turnDuration is the per-turn model-call wall-clock histogram (unit "s"),
 	// recorded from EvTurnEnd.DurationMs.
@@ -179,8 +201,8 @@ var (
 
 // NewMetrics constructs a Metrics adapter from an OTel MeterProvider. It
 // implements both port.EventSink and port.ToolCallRecorder. The provider is expected to
-// have a prometheus exporter reader and the tool-duration exponential-histogram
-// view installed (see Setup); NewMetrics itself only creates the instruments.
+// have a prometheus exporter reader and the latency explicit-bucket-histogram
+// views installed (see Setup); NewMetrics itself only creates the instruments.
 //
 // It returns an error if any instrument fails to construct — the OTel meter API
 // is fallible, unlike client_golang's panic-on-misuse registration.

@@ -2654,6 +2654,23 @@ snapshot's `heap_alloc_bytes` became `heap_allocs_total_bytes`
 the live heap, and the old key read as a `MemStats.HeapAlloc`-style live-heap gauge (a
 misread worth the one-time wire break; live heap-object memory is `heap_object_bytes`).
 
+**Latency-histogram aggregation — explicit buckets, not exponential (`docs/adr/0045`, issue #158).**
+There is ONE `MeterProvider` with ONE reader — the Prometheus exporter (`telemetry.newMeterProvider`);
+OTLP metrics push is only a documented seam (no reader wired). The OTel→Prometheus exporter renders
+a base-2 exponential (native) histogram as `sum`/`count` + a lone `le="+Inf"` bucket in the classic
+TEXT exposition, so `curl :9099/metrics` / promtool got means only — p50/p90/p99 were unobtainable
+(the perf-MCP `nativeLadder` path reconstructed them, but the human/promtool path did not). The
+latency instruments (`telemetry.latencyInstruments`) now aggregate as EXPLICIT-bucket histograms via
+`LatencyViews()`/`latencyBucketAggregation()`, sharing one boundary ladder
+(`telemetry.latencyBucketBoundaries`, seconds): `{0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25,
+0.5, 1, 2.5, 5, 10, 30, 60, 120, 300}` — the ms low end gives `inter_token`/`tool_queue` resolution,
+the 30–300 high end covers minute-scale reasoning turns. Explicit buckets render as classic `le=`
+ladders, so the text `/metrics` exposition + promtool + the perf-MCP reducer's `classicLadder` path
+all yield quantiles with zero scrape config. Trade-off: the exponential tail precision is lost, but it
+was UNCONSUMED (no OTLP metrics reader). Pinned by `TestNewMeterProviderEmitsClassicLatencyBuckets`
+(real exporter → finite `le=` buckets) and mcpperf's `TestMetricsSummaryRealExporterYieldsQuantiles`
+(real pipeline → non-degenerate p50<=p90<=p99). Supersedes `docs/adr/0018` §5 decision 2.
+
 **Per-session provider/model routing (S3, `sessionEngineFactory` + `modelsnapshot.go`):**
 `buildProvider` returns the registry ALONGSIDE the default provider so composition threads it
 into the factory + `modelSnapshot`. The widened `server.SessionEngineFactory func(ctx, sel
