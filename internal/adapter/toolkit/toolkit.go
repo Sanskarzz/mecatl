@@ -25,6 +25,13 @@ import (
 // from drifting between tool packages.
 const MaxOutputBytes = 25_000
 
+// TruncationMarker is the suffix Truncate appends when it trims s to the byte cap.
+// It is exported so a caller that needs to reserve room for additional content
+// AFTER a truncated body (e.g. the Bash tool's timeout/cancel trailer, which must
+// survive the cap) can account for the marker's worst-case length without
+// hard-coding the literal. Truncate is the only writer of it.
+const TruncationMarker = "\n... [output truncated: exceeded 25000 bytes]"
+
 // ParseArgs unmarshals a tool call's JSON arguments into dst. An empty payload
 // leaves dst at its zero value so tools with all-optional arguments work without
 // an explicit "{}". On malformed JSON it returns a model-facing error string (not
@@ -52,7 +59,7 @@ func Truncate(s string, maxBytes int) string {
 	for cut > 0 && !utf8RuneStart(s[cut]) {
 		cut--
 	}
-	return s[:cut] + "\n... [output truncated: exceeded 25000 bytes]"
+	return s[:cut] + TruncationMarker
 }
 
 // utf8RuneStart reports whether b is the first byte of a UTF-8 rune (i.e. not a

@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -364,6 +365,187 @@ func TestBashNoShellSurfacesAsToolError(t *testing.T) {
 	if !res.IsError {
 		t.Error("runner error should surface as a tool error, not a harness error")
 	}
+	// tool.ErrNoShell must be classified as the no-shell case, not the generic
+	// default — the message should name the missing shell.
+	rr := &recordingRunner{returnError: tool.ErrNoShell}
+	res = exec(t, NewBashTool(rr), call(t, "Bash", map[string]any{"command": "echo hi"}), ws)
+	if !res.IsError {
+		t.Error("ErrNoShell should surface as a tool error")
+	}
+	if !strings.Contains(res.Content, "no shell available") {
+		t.Errorf("Bash no-shell content = %q; want a 'no shell available' message", res.Content)
+	}
+}
+
+func TestBashTimeoutSurfacesPartialOutput(t *testing.T) {
+	ws := memfs.NewWorkspace("/")
+	rr := &recordingRunner{
+		result:      tool.CommandResult{Stdout: "hi\n"},
+		returnError: context.DeadlineExceeded,
+	}
+	res := exec(t, NewBashTool(rr), call(t, "Bash", map[string]any{"command": "echo hi; sleep 5", "timeout_ms": 50}), ws)
+	if !res.IsError {
+		t.Fatal("a timed-out command should be a tool error")
+	}
+	if !strings.Contains(res.Content, "hi") {
+		t.Errorf("partial output dropped: content = %q", res.Content)
+	}
+	if !strings.Contains(res.Content, "timed out") || !strings.Contains(res.Content, "50ms") {
+		t.Errorf("expected a timeout trailer naming 50ms: content = %q", res.Content)
+	}
+	if strings.Contains(res.Content, "[exit code: 0]") {
+		t.Errorf("ctx-error path must not print a placeholder exit code: content = %q", res.Content)
+	}
+}
+
+func TestBashTimeoutNoOutput(t *testing.T) {
+	ws := memfs.NewWorkspace("/")
+	rr := &recordingRunner{returnError: context.DeadlineExceeded}
+	res := exec(t, NewBashTool(rr), call(t, "Bash", map[string]any{"command": "sleep 5", "timeout_ms": 50}), ws)
+	if !res.IsError {
+		t.Fatal("a timed-out command should be a tool error")
+	}
+	if strings.TrimSpace(res.Content) == "" {
+		t.Fatal("a no-output timeout should still report why it stopped")
+	}
+	if !strings.Contains(res.Content, "timed out") || !strings.Contains(res.Content, "50ms") {
+		t.Errorf("expected a timeout reason naming 50ms: content = %q", res.Content)
+	}
+	if !strings.Contains(res.Content, "no output") {
+		t.Errorf("expected a no-output phrase: content = %q", res.Content)
+	}
+}
+
+func TestBashTimeoutNoTimeoutMsSet(t *testing.T) {
+	ws := memfs.NewWorkspace("/")
+	rr := &recordingRunner{
+		result:      tool.CommandResult{Stdout: "partial\n"},
+		returnError: context.DeadlineExceeded,
+	}
+	// No timeout_ms: the runner's private default fired. We must not fabricate a
+	// number we cannot see.
+	res := exec(t, NewBashTool(rr), call(t, "Bash", map[string]any{"command": "sleep 99"}), ws)
+	if !res.IsError {
+		t.Fatal("a timed-out command should be a tool error")
+	}
+	if !strings.Contains(res.Content, "partial") {
+		t.Errorf("partial output dropped: content = %q", res.Content)
+	}
+	if !strings.Contains(res.Content, "timed out") {
+		t.Errorf("expected a timeout trailer: content = %q", res.Content)
+	}
+	if strings.Contains(res.Content, "ms") {
+		t.Errorf("must not fabricate a timeout number when timeout_ms is unset: content = %q", res.Content)
+	}
+}
+
+func TestBashCancelSurfacesPartialOutput(t *testing.T) {
+	ws := memfs.NewWorkspace("/")
+	rr := &recordingRunner{
+		result:      tool.CommandResult{Stdout: "before cancel\n"},
+		returnError: context.Canceled,
+	}
+	res := exec(t, NewBashTool(rr), call(t, "Bash", map[string]any{"command": "echo before cancel; sleep 5"}), ws)
+	if !res.IsError {
+		t.Fatal("a canceled command should be a tool error")
+	}
+	if !strings.Contains(res.Content, "before cancel") {
+		t.Errorf("partial output dropped: content = %q", res.Content)
+	}
+	if !strings.Contains(res.Content, "canceled") {
+		t.Errorf("expected a cancellation trailer: content = %q", res.Content)
+	}
+}
+
+// TestBashTimeoutTrailerSurvivesTruncation pins the worst case: a runaway/timed-out
+// command produces output larger than the output cap, so a naive "truncate the
+// joined string" would land the cut inside the body and drop the timeout signal.
+// The trailer must survive.
+func TestBashTimeoutTrailerSurvivesTruncation(t *testing.T) {
+	ws := memfs.NewWorkspace("/")
+	huge := strings.Repeat("x", toolkit.MaxOutputBytes+5000) + "\n"
+	rr := &recordingRunner{
+		result:      tool.CommandResult{Stdout: huge},
+		returnError: context.DeadlineExceeded,
+	}
+	res := exec(t, NewBashTool(rr), call(t, "Bash", map[string]any{"command": "yes", "timeout_ms": 50}), ws)
+	if !res.IsError {
+		t.Fatal("a timed-out command should be a tool error")
+	}
+	if !strings.Contains(res.Content, "timed out") {
+		t.Errorf("timeout trailer was truncated away: content tail = %q", tail(res.Content, 200))
+	}
+	if !strings.Contains(res.Content, "50ms") {
+		t.Errorf("timeout trailer lost the configured limit: content tail = %q", tail(res.Content, 200))
+	}
+	if len(res.Content) > toolkit.MaxOutputBytes {
+		t.Errorf("final output %d bytes exceeds the cap %d", len(res.Content), toolkit.MaxOutputBytes)
+	}
+}
+
+// TestBashTimeoutStderrSurvives covers the motivating case — a build failure whose
+// partial output landed on STDERR, not stdout.
+func TestBashTimeoutStderrSurvives(t *testing.T) {
+	ws := memfs.NewWorkspace("/")
+	rr := &recordingRunner{
+		result:      tool.CommandResult{Stderr: "compile error: undefined symbol\n"},
+		returnError: context.DeadlineExceeded,
+	}
+	res := exec(t, NewBashTool(rr), call(t, "Bash", map[string]any{"command": "go build ./...", "timeout_ms": 50}), ws)
+	if !res.IsError {
+		t.Fatal("a timed-out command should be a tool error")
+	}
+	if !strings.Contains(res.Content, "compile error") {
+		t.Errorf("stderr partial output dropped: content = %q", res.Content)
+	}
+	if !strings.Contains(res.Content, "timed out") {
+		t.Errorf("expected a timeout trailer: content = %q", res.Content)
+	}
+}
+
+// TestBashTimeoutNoOutputNoTimeoutMs hits the no-output + unset-timeout_ms branch:
+// no fabricated number, and a self-contained no-output phrasing.
+func TestBashTimeoutNoOutputNoTimeoutMs(t *testing.T) {
+	ws := memfs.NewWorkspace("/")
+	rr := &recordingRunner{returnError: context.DeadlineExceeded}
+	res := exec(t, NewBashTool(rr), call(t, "Bash", map[string]any{"command": "sleep 99"}), ws)
+	if !res.IsError {
+		t.Fatal("a timed-out command should be a tool error")
+	}
+	if !strings.Contains(res.Content, "timed out") || !strings.Contains(res.Content, "no output") {
+		t.Errorf("expected a no-output timeout message: content = %q", res.Content)
+	}
+	if strings.Contains(res.Content, "ms") {
+		t.Errorf("must not fabricate a timeout number when timeout_ms is unset: content = %q", res.Content)
+	}
+}
+
+// TestBashGenericErrorKeepsPartialOutput covers the non-ctx default branch: a
+// generic runner error must still preserve any captured partial output.
+func TestBashGenericErrorKeepsPartialOutput(t *testing.T) {
+	ws := memfs.NewWorkspace("/")
+	rr := &recordingRunner{
+		result:      tool.CommandResult{Stdout: "partial\n"},
+		returnError: errors.New("boom"),
+	}
+	res := exec(t, NewBashTool(rr), call(t, "Bash", map[string]any{"command": "echo partial"}), ws)
+	if !res.IsError {
+		t.Fatal("a runner error should be a tool error")
+	}
+	if !strings.Contains(res.Content, "partial") {
+		t.Errorf("partial output dropped on the default error path: content = %q", res.Content)
+	}
+	if !strings.Contains(res.Content, "command failed to run: boom") {
+		t.Errorf("expected the generic failure reason: content = %q", res.Content)
+	}
+}
+
+// tail returns the last n bytes of s (for failure messages on large outputs).
+func tail(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[len(s)-n:]
 }
 
 // recordingRunner is a tool.CommandRunner fake that records the workdir of the

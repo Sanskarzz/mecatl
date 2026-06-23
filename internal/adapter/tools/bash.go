@@ -2,12 +2,14 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/tool"
+	"github.com/stacklok/mecatl/internal/adapter/toolkit"
 )
 
 // BashToolName is the catalog name of the Bash tool. It is the single authority
@@ -35,6 +37,12 @@ Behavior:
   shared base — so commands you run there do not affect the parent's tree.
 - Standard output and standard error are captured together and returned along
   with the process exit code. A non-zero exit code is reported, not hidden.
+- If the command times out (exceeds timeout_ms) or is canceled, whatever output
+  it produced before stopping is still returned, followed by a short trailer
+  saying why it stopped. The result is marked an error, so on a timeout you can
+  re-run with a larger timeout_ms after reading the partial output above. A
+  cancellation or a "no shell available" failure is NOT retryable — do not re-run
+  those.
 
 Arguments:
 - command    (required): the shell command line to run.
@@ -143,10 +151,29 @@ func (bt BashTool) Execute(ctx context.Context, in session.ToolCall, ws tool.Wor
 	res, err := bt.runner.Run(ctx, args.Command, ws.Root())
 	if err != nil {
 		// Surface command-execution failures (no shell, timeout, cancellation)
-		// to the model so it can adapt, rather than aborting the harness.
-		return session.NewToolError(in.ID, fmt.Sprintf("command failed to run: %v", err)), nil
+		// to the model so it can adapt, rather than aborting the harness. The
+		// runner returns whatever output it captured before the error alongside
+		// the ctx error (see osfs.CommandRunner.Run), so preserve that partial
+		// output here rather than discarding it: a timed-out build that printed
+		// a useful failure should not collapse to a bare "command failed".
+		body := bashCombinedOutput(res, false) // includeExit=false: the ctx-error
+		// path leaves ExitCode as a 0 placeholder; printing "[exit code: 0]"
+		// would read as success, which is misleading on a failure.
+		return session.NewToolError(in.ID, bashErrorMessage(body, err, args.TimeoutMS)), nil
 	}
 
+	out := truncateBytes(bashCombinedOutput(res, true))
+	if res.ExitCode != 0 {
+		return session.NewToolError(in.ID, out), nil
+	}
+	return session.NewToolResult(in.ID, out), nil
+}
+
+// bashCombinedOutput renders a CommandResult as the model-facing combined output:
+// stdout then stderr (each newline-normalized), and — only when includeExit — a
+// trailing "[exit code: N]" line. The success path includes the exit line; the
+// ctx-error path omits it (ExitCode is an unset 0 placeholder there).
+func bashCombinedOutput(res tool.CommandResult, includeExit bool) string {
 	var b strings.Builder
 	if res.Stdout != "" {
 		b.WriteString(res.Stdout)
@@ -160,11 +187,62 @@ func (bt BashTool) Execute(ctx context.Context, in session.ToolCall, ws tool.Wor
 			b.WriteByte('\n')
 		}
 	}
-	fmt.Fprintf(&b, "[exit code: %d]", res.ExitCode)
-
-	out := truncateBytes(b.String())
-	if res.ExitCode != 0 {
-		return session.NewToolError(in.ID, out), nil
+	if includeExit {
+		fmt.Fprintf(&b, "[exit code: %d]", res.ExitCode)
 	}
-	return session.NewToolResult(in.ID, out), nil
+	return b.String()
+}
+
+// bashErrorMessage composes the model-facing message for a runner error, keeping
+// any partial output (body) and appending a trailer that explains why the command
+// stopped. timeoutMS is the caller-requested timeout (0 if unset) — used only to
+// name the configured limit on a deadline; the runner's own default timeout is
+// private to it and is never fabricated here.
+//
+// The trailer ALWAYS survives the output cap: a timed-out/runaway command commonly
+// produces output far larger than toolkit.MaxOutputBytes, so this truncates the
+// BODY first (reserving room for the trailer) and then appends the trailer, rather
+// than truncating the joined string — which would land the cut inside the body and
+// drop the "timed out"/"canceled" signal entirely, leaving the model to read a
+// truncated result as an ordinary too-long one.
+func bashErrorMessage(body string, err error, timeoutMS int) string {
+	noBodyMsg, trailer := bashErrorTrailer(err, timeoutMS)
+	if body == "" {
+		// No partial output: the standalone phrasing IS the whole message.
+		return truncateBytes(noBodyMsg)
+	}
+	// Reserve room for the trailer (plus its leading newline) AND for the
+	// truncation marker toolkit.Truncate appends when it trims the body — so the
+	// final string fits the cap with the timeout/cancel reason intact.
+	suffix := "\n" + trailer
+	budget := toolkit.MaxOutputBytes - len(suffix) - len(toolkit.TruncationMarker)
+	if budget < 0 {
+		budget = 0
+	}
+	return toolkit.Truncate(body, budget) + suffix
+}
+
+// bashErrorTrailer returns the model-facing wording for a runner error: noBodyMsg
+// is the self-contained message when the command produced no output; trailer is
+// the line appended after any partial output. Classification order: deadline /
+// cancellation first, then no-shell, then a generic default.
+func bashErrorTrailer(err error, timeoutMS int) (noBodyMsg, trailer string) {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		if timeoutMS > 0 {
+			return fmt.Sprintf("[command produced no output and timed out after %dms]", timeoutMS),
+				fmt.Sprintf("[command timed out after %dms; output above is partial]", timeoutMS)
+		}
+		return "[command produced no output and timed out]",
+			"[command timed out; output above is partial]"
+	case errors.Is(err, context.Canceled):
+		return "[command was canceled before producing output]",
+			"[command was canceled; output above is partial]"
+	case errors.Is(err, tool.ErrNoShell):
+		return "[command failed to run: no shell available]",
+			"[command failed to run: no shell available]"
+	default:
+		return fmt.Sprintf("command failed to run: %v", err),
+			fmt.Sprintf("[command failed to run: %v]", err)
+	}
 }
