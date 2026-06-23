@@ -142,7 +142,18 @@ package would need its own suite bootstrap and its own server):
 11. **soul** — deterministic: the `soul ENABLED (user provenance...` composition
     fact in the captured stderr; the behavioural `SOUL-OK:` marker is a
     `quarantine`-labelled spec that reports but never fails.
-12. **approve-after-kill (cloud-native Phase 2)** — raises a real `Write`
+12. **guardrails slot-enable (issue #159)** — spawns its OWN mecated with a
+    slot-ONLY guardrails config (`--model-slot guardrail=cheap` +
+    `--model-alias cheap=<checker-model>`, NO `--guardrails-model`) and asserts
+    (A) the build-once `guardrails: ON` startup line names the RESOLVED slot
+    model with `via slot \`guardrail\`` provenance (the must-fix #1: the line
+    reports the resolved checker, not an absent gate value; must-fix #2: the
+    slot alone enables); (B) a WebSearch tool call — observed by the default
+    advisory set — drives a real PreToolUse/PostToolUse verdict round-trip on
+    the slot model against the live provider and the run completes cleanly.
+    Env: `MECATL_E2E_GUARDRAIL_MODEL` (default `openai/gpt-4.1-mini`).
+    `FlakeAttempts(2)`, local-target only (own-spawn slot flags).
+13. **approve-after-kill (cloud-native Phase 2)** — raises a real `Write`
     permission ask on the haiku lane, **SIGKILL**s the mecated process WITHOUT
     cleanup, restarts a SECOND mecated over the SAME `--store-dir`, POSTs
     `/v1/sessions/{id}/approve` (`allow_once`) to the second process's HTTP
