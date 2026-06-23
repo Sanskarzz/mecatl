@@ -1043,7 +1043,10 @@ The subtree is parsed **strictly** (an unknown sub-key is an error, like
 with `--guardrails-model` (overrides the YAML `model:`) OR bind the `guardrail` model
 slot (`--model-slot guardrail=…` / `models.slots.guardrail`); a bound slot
 **supersedes** the `--guardrails-model`/YAML model when both are set; force off with
-`--guardrails=off`.
+`--guardrails=off`. Note: while the RULES gate stays operator-tier-only, on a TRUSTED
+project a project-tier `models.slots.guardrail=` binding within the operator
+`models.allowlist` does enable the checker (consistent with the router slot) — the
+enable axis is slot-binding, not the rule list.
 
 **Startup posture.** Build prints exactly one `guardrails: ON|OFF …` line carrying the
 RESOLVED checker model + its provenance (via `--guardrails-model`, via the `guardrail`

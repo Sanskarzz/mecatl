@@ -2587,10 +2587,20 @@ func normalizeGuardrailsModel(cfg Config) (string, error) {
 // WRONG (inert) model. This line resolves through the SAME resolveGuardrailsCheckerModel
 // buildGuardrailsChecker does, so the posture and the live checker cannot disagree.
 //
+// It branches on the RESOLVER's own `configured` return (resolveGuardrailsCheckerModel),
+// NOT on guardrailsConfigured. guardrailsConfigured is the bound-slot-OR-gate gate used
+// only to decide whether to WIRE the hooks (buildGuardrailsHooks); a slot that is BOUND
+// but UNRESOLVABLE passes that gate but makes resolveGuardrailsCheckerModel return
+// configured=false (and buildGuardrailsChecker returns nil). Branching the ON posture on
+// guardrailsConfigured there would emit a false "guardrails: ON" for that unresolvable
+// slot — the exact posture↔checker divergence this refactor eliminated. The resolver's
+// `configured` is the SAME truth buildGuardrailsChecker acts on, so the posture line and
+// the live checker share one source of truth.
+//
 // Branches (issue #159 UX-B), exactly ONE cfg.diag().Log(LevelInfo, …) call per Build:
 //  1. kill-switch active (--guardrails=off / GuardrailsDisabled) → "guardrails: OFF …".
-//  2. nothing configured (no gate model, no bound slot) → "guardrails: OFF …" + a hint
-//     naming BOTH enable paths (bind the `guardrail` slot OR set --guardrails-model).
+//  2. nothing resolvable (no gate model, no resolvable slot) → "guardrails: OFF …" + a
+//     hint naming BOTH enable paths (bind the `guardrail` slot OR set --guardrails-model).
 //  3. configured → "guardrails: ON, checker=<resolved> (via <provenance>), mode=…, rules=N
 //     [ (default set: WebSearch, WebFetch, mcp__*)][, maxChecks=<n>]".
 //
@@ -2606,12 +2616,12 @@ func logGuardrailsPosture(cfg Config) {
 			"guardrails: OFF (kill-switch active via --guardrails=off); the LLM content checker is forced off regardless of --guardrails-model / the `guardrail` model slot")
 		return
 	}
-	if !guardrailsConfigured(cfg) {
+	model, src, configured := resolveGuardrailsCheckerModel(cfg)
+	if !configured {
 		cfg.diag().Log(ctx, port.LevelInfo,
 			"guardrails: OFF (no checker model configured; bind the `guardrail` model slot or set --guardrails-model to enable)")
 		return
 	}
-	model, src, _ := resolveGuardrailsCheckerModel(cfg)
 	specs, usedDefaults := effectiveGuardrailSpecs(cfg)
 	line := guardrailsPostureLine(cfg, model, src, specs, usedDefaults)
 	cfg.diag().Log(ctx, port.LevelInfo, line)
@@ -2680,7 +2690,15 @@ func highestSeverityGuardrailMode(specs []modelhook.RuleSpec) string {
 		sev := severity(s.Mode)
 		if sev > best {
 			best = sev
-			bestMode = s.Mode
+			// Normalize: an empty or unknown mode string counts as block (the
+			// adapter's CompileRule safe default), so report "block" — never the
+			// raw unrecognised token — as the posture mode.
+			switch modelhook.Mode(s.Mode) {
+			case modelhook.ModeAdvisory, modelhook.ModeSanitize, modelhook.ModeBlock:
+				bestMode = s.Mode
+			default: // "" or unknown
+				bestMode = "block"
+			}
 			if bestMode == "" {
 				bestMode = "block"
 			}
