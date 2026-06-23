@@ -1407,13 +1407,98 @@ func (e *Engine) recordContinuation(r *Run, sess *session.Session, turnIdx int, 
 
 // turnTiming carries the latency measurements runTurn derives from the model
 // stream, in milliseconds. A field is 0 when it could not be measured (no Clock
-// injected, no content chunk for TTFT, or fewer than two content chunks for the
-// inter-token summary) — telemetry treats a 0 here as "not measured", never a
-// real observation.
+// injected, no observable output for TTFT, or fewer than two streaming content
+// deltas for the inter-token summary) — telemetry treats a 0 here as "not
+// measured", never a real observation.
 type turnTiming struct {
 	ttftMs           int64
 	interTokenMeanMs int64
 	interTokenMaxMs  int64
+}
+
+// turnLatency accumulates the TTFT anchor and the inter-token gap series for a
+// single streamed turn off an injected port.Clock. It SPLITS the two concerns the
+// stream switch used to conflate (issue #155): TTFT anchors on the FIRST
+// OBSERVABLE OUTPUT — text, reasoning, a reasoning replay item, or a tool call
+// (noteFirstOutput) — while the inter-token gap series counts ONLY STREAMING
+// content deltas (text or reasoning, noteStreamDelta), so a tool call or reasoning
+// replay blob anchors TTFT without polluting the gap series. With no Clock injected
+// (clock == nil) every measurement degrades to 0.
+type turnLatency struct {
+	clock              port.Clock
+	streamStart        time.Time
+	lastContent        time.Time
+	firstOutputSeen    bool
+	contentChunks      int
+	gapSumMs, gapMaxMs int64
+	timing             turnTiming
+}
+
+// newTurnLatency anchors the stream start (one Clock read when a Clock is present)
+// and returns the accumulator for one turn.
+func newTurnLatency(clock port.Clock) *turnLatency {
+	l := &turnLatency{clock: clock}
+	if clock != nil {
+		l.streamStart = clock.Now()
+	}
+	return l
+}
+
+// noteFirstOutputAt anchors TTFT on the first observable output at the supplied
+// instant. First-only idempotent (firstOutputSeen guards it), so the
+// reasoning-delta-THEN-tool-call ordering anchors on the reasoning delta and the
+// later tool call is a no-op.
+func (l *turnLatency) noteFirstOutputAt(now time.Time) {
+	if l.firstOutputSeen {
+		return
+	}
+	l.firstOutputSeen = true
+	l.timing.ttftMs = now.Sub(l.streamStart).Milliseconds()
+}
+
+// noteFirstOutput anchors TTFT on the first observable output (a single Clock
+// read). It is the entry point for the non-streaming observable-output branches
+// (reasoning replay item, tool call); the streaming branches go through
+// noteStreamDelta, which anchors TTFT off the same read it uses for the gap.
+func (l *turnLatency) noteFirstOutput() {
+	if l.clock == nil || l.firstOutputSeen {
+		return
+	}
+	l.noteFirstOutputAt(l.clock.Now())
+}
+
+// noteStreamDelta records one STREAMING content delta (text or reasoning) for the
+// inter-token gap measurement, and also anchors TTFT — both off a SINGLE Clock
+// read, so the read count per delta is identical to the old single-purpose
+// accounting. Call it exactly once per streaming content delta. The gap series
+// counts ONLY these deltas — never tool calls or reasoning replay blobs.
+func (l *turnLatency) noteStreamDelta() {
+	if l.clock == nil {
+		return
+	}
+	now := l.clock.Now()
+	l.noteFirstOutputAt(now)
+	l.contentChunks++
+	if l.contentChunks >= 2 {
+		gap := now.Sub(l.lastContent).Milliseconds()
+		l.gapSumMs += gap
+		if gap > l.gapMaxMs {
+			l.gapMaxMs = gap
+		}
+	}
+	l.lastContent = now
+}
+
+// summary finalises the inter-token gap summary: mean over the (contentChunks-1)
+// gaps and the largest single gap. With fewer than two streaming content deltas
+// there is no gap, so both stay 0 — never a bogus zero observation. The TTFT was
+// already anchored in place.
+func (l *turnLatency) summary() turnTiming {
+	if l.contentChunks >= 2 {
+		l.timing.interTokenMeanMs = l.gapSumMs / int64(l.contentChunks-1)
+		l.timing.interTokenMaxMs = l.gapMaxMs
+	}
+	return l.timing
 }
 
 // runTurn builds the LLMRequest, calls Stream, and assembles the chunk sequence
@@ -1422,12 +1507,16 @@ type turnTiming struct {
 //
 // It also measures, via the injected Clock (never time.Now directly, so tests
 // drive it with a fake clock): TTFT — the elapsed time from the start of the
-// model stream to the FIRST content chunk (text or reasoning) — and the
-// inter-token gaps between consecutive content chunks, summarised as mean and
-// max. Tool-call/usage/done chunks are NOT content and never count toward TTFT or
-// the inter-token gaps (those carry no user-perceived token). A turn with zero
-// content chunks reports no TTFT; a turn with one content chunk reports a TTFT
-// but no inter-token summary (there is no gap).
+// model stream to the FIRST OBSERVABLE OUTPUT (text, reasoning, a reasoning
+// replay item, or a tool call) — and the inter-token gaps between consecutive
+// STREAMING content deltas (text or reasoning), summarised as mean and max. TTFT
+// anchors on whatever observable output arrives first (see noteFirstOutput);
+// usage/done/phase chunks carry no output and never anchor it. The inter-token
+// gaps, by contrast, count ONLY streaming content deltas (see noteStreamDelta) —
+// a tool call or reasoning replay blob is observable output (so it anchors TTFT)
+// but is NOT a streamed token, so it never pollutes the gap series. A turn with
+// no observable output at all reports no TTFT; a turn with fewer than two
+// streaming content deltas reports no inter-token summary (there is no gap).
 func (e *Engine) runTurn(ctx context.Context, r *Run, sess *session.Session, ws tool.Workspace, turnIdx int) (session.Message, session.Usage, session.StopReason, turnTiming, error) {
 	req := e.buildRequest(ctx, r, sess, ws)
 	seq, err := e.deps.LLM.Stream(ctx, req)
@@ -1435,40 +1524,13 @@ func (e *Engine) runTurn(ctx context.Context, r *Run, sess *session.Session, ws 
 		return session.Message{}, session.Usage{}, session.StopNone, turnTiming{}, fmt.Errorf("agent: start stream: %w", err)
 	}
 
-	// Latency measurement state. streamStart anchors TTFT; lastContent marks the
-	// previous content chunk's arrival for the inter-token gaps. Both are taken
-	// from the injected Clock; when no Clock is configured, hasClock is false and
-	// every measurement degrades to 0 (matching the turn-duration guard).
-	hasClock := e.deps.Clock != nil
-	var streamStart, lastContent time.Time
-	if hasClock {
-		streamStart = e.deps.Clock.Now()
-	}
-	var (
-		timing             turnTiming
-		contentChunks      int
-		gapSumMs, gapMaxMs int64
-	)
-	// noteContent records the arrival of one content chunk (text or reasoning) for
-	// the TTFT / inter-token measurement. It must be called exactly once per
-	// content chunk, before the chunk is otherwise handled.
-	noteContent := func() {
-		if !hasClock {
-			return
-		}
-		now := e.deps.Clock.Now()
-		contentChunks++
-		if contentChunks == 1 {
-			timing.ttftMs = now.Sub(streamStart).Milliseconds()
-		} else {
-			gap := now.Sub(lastContent).Milliseconds()
-			gapSumMs += gap
-			if gap > gapMaxMs {
-				gapMaxMs = gap
-			}
-		}
-		lastContent = now
-	}
+	// Latency measurement state (anchored off the injected Clock; degrades to 0
+	// with no Clock). noteFirstOutput anchors TTFT on the first observable output;
+	// noteStreamDelta accumulates the inter-token gap series over streaming content
+	// deltas only. See turnLatency.
+	lat := newTurnLatency(e.deps.Clock)
+	noteFirstOutput := lat.noteFirstOutput
+	noteStreamDelta := lat.noteStreamDelta
 
 	// text is the visible assistant text. reasoningBlob is the opaque
 	// encrypted_content replayed back to the provider on subsequent turns (stored
@@ -1477,8 +1539,9 @@ func (e *Engine) runTurn(ctx context.Context, r *Run, sess *session.Session, ws 
 	var text, reasoningBlob string
 	// phase is the OpenAI Responses opaque phase marker (commentary/final_answer),
 	// stored verbatim on Message.ProviderPhase and replayed next turn; like the
-	// reasoning blob it is never displayed or interpreted, so it carries no user-perceived
-	// token (no noteContent()).
+	// reasoning blob it is never displayed or interpreted. It is NOT observable
+	// output (it anchors no TTFT — no noteFirstOutput) and carries no streamed
+	// token (no noteStreamDelta).
 	var phase string
 	var calls []session.ToolCall
 	var usage session.Usage
@@ -1493,20 +1556,22 @@ func (e *Engine) runTurn(ctx context.Context, r *Run, sess *session.Session, ws 
 		}
 		switch chunk.Kind {
 		case port.ChunkText:
-			noteContent()
+			noteStreamDelta()
 			text += chunk.Text
 			e.emit(r, session.Event{Type: session.EvMessageDelta, Turn: turnIdx, Text: chunk.Text})
 		case port.ChunkReasoning:
 			// Display-only: surface the human-readable reasoning summary to
 			// clients. This text is NOT what gets replayed to the provider (see
 			// ChunkReasoningItem below); it must not be stored on Message.Reasoning.
-			noteContent()
+			noteStreamDelta()
 			e.emit(r, session.Event{Type: session.EvReasoningDelta, Turn: turnIdx, Text: chunk.Text})
 		case port.ChunkReasoningItem:
 			// The opaque encrypted_content replay blob. Stored on Message.Reasoning
 			// and sent back verbatim next turn for stateless reasoning continuity.
 			// The provider emits at most one per turn; concatenation is harmless if
-			// it ever splits.
+			// it ever splits. It is observable OUTPUT (it anchors TTFT) but not a
+			// streamed token, so it never counts toward the inter-token gap series.
+			noteFirstOutput()
 			reasoningBlob += chunk.Text
 		case port.ChunkPhase:
 			// The opaque phase marker (commentary/final_answer). Stored on
@@ -1514,6 +1579,11 @@ func (e *Engine) runTurn(ctx context.Context, r *Run, sess *session.Session, ws 
 			// reasoning blob); never displayed or interpreted.
 			phase = chunk.Text
 		case port.ChunkToolCall:
+			// A tool call is observable OUTPUT — a pure tool-call turn must still
+			// anchor TTFT (issue #155) — but it is not a streamed token, so it goes
+			// through noteFirstOutput, never noteStreamDelta: it must never seed the
+			// inter-token gap series.
+			noteFirstOutput()
 			if chunk.ToolCall != nil {
 				calls = append(calls, *chunk.ToolCall)
 			}
@@ -1532,13 +1602,7 @@ func (e *Engine) runTurn(ctx context.Context, r *Run, sess *session.Session, ws 
 		return session.Message{}, usage, stop, turnTiming{}, context.Canceled
 	}
 
-	// Summarise the inter-token gaps: mean over the (contentChunks-1) gaps and the
-	// largest single gap. With fewer than two content chunks there is no gap, so
-	// both stay 0 (already the zero value) — never a bogus zero observation.
-	if contentChunks >= 2 {
-		timing.interTokenMeanMs = gapSumMs / int64(contentChunks-1)
-		timing.interTokenMaxMs = gapMaxMs
-	}
+	timing := lat.summary()
 
 	msg := session.NewAssistantMessage(text, reasoningBlob, calls)
 	msg.ProviderPhase = phase

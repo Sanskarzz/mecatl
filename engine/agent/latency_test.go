@@ -16,18 +16,21 @@ import (
 // scriptedClock returns a pre-scripted sequence of timestamps, one per Now()
 // call, so a test can pin the exact instants the loop reads. After the script is
 // exhausted it keeps returning the final value (so unrelated trailing reads do
-// not panic). It is the controlled clock the TTFT / inter-token measurement tests
-// drive instead of the 1ms-step fakeClock, which cannot express specific gaps.
+// not panic) but counts every such read in overReads. It is the controlled clock
+// the TTFT / inter-token measurement tests drive instead of the 1ms-step
+// fakeClock, which cannot express specific gaps.
 type scriptedClock struct {
-	mu    sync.Mutex
-	times []time.Time
-	i     int
+	mu        sync.Mutex
+	times     []time.Time
+	i         int
+	overReads int // reads past the end of the script — pins the per-delta read count
 }
 
 func (c *scriptedClock) Now() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.i >= len(c.times) {
+		c.overReads++
 		if len(c.times) == 0 {
 			return time.Unix(0, 0)
 		}
@@ -36,6 +39,27 @@ func (c *scriptedClock) Now() time.Time {
 	t := c.times[c.i]
 	c.i++
 	return t
+}
+
+// assertScriptFullyConsumed fails the test unless the loop read EXACTLY the
+// scripted number of timestamps — no fewer (a skipped read) and no more (an
+// over-read past the script). This pins the single-Clock-read-per-delta parity
+// that keeps the inter-token gap series honest: a future double-read in
+// noteStreamDelta / noteFirstOutput would push reads past the script and fail here
+// LOUDLY, instead of being silently absorbed by the final-value fallback. Use it
+// only with a script that covers EVERY read of the whole run.
+func (c *scriptedClock) assertScriptFullyConsumed(t *testing.T) {
+	t.Helper()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.overReads != 0 {
+		t.Errorf("scriptedClock over-read %d time(s) past its %d-entry script — an extra Clock read crept into the latency path",
+			c.overReads, len(c.times))
+	}
+	if c.i != len(c.times) {
+		t.Errorf("scriptedClock consumed %d of %d scripted reads — a Clock read was skipped",
+			c.i, len(c.times))
+	}
 }
 
 // at builds a timestamp at ms milliseconds past the Unix epoch.
@@ -102,6 +126,7 @@ func TestTurnEndLatencyMeasured(t *testing.T) {
 	if te.DurationMs != 195 {
 		t.Errorf("DurationMs = %d, want 195", te.DurationMs)
 	}
+	clk.assertScriptFullyConsumed(t)
 }
 
 // TestTurnEndLatencyMaxIsFirstGap drives a turn whose LARGEST inter-token gap is
@@ -138,6 +163,7 @@ func TestTurnEndLatencyMaxIsFirstGap(t *testing.T) {
 	if te.InterTokenMeanMs != 25 { // (40 + 10) / 2
 		t.Errorf("InterTokenMeanMs = %d, want 25", te.InterTokenMeanMs)
 	}
+	clk.assertScriptFullyConsumed(t)
 }
 
 // TestTurnEndLatencyReasoningCountsAsContent asserts a ChunkReasoning (the
@@ -174,6 +200,7 @@ func TestTurnEndLatencyReasoningCountsAsContent(t *testing.T) {
 	if te.InterTokenMaxMs != 25 {
 		t.Errorf("InterTokenMaxMs = %d, want 25", te.InterTokenMaxMs)
 	}
+	clk.assertScriptFullyConsumed(t)
 }
 
 // TestTurnEndLatencyOneContentChunk: a turn with exactly one content chunk has a
@@ -201,12 +228,23 @@ func TestTurnEndLatencyOneContentChunk(t *testing.T) {
 		t.Errorf("inter-token = (%d,%d), want (0,0) for a single content chunk",
 			te.InterTokenMeanMs, te.InterTokenMaxMs)
 	}
+	clk.assertScriptFullyConsumed(t)
 }
 
-// TestTurnEndLatencyNoContent: a turn whose only chunks are a tool call (plus
-// usage/done) produces NO content chunk, so TTFT and both inter-token fields must
-// be 0 (not measured) — never a bogus zero.
-func TestTurnEndLatencyNoContent(t *testing.T) {
+// TestTurnEndLatencyToolCallAnchorsTTFT: a turn whose only chunks are a tool call
+// (plus usage/done) carries NO streaming content delta, but the tool call IS
+// observable output — so TTFT anchors on it (issue #155), while both inter-token
+// fields stay 0 (a tool call must NOT seed the gap series).
+//
+// The script covers EVERY read of the whole two-turn run so the full-consumption
+// oracle pins the tool-call branch's SINGLE noteFirstOutput read (a double-read
+// regression there would over-run the script and fail loudly). Reads:
+//
+//	turn 1: [0] turnStart=5, [1] streamStart=10, [2] tool call → TTFT = 40-10 = 30,
+//	        [3] durMs=200
+//	dispatch: [4] enqueue=210, [5] execStart=215, [6] dur=220
+//	turn 2: [7] turnStart=230, [8] streamStart=235, [9] text → TTFT, [10] durMs=300
+func TestTurnEndLatencyToolCallAnchorsTTFT(t *testing.T) {
 	llm := mockllm.New(
 		mockllm.ChunksTurn(
 			mockllm.ToolCallChunk(toolCall("c1", "noop", `{}`)),
@@ -224,19 +262,194 @@ func TestTurnEndLatencyNoContent(t *testing.T) {
 		exec: func(_ context.Context, in session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
 			return session.NewToolResult(in.ID, "ok"), nil
 		}}
-	clk := &scriptedClock{} // value-less script: every read returns the epoch
+	clk := &scriptedClock{times: []time.Time{
+		at(5), at(10), at(40), at(200), // turn 1
+		at(210), at(215), at(220), // dispatch
+		at(230), at(235), at(250), at(300), // turn 2
+	}}
 	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t, noop), Clock: clk})
 	sess := newSession(t, session.Limits{})
 	r := e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), "go")
 	evs := drain(r)
 
-	// The FIRST turn.end is the tool-call-only turn: no content → no TTFT/gaps.
+	// The FIRST turn.end is the tool-call-only turn: the tool call anchors TTFT,
+	// but seeds no inter-token gap.
 	te := turnEndOf(t, evs)
-	if te.TTFTMs != 0 {
-		t.Errorf("TTFTMs = %d, want 0 (no content chunk)", te.TTFTMs)
+	if te.TTFTMs != 30 {
+		t.Errorf("TTFTMs = %d, want 30 (a tool call anchors TTFT)", te.TTFTMs)
 	}
 	if te.InterTokenMeanMs != 0 || te.InterTokenMaxMs != 0 {
-		t.Errorf("inter-token = (%d,%d), want (0,0) (no content chunk)",
+		t.Errorf("inter-token = (%d,%d), want (0,0) (a tool call must not seed the gap series)",
+			te.InterTokenMeanMs, te.InterTokenMaxMs)
+	}
+	clk.assertScriptFullyConsumed(t)
+}
+
+// TestTurnEndLatencyReasoningItemAnchorsTTFT: a turn whose only observable output
+// is a reasoning replay item (the opaque encrypted_content blob) anchors TTFT on
+// it, with no inter-token gap (the replay blob is not a streamed token).
+//
+// Clock reads: [0] turnStart=0, [1] streamStart=5, [2] reasoning item → TTFT = 20
+// - 5 = 15, [3] durMs=50. Usage/done consume no clock read.
+func TestTurnEndLatencyReasoningItemAnchorsTTFT(t *testing.T) {
+	llm := mockllm.New(
+		mockllm.ChunksTurn(
+			mockllm.ReasoningItemChunk("BLOB"),
+			mockllm.UsageChunk(session.Usage{}),
+			mockllm.DoneChunk(session.StopEndTurn),
+		),
+	)
+	clk := &scriptedClock{times: []time.Time{at(0), at(5), at(20), at(50)}}
+	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t), Clock: clk})
+	sess := newSession(t, session.Limits{})
+	r := e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), "go")
+	evs := drain(r)
+
+	te := turnEndOf(t, evs)
+	if te.TTFTMs != 15 {
+		t.Errorf("TTFTMs = %d, want 15 (a reasoning replay item anchors TTFT)", te.TTFTMs)
+	}
+	if te.InterTokenMeanMs != 0 || te.InterTokenMaxMs != 0 {
+		t.Errorf("inter-token = (%d,%d), want (0,0) (a replay blob is not a streamed token)",
+			te.InterTokenMeanMs, te.InterTokenMaxMs)
+	}
+	// NOTE: a reasoning-item-only turn carries no text and no tool call, so it is an
+	// empty turn that triggers the no-progress nudge (extra turns + dispatch-less
+	// clock reads). The full-consumption oracle therefore does not apply here; the
+	// TTFT value pins the single noteFirstOutput read for the reasoning-item branch.
+}
+
+// TestTurnEndLatencyTwoToolCalls: a turn carrying TWO tool calls and no text or
+// reasoning anchors TTFT on the FIRST tool call only (first-only guard), and the
+// second tool call must NOT pollute the inter-token gap series — both gap fields
+// stay 0.
+//
+// Clock reads for the first (two-tool-call) turn: [0] turnStart=5, [1]
+// streamStart=10, [2] tool call #1 → TTFT = 30 - 10 = 20, [3] tool call #2 → a
+// no-op for TTFT and NOT a streaming delta, [4] durMs. Wait — the second tool call
+// reads no clock (noteFirstOutput is a no-op after firstOutputSeen), so the script
+// is: [2] tool #1 at 30, [3] durMs at 90.
+func TestTurnEndLatencyTwoToolCalls(t *testing.T) {
+	llm := mockllm.New(
+		mockllm.ChunksTurn(
+			mockllm.ToolCallChunk(toolCall("c1", "noop", `{}`)),
+			mockllm.ToolCallChunk(toolCall("c2", "noop", `{}`)),
+			mockllm.UsageChunk(session.Usage{}),
+			mockllm.DoneChunk(session.StopEndTurn),
+		),
+		mockllm.ChunksTurn(
+			mockllm.TextChunk("done"),
+			mockllm.UsageChunk(session.Usage{}),
+			mockllm.DoneChunk(session.StopEndTurn),
+		),
+	)
+	noop := &fakeTool{name: "noop", readOnly: true,
+		exec: func(_ context.Context, in session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
+			return session.NewToolResult(in.ID, "ok"), nil
+		}}
+	clk := &scriptedClock{times: []time.Time{at(5), at(10), at(30), at(90)}}
+	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t, noop), Clock: clk})
+	sess := newSession(t, session.Limits{})
+	r := e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), "go")
+	evs := drain(r)
+
+	te := turnEndOf(t, evs)
+	if te.TTFTMs != 20 {
+		t.Errorf("TTFTMs = %d, want 20 (first tool call anchors TTFT)", te.TTFTMs)
+	}
+	if te.InterTokenMeanMs != 0 || te.InterTokenMaxMs != 0 {
+		t.Errorf("inter-token = (%d,%d), want (0,0) (tool calls must not pollute the gap series)",
+			te.InterTokenMeanMs, te.InterTokenMaxMs)
+	}
+}
+
+// TestTurnEndLatencyTwoTextDeltasThenToolCall: TWO text deltas (which DO seed the
+// inter-token gap series — one text-to-text gap) followed by a tool call. The tool
+// call anchors no further TTFT (first-only guard) and must NOT append a spurious
+// gap to the already-non-empty series: the mean and max stay the single text gap.
+// This is the real pollution path — the reasoning-delta-then-tool-call test has
+// only one streaming delta, so its series is empty and cannot prove a non-empty
+// series is left unpolluted.
+//
+// Clock reads for the first turn: [0] turnStart=5, [1] streamStart=10, [2] text #1
+// → TTFT = 30 - 10 = 20, [3] text #2 → gap = 70 - 30 = 40, the tool call reads NO
+// clock (firstOutputSeen, not a streaming delta), [4] durMs=120.
+func TestTurnEndLatencyTwoTextDeltasThenToolCall(t *testing.T) {
+	llm := mockllm.New(
+		mockllm.ChunksTurn(
+			mockllm.TextChunk("a"),
+			mockllm.TextChunk("b"),
+			mockllm.ToolCallChunk(toolCall("c1", "noop", `{}`)),
+			mockllm.UsageChunk(session.Usage{}),
+			mockllm.DoneChunk(session.StopEndTurn),
+		),
+		mockllm.ChunksTurn(
+			mockllm.TextChunk("done"),
+			mockllm.UsageChunk(session.Usage{}),
+			mockllm.DoneChunk(session.StopEndTurn),
+		),
+	)
+	noop := &fakeTool{name: "noop", readOnly: true,
+		exec: func(_ context.Context, in session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
+			return session.NewToolResult(in.ID, "ok"), nil
+		}}
+	clk := &scriptedClock{times: []time.Time{at(5), at(10), at(30), at(70), at(120)}}
+	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t, noop), Clock: clk})
+	sess := newSession(t, session.Limits{})
+	r := e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), "go")
+	evs := drain(r)
+
+	te := turnEndOf(t, evs)
+	if te.TTFTMs != 20 {
+		t.Errorf("TTFTMs = %d, want 20 (first text delta anchors TTFT)", te.TTFTMs)
+	}
+	// Exactly ONE gap (text#1 → text#2 = 40); the trailing tool call appends none.
+	if te.InterTokenMeanMs != 40 {
+		t.Errorf("InterTokenMeanMs = %d, want 40 (the single text-to-text gap; the tool call adds no gap)", te.InterTokenMeanMs)
+	}
+	if te.InterTokenMaxMs != 40 {
+		t.Errorf("InterTokenMaxMs = %d, want 40 (the single text-to-text gap; the tool call adds no gap)", te.InterTokenMaxMs)
+	}
+}
+
+// TestTurnEndLatencyReasoningDeltaThenToolCall: a reasoning DELTA followed by a
+// tool call. The first-only guard means TTFT anchors on the reasoning delta
+// instant, and the trailing tool call is a no-op for TTFT and never a streaming
+// delta — so the inter-token gap series stays empty.
+//
+// Clock reads: [0] turnStart=0, [1] streamStart=10, [2] reasoning delta → TTFT =
+// 25 - 10 = 15, [3] tool call is a no-op (firstOutputSeen) so reads NO clock, [3]
+// durMs=80.
+func TestTurnEndLatencyReasoningDeltaThenToolCall(t *testing.T) {
+	llm := mockllm.New(
+		mockllm.ChunksTurn(
+			mockllm.ReasoningChunk("thinking"),
+			mockllm.ToolCallChunk(toolCall("c1", "noop", `{}`)),
+			mockllm.UsageChunk(session.Usage{}),
+			mockllm.DoneChunk(session.StopEndTurn),
+		),
+		mockllm.ChunksTurn(
+			mockllm.TextChunk("done"),
+			mockllm.UsageChunk(session.Usage{}),
+			mockllm.DoneChunk(session.StopEndTurn),
+		),
+	)
+	noop := &fakeTool{name: "noop", readOnly: true,
+		exec: func(_ context.Context, in session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
+			return session.NewToolResult(in.ID, "ok"), nil
+		}}
+	clk := &scriptedClock{times: []time.Time{at(0), at(10), at(25), at(80)}}
+	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t, noop), Clock: clk})
+	sess := newSession(t, session.Limits{})
+	r := e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), "go")
+	evs := drain(r)
+
+	te := turnEndOf(t, evs)
+	if te.TTFTMs != 15 {
+		t.Errorf("TTFTMs = %d, want 15 (reasoning delta anchors first; the tool call is a no-op)", te.TTFTMs)
+	}
+	if te.InterTokenMeanMs != 0 || te.InterTokenMaxMs != 0 {
+		t.Errorf("inter-token = (%d,%d), want (0,0) (only one streaming delta; the tool call adds no gap)",
 			te.InterTokenMeanMs, te.InterTokenMaxMs)
 	}
 }

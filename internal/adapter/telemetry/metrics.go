@@ -157,7 +157,7 @@ type Metrics struct {
 	// recorded from EvTurnEnd.DurationMs.
 	turnDuration metric.Float64Histogram
 	// ttft is the time-to-first-token histogram (unit "s"), recorded from
-	// EvTurnEnd.TTFTMs (skipped when the turn produced no content chunk).
+	// EvTurnEnd.TTFTMs (skipped when the turn produced no observable output).
 	ttft metric.Float64Histogram
 	// interToken is the per-turn mean inter-token-gap histogram (unit "s"),
 	// recorded from EvTurnEnd.InterTokenMeanMs (skipped for <2-content-chunk turns).
@@ -260,7 +260,7 @@ func NewMetrics(mp metric.MeterProvider) (*Metrics, error) {
 	}
 	if m.ttft, err = meter.Float64Histogram(
 		ttftInstrument,
-		metric.WithDescription("Time to first content token (text or reasoning) per turn, in seconds."),
+		metric.WithDescription("Time to first observable output (text, reasoning, or tool call) per turn, in seconds."),
 		metric.WithUnit("s"),
 	); err != nil {
 		return nil, fmt.Errorf("telemetry: ttft histogram: %w", err)

@@ -379,8 +379,8 @@ func TestMetricsLatencyInstruments(t *testing.T) {
 	m.Emit(context.Background(), session.Event{Type: session.EvTurnEnd, TurnEnd: &session.TurnEndPayload{
 		DurationMs: 195, TTFTMs: 30, InterTokenMeanMs: 25, InterTokenMaxMs: 40,
 	}})
-	// A tool-call-only turn: duration measured, TTFT/inter-token "not measured" (0)
-	// → must NOT add a TTFT/inter-token observation.
+	// A Clock-less / no-output turn: duration measured, TTFT/inter-token "not
+	// measured" (0) → must NOT add a TTFT/inter-token observation.
 	m.Emit(context.Background(), session.Event{Type: session.EvTurnEnd, TurnEnd: &session.TurnEndPayload{
 		DurationMs: 5, TTFTMs: 0, InterTokenMeanMs: 0, InterTokenMaxMs: 0,
 	}})
