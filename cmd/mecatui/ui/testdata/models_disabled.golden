@@ -3,7 +3,6 @@
 
 
 
-
 ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
 ┃                                                                                                     ┃
 ┃  Models                                                                                             ┃
@@ -22,9 +21,10 @@
 
 
 
-┃   1 Ask mecatl to do something…  (enter to send · shift+enter for newline · ? for help)
-┃
-┃
+│
+│  ┃   1 Ask mecatl to do something…  (enter to send · shift+enter for newline · ? for help)
+│  ┃
+│  ┃
 ────────────────────────────────────────────────────────────────────────────────────────────────────
  connected                                                                   ctx 0 · ↑0 ↓0 cache 0%
 ? help · / commands · ctrl+c quit

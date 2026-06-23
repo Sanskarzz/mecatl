@@ -442,17 +442,35 @@ func (m Model) wordSelect(line, col int) Model {
 	return m
 }
 
-// lineSelect sets the selection to the WHOLE logical line (column 0 to the line's
-// grapheme count), then snapshots its identity + re-renders the highlight. An empty line
-// yields an empty selection (anchor==head) so the caller copies nothing. An
-// out-of-bounds line index is a no-op.
+// lineSelect sets the selection to the WHOLE logical line's CONTENT — from the first
+// non-whitespace grapheme to the line's grapheme count — then snapshots its identity +
+// re-renders the highlight. Skipping the LEADING WHITESPACE means triple-click grabs the
+// line's text regardless of how much left margin the renderer prepended: the base block
+// indent, plus the assistant body hang, plus the user block's rail+padding all leave
+// leading spaces (the rail glyph is the only non-space, and it precedes the body text, so
+// for an assistant/notice/tool line this lands on the first real character). A blank line
+// (all whitespace) yields an empty selection (anchor==head) so the caller copies nothing.
+// An out-of-bounds line index is a no-op.
 func (m Model) lineSelect(line int) Model {
 	lines := strings.Split(m.vp.GetContent(), "\n")
 	if line < 0 || line >= len(lines) {
 		return m
 	}
 	stripped := ansi.Strip(lines[line])
-	m.sel = selection{active: true, anchorL: line, anchorC: 0, headL: line, headC: graphemeCount(stripped)}
+	n := graphemeCount(stripped)
+	// Skip leading whitespace (the conversation left margin / hang) so the selection
+	// starts at the first real glyph. Counted in GRAPHEME columns to match anchorC/headC.
+	start := 0
+	for _, rn := range stripped {
+		if rn != ' ' {
+			break
+		}
+		start++
+	}
+	if start > n {
+		start = n
+	}
+	m.sel = selection{active: true, anchorL: line, anchorC: start, headL: line, headC: n}
 	snapshotSelection(&m)
 	return m
 }

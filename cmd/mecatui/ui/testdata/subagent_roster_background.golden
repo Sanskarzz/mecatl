@@ -1,6 +1,5 @@
  mecatui  ·  session sess-test-00  ·  mock-model  ·  mode default  ·  127.0.0.1:8080
 ────────────────────────────────────────────────────────────────────────────────────────────────────
-
      ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
      ┃                                                                                       ┃
      ┃  ▸ Subagents    Parallel    Teams                                                     ┃
@@ -22,9 +21,10 @@
      ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
 
-┃   1 Ask mecatl to do something…  (enter to send · shift+enter for newline · ? for help)
-┃
-┃
+│
+│  ┃   1 Ask mecatl to do something…  (enter to send · shift+enter for newline · ? for help)
+│  ┃
+│  ┃
 ────────────────────────────────────────────────────────────────────────────────────────────────────
  background subagent #r-g7b7 done — result ready for the agent    ⛭ subagents 4◐ 3✓ · ctrl+a  ctx 0
 ? help · / commands · ctrl+c quit

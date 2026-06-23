@@ -5,6 +5,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"charm.land/lipgloss/v2"
 )
 
 // TestBuiltinsSlotCompleteness asserts every built-in theme populates every
@@ -35,13 +37,109 @@ func TestStylesCompiled(t *testing.T) {
 		"header", "footer", "viewport", "userBlock", "userLabel",
 		"assistantLabel", "toolCard", "toolName", "toolArgs", "toolOk",
 		"toolErr", "askCard", "askTitle", "askButton", "askButtonActive",
-		"spinner", "muted", "errorText", "selection",
+		"spinner", "muted", "warning", "dangerPill", "errorText", "selection",
 	}
 	th := New("aztec", aztecPalette)
 	for _, slot := range want {
 		if _, ok := th.styles[slot]; !ok {
 			t.Errorf("style slot %q not compiled", slot)
 		}
+	}
+}
+
+// TestUserBlockRailNoTint pins decision 1 (partial-reverted): the conversation user
+// block carries the GOLD LEFT RAIL (BorderLeft, user-coloured) but NO background tint —
+// the faint panel tint belongs ONLY to the input box, never the conversation history.
+func TestUserBlockRailNoTint(t *testing.T) {
+	th := New("aztec", aztecPalette)
+	st := th.Style("userBlock")
+	// NO background fill (the tint was removed — it read as an off surface in history).
+	if _, plain := st.GetBackground().(lipgloss.NoColor); !plain {
+		t.Errorf("userBlock must carry NO background tint, got %v", st.GetBackground())
+	}
+	// The gold rail survives: a left border in the user colour.
+	if !st.GetBorderLeft() {
+		t.Error("userBlock must keep its left border (the gold rail)")
+	}
+	if got := st.GetBorderLeftForeground(); got != col(aztecPalette.User) {
+		t.Errorf("userBlock left-border colour = %v, want the gold User %q", got, aztecPalette.User)
+	}
+}
+
+// TestWarningAndDangerPillSlots pins decisions 3+5 (recut): the "warning" slot is
+// inline coloured+bold text (warning fg, NO background fill), while "dangerPill" is a
+// filled, padded chip with FIXED, theme-INDEPENDENT alarm colours (alarm-red bg,
+// near-white fg) — NOT palette-derived. The two must be visually distinct — the pill is
+// the louder cue, and danger reads identically in every theme.
+func TestWarningAndDangerPillSlots(t *testing.T) {
+	th := New("aztec", aztecPalette)
+
+	warn := th.Style("warning")
+	if got := warn.GetForeground(); got != col(aztecPalette.Warning) {
+		t.Errorf("warning fg = %v, want Warning %q", got, aztecPalette.Warning)
+	}
+	// Inline text: no filled background and no padding frame (distinct from the pill).
+	if _, filled := warn.GetBackground().(lipgloss.NoColor); !filled {
+		t.Errorf("warning must be inline text (no background fill), got %v", warn.GetBackground())
+	}
+	if got := warn.GetHorizontalFrameSize(); got != 0 {
+		t.Errorf("warning horizontal frame = %d, want 0 (inline, not a pill)", got)
+	}
+
+	pill := th.Style("dangerPill")
+	// FIXED alarm colours — NOT the theme's Error / Bg (a safety affordance, not themed).
+	if got := pill.GetBackground(); got != col(dangerPillBg) {
+		t.Errorf("dangerPill background = %v, want the FIXED alarm red %q", got, dangerPillBg)
+	}
+	if got := pill.GetForeground(); got != col(dangerPillFg) {
+		t.Errorf("dangerPill fg = %v, want the FIXED near-white %q", got, dangerPillFg)
+	}
+	// The pill's horizontal frame adds the 2 cells the width math in fitHeader
+	// compensates for.
+	if got := pill.GetHorizontalFrameSize(); got != 2 {
+		t.Errorf("dangerPill horizontal frame = %d, want 2 (Padding(0,1))", got)
+	}
+}
+
+// TestDangerPillThemeIndependent proves the dangerPill colours do NOT track the palette:
+// two DIFFERENT themes (different Error / Bg) must render the pill with the SAME fixed
+// alarm-red bg + near-white fg. This is the safety-affordance guarantee — danger reads
+// the same everywhere — and the guard against a regression back to palette-derived
+// Error/Bg.
+func TestDangerPillThemeIndependent(t *testing.T) {
+	a := New("aztec", aztecPalette)
+	// A contrived second palette with a deliberately different Error and Bg.
+	alt := aztecPalette
+	alt.Error = "#00FF00"
+	alt.Bg = "#123456"
+	b := New("other", alt)
+
+	pa, pb := a.Style("dangerPill"), b.Style("dangerPill")
+	if pa.GetBackground() != pb.GetBackground() {
+		t.Errorf("dangerPill bg must be theme-independent: %v vs %v", pa.GetBackground(), pb.GetBackground())
+	}
+	if pa.GetForeground() != pb.GetForeground() {
+		t.Errorf("dangerPill fg must be theme-independent: %v vs %v", pa.GetForeground(), pb.GetForeground())
+	}
+	if pa.GetBackground() != col(dangerPillBg) {
+		t.Errorf("dangerPill bg = %v, want fixed alarm red %q (not the theme Error)", pa.GetBackground(), dangerPillBg)
+	}
+}
+
+// TestGlamourCodeDeEmphasised pins decision 6: inline code recedes — its
+// foreground is the (palette-derived) quote slot and Faint is set, over the
+// element background. No hardcoded hex.
+func TestGlamourCodeDeEmphasised(t *testing.T) {
+	th := New("aztec", aztecPalette)
+	code := th.GlamourStyle().Code.StylePrimitive
+	if code.Color == nil || *code.Color != aztecPalette.MdQuote {
+		t.Errorf("inline code colour = %v, want the recede MdQuote slot %q", code.Color, aztecPalette.MdQuote)
+	}
+	if code.Faint == nil || !*code.Faint {
+		t.Error("inline code must be Faint (de-emphasised)")
+	}
+	if code.BackgroundColor == nil || *code.BackgroundColor != aztecPalette.BgElement {
+		t.Errorf("inline code background = %v, want BgElement %q (unchanged)", code.BackgroundColor, aztecPalette.BgElement)
 	}
 }
 
