@@ -58,6 +58,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/mcp"
 	mcpsource "github.com/stacklok/mecatl/internal/adapter/mcp/source"
 	"github.com/stacklok/mecatl/internal/adapter/memory"
+	"github.com/stacklok/mecatl/internal/adapter/modelhook"
 	"github.com/stacklok/mecatl/internal/adapter/osfs"
 	"github.com/stacklok/mecatl/internal/adapter/permconfig"
 	"github.com/stacklok/mecatl/internal/adapter/providercatalog"
@@ -1055,6 +1056,12 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	// per-engine line — the no-per-derivation-duplication rule + the "exactly THREE loop
 	// lines" invariant).
 	logModelRouterFacts(cfg)
+	// Guardrails posture (issue #159): the ONE build-once line carrying the RESOLVED
+	// checker model + provenance (ON|OFF). Replaces the old normalizeGuardrailsModel
+	// "guardrails ACTIVE" emit, which reported the GATE value rather than the resolved
+	// checker model a `guardrail` slot may supersede. Always present (OFF is explicit,
+	// not inferred from silence); build-once only, not a loop line.
+	logGuardrailsPosture(cfg)
 
 	// Slash-command driver source (Phase C2): ONE dial + Probe at build time
 	// (fatal on a fault — loud-misconfig posture), then the probed client is
@@ -2550,7 +2557,10 @@ func normalizeAskReviewerModel(cfg Config) (string, error) {
 // configured model with NO explicit rules is still ACTIVE — it takes the built-in
 // DEFAULT advisory rule set (WebSearch/WebFetch/mcp__*, observe-only), the headline
 // default. The master kill-switch (GuardrailsDisabled) turns it off. No-op under
-// UseMock. On success it emits the build-once ACTIVE fact.
+// UseMock. It is now VALIDATE-ONLY: it no longer emits the build-once ACTIVE fact.
+// The always-one-line posture — ON|OFF carrying the RESOLVED checker model + its
+// provenance, which this function never computed (it only validated the GATE value)
+// — is emitted by logGuardrailsPosture (Build-once, alongside logModelRouterFacts).
 func normalizeGuardrailsModel(cfg Config) (string, error) {
 	sel := strings.TrimSpace(cfg.GuardrailsModel)
 	if sel == "" || cfg.GuardrailsDisabled {
@@ -2565,19 +2575,138 @@ func normalizeGuardrailsModel(cfg Config) (string, error) {
 			return "", fmt.Errorf("--guardrails-model %q: the alias resolves to \"inherit\" (the built-in sonnet/opus/haiku aliases mean inherit unless overridden via --model-alias); pass a concrete model id or map the alias to one", sel)
 		}
 	}
-	if len(cfg.GuardrailsRules) == 0 {
-		cfg.diag().Log(context.Background(), port.LevelInfo,
-			"guardrails ACTIVE (default advisory rules): WebSearch/WebFetch/mcp__* tool content is inspected observe-only (findings logged, content unchanged); add a guardrails: rule list to enforce (block/sanitize) or narrow the scope",
-			"model", sel)
-		return sel, nil
-	}
-	cfg.diag().Log(context.Background(), port.LevelInfo,
-		"guardrails ACTIVE: PreToolUse (outbound-args exfil) and PostToolUse (inbound-result injection) tool content is inspected by an automated checker; block/sanitize/advisory per rule",
-		"model", sel, "rules", len(cfg.GuardrailsRules))
 	return sel, nil
 }
 
-// validateDefaultModel validates the server-configured deployment-wide default
+// logGuardrailsPosture emits the build-once guardrails posture line — the ONE line per
+// Build that tells an operator, honestly, whether the LLM-backed content checker is ON or
+// OFF and (when ON) the RESOLVED checker model + its provenance. It REPLACES the old
+// normalizeGuardrailsModel "guardrails ACTIVE" emit, which reported the GATE value
+// (--guardrails-model / guardrails.model YAML) rather than the RESOLVED checker model —
+// so under a `guardrail` model slot superseding the gate value the old line logged the
+// WRONG (inert) model. This line resolves through the SAME resolveGuardrailsCheckerModel
+// buildGuardrailsChecker does, so the posture and the live checker cannot disagree.
+//
+// It branches on the RESOLVER's own `configured` return (resolveGuardrailsCheckerModel),
+// NOT on guardrailsConfigured. guardrailsConfigured is the bound-slot-OR-gate gate used
+// only to decide whether to WIRE the hooks (buildGuardrailsHooks); a slot that is BOUND
+// but UNRESOLVABLE passes that gate but makes resolveGuardrailsCheckerModel return
+// configured=false (and buildGuardrailsChecker returns nil). Branching the ON posture on
+// guardrailsConfigured there would emit a false "guardrails: ON" for that unresolvable
+// slot — the exact posture↔checker divergence this refactor eliminated. The resolver's
+// `configured` is the SAME truth buildGuardrailsChecker acts on, so the posture line and
+// the live checker share one source of truth.
+//
+// Branches (issue #159 UX-B), exactly ONE cfg.diag().Log(LevelInfo, …) call per Build:
+//  1. kill-switch active (--guardrails=off / GuardrailsDisabled) → "guardrails: OFF …".
+//  2. nothing resolvable (no gate model, no resolvable slot) → "guardrails: OFF …" + a
+//     hint naming BOTH enable paths (bind the `guardrail` slot OR set --guardrails-model).
+//  3. configured → "guardrails: ON, checker=<resolved> (via <provenance>), mode=…, rules=N
+//     [ (default set: WebSearch, WebFetch, mcp__*)][, maxChecks=<n>]".
+//
+// Build-once ONLY (called from Build right after logModelRouterFacts, alongside the other
+// build-once fact emitters). NOT a loop line — the "loop emits exactly THREE lines"
+// invariant holds. logSlotConfigFacts still emits its own "model slot ACTIVE" for a
+// resolving guardrail slot; that is a distinct fact (which slot is bound), not a duplicate
+// of this posture (is the checker ON, and on which resolved model).
+func logGuardrailsPosture(cfg Config) {
+	ctx := context.Background()
+	if cfg.GuardrailsDisabled {
+		cfg.diag().Log(ctx, port.LevelInfo,
+			"guardrails: OFF (kill-switch active via --guardrails=off); the LLM content checker is forced off regardless of --guardrails-model / the `guardrail` model slot")
+		return
+	}
+	model, src, configured := resolveGuardrailsCheckerModel(cfg)
+	if !configured {
+		cfg.diag().Log(ctx, port.LevelInfo,
+			"guardrails: OFF (no checker model configured; bind the `guardrail` model slot or set --guardrails-model to enable)")
+		return
+	}
+	specs, usedDefaults := effectiveGuardrailSpecs(cfg)
+	line := guardrailsPostureLine(cfg, model, src, specs, usedDefaults)
+	cfg.diag().Log(ctx, port.LevelInfo, line)
+}
+
+// guardrailsPostureLine composes the ON posture line as a pure helper so it can be
+// table-tested directly (TestLogGuardrailsPostureBranches). It carries the resolved
+// checker model + provenance, the effective rule mode, the rule count, whether the default
+// advisory set is in force, and the per-session maxChecks cap. Provenance: srcSlot →
+// "via slot `guardrail`"; srcSlotSupersedingGate → "via slot `guardrail`, supersedes gate
+// value `<gateval>`"; srcGate → "via --guardrails-model". Mode: usedDefaults → "advisory";
+// else the highest-severity explicit-rule mode present (block > sanitize > advisory), or
+// "mixed" only if a lower-severity mode coexists with block/sanitize in a way the
+// highest-severity roll-up would hide — we report the highest-severity present (block >
+// sanitize > advisory), so "mixed" is unreachable under the severity ordering; it is kept
+// as the honest fallback for an unforeseen mode string.
+func guardrailsPostureLine(cfg Config, model string, src guardrailSource, specs []modelhook.RuleSpec, usedDefaults bool) string {
+	var provenance string
+	switch src {
+	case srcSlot:
+		provenance = "via slot `guardrail`"
+	case srcSlotSupersedingGate:
+		provenance = fmt.Sprintf("via slot `guardrail`, supersedes gate value %q", strings.TrimSpace(cfg.GuardrailsModel))
+	case srcGate:
+		provenance = "via --guardrails-model"
+	}
+	mode := "advisory"
+	if !usedDefaults {
+		mode = highestSeverityGuardrailMode(specs)
+	}
+	out := fmt.Sprintf("guardrails: ON, checker=%s (%s), mode=%s, rules=%d", model, provenance, mode, len(specs))
+	if usedDefaults {
+		out += " (default set: WebSearch, WebFetch, mcp__*)"
+	}
+	if mc := cfg.GuardrailsMaxChecks; mc > 0 {
+		out += fmt.Sprintf(", maxChecks=%d", mc)
+	}
+	return out
+}
+
+// highestSeverityGuardrailMode reports the highest-severity enforcement mode present
+// across the explicit rule specs (block > sanitize > advisory). An empty/unknown mode
+// string (treated as block by the adapter's CompileRule) counts as block. Used only by
+// the posture line for the ON-with-explicit-rules branch; the live matcher is unchanged.
+func highestSeverityGuardrailMode(specs []modelhook.RuleSpec) string {
+	const (
+		adv = 1
+		san = 2
+		blk = 3
+	)
+	severity := func(m string) int {
+		switch modelhook.Mode(m) {
+		case modelhook.ModeAdvisory:
+			return adv
+		case modelhook.ModeSanitize:
+			return san
+		case modelhook.ModeBlock, "":
+			return blk
+		default:
+			return blk // unknown defaults to block (the adapter's safe default)
+		}
+	}
+	best := 0
+	bestMode := "block"
+	for _, s := range specs {
+		sev := severity(s.Mode)
+		if sev > best {
+			best = sev
+			// Normalize: an empty or unknown mode string counts as block (the
+			// adapter's CompileRule safe default), so report "block" — never the
+			// raw unrecognised token — as the posture mode.
+			switch modelhook.Mode(s.Mode) {
+			case modelhook.ModeAdvisory, modelhook.ModeSanitize, modelhook.ModeBlock:
+				bestMode = s.Mode
+			default: // "" or unknown
+				bestMode = "block"
+			}
+			if bestMode == "" {
+				bestMode = "block"
+			}
+		}
+	}
+	return bestMode
+}
+
 // (Config.DefaultProvider/DefaultModel — --default-provider/--default-model,
 // issue #21) EXACTLY ONCE at build time (called only from Build, fail-fast as
 // early as possible after the registry exists — the build-once

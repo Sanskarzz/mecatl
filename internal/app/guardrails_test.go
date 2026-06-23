@@ -40,7 +40,9 @@ func TestNormalizeGuardrailsModelFailFast(t *testing.T) {
 	}
 }
 
-// the build-once ACTIVE / INERT facts.
+// the build-once ACTIVE facts are GONE (issue #159): normalizeGuardrailsModel is now
+// validate-only — it emits NOTHING. The always-one-line posture (ON|OFF, resolved model
+// + provenance) is emitted by logGuardrailsPosture (TestLogGuardrailsPostureBranches).
 func TestNormalizeGuardrailsModelNarratesFacts(t *testing.T) {
 	active := &capturingDiag{}
 	if _, err := normalizeGuardrailsModel(Config{
@@ -50,18 +52,121 @@ func TestNormalizeGuardrailsModelNarratesFacts(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("valid config: %v", err)
 	}
-	if !active.has("guardrails ACTIVE") {
-		t.Fatalf("a model + rules must narrate ACTIVE; lines=%v", active.lines)
+	if len(active.lines) != 0 {
+		t.Fatalf("normalizeGuardrailsModel must emit NOTHING now (posture moved to logGuardrailsPosture); lines=%v", active.lines)
 	}
 
-	// A model with NO explicit rules is ACTIVE on the DEFAULT advisory rule set (the
-	// headline default), narrated as such — NOT inert.
+	// A model with NO explicit rules is still valid — but the validator stays silent
+	// (the ON/default-advisory posture is logGuardrailsPosture's job).
 	defaults := &capturingDiag{}
 	if _, err := normalizeGuardrailsModel(Config{GuardrailsModel: "gpt-5-mini", Diagnostics: defaults}); err != nil {
 		t.Fatalf("model-without-rules: %v", err)
 	}
-	if !defaults.has("default advisory rules") {
-		t.Fatalf("a model with no rules must narrate ACTIVE on the default advisory set; lines=%v", defaults.lines)
+	if len(defaults.lines) != 0 {
+		t.Fatalf("normalizeGuardrailsModel must emit NOTHING even with default rules; lines=%v", defaults.lines)
+	}
+}
+
+// TestGuardrailsConfiguredSlotEnables pins the #159 gate truth table: a bound
+// `guardrail` model slot now CO-ENABLES guardrails (configure = enable, ADR 0046), not
+// merely routes an already-enabled checker. The kill-switch still wins.
+func TestGuardrailsConfiguredSlotEnables(t *testing.T) {
+	slot := func() map[string]string { return map[string]string{slotGuardrail: "cheap"} }
+	aliases := map[string]string{"cheap": "slot-id"}
+	cases := []struct {
+		name string
+		cfg  Config
+		want bool
+	}{
+		{"nothing", Config{}, false},
+		{"gate only", Config{GuardrailsModel: "gpt-5-mini"}, true},
+		{"slot only (explicit guardrail=)", Config{ModelSlots: slot(), ModelAliases: aliases}, true},
+		{"slot via tier fall-through (cheap= only)", Config{
+			ModelSlots:   map[string]string{slotCheap: "cheap"},
+			ModelAliases: aliases,
+		}, true},
+		{"slot bound + --guardrails=off", Config{
+			GuardrailsDisabled: true,
+			ModelSlots:         slot(),
+			ModelAliases:       aliases,
+		}, false},
+		{"slot + model", Config{
+			GuardrailsModel: "gpt-5-mini",
+			ModelSlots:      slot(),
+			ModelAliases:    aliases,
+		}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := guardrailsConfigured(c.cfg); got != c.want {
+				t.Fatalf("guardrailsConfigured = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestResolveGuardrailsCheckerModelProvenance pins the shared resolver's precedence +
+// provenance, the single source of truth both buildGuardrailsChecker and the posture
+// line read. Slot supersedes gate; same-id gate stays srcSlot; UseMock gate-only passes
+// the literal through.
+func TestResolveGuardrailsCheckerModelProvenance(t *testing.T) {
+	cases := []struct {
+		name      string
+		cfg       Config
+		wantModel string
+		wantSrc   guardrailSource
+		wantConf  bool
+	}{
+		{
+			name:      "gate only",
+			cfg:       Config{GuardrailsModel: "gpt-5-mini"},
+			wantModel: "gpt-5-mini",
+			wantSrc:   srcGate,
+			wantConf:  true,
+		},
+		{
+			name:      "slot only",
+			cfg:       Config{ModelSlots: map[string]string{slotGuardrail: "cheap"}, ModelAliases: map[string]string{"cheap": "slot-id"}},
+			wantModel: "slot-id",
+			wantSrc:   srcSlot,
+			wantConf:  true,
+		},
+		{
+			name:      "slot+gate differing (slot wins, supersedes gate)",
+			cfg:       Config{GuardrailsModel: "gate-id", ModelSlots: map[string]string{slotGuardrail: "cheap"}, ModelAliases: map[string]string{"cheap": "slot-id"}},
+			wantModel: "slot-id",
+			wantSrc:   srcSlotSupersedingGate,
+			wantConf:  true,
+		},
+		{
+			name:      "slot+gate same resolved id (no superseding)",
+			cfg:       Config{GuardrailsModel: "slot-id", ModelSlots: map[string]string{slotGuardrail: "cheap"}, ModelAliases: map[string]string{"cheap": "slot-id"}},
+			wantModel: "slot-id",
+			wantSrc:   srcSlot,
+			wantConf:  true,
+		},
+		{
+			name:     "nothing",
+			cfg:      Config{},
+			wantSrc:  srcNone,
+			wantConf: false,
+		},
+		{
+			name:      "UseMock gate-only (literal passthrough)",
+			cfg:       Config{UseMock: true, GuardrailsModel: "bogus-literal"},
+			wantModel: "bogus-literal",
+			wantSrc:   srcGate,
+			wantConf:  true,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			gotModel, gotSrc, gotConf := resolveGuardrailsCheckerModel(c.cfg)
+			if gotModel != c.wantModel || gotSrc != c.wantSrc || gotConf != c.wantConf {
+				t.Fatalf("resolveGuardrailsCheckerModel = (%q, %v, %v), want (%q, %v, %v)",
+					gotModel, gotSrc, gotConf, c.wantModel, c.wantSrc, c.wantConf)
+			}
+		})
 	}
 }
 

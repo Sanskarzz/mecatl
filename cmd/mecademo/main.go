@@ -26,6 +26,10 @@ func main() {
 
 	fmt.Printf("=== mecatl demo (%s) ===\n", label)
 	fmt.Println("Driving a real agent.Engine: auto-allowed tool call -> permission ask + approval -> final result.")
+	// The demo never configures a guardrails checker (no --guardrails-model, no
+	// `guardrail` slot), so the LLM-backed content checker is OFF — stated explicitly,
+	// mirroring the composition build-once posture line (logGuardrailsPosture).
+	fmt.Println("guardrails: OFF (no checker model configured; bind the `guardrail` model slot or set --guardrails-model to enable)")
 	fmt.Println()
 
 	events, err := RunScenario(context.Background(), provider, *model)

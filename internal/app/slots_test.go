@@ -147,8 +147,10 @@ func TestAskReviewerSlotSupersedesFlag(t *testing.T) {
 	}
 }
 
-// TestGuardrailSlotRoutesChecker pins E3 (ADR 0030): a configured guardrail slot
-// routes the checker model; the GuardrailsModel field stays the on/off gate.
+// TestGuardrailSlotRoutesChecker pins E3 (ADR 0030) + the #159 enable widening: a
+// configured guardrail slot routes the checker model AND (alone) ENABLES guardrails
+// (configure = enable, ADR 0046). The slot supersedes the --guardrails-model value
+// when both are set.
 func TestGuardrailSlotRoutesChecker(t *testing.T) {
 	const sessionModel = "gpt-4o"
 	cfg := Config{
@@ -162,16 +164,19 @@ func TestGuardrailSlotRoutesChecker(t *testing.T) {
 		t.Fatalf("guardrail checker model = %q, want the slot model %q", m, "slot-guard-id")
 	}
 
-	// A slot WITHOUT a GuardrailsModel must NOT build a checker (the slot does not
-	// enable guardrails).
+	// A slot WITHOUT a GuardrailsModel now ENABLES the checker (the slot alone enables,
+	// #159): buildGuardrailsChecker returns non-nil and routes the slot model.
 	noModel := Config{
 		Model:        sessionModel,
 		UseMock:      true,
 		ModelSlots:   map[string]string{slotGuardrail: "cheap"},
 		ModelAliases: map[string]string{"cheap": "slot-guard-id"},
 	}
-	if checker := buildGuardrailsChecker(noModel, nil, mockllm.New(mockllm.TextTurn("x")), "openai", sessionModel); checker != nil {
-		t.Fatalf("a guardrail slot WITHOUT --guardrails-model must NOT enable the checker")
+	if checker := buildGuardrailsChecker(noModel, nil, mockllm.New(mockllm.TextTurn("x")), "openai", sessionModel); checker == nil {
+		t.Fatalf("a guardrail slot WITHOUT --guardrails-model must now ENABLE the checker (ADR 0046)")
+	}
+	if m := checkerModel(t, noModel, sessionModel); m != "slot-guard-id" {
+		t.Fatalf("slot-only guardrail checker model = %q, want the slot model %q", m, "slot-guard-id")
 	}
 }
 

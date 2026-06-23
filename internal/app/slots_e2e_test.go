@@ -100,6 +100,8 @@ func TestCompactionSlotE2ESummaryModel(t *testing.T) {
 // TestGuardrailSlotE2ECheckerModel is the G4 guardrail analogue: the built checker,
 // driven once, sends the slot model to the provider while a no-slot baseline sends
 // the configured guardrails model — proving the slot routes ONLY the checker call.
+// The #159 sub-case pins that a slot ALONE (no GuardrailsModel) builds a checker that
+// runs the slot model (configure = enable, ADR 0046).
 func TestGuardrailSlotE2ECheckerModel(t *testing.T) {
 	const sessionModel = "session-model"
 
@@ -119,5 +121,16 @@ func TestGuardrailSlotE2ECheckerModel(t *testing.T) {
 	plain := Config{Model: sessionModel, UseMock: true, GuardrailsModel: "guard-flag-id"}
 	if m := checkerModel(t, plain, sessionModel); m != "guard-flag-id" {
 		t.Fatalf("unslotted guardrail checker model = %q, want %q", m, "guard-flag-id")
+	}
+
+	// #159: slot ONLY (no GuardrailsModel) builds a checker that runs the slot model.
+	slotOnly := Config{
+		Model:        sessionModel,
+		UseMock:      true,
+		ModelSlots:   map[string]string{slotGuardrail: slotCheap},
+		ModelAliases: map[string]string{slotCheap: "mock-cheap-model"},
+	}
+	if m := checkerModel(t, slotOnly, sessionModel); m != "mock-cheap-model" {
+		t.Fatalf("slot-only guardrail checker model = %q, want %q (the slot must enable + route, ADR 0046)", m, "mock-cheap-model")
 	}
 }
