@@ -667,61 +667,19 @@ func buildAgentSubagentEngines(ctx context.Context, cfg Config, provider port.LL
 	var closeFn func() error
 
 	for _, def := range reg.List() {
-		names, diags := scopedToolNamesMode(def, base, false, allowShell, bashScopeMissReason(cfg))
-		for _, d := range diags {
-			cfg.diag().Log(ctx, port.LevelWarn, "agent def tool scoping",
-				"agent", def.Name, "tool", d.tool, "reason", d.reason, "source", reg.Detail(def.Name))
-		}
-
-		cat := tool.NewCatalog()
-		for _, name := range names {
-			// Bash registers with the HARDENED runner (the base map's Bash is the
-			// unhardened one used only to compute the name set), since the Subagent child's
-			// shell runs over a worktree that shares the parent `.git`. Every other tool
-			// registers as-is. allowShell is true iff runner != nil, so this branch only
-			// fires with a non-nil runner.
-			if name == tools.BashToolName && runner != nil {
-				cat.MustRegister(tools.NewBashTool(runner))
-				continue
-			}
-			cat.MustRegister(base[name])
-		}
-
-		// Per-agent MCP: a def's mcpServers add the referenced/inline servers' tools to
-		// THIS def's catalog (not the main conversation's). The inline managers' Close is
-		// aggregated into closeFn → Built.Close (process-lifetime engines, torn down on
-		// shutdown). MCP tool names are NOT relevant to a Subagent def's read-only backstop
-		// (Subagent defs are not team members), so the names return is ignored here.
-		mcpTools, _, mcpClose := defMCPTools(ctx, cfg.diag(), def, mainMgr)
-		for _, mt := range mcpTools {
-			if err := cat.Register(mt); err != nil {
-				cfg.diag().Log(ctx, port.LevelWarn, "agent def MCP tool registration failed; skipped",
-					"agent", def.Name, "tool", mt.Spec().Name, "err", err)
-			}
-		}
-		closeFn = composeCloseErr(mcpClose, closeFn)
-
 		// Resolve the def's (provider, model, window): a pinned-and-known provider
 		// switches the child engine (with its catalogued window); a def pinning no (or
 		// the same) provider inherits the parent's model AND its real resolved window
-		// (issue #64 — no longer the hardcoded 128k floor).
+		// (issue #64 — no longer the hardcoded 128k floor). The startup path threads the
+		// startup-resolved (childProvider, model, windowFn) into buildAgentDefEngine; the
+		// per-call agent+model override path (buildAgentModelEngineFactory) resolves its OWN
+		// tuple to rebuild the SAME scoped engine on the override model.
 		childProvider, pid, model, windowFn := resolveChildProvider(cfg, provReg, def, provider, parentProviderID, parentModel)
 
-		bodies, missing := preloadedSkillBodies(def, skillIdx)
-		for _, name := range missing {
-			cfg.diag().Log(ctx, port.LevelWarn, "agent def references an unknown skill; not preloaded",
-				"agent", def.Name, "skill", name, "source", reg.Detail(def.Name))
-		}
-		hooks := defHookRunner(cfg, def, defaultHooks)
-		// Persistent per-agent memory (issue #33): resolve the MEMORY.md head ONCE at
-		// build time (like skillBodies) so it rides the cache-stable StablePrefix.
-		memHead, _ := resolveAgentMemoryHead(cfg, def)
+		eng, mcpClose, names, skillCount := buildAgentDefEngine(ctx, cfg, def, "task:"+def.Name, reg.Detail(def.Name), childProvider, model, windowFn, base, allowShell, skillIdx, defaultHooks, runner, mainMgr)
+		engines[def.Name] = eng
+		closeFn = composeCloseErr(mcpClose, closeFn)
 
-		// ProgressiveTools deliberately OFF: child catalogs are tiny and a ToolSearch
-		// tool would not be in the def allowlist. newChildEngineForProvider leaves it at
-		// its zero value (off), matching the original explicit omission, AND routes the
-		// child's compactor/counter/window through pid+model (contamination fix).
-		engines[def.Name] = newChildEngineForProvider(cfg, "task:"+def.Name, childProvider, model, windowFn, cat, agentPromptConfig(cfg, def, model, memHead, bodies...), hooks)
 		// Per-def limits ride on AgentMeta so the Subagent tool bounds THIS def's child
 		// session by them (per-field falling back to the Subagent default child limits for
 		// any zero field). A def that sets neither yields the default, unchanged.
@@ -733,12 +691,94 @@ func buildAgentSubagentEngines(ctx context.Context, cfg Config, provider port.LL
 
 		cfg.diag().Log(ctx, port.LevelInfo, "agent def engine built",
 			"agent", def.Name, "tools", strings.Join(names, ","), "provider", pid, "model", model,
-			"preloaded_skills", len(bodies), "source", reg.Detail(def.Name))
+			"preloaded_skills", skillCount, "source", reg.Detail(def.Name))
 	}
 
 	// meta in registry (name-sorted) order for a byte-stable Subagent spec.
 	sort.Slice(meta, func(i, j int) bool { return meta[i].Name < meta[j].Name })
 	return engines, meta, closeFn
+}
+
+// buildAgentDefEngine builds ONE def's scoped engine on an already-resolved
+// (childProvider, model, windowFn) tuple. It is the SINGLE shared engine-construction
+// step both the STARTUP path (buildAgentSubagentEngines, which resolves the tuple via
+// resolveChildProvider) and the PER-CALL agent+model override path
+// (buildAgentModelEngineFactory, which resolves its own tuple to rebuild the SAME scoped
+// engine on the override model) consume, so the two paths cannot drift in catalog/prompt/
+// hooks/memory/MCP wiring — they differ ONLY in the resolved (provider, model, windowFn)
+// and the role label. It returns the engine + the def's inline-MCP close func (nil when
+// the def opened no inline server).
+//
+// role is the child engine's Deps.Role (a telemetry/diagnostic label); the startup path
+// passes "task:"+def.Name, the agent+model override path passes
+// "task:"+def.Name+":model="+model so the override child's series is distinguishable.
+//
+// source is the def's origin locator (reg.Detail(def.Name)) threaded in so the tool-scope
+// and unknown-skill WARNs carry it (an operator disambiguates same-named defs across tiers
+// by source); it is purely diagnostic.
+//
+// base is the AVAILABLE base toolset the def's catalog is scoped over
+// (baseSubagentTools(cfg)); allowShell mirrors the caller's runner-wired posture (a
+// per-def Subagent explorer keeps Bash iff a sandboxed runner is wired). skillIdx is the
+// build-once name→body preload index; defaultHooks is the inert fallback a def with no
+// scoped `hooks:` adopts. runner is the SANDBOXED command runner (nil when Bash is
+// disabled); mainMgr supplies the reference-MCP base manager (defMCPTools).
+//
+// It returns the engine + the def's inline-MCP close func (nil when the def opened no
+// inline server) + the scoped tool NAMES + the preloaded-skill COUNT, so callers can log
+// the "agent def engine built" INFO with the same fields the pre-extraction inline path
+// carried (tools/preloaded_skills) — the extraction must not silently drop diagnostics.
+func buildAgentDefEngine(ctx context.Context, cfg Config, def agents.AgentDef, role, source string, childProvider port.LLMProvider, model string, windowFn func() int, base map[string]tool.Tool, allowShell bool, skillIdx skillIndex, defaultHooks port.HookRunner, runner tool.CommandRunner, mainMgr *mcp.Manager) (*agent.Engine, func() error, []string, int) {
+	names, diags := scopedToolNamesMode(def, base, false, allowShell, bashScopeMissReason(cfg))
+	for _, d := range diags {
+		cfg.diag().Log(ctx, port.LevelWarn, "agent def tool scoping",
+			"agent", def.Name, "tool", d.tool, "reason", d.reason, "source", source)
+	}
+
+	cat := tool.NewCatalog()
+	for _, name := range names {
+		// Bash registers with the HARDENED runner (the base map's Bash is the
+		// unhardened one used only to compute the name set), since the Subagent child's
+		// shell runs over a worktree that shares the parent `.git`. Every other tool
+		// registers as-is. allowShell is true iff runner != nil, so this branch only
+		// fires with a non-nil runner.
+		if name == tools.BashToolName && runner != nil {
+			cat.MustRegister(tools.NewBashTool(runner))
+			continue
+		}
+		cat.MustRegister(base[name])
+	}
+
+	// Per-agent MCP: a def's mcpServers add the referenced/inline servers' tools to
+	// THIS def's catalog (not the main conversation's). The inline managers' Close is
+	// aggregated into the returned closeFn → Built.Close (process-lifetime engines, torn
+	// down on shutdown). MCP tool names are NOT relevant to a Subagent def's read-only
+	// backstop (Subagent defs are not team members), so the names return is ignored here.
+	mcpTools, _, mcpClose := defMCPTools(ctx, cfg.diag(), def, mainMgr)
+	for _, mt := range mcpTools {
+		if err := cat.Register(mt); err != nil {
+			cfg.diag().Log(ctx, port.LevelWarn, "agent def MCP tool registration failed; skipped",
+				"agent", def.Name, "tool", mt.Spec().Name, "err", err)
+		}
+	}
+
+	bodies, missing := preloadedSkillBodies(def, skillIdx)
+	for _, name := range missing {
+		cfg.diag().Log(ctx, port.LevelWarn, "agent def references an unknown skill; not preloaded",
+			"agent", def.Name, "skill", name, "source", source)
+	}
+	hooks := defHookRunner(cfg, def, defaultHooks)
+	// Persistent per-agent memory (issue #33): resolve the MEMORY.md head ONCE at
+	// build time (like skillBodies) so it rides the cache-stable StablePrefix.
+	memHead, _ := resolveAgentMemoryHead(cfg, def)
+
+	// ProgressiveTools deliberately OFF: child catalogs are tiny and a ToolSearch
+	// tool would not be in the def allowlist. newChildEngineForProvider leaves it at
+	// its zero value (off), matching the original explicit omission, AND routes the
+	// child's compactor/counter/window through the resolved provider+model
+	// (contamination fix).
+	eng := newChildEngineForProvider(cfg, role, childProvider, model, windowFn, cat, agentPromptConfig(cfg, def, model, memHead, bodies...), hooks)
+	return eng, mcpClose, names, len(bodies)
 }
 
 // composeCloseErr chains two optional error-returning close funcs into one (first

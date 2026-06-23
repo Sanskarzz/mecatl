@@ -418,6 +418,29 @@ func TestSubagentModeCombinationGuards(t *testing.T) {
 		}
 	})
 
+	t.Run("read-write + agent + model rejected", func(t *testing.T) {
+		// validateMode's read-write+agent arm fires FIRST (before selectChildEngine),
+		// so read-write+agent+model is rejected at the agent guard — never reaching the
+		// agent+model support path. A specialist stays read-only in v1.
+		var rr atomic.Pointer[string]
+		readOnly := childEngineWith(mockllm.New(mockllm.TextTurn("ro")), catalogWith(t))
+		overrideEngine := childEngineWithModel("fast", mockllm.New(mockllm.TextTurn("fast")), catalogWith(t))
+		task := agent.NewSubagentTool(readOnly,
+			agent.WithWritableChildEngine(writableChildWriting(t, "ok", &rr)),
+			agent.WithAgentEngines(
+				map[string]*agent.Engine{"reviewer": childEngineWith(mockllm.New(mockllm.TextTurn("r")), catalogWith(t))},
+				[]agent.AgentMeta{{Name: "reviewer", Description: "reviews"}},
+			),
+			agent.WithAgentModelEngineFactory(func(string, string) (*agent.Engine, bool) { return overrideEngine, true }))
+		res := runOneSubagent(t, task, "p1", `{"prompt":"go","mode":"read-write","agent":"reviewer","model":"fast"}`)
+		if !res.IsError || !strings.Contains(res.Content, "agent") {
+			t.Fatalf("read-write+agent(+model) must be rejected at the agent guard, got %+v", res)
+		}
+		if strings.Contains(res.Content, "not supported in this deployment") {
+			t.Fatalf("the agent guard must fire (not the agent+model unsupported guard), got %q", res.Content)
+		}
+	})
+
 	t.Run("read-write unsupported when unwired", func(t *testing.T) {
 		// A plain read-only Subagent tool (no writable wiring) rejects read-write.
 		task := agent.NewSubagentTool(childEngineWith(mockllm.New(mockllm.TextTurn("ro")), catalogWith(t)))

@@ -325,11 +325,20 @@ existing engine's LLM (the "Provider is FIXED per session" invariant). The facto
 model on the parent's provider (the registry is keyed by provider, not model — cross-provider
 routing by a bare model id stays a def's `provider:` concern), re-derives the window live-first via
 `provReg.meta.contextWindowFor`, and returns `(nil,false)` for a blank/unroutable model (Subagent then
-surfaces a model-addressable error). `agent` + `model` together is REJECTED (R9): a specialist
-already pins its own engine/model. Reasoning-effort stays an adapter-construction Option (the
-factory owns adapter construction), never a `subagentArgs`/`port.LLMRequest` field. Guards:
+surfaces a model-addressable error). `agent` + `model` together is SUPPORTED via `WithAgentModelEngineFactory`
+(`buildAgentModelEngineFactory`): the override REBUILDS the named specialist's SCOPED engine (catalog/prompt/skills/hooks/memory,
+via the shared `buildAgentDefEngine` step that `buildAgentSubagentEngines` also uses) on the override model — NOT the generic
+explorer set; the override runs on the def's resolved provider (cross-provider override OF the provider by a bare model id
+stays out of scope), the model taken verbatim (no alias resolution — parity with the model-only path's opaque-string posture);
+the pre-built `agentEngines` map is never mutated (fresh engine per call); per-def limits still bind. A def with INLINE MCP
+servers is declined on the agent+model path (v1 scope limit — the inline manager's live session has no process-lifetime owner
+on a per-call engine); reference-only MCP is supported (borrows `mainMgr`). `read-write`+`agent`(+`model`) stays REJECTED
+(named specialists run read-only in v1 — `validateMode`'s `args.Agent` arm fires first). Reasoning-effort stays an
+adapter-construction Option (the factory owns adapter construction), never a `subagentArgs`/`port.LLMRequest` field. Guards:
 `agent.TestSubagentPerCallModelRoutesToFactory`, `agent.TestSubagentPerCallModelUnknownErrors`,
-`agent.TestSubagentAgentAndModelTogetherRejected`, `app.TestBuildSubagentEngineFactoryReDerivesForOverrideModel`.
+`agent.TestSubagentAgentAndModelTogetherSupported`, `agent.TestSubagentAgentPlusModelRunsScopedChildOnOverrideModel`,
+`agent.TestSubagentAgentPlusModelPerDefLimitsBind`, `app.TestBuildAgentModelEngineFactoryRebuildsDefScopeOnOverrideModel`,
+`app.TestBuildAgentModelEngineFactoryDeclinesInlineMCP`, `app.TestBuildSubagentEngineFactoryReDerivesForOverrideModel`.
 
 **Def-less child default model (`Config.SubagentModel` everywhere — issue #35).** `SubagentModel`
 (`--subagent-model`, mecated AND mecatui) used to reach only the def-RESOLVED child paths

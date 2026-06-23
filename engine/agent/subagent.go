@@ -292,8 +292,10 @@ type subagentArgs struct {
 	// root resolves it to a contamination-safe child engine via the injected engine
 	// factory (so Compactor/TokenCounter/Env.Model/ContextWindow are re-derived for the
 	// override model — never a clone-and-swap of the LLM on an existing engine). An
-	// unknown/unroutable model is a model-addressable error. Empty = inherit. It is
-	// REJECTED together with `agent` (a specialist already pins its own engine/model).
+	// unknown/unroutable model is a model-addressable error. Empty = inherit. Composes
+	// with `agent` (WithAgentModelEngineFactory rebuilds the specialist's scoped engine
+	// on the override model, running on the def's resolved provider; the override model
+	// is passed verbatim — no alias resolution — matching the model-only path's parity).
 	Model string `json:"model,omitempty"`
 
 	// OutputSchema optionally requests STRUCTURED output: a model-authored JSON schema
@@ -587,6 +589,23 @@ type SubagentTool struct {
 	// WithAgentEngines).
 	engineFactory func(model string) (*Engine, bool)
 
+	// agentModelFactory, when non-nil, mints a child engine for a per-call
+	// `agent`+`model` combination: the model runs on the named specialist's
+	// resolved provider, but the def's SCOPED engine (catalog/prompt/hooks/memory) is
+	// REBUILT on the override model. It is a composition-supplied closure
+	// (WithAgentModelEngineFactory) closing over the agent-def registry + the provider
+	// registry, so the override child keeps the specialist's tools/playbook (NOT the
+	// generic explorer set) while re-deriving the provider-closing Deps
+	// (Compactor/TokenCounter/Env.Model/ContextWindow) for the override model — NEVER a
+	// clone-and-swap of an existing engine, and the pre-built agentEngines map is NEVER
+	// mutated (a fresh engine is minted per call). It returns ok=false for an
+	// unknown/unroutable model, which Subagent renders as a model-addressable error. nil
+	// (the default, and ALWAYS on the no-FS path) means agent+model together is not
+	// supported in this deployment (a call setting both then errors with a clear "not
+	// supported" message). It is layering-clean: the closure takes two strings and
+	// returns *Engine — both agent-layer types — and no adapter/proto/server type crosses.
+	agentModelFactory func(agentName, model string) (*Engine, bool)
+
 	// writableChildEngine runs a mode:"read-write" child: a WRITABLE explorer whose
 	// catalog includes Edit/Write (built by the composition root over the read-only
 	// explorer catalog + Edit + Write, using the MAIN session's command runner). It
@@ -801,6 +820,29 @@ func WithSubagentNoFSNote() SubagentOption {
 // engine/agent (same shape as WithAgentEngines).
 func WithSubagentEngineFactory(f func(model string) (*Engine, bool)) SubagentOption {
 	return func(t *SubagentTool) { t.engineFactory = f }
+}
+
+// WithAgentModelEngineFactory injects the composition-supplied factory that mints a child
+// engine for a per-call `agent`+`model` combination. The override model runs on the named
+// specialist's resolved provider, and the def's SCOPED engine (catalog/prompt/hooks/
+// memory) is REBUILT on the override model through the contamination-safe per-provider
+// path (engineDepsForProvider re-derives Compactor/TokenCounter/Env.Model/ContextWindow)
+// — NEVER a clone-and-swap of an existing engine, and the pre-built agentEngines map is
+// never mutated. It returns (engine, true) for a routable (agent, model) and (nil, false)
+// otherwise (an unknown/unroutable model, which Subagent surfaces as a model-addressable
+// error naming both the agent and the model). nil (the default, and the no-FS path)
+// leaves Subagent without agent+model support (a call setting both then errors).
+//
+// The override model is passed VERBATIM (no alias resolution — an opaque string the
+// provider validates at request time), matching the model-only path's parity. The def's
+// resolved PROVIDER (def.Provider pinned-and-known → that provider; else the parent's)
+// is the only provider dimension; cross-provider override OF the provider by a bare model
+// id is out of scope (matches buildSubagentEngineFactory's existing out-of-scope comment).
+// A def with INLINE MCP servers is a v1 scope limit (the inline managers' live sessions
+// must outlive a per-call engine); the factory returns (nil, false) and selectChildEngine
+// surfaces the accurate error. read-write+agent stays rejected (validateMode fires first).
+func WithAgentModelEngineFactory(f func(agentName, model string) (*Engine, bool)) SubagentOption {
+	return func(t *SubagentTool) { t.agentModelFactory = f }
 }
 
 // WithWritableChildEngine injects the child *Engine a mode:"read-write" Subagent
@@ -1111,20 +1153,49 @@ func (t *SubagentTool) ExecuteWithParent(ctx context.Context, call session.ToolC
 // internally, optionally forwards a redacted projection of that activity, and
 // returns only the child's final summary text as a single ToolResult.
 // selectChildEngine resolves the child engine + base session limits for a Subagent call
-// from its `agent` / `model` arguments (mutually exclusive — R9). It returns
-// ok=false with a model-addressable error ToolResult on a bad selection (agent+model
-// together, an unknown agent, an unwired/unroutable model), and the chosen engine +
-// limits on success. The default explorer + the Subagent tool's default limits is the
-// no-arg case.
+// from its `agent` / `model` arguments. The four cases, in precedence order:
+//   - `agent`+`model` together: REBUILDS the named specialist's scoped engine on the
+//     override model via agentModelFactory (the override runs on the def's resolved
+//     provider). The pre-built agentEngines map is never mutated. Without a wired factory
+//     the combination is unsupported (an honest error, never a silent fallback); an
+//     unknown agent or an unroutable model are model-addressable errors.
+//   - `agent` only: routes to the pre-built specialist engine (agentEngines).
+//   - `model` only: mints a generic explorer child for the requested model via
+//     engineFactory (re-derives the provider-closing Deps).
+//   - neither: the default explorer + the Subagent tool's default limits.
+//
+// It returns ok=false with a model-addressable error ToolResult on a bad selection (an
+// unsupported combination, an unknown agent, an unwired/unroutable model), and the chosen
+// engine + limits on success.
 func (t *SubagentTool) selectChildEngine(callID session.ToolCallID, args subagentArgs, routedModel string) (engine *Engine, limits session.Limits, errResult session.ToolResult, ok bool) {
-	// `agent` and `model` are mutually exclusive: a named specialist already pins its
-	// own engine/model/prompt/scope, so layering a call-time model over it would
-	// silently break the def's contract. Reject the combination with a clear error.
 	wantAgent := strings.TrimSpace(args.Agent)
 	wantModel := strings.TrimSpace(args.Model)
+
+	// `agent`+`model` together: rebuild the specialist's scoped engine on the override
+	// model. The model runs on the def's resolved provider (the factory owns that
+	// resolution), but the specialist's catalog/prompt/hooks/memory are kept — NOT the
+	// generic explorer set. The pre-built agentEngines map is read for the name-truth
+	// check only; a fresh engine is minted per call, never inserted.
 	if wantAgent != "" && wantModel != "" {
-		return nil, session.Limits{}, session.NewToolError(callID,
-			"Subagent: specify `agent` OR `model`, not both — a specialist agent already pins its own model"), false
+		if t.agentModelFactory == nil {
+			return nil, session.Limits{}, session.NewToolError(callID,
+				"Subagent: `agent`+`model` together is not supported in this deployment"), false
+		}
+		if _, found := t.agentEngines[wantAgent]; !found {
+			return nil, session.Limits{}, session.NewToolError(callID, "Subagent: "+t.unknownAgentHint(wantAgent)), false
+		}
+		eng, found := t.agentModelFactory(wantAgent, wantModel)
+		if !found || eng == nil {
+			return nil, session.Limits{}, session.NewToolError(callID,
+				fmt.Sprintf("Subagent: unknown or unroutable model %q for agent %q; omit `model` to run the specialist on its own model", wantModel, wantAgent)), false
+		}
+		engine = eng
+		if l, found := t.agentLimits[wantAgent]; found {
+			limits = l
+		} else {
+			limits = t.limits
+		}
+		return engine, limits, session.ToolResult{}, true
 	}
 
 	// Route to a named specialist when requested; otherwise the default explorer. An

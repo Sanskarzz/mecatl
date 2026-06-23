@@ -109,16 +109,52 @@ func TestSubagentPerCallModelUnknownErrors(t *testing.T) {
 	}
 }
 
-// TestSubagentAgentAndModelTogetherRejected proves a call that sets BOTH `agent` and `model`
-// is rejected with a clear error (R9): a specialist already pins its own engine/model.
-func TestSubagentAgentAndModelTogetherRejected(t *testing.T) {
+// TestSubagentAgentAndModelTogetherSupported proves a call that sets BOTH `agent` and `model`
+// routes to the engine the agentModelFactory minted for the (agent, model) pair — a scoped
+// rebuild of the specialist on the override model (distinguished by a marker mockllm
+// summary), NOT the pre-built agentEngines["reviewer"] engine and NOT the default explorer.
+func TestSubagentAgentAndModelTogetherSupported(t *testing.T) {
+	defaultEngine := childEngineWith(mockllm.New(mockllm.TextTurn("DEFAULT")), catalogWith(t))
+	reviewerEngine := childEngineWith(mockllm.New(mockllm.TextTurn("REVIEWER")), catalogWith(t))
+	overrideEngine := childEngineWithModel("fast", mockllm.New(mockllm.TextTurn("REVIEWER-ON-FAST")), catalogWith(t))
+	task := agent.NewSubagentTool(defaultEngine,
+		agent.WithAgentEngines(
+			map[string]*agent.Engine{"reviewer": reviewerEngine},
+			[]agent.AgentMeta{{Name: "reviewer", Description: "reviews"}}),
+		agent.WithAgentModelEngineFactory(func(agentName, model string) (*agent.Engine, bool) {
+			if agentName == "reviewer" && model == "fast" {
+				return overrideEngine, true
+			}
+			return nil, false
+		}),
+	)
+
+	results, _ := subagentParentResults(t, task,
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"x","agent":"reviewer","model":"fast"}`)),
+		mockllm.TextTurn("parent done"),
+	)
+	if len(results) != 1 || results[0].IsError {
+		t.Fatalf("agent+model together must succeed, got %+v", results[0])
+	}
+	if !strings.Contains(results[0].Content, "REVIEWER-ON-FAST") {
+		t.Fatalf("agent+model must route to the factory's override engine, got %q", results[0].Content)
+	}
+	if !strings.Contains(results[0].Content, "agentId:") {
+		t.Fatalf("result must carry an agentId trailer, got %q", results[0].Content)
+	}
+}
+
+// TestSubagentAgentAndModelUnsupportedErrors proves that without a wired
+// agentModelFactory, agent+model together is a model-addressable "not supported in this
+// deployment" error (never a silent fallback to the agent's own engine or the explorer).
+func TestSubagentAgentAndModelUnsupportedErrors(t *testing.T) {
 	defaultEngine := childEngineWith(mockllm.New(mockllm.TextTurn("DEFAULT")), catalogWith(t))
 	reviewerEngine := childEngineWith(mockllm.New(mockllm.TextTurn("REVIEWER")), catalogWith(t))
 	task := agent.NewSubagentTool(defaultEngine,
 		agent.WithAgentEngines(
 			map[string]*agent.Engine{"reviewer": reviewerEngine},
 			[]agent.AgentMeta{{Name: "reviewer", Description: "reviews"}}),
-		agent.WithSubagentEngineFactory(func(string) (*agent.Engine, bool) { return reviewerEngine, true }),
+		// NO WithAgentModelEngineFactory — agent+model is unsupported in this deployment.
 	)
 
 	results, _ := subagentParentResults(t, task,
@@ -126,10 +162,63 @@ func TestSubagentAgentAndModelTogetherRejected(t *testing.T) {
 		mockllm.TextTurn("parent recovered"),
 	)
 	if len(results) != 1 || !results[0].IsError {
-		t.Fatalf("agent+model together must be rejected, got %+v", results[0])
+		t.Fatalf("agent+model with no factory must be an error, got %+v", results[0])
 	}
-	if !strings.Contains(results[0].Content, "not both") {
-		t.Fatalf("error should explain the exclusivity, got %q", results[0].Content)
+	if !strings.Contains(results[0].Content, "not supported in this deployment") {
+		t.Fatalf("error must say 'not supported in this deployment', got %q", results[0].Content)
+	}
+}
+
+// TestSubagentAgentModelUnknownAgentListsNames proves that with agent+model, an UNKNOWN
+// agent yields the unknown-agent hint (listing valid names) — NOT a model error. The
+// name-truth check runs before the factory, so a typo names the valid agents, not the model.
+func TestSubagentAgentModelUnknownAgentListsNames(t *testing.T) {
+	defaultEngine := childEngineWith(mockllm.New(mockllm.TextTurn("DEFAULT")), catalogWith(t))
+	reviewerEngine := childEngineWith(mockllm.New(mockllm.TextTurn("REVIEWER")), catalogWith(t))
+	task := agent.NewSubagentTool(defaultEngine,
+		agent.WithAgentEngines(
+			map[string]*agent.Engine{"reviewer": reviewerEngine},
+			[]agent.AgentMeta{{Name: "reviewer", Description: "reviews"}}),
+		agent.WithAgentModelEngineFactory(func(string, string) (*agent.Engine, bool) { return nil, false }),
+	)
+
+	results, _ := subagentParentResults(t, task,
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"x","agent":"ghost","model":"fast"}`)),
+		mockllm.TextTurn("parent recovered"),
+	)
+	if len(results) != 1 || !results[0].IsError {
+		t.Fatalf("unknown agent+model must be an error, got %+v", results[0])
+	}
+	if !strings.Contains(results[0].Content, "reviewer") {
+		t.Fatalf("unknown-agent error must list the valid agent name 'reviewer', got %q", results[0].Content)
+	}
+	if strings.Contains(results[0].Content, "unroutable model") {
+		t.Fatalf("unknown-agent error must NOT be a model error, got %q", results[0].Content)
+	}
+}
+
+// TestSubagentAgentModelUnroutableModelErrors proves a KNOWN agent + a model the factory
+// cannot route yields a model-addressable error naming BOTH the agent and the model (so the
+// model can retry by omitting `model`), never a silent fallback to the agent's own engine.
+func TestSubagentAgentModelUnroutableModelErrors(t *testing.T) {
+	defaultEngine := childEngineWith(mockllm.New(mockllm.TextTurn("DEFAULT")), catalogWith(t))
+	reviewerEngine := childEngineWith(mockllm.New(mockllm.TextTurn("REVIEWER")), catalogWith(t))
+	task := agent.NewSubagentTool(defaultEngine,
+		agent.WithAgentEngines(
+			map[string]*agent.Engine{"reviewer": reviewerEngine},
+			[]agent.AgentMeta{{Name: "reviewer", Description: "reviews"}}),
+		agent.WithAgentModelEngineFactory(func(string, string) (*agent.Engine, bool) { return nil, false }),
+	)
+
+	results, _ := subagentParentResults(t, task,
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"x","agent":"reviewer","model":"bogus"}`)),
+		mockllm.TextTurn("parent recovered"),
+	)
+	if len(results) != 1 || !results[0].IsError {
+		t.Fatalf("unroutable model must be an error, got %+v", results[0])
+	}
+	if !strings.Contains(results[0].Content, "bogus") || !strings.Contains(results[0].Content, "reviewer") {
+		t.Fatalf("error must name both the bad model and the agent, got %q", results[0].Content)
 	}
 }
 

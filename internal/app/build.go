@@ -4444,6 +4444,13 @@ func buildSubagentTool(ctx context.Context, cfg Config, provReg *providerRegistr
 	// crosses (same shape/spirit as WithAgentEngines).
 	opts = append(opts, agent.WithSubagentEngineFactory(
 		buildSubagentEngineFactory(cfg, provReg, provider, parentProviderID, parentModel, sandboxedRunner)))
+	// agent+model override factory: rebuild a named specialist's SCOPED engine on the
+	// per-call override model (the override runs on the def's resolved provider). The
+	// closure hands engine/agent only func(string,string)(*Engine,bool); the registry never
+	// crosses (same shape/spirit as WithAgentEngines). A def with inline MCP servers is a
+	// v1 scope limit (the factory declines; selectChildEngine surfaces the error).
+	opts = append(opts, agent.WithAgentModelEngineFactory(
+		buildAgentModelEngineFactory(ctx, cfg, provReg, provider, parentProviderID, parentModel, reg, skillIdx, hooks, sandboxedRunner, mainMgr)))
 	// WRITABLE subagent (mode:"read-write", ADR 0041): a child engine whose catalog
 	// adds Edit/Write over the read-only explorer surface and runs DIRECTLY against
 	// the PARENT workspace — no fork, no copy, no merge-back. Its Edit/Write/Bash
@@ -4547,6 +4554,92 @@ func buildSubagentEngineFactory(cfg Config, provReg *providerRegistry, provider 
 		windowFn := childWindowFor(cfg, provReg, parentProviderID, model)
 		eng := newChildEngineForProvider(cfg, "task:model="+model, provider, model, windowFn,
 			childCat, explorerPromptConfig(modelCfgFor(cfg, model)), nil)
+		return eng, true
+	}
+}
+
+// buildAgentModelEngineFactory returns the per-call `agent`+`model` override factory the
+// Subagent tool invokes when a call sets BOTH `agent` and `model`. Given a (agentName,
+// model) pair it rebuilds the named specialist's SCOPED engine on the override model —
+// the SAME catalog/prompt/hooks/memory the startup path builds (buildAgentDefEngine), so
+// the override child keeps the specialist's tools/playbook (NOT the generic explorer set),
+// while re-deriving the provider-closing Deps (Compactor/TokenCounter/Env.Model/
+// ContextWindow) for the override model via newChildEngineForProvider. The pre-built
+// agentEngines map is NEVER mutated (a fresh engine is minted per call).
+//
+// PROVIDER/MODEL RESOLUTION (parity with the model-only path, per the architect's
+// decision): the override runs on the DEF's resolved provider. resolveProviderModel is
+// called with the REAL def to select the provider (pid) — then the override model is set
+// VERBATIM (resolvedModel = wantModel, no alias resolution — an opaque string the provider
+// validates at request time, matching buildSubagentEngineFactory's "opaque string" posture).
+// A synthetic-def approach is NOT used (it would double-alias-resolve). childProvider is the
+// def's resolved provider entry (or the parent's when the def pins none/unknown);
+// windowFn = childWindowFor(cfg, provReg, pid, wantModel). Cross-provider override OF the
+// provider by a bare model id is out of scope (matches buildSubagentEngineFactory's existing
+// out-of-scope comment) — a def's `provider:` remains the only cross-provider seam.
+//
+// INLINE MCP v1 LIMIT (Risk-1, Option B): a def with INLINE MCP servers (any entry where
+// !IsReference()) is unsupported on the agent+model path. The inline managers' live
+// sessions (mcp.remoteTool.Execute proxies over a *mcpsdk.ClientSession) must outlive a
+// per-call engine, but the per-call factory has no process-lifetime owner for a freshly-
+// built manager (reusing cached managers would require a per-def manager cache with
+// careful Close ownership the per-call engine can't hold). The factory returns (nil, false)
+// and selectChildEngine surfaces the model-addressable error naming both agent and model.
+// Safe and leak-free; a documented v1 scope limit. REFERENCE-only MCP servers ARE
+// supported (they borrow the process-lifetime mainMgr, no new connection).
+//
+// The returned inline-MCP close func (from buildAgentDefEngine) is invoked immediately
+// (safe close) when the def has NO inline servers — there are none to keep alive, and a
+// reference-only def's tools borrow mainMgr, so closing the (nil) inline close is a no-op.
+// (A def that reached here with inline servers was already rejected above, so the close
+// func is always nil by the time it could matter.)
+func buildAgentModelEngineFactory(ctx context.Context, cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, reg *agents.Registry, skillIdx skillIndex, defaultHooks port.HookRunner, runner tool.CommandRunner, mainMgr *mcp.Manager) func(agentName, model string) (*agent.Engine, bool) {
+	return func(agentName, model string) (*agent.Engine, bool) {
+		agentName = strings.TrimSpace(agentName)
+		model = strings.TrimSpace(model)
+		if reg == nil || agentName == "" || model == "" {
+			return nil, false
+		}
+		def, ok := reg.Get(agentName)
+		if !ok {
+			return nil, false
+		}
+		// Risk-1 (Option B): inline MCP servers are a v1 scope limit on the agent+model
+		// path. The factory declines; selectChildEngine surfaces the model-addressable error.
+		for _, entry := range def.MCPServers {
+			if !entry.IsReference() {
+				cfg.diag().Log(ctx, port.LevelInfo, "agent+model override declined: def has inline MCP servers (v1 scope limit)",
+					"agent", def.Name, "model", model, "server", entry.Name)
+				return nil, false
+			}
+		}
+		// Provider selection via the REAL def (def.Provider pinned-and-known → that provider;
+		// else parent). The override model is set VERBATIM (no alias resolution — parity with
+		// the model-only path's opaque-string posture; a synthetic def would double-resolve).
+		pid, _ := resolveProviderModel(cfg, provReg, def, parentProviderID, parentModel)
+		childProvider := provider
+		if pid != parentProviderID {
+			if entry, found := provReg.Lookup(pid); found {
+				childProvider = entry.provider
+			}
+		}
+		windowFn := childWindowFor(cfg, provReg, pid, model)
+
+		eng, mcpClose, names, skillCount := buildAgentDefEngine(ctx, cfg, def, "task:"+def.Name+":model="+model, reg.Detail(def.Name), childProvider, model, windowFn,
+			baseSubagentTools(cfg), runner != nil, skillIdx, defaultHooks, runner, mainMgr)
+		// The def has no inline servers (rejected above), so mcpClose is nil; call it
+		// defensively in case a future reference-only path ever returns one (a reference
+		// borrows mainMgr, so closing is a no-op). Never closes mainMgr.
+		if mcpClose != nil {
+			if err := mcpClose(); err != nil {
+				cfg.diag().Log(ctx, port.LevelWarn, "agent+model override engine inline MCP close",
+					"agent", def.Name, "model", model, "err", err)
+			}
+		}
+
+		cfg.diag().Log(ctx, port.LevelInfo, "agent def engine rebuilt on override model",
+			"agent", def.Name, "tools", strings.Join(names, ","), "provider", pid, "model", model,
+			"preloaded_skills", skillCount, "source", reg.Detail(def.Name))
 		return eng, true
 	}
 }

@@ -11,6 +11,19 @@ The covered surface is the seven core packages (`session`, `governance`, `tool`,
 
 ## [Unreleased]
 
+### Added
+
+- **`agent.WithAgentModelEngineFactory`.** A new `SubagentOption` injecting a
+  composition-supplied factory `func(agentName, model string) (*Engine, bool)`
+  that rebuilds a named specialist's scoped engine on a per-call override model,
+  so a Subagent call may now set BOTH `agent` and `model` (previously rejected).
+  The override model runs on the def's resolved provider; the specialist's
+  catalog/prompt/skills/hooks/memory are preserved (NOT the generic explorer
+  set); the provider-closing Deps are re-derived for the override model via the
+  contamination-safe per-provider path. A def with inline MCP servers is
+  declined on the agent+model path (v1 scope limit); reference-only MCP is
+  supported. Classified Added per COMPATIBILITY.md (a new exported Option).
+
 ### Changed
 
 - **`tool.MaxAgentDescriptionBytes` raised 800 → 2000; `tool.MaxAgentBodyBytes`
