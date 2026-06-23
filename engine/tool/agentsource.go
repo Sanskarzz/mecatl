@@ -28,21 +28,31 @@ const (
 )
 
 // MaxAgentDescriptionBytes caps AgentDef.Description. The description is the
-// ALWAYS-IN-CONTEXT routing metadata (it rides the Subagent tool's
-// Spec().Description tail on every request), so an unbounded one would
-// inflate every prompt and break byte-stable prompt-prefix caching. It is the
-// ONE canonical cap every source shares: the filesystem frontmatter parser
-// truncates to it on discovery, and a remote-driver client re-truncates wire
-// metadata to it defensively (the conformance suite asserts every listed def
-// respects it).
-const MaxAgentDescriptionBytes = 800
+// EXPENSIVE field: it is ALWAYS-IN-CONTEXT routing metadata (it rides the
+// Subagent tool's Spec().Description tail on EVERY request, summed across ALL
+// registered agents, and is part of the byte-stable prompt-cache prefix), so an
+// unbounded one would inflate every prompt and break prefix caching. It
+// therefore stays CONSERVATIVE — 2000 bytes is roomy for a routing sentence or
+// two but still bounds the per-request, all-agents tax. It is the ONE canonical
+// cap every source shares: the filesystem frontmatter parser truncates to it on
+// discovery, and a remote-driver client re-truncates wire metadata to it
+// defensively (the conformance suite asserts every listed def respects it).
+//
+// Changing this value is a ONE-TIME prompt-cache-prefix invalidation (the
+// truncation point moves), but discovery stays deterministic — the same input
+// always truncates to the same bytes.
+const MaxAgentDescriptionBytes = 2000
 
-// MaxAgentBodyBytes caps AgentDef.Body. The body becomes a system-prompt
-// layer that is in-context EVERY TURN for that def's engine, so an oversized
-// body is a real per-turn token cost (capped harder than a skill body, which
-// loads only on activation). Same single-cap discipline as
-// MaxAgentDescriptionBytes.
-const MaxAgentBodyBytes = 8 * 1024
+// MaxAgentBodyBytes caps AgentDef.Body. The body is CHEAP relative to the
+// description: it becomes a system-prompt layer that is in-context only for
+// THAT ONE specialist engine's own turns (never summed across agents, never on
+// the parent's requests), so it can afford generous headroom — 32 KiB lets a
+// real specialist persona carry detailed instructions without losing the tail.
+// (Contrast a skill body, which loads only on activation.) Same single-cap
+// discipline as MaxAgentDescriptionBytes — one canonical cap every source
+// truncates to. Changing it is the same one-time, deterministic prefix
+// invalidation as the description cap.
+const MaxAgentBodyBytes = 32 * 1024
 
 // AgentDef is a pure value object: one agent definition's metadata and
 // system-prompt body. It carries no behaviour, no infrastructure types, and NO

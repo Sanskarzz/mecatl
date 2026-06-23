@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"iter"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -355,4 +357,62 @@ func TestBuildAgentSubagentEnginesResolvedModelOnRequest(t *testing.T) {
 	if got := rec.lastModel(); got != "cheap-id" {
 		t.Fatalf("recorded request model = %q, want the resolved per-def alias 'cheap-id'", got)
 	}
+}
+
+// TestResolveAgentRegistryLogsDroppedVsAdjusted pins issue #156 Part B at the
+// composition seam: a kept-but-truncated def logs "agent def adjusted" (the
+// def stays in the registry) while a def that cannot be admitted logs "agent
+// def dropped" — the structural Fatal split, never the overloaded "skipped".
+func TestResolveAgentRegistryLogsDroppedVsAdjusted(t *testing.T) {
+	dir := t.TempDir()
+	longBody := strings.Repeat("b", tool.MaxAgentBodyBytes+1)
+	if err := os.WriteFile(filepath.Join(dir, "kept.md"),
+		[]byte("---\nname: kept\ndescription: d\n---\n"+longBody), 0o644); err != nil {
+		t.Fatalf("write kept.md: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "bad.md"),
+		[]byte("---\nname: [unterminated\n---\nbody"), 0o644); err != nil {
+		t.Fatalf("write bad.md: %v", err)
+	}
+
+	diag := &kvDiag{}
+	cfg := Config{AgentsDirs: []string{dir}, Diagnostics: diag}
+	reg := resolveAgentRegistry(context.Background(), cfg)
+	if reg.Len() != 1 {
+		t.Fatalf("want 1 admitted def (the truncated one is KEPT), got %d", reg.Len())
+	}
+
+	var sawAdjusted, sawDropped bool
+	for i, m := range diag.msgs {
+		switch m {
+		case "agent def adjusted":
+			sawAdjusted = true
+			// The adjusted log must state the OUTCOME (the def is still usable) —
+			// the core intent of issue #156 ("skipped" lied about usability).
+			if !kvArgsContain(diag.args[i], "outcome", "agent still loaded") {
+				t.Fatalf("adjusted log must carry outcome=\"agent still loaded\"; args = %v", diag.args[i])
+			}
+		case "agent def dropped":
+			sawDropped = true
+		case "agent def skipped":
+			t.Fatalf("the overloaded %q wording must not be used", m)
+		}
+	}
+	if !sawAdjusted {
+		t.Fatalf("truncated def should log \"agent def adjusted\"; messages = %v", diag.msgs)
+	}
+	if !sawDropped {
+		t.Fatalf("malformed def should log \"agent def dropped\"; messages = %v", diag.msgs)
+	}
+}
+
+// kvArgsContain reports whether a slog-style key/value arg slice carries the
+// given key immediately followed by the given value.
+func kvArgsContain(args []any, key, val string) bool {
+	for i := 0; i+1 < len(args); i += 2 {
+		if args[i] == key && args[i+1] == val {
+			return true
+		}
+	}
+	return false
 }

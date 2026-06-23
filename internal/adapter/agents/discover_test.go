@@ -3,8 +3,10 @@ package agents
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // writeDef writes a <name>.md file into dir, creating dir if needed.
@@ -205,6 +207,208 @@ func TestParseAgentDefTruncatesDescriptionAndBody(t *testing.T) {
 	}
 	if len(notes) != 2 {
 		t.Fatalf("want 2 truncation notes, got %d: %v", len(notes), notes)
+	}
+	// Pin that the two notes are the DESCRIPTION-cap note and the BODY-cap note
+	// (they differ: "always-in-context cap" vs "prompt-body cap"), so a
+	// regression that emits the same note twice or drops one field's truncation
+	// is caught — not just the count.
+	var sawDescNote, sawBodyNote bool
+	for _, n := range notes {
+		switch {
+		case strings.Contains(n, "always-in-context cap"):
+			sawDescNote = true
+		case strings.Contains(n, "prompt-body cap"):
+			sawBodyNote = true
+		}
+	}
+	if !sawDescNote {
+		t.Fatalf("missing the description-cap note (\"always-in-context cap\"); notes = %v", notes)
+	}
+	if !sawBodyNote {
+		t.Fatalf("missing the body-cap note (\"prompt-body cap\"); notes = %v", notes)
+	}
+}
+
+// TestParseAgentDefBodyBoundary proves the body cap is exact: a body at exactly
+// MaxAgentBodyBytes is kept untouched with no note; one byte over is truncated
+// with a single note that names the byte cap.
+func TestParseAgentDefBodyBoundary(t *testing.T) {
+	atCap := strings.Repeat("b", maxPromptBodyBytes)
+	raw := []byte("---\nname: n\ndescription: d\n---\n" + atCap)
+	def, perr, notes := parseAgentDef(raw, "n.md")
+	if perr != "" {
+		t.Fatalf("parse error: %s", perr)
+	}
+	if len(def.Body) != maxPromptBodyBytes {
+		t.Fatalf("body at cap should be untouched: got %d bytes, want %d", len(def.Body), maxPromptBodyBytes)
+	}
+	if len(notes) != 0 {
+		t.Fatalf("body at cap should produce no note, got %v", notes)
+	}
+
+	over := strings.Repeat("b", maxPromptBodyBytes+1)
+	raw = []byte("---\nname: n\ndescription: d\n---\n" + over)
+	def, perr, notes = parseAgentDef(raw, "n.md")
+	if perr != "" {
+		t.Fatalf("parse error: %s", perr)
+	}
+	if len(def.Body) > maxPromptBodyBytes {
+		t.Fatalf("body over cap not truncated: %d bytes", len(def.Body))
+	}
+	if len(notes) != 1 {
+		t.Fatalf("body over cap should produce exactly one note, got %d: %v", len(notes), notes)
+	}
+	if want := strconv.Itoa(maxPromptBodyBytes); !strings.Contains(notes[0], want) {
+		t.Fatalf("note should mention the cap %s bytes, got %q", want, notes[0])
+	}
+}
+
+// TestParseAgentDefDescriptionBoundary proves the description cap is exact: a
+// description at exactly MaxAgentDescriptionBytes is kept untouched with no
+// note; one byte over is truncated with a single note that names the byte cap.
+func TestParseAgentDefDescriptionBoundary(t *testing.T) {
+	atCap := strings.Repeat("d", maxDescriptionBytes)
+	raw := []byte("---\nname: n\ndescription: " + atCap + "\n---\nbody")
+	def, perr, notes := parseAgentDef(raw, "n.md")
+	if perr != "" {
+		t.Fatalf("parse error: %s", perr)
+	}
+	if len(def.Description) != maxDescriptionBytes {
+		t.Fatalf("description at cap should be untouched: got %d bytes, want %d", len(def.Description), maxDescriptionBytes)
+	}
+	if len(notes) != 0 {
+		t.Fatalf("description at cap should produce no note, got %v", notes)
+	}
+
+	over := strings.Repeat("d", maxDescriptionBytes+1)
+	raw = []byte("---\nname: n\ndescription: " + over + "\n---\nbody")
+	def, perr, notes = parseAgentDef(raw, "n.md")
+	if perr != "" {
+		t.Fatalf("parse error: %s", perr)
+	}
+	if len(def.Description) > maxDescriptionBytes {
+		t.Fatalf("description over cap not truncated: %d bytes", len(def.Description))
+	}
+	if len(notes) != 1 {
+		t.Fatalf("description over cap should produce exactly one note, got %d: %v", len(notes), notes)
+	}
+	if want := strconv.Itoa(maxDescriptionBytes); !strings.Contains(notes[0], want) {
+		t.Fatalf("note should mention the cap %s bytes, got %q", want, notes[0])
+	}
+}
+
+// TestDirSourceSkipErrorFatalClassification is the structural oracle for the
+// "dropped" vs "adjusted" log split (issue #156 Part B): a kept-but-truncated
+// def yields a non-fatal SkipError (Fatal==false), while a def that cannot be
+// admitted at all (malformed YAML, missing name, missing description, duplicate
+// name) yields a fatal one (Fatal==true).
+func TestDirSourceSkipErrorFatalClassification(t *testing.T) {
+	dir := t.TempDir()
+	longBody := strings.Repeat("b", maxPromptBodyBytes+1)
+	writeDef(t, dir, "kept.md", "---\nname: kept\ndescription: d\n---\n"+longBody) // kept, adjusted
+	writeDef(t, dir, "malformed.md", "---\nname: [unterminated\n---\nbody")        // dropped: parse
+	writeDef(t, dir, "noname.md", "---\ndescription: d\n---\nbody")                // dropped: missing name
+	writeDef(t, dir, "nodesc.md", "---\nname: nodesc\n---\nbody")                  // dropped: missing desc
+	writeDef(t, dir, "dup-a.md", "---\nname: dup\ndescription: first\n---\nbody")  // kept (first)
+	writeDef(t, dir, "dup-b.md", "---\nname: dup\ndescription: second\n---\nbody") // dropped: duplicate
+	// cannot-read fatal site: a DANGLING symlink named like a def. os.ReadDir
+	// reports it as a non-dir entry (so it passes the IsDir guard), but
+	// os.ReadFile follows it to a nonexistent target and errors — far more
+	// robust under CI/root than a mode-0000 file (root reads through 0000).
+	if err := os.Symlink(filepath.Join(dir, "does-not-exist"), filepath.Join(dir, "dangling.md")); err != nil {
+		t.Fatalf("symlink dangling.md: %v", err)
+	}
+
+	_, skips, err := DirSource{Dir: dir}.Agents(t.Context())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// The CLOSED set of fatal causes wired in discover.go/source.go. Asserting
+	// every fatal reason matches one of these is the structural guard the panel
+	// asked for: a NEW fatal site that forgets Fatal:true would land in the
+	// non-fatal arm (failing the "unexpected non-fatal skip" check below), and a
+	// fatal site with an unrecognised reason fails here.
+	fatalReasonFragments := []string{"cannot read", "malformed YAML", "missing a non-empty", "duplicate agent name"}
+	matchesAFatalCause := func(reason string) bool {
+		for _, frag := range fatalReasonFragments {
+			if strings.Contains(reason, frag) {
+				return true
+			}
+		}
+		return false
+	}
+
+	var sawAdjusted, sawFatal int
+	sawCannotRead := false
+	for _, s := range skips {
+		if s.Fatal {
+			sawFatal++
+			if !matchesAFatalCause(s.Reason) {
+				t.Fatalf("fatal skip has an unrecognised reason (a new fatal site?): %+v", s)
+			}
+			if strings.Contains(s.Reason, "cannot read") {
+				sawCannotRead = true
+			}
+			continue
+		}
+		sawAdjusted++
+		// The only non-fatal skip here is the truncation of kept.md.
+		if !strings.Contains(s.Reason, "truncated") {
+			t.Fatalf("unexpected non-fatal skip (a fatal site missing Fatal:true?): %+v", s)
+		}
+	}
+	if sawAdjusted != 1 {
+		t.Fatalf("want exactly 1 non-fatal (adjusted) skip, got %d: %+v", sawAdjusted, skips)
+	}
+	// cannot-read + malformed + noname + nodesc + duplicate = 5 fatal drops.
+	if sawFatal != 5 {
+		t.Fatalf("want 5 fatal (dropped) skips, got %d: %+v", sawFatal, skips)
+	}
+	if !sawCannotRead {
+		t.Fatalf("missing the cannot-read fatal skip; skips = %+v", skips)
+	}
+}
+
+// TestParseAgentDefTruncatesOnRuneBoundary locks the rune-safe truncation
+// contract: a multi-byte rune straddling the cap is NOT split mid-rune (no
+// mojibake), and the result stays within the byte cap. TruncateRunes backs
+// both the description and body truncation.
+func TestParseAgentDefTruncatesOnRuneBoundary(t *testing.T) {
+	// "世" is 3 bytes (U+4E16). Build a body that overshoots the cap by an amount
+	// that is NOT a multiple of 3, so the byte cap lands mid-rune and the
+	// rune-boundary back-off must engage.
+	body := strings.Repeat("世", maxPromptBodyBytes) // far over the byte cap
+	raw := []byte("---\nname: n\ndescription: d\n---\n" + body)
+	def, perr, notes := parseAgentDef(raw, "n.md")
+	if perr != "" {
+		t.Fatalf("parse error: %s", perr)
+	}
+	if len(def.Body) > maxPromptBodyBytes {
+		t.Fatalf("truncated body exceeds the byte cap: %d > %d", len(def.Body), maxPromptBodyBytes)
+	}
+	if !utf8.ValidString(def.Body) {
+		t.Fatalf("truncated body is not valid UTF-8 (mid-rune split / mojibake): %q", def.Body)
+	}
+	if len(notes) != 1 {
+		t.Fatalf("want 1 truncation note, got %d: %v", len(notes), notes)
+	}
+
+	// Same for the description.
+	desc := strings.Repeat("世", maxDescriptionBytes)
+	raw = []byte("---\nname: n\ndescription: " + desc + "\n---\nbody")
+	def, perr, notes = parseAgentDef(raw, "n.md")
+	if perr != "" {
+		t.Fatalf("parse error: %s", perr)
+	}
+	if len(def.Description) > maxDescriptionBytes {
+		t.Fatalf("truncated description exceeds the byte cap: %d > %d", len(def.Description), maxDescriptionBytes)
+	}
+	if !utf8.ValidString(def.Description) {
+		t.Fatalf("truncated description is not valid UTF-8 (mid-rune split): %q", def.Description)
+	}
+	if len(notes) != 1 {
+		t.Fatalf("want 1 truncation note, got %d: %v", len(notes), notes)
 	}
 }
 

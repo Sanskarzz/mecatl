@@ -1095,7 +1095,20 @@ func resolveAgentRegistry(ctx context.Context, cfg Config) *agents.Registry {
 	}
 	src, skips, err := agents.NewFSSource(ctx, sources...)
 	for _, s := range skips {
-		cfg.diag().Log(ctx, port.LevelWarn, "agent def skipped", "path", s.Path, "reason", s.Reason)
+		// Word the log by the structural Fatal split, never the overloaded
+		// "skipped": a Fatal SkipError means the def was DROPPED (excluded); a
+		// non-fatal one means it was KEPT but ADJUSTED (e.g. truncated). Both
+		// stay at WARN — a truncation is a visible adjustment, just no longer
+		// mislabelled as a drop.
+		if s.Fatal {
+			cfg.diag().Log(ctx, port.LevelWarn, "agent def dropped", "path", s.Path, "reason", s.Reason)
+			continue
+		}
+		// State the OUTCOME the operator actually cares about — the def is STILL
+		// LOADED and usable. This is the whole point of issue #156: "skipped"
+		// LIED about usability, so "adjusted" must not be silent on it.
+		cfg.diag().Log(ctx, port.LevelWarn, "agent def adjusted",
+			"path", s.Path, "reason", s.Reason, "outcome", "agent still loaded")
 	}
 	if err != nil {
 		cfg.diag().Log(ctx, port.LevelWarn, "resolving agent definitions failed; none registered",

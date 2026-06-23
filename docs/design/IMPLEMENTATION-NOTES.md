@@ -3807,6 +3807,31 @@ rejection rationale (Bash executes real processes — drivers must materialize).
   re-normalized via the exported `agents.NormalizeHooks/NormalizeHeaders` (the same helpers
   the frontmatter parser uses), `Origin` stamped `AgentOriginDriver` UNCONDITIONALLY (wire
   origin is driver-side observability only).
+- **The two def caps are ASYMMETRIC by cost (issue #156).** `tool.MaxAgentBodyBytes = 32*1024`
+  (32 KiB) and `tool.MaxAgentDescriptionBytes = 2000` — the description is EXPENSIVE (it rides
+  `Subagent`'s `Spec().Description` on EVERY request, summed across ALL registered agents, and
+  is part of the byte-stable prompt-cache prefix) so it stays conservative; the body is CHEAP
+  (in-context only for that one specialist engine's own turns, never summed, never on the
+  parent's requests) so it gets generous headroom. Both are CONSTANTS-ONLY — there is no
+  settings key / CLI flag / per-source override (a configurable cap is a deliberately
+  DEFERRED follow-up: the single-canonical-cap discipline — FS parser truncates on discovery,
+  driver client re-truncates wire data, `sourceconformance` asserts every listed def respects
+  both — would have to grow a config plumb-through first). Raising a cap is a one-time
+  prompt-cache-prefix invalidation but discovery stays deterministic (same input → same
+  truncation).
+- **Discovery diagnostics split DROPPED vs ADJUSTED, structurally (issue #156).** A
+  `agents.SkipError` now carries a `Fatal bool` (zero value = non-fatal): `Fatal:true` at the
+  cannot-read / malformed-or-missing-required-field / duplicate-name / shadowed sites (the def
+  is EXCLUDED), `Fatal:false` for a kept-but-adjusted def (a truncation, a dropped mcpServers
+  entry, an ignored unsupported `memory:` tier). `resolveAgentRegistry` words the WARN off
+  that bit — `Fatal` → "agent def dropped", else "agent def adjusted" (the adjusted log also
+  carries `outcome="agent still loaded"` so the message states the OUTCOME the operator cares
+  about, not just the change — the core of #156: "skipped" LIED about usability) — instead of
+  the old overloaded "agent def skipped" (which mislabelled a kept-but-truncated def as
+  excluded). BOTH stay at `LevelWarn` (a truncation is a visible adjustment the operator should
+  still see, just not as a drop). The split is a STRUCTURAL signal, not a string match: a
+  two-way `bool` rather than a `Kind` enum, which would be over-engineered for a two-way
+  distinction.
 - **ONE resolution per build (the drift-class guard).** The registry used to resolve THREE
   times (buildEngine→catalog, the ListAgents snapshot, buildTeamWiring) — the third firing of
   the per-session-drift class. `resolveAgentSeam` (driver branch: dial fatal, ONE

@@ -11,6 +11,20 @@ The covered surface is the seven core packages (`session`, `governance`, `tool`,
 
 ## [Unreleased]
 
+### Changed
+
+- **`tool.MaxAgentDescriptionBytes` raised 800 → 2000; `tool.MaxAgentBodyBytes`
+  raised 8192 → 32768 (32 KiB).** The two agent-def caps got more headroom, with an
+  asymmetric rationale: the DESCRIPTION rides `Subagent`'s `Spec().Description` on
+  every request, summed across all registered agents, and is part of the byte-stable
+  prompt-cache prefix, so it stays conservative (2000 B); the BODY is in-context only
+  for that one specialist engine's own turns, so it can afford 32 KiB. The constant
+  identifiers and types are unchanged — only their VALUES move. Classified Changed
+  per COMPATIBILITY.md (an exported const value is part of the API snapshot): an
+  external consumer relying on the exact old numbers, or on the old truncation point,
+  must re-baseline. Discovery stays deterministic; the only runtime effect is a
+  one-time prompt-cache-prefix invalidation. (#156)
+
 ## [0.1.0] - 2026-06-22
 
 ### Changed

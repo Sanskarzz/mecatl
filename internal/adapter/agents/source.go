@@ -37,17 +37,30 @@ type AgentSource interface {
 	Agents(ctx context.Context) ([]Discovered, []SkipError, error)
 }
 
-// SkipError records one diagnostic from discovery: a def that could not be
-// loaded (a fatal SKIP — the def is excluded), a non-fatal WARNING about a def
-// that WAS kept (e.g. its description was truncated), or a def dropped because it
-// was SHADOWED by a higher-precedence source. Discovery keeps scanning rather
-// than aborting and returns the collected diagnostics so the composition root can
-// surface them. It is never returned as a Source's fatal error.
+// SkipError records one diagnostic from discovery. It carries a structural
+// two-way split via Fatal — NOT a string-matched one — so the composition root
+// can word the log honestly instead of overloading "skipped":
+//
+//   - Fatal == true: the def was DROPPED (excluded from the registry). Causes:
+//     it could not be read, its frontmatter was malformed / missing a required
+//     field, a duplicate name within a directory, or it was SHADOWED by a
+//     higher-precedence source.
+//   - Fatal == false (the zero value): the def was KEPT but ADJUSTED — a
+//     non-fatal modification was applied (e.g. its description/body was
+//     truncated to a cap, an mcpServers entry was skipped, or an unsupported
+//     memory tier was ignored). The def is still in the registry.
+//
+// Discovery keeps scanning rather than aborting and returns the collected
+// diagnostics so the composition root can surface them. A SkipError is never
+// returned as a Source's fatal error.
 type SkipError struct {
 	// Path is the <name>.md (or directory) the problem was found at.
 	Path string
 	// Reason is a short, human-readable description of the problem.
 	Reason string
+	// Fatal reports whether the def was DROPPED (true) or KEPT-but-ADJUSTED
+	// (false, the zero value). See the type doc-comment.
+	Fatal bool
 }
 
 func (e SkipError) Error() string {
@@ -105,6 +118,7 @@ func (m MultiSource) Agents(ctx context.Context) ([]Discovered, []SkipError, err
 					Reason: fmt.Sprintf(
 						"agent def %q shadowed by a higher-precedence source (kept %q)",
 						d.Def.Name, prev.Detail),
+					Fatal: true,
 				})
 				continue
 			}

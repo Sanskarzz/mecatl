@@ -51,6 +51,11 @@ func TestMultiSourcePrecedenceShadows(t *testing.T) {
 	if skips[0].Path != "user(xdg): /low/rev.md" || !strings.Contains(skips[0].Reason, `kept "explicit: /high/rev.md"`) {
 		t.Fatalf("shadow skip detail mismatch: %+v", skips[0])
 	}
+	// A shadow is a DROP (the lower-precedence def is excluded), so it carries
+	// Fatal==true — the composition root logs it as "agent def dropped".
+	if !skips[0].Fatal {
+		t.Fatalf("shadow skip should be Fatal (dropped), got %+v", skips[0])
+	}
 }
 
 func TestMultiSourceFatalErrorPropagates(t *testing.T) {

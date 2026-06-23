@@ -296,14 +296,17 @@ func (s DirSource) Agents(_ context.Context) ([]Discovered, []SkipError, error) 
 		path := filepath.Join(dir, e.Name())
 		raw, rerr := os.ReadFile(path)
 		if rerr != nil {
-			skips = append(skips, SkipError{Path: path, Reason: fmt.Sprintf("cannot read: %v", rerr)})
+			skips = append(skips, SkipError{Path: path, Reason: fmt.Sprintf("cannot read: %v", rerr), Fatal: true})
 			continue
 		}
 		def, perr, notes := parseAgentDef(raw, path)
 		if perr != "" {
-			skips = append(skips, SkipError{Path: path, Reason: perr})
+			skips = append(skips, SkipError{Path: path, Reason: perr, Fatal: true})
 			continue
 		}
+		// Notes are non-fatal: the def IS kept, just adjusted (truncated, an
+		// mcpServers entry dropped, an unsupported memory tier ignored). Fatal
+		// stays the zero value (false).
 		for _, n := range notes {
 			skips = append(skips, SkipError{Path: path, Reason: n})
 		}
@@ -311,6 +314,7 @@ func (s DirSource) Agents(_ context.Context) ([]Discovered, []SkipError, error) 
 			skips = append(skips, SkipError{
 				Path:   path,
 				Reason: fmt.Sprintf("duplicate agent name %q (already defined at %q)", def.Name, prev),
+				Fatal:  true,
 			})
 			continue
 		}
