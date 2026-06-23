@@ -2135,6 +2135,59 @@ FALL BACK to the hardcoded prefix matrix
 (`adaptiveThinkingPrefixes`/`thinkingIncapablePrefixes`, NOT deleted) as the OFFLINE FLOOR; the
 `max_tokens` resolver is likewise live-first via the `liveMetaStore`.
 
+### Adapter request-assembly benchmarks — closing the #157 measurement gap
+
+Issue #157 found the main-turn allocation churn is dominated by the **per-turn
+full-conversation re-marshal** (`store:false` resends the WHOLE accumulated `messages`/`input`
+array every turn) — but that path had **ZERO offline benchmark coverage**: every `task bench`
+/ `task perf:scenarios` benchmark drives the loop through `engine/adapter/mockllm`, which
+short-circuits the provider adapters' request-assembly (`buildParams`/`buildMessages` /
+`buildInput`) and the streaming decode (`translate`) entirely. The re-marshal hypothesis
+therefore could never be RANKED against the inherent-cost / SDK-owned alternatives. The
+deliverable was to CLOSE that gap, not to force a change.
+
+The benches live in `internal/adapter/anthropic/request_bench_test.go` and
+`internal/adapter/openai/request_bench_test.go` (in-package — `buildParams`/`buildMessages` are
+unexported), fully OFFLINE (no client/network), following `engine/agent/bench_test.go`
+conventions (`b.Loop()`, fixtures outside the loop, results parked in a package-level sink). Each
+drives a synthetic `port.LLMRequest` whose conversation grows to 50/200/500 messages (a realistic
+user/assistant-with-reasoning-and-tool-call/tool-result mix — long-session replay growth):
+`BenchmarkBuildParams`/`BenchmarkBuildMessages`/`BenchmarkBuildInput` isolate OUR struct-building
+glue; `BenchmarkBuildParamsAndMarshal` adds the SDK `json.Marshal` (the cost the live monitoring
+fingered — the SDK's `MarshalJSON` is what the real `Stream` call drives inside the client);
+`BenchmarkDecodeSSE` exercises the only decode code we author — `translate()` over a recorded
+`testdata/*.sse` fixture (the live SDK decode is not benchmarkable offline).
+
+**The profile finding (the gap, now closed).** Attributing `BuildParamsAndMarshal` at msgs=500
+(`go tool pprof -alloc_objects`): the cost is **overwhelmingly SDK-owned and inherent** — the
+SDK's reflection-based `json.Marshal` + `reflect.unsafe_New` are ~92% (anthropic) / ~87%
+(openai) of allocated objects. OUR glue is a small flat fraction (`assistantBlocks` /
+`assistantItems` ~6–7%) and is already capacity-pre-sized (`make(..., 0, len(...)+…)` at every
+slice site). The single piece of our code doing per-turn JSON work that grows with history is
+the anthropic `unpackReasoning` (it `json.Unmarshal`s the opaque reasoning envelope on every
+assistant turn) — but even eliminating it entirely is only ~11% of the realistic full-path
+allocs, and a blob-keyed unpack cache would add stateful-invalidation surface (and no natural
+home without widening the domain `Message`, which is forbidden) for a marginal gain — a
+legitimate NO-GO per the perf-optimization discipline.
+
+**Decision: gap-closed, NO source change.** There is no byte-identical win in our glue: the SDK
+param structs MUST be built and MUST serialize identically (the byte-stable prompt prefix /
+provider cache-hit rate is the exact thing the change would risk), and the candidate
+micro-savings (e.g. nilling openai's `Summary: []{}`) would CHANGE the wire bytes — the field is
+`json:"summary,omitzero" api:"required"`, so `nil` drops `"summary":[]` from the payload. The
+benchmarks STAND as the regression guard + the evidence that closed the measurement gap. They
+match the architect's earlier conclusion (the churn is inherent stateless-replay design + the
+provider SDK's marshal, code we don't own) — now MEASURED rather than hypothesised.
+
+**Taskfile / gating:** the benches are runnable (`cd internal/adapter/anthropic && go test -bench
+. -benchmem -run '^$'`, openai sibling) but are deliberately NOT wired into `task bench` (which
+stays engine-only) or the FAIL-CLOSED `perf/cmd/allocsgate` baseline. Wiring them in would
+require establishing + committing an `allocs/op` baseline whose dominant term is the third-party
+SDK's reflective marshal — a number that moves on every SDK bump for reasons outside our control,
+which would destabilise the gate. Follow-up: if the adapter glue ever grows enough to warrant
+gating, add a glue-ONLY baseline (`BuildParams`/`BuildMessages`, excluding the SDK marshal) so the
+gate tracks code we own.
+
 ### `permconfig` (file-based permission config — issues #13/#32)
 
 A `permpolicy.RuleResolver` that re-resolves per workspace-root the shared
