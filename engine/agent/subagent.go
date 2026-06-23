@@ -317,7 +317,7 @@ type subagentArgs struct {
 	// non-positive value is ignored (inherit the engine's budget — DEFAULT is the
 	// inherited/unlimited budget). A budget-stopped child returns its best-effort summary
 	// (StopBudget is a clean terminal — salvaged even when the budget tripped before any
-	// text, see salvageEmptyLimitStop), not an error. It is the same budget as the
+	// text, see salvageEmptyStop), not an error. It is the same budget as the
 	// deprecated `max_tokens` alias; supplying both with CONFLICTING positive values is a
 	// model-visible error (see resolveMaxRunTokens).
 	//
@@ -671,12 +671,21 @@ const defaultStructuredOutputRetries = 2
 // fetching/reading and never reached its conclusion. The salvage asks the child to
 // stop and summarize its partial findings; it explicitly forbids further tool use
 // because the salvage drive is hard-bound to a single turn (see
-// salvageEmptyLimitStop). For a token-budget stop the salvage drive uses a
+// salvageEmptyStop). For a token-budget stop the salvage drive uses a
 // ResetUsage call (mirroring the Supervisor.synthesise precedent) so the one wrap-up
 // turn is not immediately re-blocked by the working run's cumulative spend.
 const salvageWrapUpPrompt = "You have reached your budget and must stop now. " +
 	"Do not call any more tools. Summarize concisely what you found so far and give " +
 	"your best partial answer as your final response."
+
+// recoveredDigestPrefix frames the last-resort digestChildActivity recovery (issue
+// #152): when both the original drive AND the bounded salvage turn produced no final
+// text, the child's last non-empty assistant message is surfaced verbatim under this
+// prefix. It states ONLY provenance ("recovered … last output") + partial-ness +
+// the resume next-action — DELIBERATELY not the stop reason, which renderSubagentResult's
+// StopNoProgress note owns (so the note + this prefix never double-state "no final
+// summary"). It reads coherently standalone on the note-less empty-StopEndTurn path too.
+const recoveredDigestPrefix = "[recovered the subagent's last output below — treat as partial; resume it with the agentId above to continue]"
 
 // submitResultToolName is the catalog name of the synthetic deliverable tool a
 // structured-output child is given. It is run-scoped (RunOptions.ExtraTools), never
@@ -2041,18 +2050,25 @@ func backgroundGateFullError(ids []string) string {
 //     failure (the child never produced a schema-valid payload within the retry budget).
 //   - StopMaxTurns / StopMaxToolCalls   → success-with-note (stopped at a limit).
 //   - StopBudget                        → success-with-note (stopped at the token budget).
+//   - StopNoProgress                    → success-with-note "[subagent stopped: ended
+//     without a final summary]": a reasoning-only / empty-turn end discarded the child's
+//     work the same way a limit stop did (issue #152). driveChild has already run the
+//     salvage + last-resort digest, so the body normally carries recovered content.
 //   - StopCancelled + clientCancelled   → success-with-note "[subagent cancelled by
 //     user]": the partial work is usable and the trailer keeps the child resumable
 //     (cancel-then-resume-with-a-narrower-prompt is the intended workflow); an error
 //     result would teach the model the delegation mechanism failed. A parent-run
 //     cancel (clientCancelled false) keeps today's un-noted success rendering.
-//   - everything else (StopEndTurn / StopNoProgress / …) → success.
+//   - everything else (an EMPTY StopEndTurn carries recovered content but deliberately
+//     NO note; a non-empty StopEndTurn is the normal clean finish) → success.
 //
 // On EVERY terminal the result text carries the structured payload (when a
 // schema was satisfied) else the free-text summary, prefixed with the agentId trailer
 // so the parent MODEL can discover the child id (mirroring renderTeamResult's Team-id
 // line — the runtime-discoverability axis: the id must be where the model reads it, not
-// only on the client-only subagent.* events).
+// only on the client-only subagent.* events). The body is NEVER a silent empty string:
+// driveChild salvages then digests an empty free-text terminal (issue #48 / #152), and
+// even the floor "(subagent produced no summary)" is paired with a stop-reason note.
 func renderSubagentResult(callID session.ToolCallID, childID session.SessionID, final string, stop session.StopReason, submit *submitResultTool, clientCancelled bool) session.ToolResult {
 	// Structured-output failure: the retry budget was exhausted without a schema-valid
 	// payload. Surface the last validation error AS the tool error (model-visible),
@@ -2083,11 +2099,19 @@ func renderSubagentResult(callID session.ToolCallID, childID session.SessionID, 
 		}
 	}
 	if strings.TrimSpace(body) == "" {
-		body = "(subagent produced no summary)"
+		// Reached only when BOTH the bounded salvage turn AND the last-resort
+		// digestChildActivity recovery produced nothing — i.e. the child genuinely never
+		// emitted any assistant text on ANY terminal. The stop-reason note below still
+		// names WHY the child stopped, so even this floor is honest rather than opaque; the
+		// resume hint keeps it from being a dead end (the agentId trailer is on the result,
+		// so the parent can continue the child rather than abandoning the delegation).
+		body = "(subagent produced no summary — resume it with the agentId above to continue)"
 	}
-	// Limit / budget notes: the child stopped at a bound rather than finishing. The
-	// result is still a success (the partial work is usable), annotated so the model
-	// knows the deliverable may be incomplete.
+	// Limit / budget / no-progress notes: the child stopped at a bound (or ended without
+	// a final summary) rather than finishing cleanly. The result is still a success (any
+	// partial work is usable), annotated so the model knows the deliverable may be
+	// incomplete. An EMPTY clean end (StopEndTurn with recovered content) gets NO note —
+	// the recovered body speaks for itself.
 	switch stop {
 	case session.StopMaxTurns:
 		body = "[subagent stopped: reached its max-turns limit]\n\n" + body
@@ -2095,6 +2119,12 @@ func renderSubagentResult(callID session.ToolCallID, childID session.SessionID, 
 		body = "[subagent stopped: reached its max-tool-calls limit]\n\n" + body
 	case session.StopBudget:
 		body = "[subagent stopped: reached its token budget]\n\n" + body
+	case session.StopNoProgress:
+		// The CANONICAL stop-reason note: it owns the "why" ("ended without a final
+		// summary"), so the digest prefix (driveChild) must NOT restate it. The
+		// next-action hint makes the partial result recoverable — the agentId trailer is
+		// already on the result, so the parent can resume the child rather than discard it.
+		body = "[subagent stopped: ended without a final summary — treat as partial; resume it with the agentId above to continue]\n\n" + body
 	case session.StopCancelled:
 		// Only a CLIENT cancel (CancelChild) is noted; a parent-run cancel keeps the
 		// legacy un-noted rendering (every child dies with the run anyway).
@@ -2205,9 +2235,24 @@ func driveChild(ctx context.Context, engine *Engine, child *session.Session, run
 		toolCount += tc
 
 		// Free-text path: done — but first try to salvage a partial summary if the child
-		// hit a turn/tool-call limit without producing any text (issue #48).
+		// ended on an empty terminal (turn/tool-call limit, token budget, no-progress, or
+		// an empty clean end) without producing any text (issue #48 / #152).
 		if submit == nil {
-			finalText, usage = salvageEmptyLimitStop(ctx, engine, child, runWS, finalText, stop, usage, runOpts, emit, call, childID, posture)
+			finalText, usage = salvageEmptyStop(ctx, engine, child, runWS, finalText, stop, usage, runOpts, emit, call, childID, posture)
+			// Last-resort digest: if the bounded salvage drive ALSO produced nothing
+			// (e.g. the model emitted another empty/reasoning-only turn), recover the
+			// child's last non-empty assistant text from its own history so the parent
+			// still gets the child's work instead of "(subagent produced no summary)".
+			// Mirrors joinTeamFallback's member-LastText recovery (engine/agent/teamtool.go).
+			// The prefix states ONLY provenance + partial-ness + the resume hint — it does
+			// NOT restate the stop reason (renderSubagentResult's StopNoProgress note owns
+			// the "why"), so the StopNoProgress note + this prefix never double-state it,
+			// and it still reads coherently standalone on the note-less empty-StopEndTurn path.
+			if strings.TrimSpace(finalText) == "" && isEmptyTerminalStop(stop) {
+				if digest := digestChildActivity(child); digest != "" {
+					finalText = recoveredDigestPrefix + "\n\n" + digest
+				}
+			}
 			return finalText, stop, usage, toolCount
 		}
 		// A structured run that produced a valid payload: done.
@@ -2235,20 +2280,68 @@ func driveChild(ctx context.Context, engine *Engine, child *session.Session, run
 	return finalText, session.StopStructuredOutput, usage, toolCount
 }
 
-// salvageEmptyLimitStop drives ONE bounded wrap-up turn to recover a partial summary
-// from a FREE-TEXT child that exhausted its TURN or TOOL-CALL limit (or its TOKEN
-// budget — StopBudget) without producing any text (issue #48) — so the parent gets a
-// usable (if partial) deliverable instead of "(subagent produced no summary)". It
-// returns the (possibly salvaged) final text and the cumulative usage (the salvage
-// turn's usage ADDED, never double-counted).
+// isEmptyTerminalStop reports whether stop is one of the terminals on which a
+// FREE-TEXT child can plausibly have ended WITHOUT a usable summary, so the salvage +
+// digest recovery (issue #48 / #152) should run. It is a positive ALLOW-SET — the four
+// bounded terminals (turn/tool-call limit, token budget, no-progress) plus an EMPTY
+// clean end (StopEndTurn). The caller pairs it with a blank-finalText guard so a NORMAL
+// StopEndTurn that produced text is never disturbed.
+func isEmptyTerminalStop(stop session.StopReason) bool {
+	switch stop {
+	case session.StopMaxTurns, session.StopMaxToolCalls, session.StopBudget,
+		session.StopNoProgress, session.StopEndTurn:
+		return true
+	default:
+		return false
+	}
+}
+
+// digestChildActivity recovers the child's LAST non-empty assistant message text from
+// its own conversation history (walking backwards, the closeOutInterruptedTurn idiom in
+// engine/session/session.go), clamped to a bounded preview. It is the LAST-RESORT
+// recovery when both the original drive AND the bounded salvage turn produced no final
+// text (issue #152): rather than discard the child's work behind "(subagent produced no
+// summary)", surface whatever the child last said. Returns "" when the child never
+// emitted any assistant text. Mirrors joinTeamFallback's member-LastText recovery
+// (engine/agent/teamtool.go) — clampRunes (not clampPreview) so multi-line reasoning
+// survives intact (this is the child's OWN output going back to the parent MODEL, not a
+// peer-controlled preview crossing a trust boundary).
+func digestChildActivity(child *session.Session) string {
+	if child == nil {
+		return ""
+	}
+	msgs := child.Conversation.Messages
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role != session.RoleAssistant {
+			continue
+		}
+		if text := strings.TrimSpace(msgs[i].Text); text != "" {
+			return clampRunes(text, maxTeamPreview)
+		}
+	}
+	return ""
+}
+
+// salvageEmptyStop drives ONE bounded wrap-up turn to recover a partial summary
+// from a FREE-TEXT child that ended on an EMPTY terminal without producing any text
+// (issue #48 / #152) — so the parent gets a usable (if partial) deliverable instead of
+// "(subagent produced no summary)". It returns the (possibly salvaged) final text and
+// the cumulative usage (the salvage turn's usage ADDED, never double-counted).
 //
 // It is strictly best-effort and bounded:
-//   - Triggers on StopMaxTurns / StopMaxToolCalls / StopBudget with a blank finalText.
-//     Every other stop falls straight through.
-//   - For StopBudget, calls child.ResetUsage() AFTER child.Reopen() (mirroring the
+//   - Triggers on an EMPTY-terminal allow-set — StopMaxTurns / StopMaxToolCalls /
+//     StopBudget / StopNoProgress / StopEndTurn — with a blank finalText. A non-empty
+//     StopEndTurn (a normal clean finish that DID produce text) is left untouched by the
+//     blank-finalText guard below; every stop outside the allow-set falls straight
+//     through. (StopNoProgress/empty-StopEndTurn are the issue-#152 additions: a
+//     reasoning-only or silently-empty turn discarded the child's work the same way a
+//     limit stop did.)
+//   - For StopBudget ONLY, calls child.ResetUsage() AFTER child.Reopen() (mirroring the
 //     Supervisor.synthesise precedent in engine/agent/teamsupervisor.go) so the one
 //     wrap-up turn is not immediately re-blocked by the working run's cumulative spend.
 //     The salvage turn's own spend is still folded into the returned usage accumulator.
+//     StopNoProgress/StopEndTurn never ResetUsage (they did not stop on the token
+//     ceiling, so the carried budget must keep braking the salvage turn).
 //   - Reuses the SAME child session via Reopen() (which resets Counters), mirroring the
 //     structured-output retry seam. A non-recoverable session (failed/cancelled) simply
 //     keeps the empty result.
@@ -2263,10 +2356,12 @@ func driveChild(ctx context.Context, engine *Engine, child *session.Session, run
 //
 // The ORIGINAL stop reason is preserved by the caller: the salvage only fills in a
 // body; renderSubagentResult still stamps the honest "[subagent stopped: reached its
-// max-turns limit]" / "[subagent stopped: reached its token budget]" note. If the
-// wrap-up errors or yields nothing, the prior empty behaviour stands.
-func salvageEmptyLimitStop(ctx context.Context, engine *Engine, child *session.Session, runWS tool.Workspace, finalText string, stop session.StopReason, usage session.Usage, runOpts RunOptions, emit func(session.Event), call session.ToolCall, childID session.SessionID, posture childPosture) (string, session.Usage) {
-	if stop != session.StopMaxTurns && stop != session.StopMaxToolCalls && stop != session.StopBudget {
+// max-turns limit]" / "[subagent stopped: reached its token budget]" / "[subagent
+// stopped: ended without a final summary]" note. If the wrap-up errors or yields
+// nothing, the caller's last-resort digest (digestChildActivity) runs next, and only
+// then the empty placeholder stands.
+func salvageEmptyStop(ctx context.Context, engine *Engine, child *session.Session, runWS tool.Workspace, finalText string, stop session.StopReason, usage session.Usage, runOpts RunOptions, emit func(session.Event), call session.ToolCall, childID session.SessionID, posture childPosture) (string, session.Usage) {
+	if !isEmptyTerminalStop(stop) {
 		return finalText, usage
 	}
 	if strings.TrimSpace(finalText) != "" {

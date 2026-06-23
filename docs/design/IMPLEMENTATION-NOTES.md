@@ -746,8 +746,36 @@ differs: `spec.Mutating || roIsolationAvailable` + the `isolateReadOnly` side-ef
 **Subagent typed result taxonomy + agentId trailer (`renderSubagentResult`/`renderSubagentTrailer`).** The Subagent
 RESULT is now LABELLED by terminal stop reason: `StopError` → tool error; `StopStructuredOutput` →
 tool error carrying the last validation failure; `StopMaxTurns`/`StopMaxToolCalls`/`StopBudget` →
-success-with-note (`[subagent stopped: …]` prefix); everything else (`StopEndTurn`/`StopNoProgress`/
-…) → success. On EVERY terminal — including the error/timeout terminals (`StopError`,
+success-with-note (`[subagent stopped: …]` prefix); `StopNoProgress` → success-with-note
+`[subagent stopped: ended without a final summary]` (issue #152 — a reasoning-only / empty-turn end
+discarded the child's work the same way a limit stop did); an EMPTY `StopEndTurn` → success carrying
+recovered content but DELIBERATELY no note; a non-empty `StopEndTurn` → the normal clean finish. The
+result body is NEVER a silent empty string: `driveChild`'s free-text path runs a TWO-STAGE recovery
+on any EMPTY terminal in the allow-set. The salvage trigger WIDENED here (issue #152): it was
+limit/budget stops only; it is now ANY empty terminal stop — `isEmptyTerminalStop` =
+`StopMaxTurns`/`StopMaxToolCalls`/`StopBudget`/`StopNoProgress`/(defense-in-depth) `StopEndTurn`,
+gated by a blank-finalText guard so a normal text answer is untouched. Stage 1 is `salvageEmptyStop`
+(renamed from `salvageEmptyLimitStop`): ONE bounded wrap-up turn (`child.Reopen()` + `MaxTurns=1` pin
++ the `salvageWrapUpPrompt`) to coax a partial summary — `ResetUsage` runs for `StopBudget` ONLY
+(mirroring `Supervisor.synthesise`; `StopNoProgress`/`StopEndTurn` keep their carried budget braking
+the salvage turn). Stage 2, if the salvage ALSO produced nothing, is `digestChildActivity`: the
+child's last non-empty `RoleAssistant` text walked backwards out of its own history (the
+`closeOutInterruptedTurn` idiom), clamped (`clampRunes`, not `clampPreview` — multi-line own-output,
+not a peer preview) and framed by `recoveredDigestPrefix`. Only when BOTH stages are empty does the
+floor `(subagent produced no summary …)` stand — and even then the stop-reason note names WHY, so the
+result is never opaque. **Framing discipline (UX): the stop reason is stated in exactly ONE place.**
+The `StopNoProgress` note (`renderSubagentResult`) owns the canonical "why" (`ended without a final
+summary`) and the next-action hint (`treat as partial; resume it with the agentId above to
+continue`); `recoveredDigestPrefix` states ONLY provenance + partial-ness + the resume hint (it
+does NOT restate the stop reason), so the note + prefix never double-state it, and the prefix still
+reads coherently standalone on the note-less empty-`StopEndTurn` path. The floor placeholder + the
+note both carry the resume hint, so the result is never a dead end (the `agentId` trailer is already
+on it). (Note: the loop's own `lastText` machinery already carries ANY text-bearing turn's text into
+a `StopNoProgress`/limit result — every text turn sets `lastText`, so for the salvage to run the
+original drive must have produced no assistant text at all, and then there is none for the digest to
+find either. The digest is therefore genuine belt-and-suspenders that the live loop provably cannot
+reach; it + the prefix wording are covered by internal unit tests, not a live-loop e2e.) On EVERY terminal — including the
+error/timeout terminals (`StopError`,
 `StopStructuredOutput`, the `timeout_ms` deadline) — the result text carries an `agentId: <childID>`
 trailer (mirroring `renderTeamResult`'s Team-id line; TRAILING on errors so the error headline stays
 first) so the parent MODEL can DISCOVER the deterministic child id (`subagent-<callID>`) — the
