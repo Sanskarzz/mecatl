@@ -27,7 +27,8 @@ Read-before-overwrite:
   clobber concurrent changes. If the file changed, re-read it, then retry.
 
 Arguments:
-- path    (required): workspace-relative path to write.
+- path    (required): workspace-relative path to write. Absolute paths that
+  resolve inside the workspace root are accepted.
 - content (required): the full new file contents.
 
 Example:
@@ -59,7 +60,7 @@ func (WriteTool) Spec() tool.ToolSpec {
 		Schema: schema(`{
   "type": "object",
   "properties": {
-    "path": {"type": "string", "description": "Workspace-relative path to write."},
+    "path": {"type": "string", "description": "Workspace-relative path to write. Absolute paths that resolve inside the workspace root are accepted."},
     "content": {"type": "string", "description": "Full new contents of the file."}
   },
   "required": ["path", "content"]

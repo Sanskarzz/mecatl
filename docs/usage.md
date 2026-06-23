@@ -819,6 +819,28 @@ never discovered and therefore never readable, and the `SkillDraft` quarantine d
 is never a source so it can never enter the read allowlist. Bundled scripts run
 via Bash by absolute path, under the same permission gates Bash always has.
 
+#### Path forms
+
+Every file tool (`Read`/`Write`/`Edit`/`Stat`, and the `Glob`/`Grep` path glob)
+accepts a path in one of two forms:
+
+- **session-relative** (the usual form), interpreted relative to the workspace
+  root; any `..` that climbs out of the root is rejected; and
+- **absolute**, accepted **iff it canonicalizes inside the workspace root** — it
+  is the same physical file a relative path would reach, addressed by its
+  absolute alias, and reduced to its root-relative form before any operation. An
+  absolute path that resolves OUTSIDE the workspace root is rejected with
+  `ErrPathEscape`. (For `Read`/`Stat` only, an absolute path under an activated
+  skill's base directory is also accepted — the read-only carve-out above.)
+
+A symlink inside the workspace whose target resolves OUTSIDE the workspace is
+rejected at resolution time, whether addressed relatively or absolutely —
+defense-in-depth on top of the `os.Root` confinement that still guards every
+in-root operation. `Glob`/`Grep` patterns are not paths: a leading `/` in a
+pattern is stripped (patterns are root-relative), and patterns are never routed
+through absolute resolution. Rationale + threat model:
+[ADR 0047](adr/0047-absolute-path-resolution.md).
+
 ### File-based permission config (`.mecatl/settings.yaml`, issue #13)
 
 The built-in permission policy (read-only tools allowed; `Bash`/`Edit`/`Write`/

@@ -27,7 +27,8 @@ When to use:
 - To change part of an existing file. To create a new file, use Write instead.
 
 Arguments:
-- path        (required): workspace-relative path to the file.
+- path        (required): workspace-relative path to the file. Absolute paths
+  that resolve inside the workspace root are accepted.
 - old_string  (required): the exact text to replace.
 - new_string  (required): the replacement text (may be empty to delete).
 - replace_all (optional): replace every occurrence instead of requiring uniqueness.
@@ -62,7 +63,7 @@ func (EditTool) Spec() tool.ToolSpec {
 		Schema: schema(`{
   "type": "object",
   "properties": {
-    "path": {"type": "string", "description": "Workspace-relative path to the file to edit."},
+    "path": {"type": "string", "description": "Workspace-relative path to the file to edit. Absolute paths that resolve inside the workspace root are accepted."},
     "old_string": {"type": "string", "description": "Exact text to replace (no line-number prefixes)."},
     "new_string": {"type": "string", "description": "Replacement text; may be empty to delete."},
     "replace_all": {"type": "boolean", "description": "Replace every occurrence instead of requiring a unique match."}
