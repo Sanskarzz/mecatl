@@ -3,6 +3,9 @@ package welcome
 import (
 	"bytes"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"os"
 	"strings"
 
@@ -111,13 +114,17 @@ func truthy(v string) bool {
 // parse it into cells and desync the cursor), so interleaving it with frames is
 // harmless.
 //
-// The full-resolution mascot is sent once as PNG (the embedded image is decoded
-// then re-encoded to PNG by kitty.EncodeGraphics under f=100/Transmission=Direct —
-// equivalent bytes, no temp file, no os/exec); the terminal scales it into the
-// cols×rows placement cell area, so the same transmit serves every layout (only the
-// placeholder grid in content changes with the tier). The data is chunked at
-// kitty.MaxChunkSize. Returns "" if the image can't be decoded (caller then keeps
-// the half-block path).
+// The mascot is first DOWNSCALED to the cols×rows cell footprint (see
+// downscaleMascot) before being re-encoded to PNG. This matters on Ghostty: the
+// full 1254×1254 PNG is ~1 MB across ~265 base64 chunks, and the exact
+// a=T/U=1/U+10EEEE virtual-placement pattern is known-buggy on Ghostty 1.3.1
+// stable (ghostty-org/ghostty#13056) where a large transmit can render at a
+// fraction of its intended width. A small, target-resolution PNG (~tens of KB,
+// a handful of chunks) sidesteps the worst of that — the terminal's own
+// cell-size scaling is never invoked because the image is already at the cell
+// footprint's pixel dimensions. The data is chunked at kitty.MaxChunkSize.
+// Returns "" if the image can't be decoded (caller then keeps the half-block
+// path).
 func TransmitMascot(cols, rows int) string {
 	if cols <= 0 || rows <= 0 {
 		return ""
@@ -129,6 +136,12 @@ func TransmitMascot(cols, rows int) string {
 	if err != nil {
 		return ""
 	}
+	// Downscale to the target cell footprint so the transmitted PNG is small
+	// (kilobytes, not a megabyte) and the terminal does no pixel scaling. A
+	// terminal cell is ~1:2 (w:h), so a cols×rows cell block is roughly
+	// (cols*cellW)×(rows*cellH) pixels; we sample at cols×rows*2 to keep the
+	// dog's square aspect (rows is the cell-rows count, the image is square).
+	scaled := downscaleMascot(img, cols, rows*2)
 	var buf bytes.Buffer
 	// f=100 (PNG), a=T (transmit AND put — a bare a=t would make U=1/c=/r= inert and
 	// create no placement, issue #44), i=ID, virtual placement (U=1), c=cols r=rows so
@@ -147,10 +160,78 @@ func TransmitMascot(cols, rows int) string {
 		Rows:             rows,
 		Chunk:            true,
 	}
-	if err := kitty.EncodeGraphics(&buf, img, opts); err != nil {
+	if err := kitty.EncodeGraphics(&buf, scaled, opts); err != nil {
 		return ""
 	}
 	return buf.String()
+}
+
+// downscaleMascot box-downscales src to a w×h pixel image, matching the
+// alpha-weighted area-average the half-block path uses (buildGrid), so the
+// high-res kitty render and the half-block fallback sample the mascot the same
+// way. The result is encoded and returned as an image.Image suitable for
+// kitty.EncodeGraphics. A near-white / near-transparent box is keyed to the
+// obsidian background so the dog floats on the card identically to the
+// half-block path.
+func downscaleMascot(src image.Image, w, h int) image.Image {
+	if w <= 0 || h <= 0 {
+		return src
+	}
+	b := src.Bounds()
+	sw, sh := b.Dx(), b.Dy()
+	bg := hexToRGB(obsidianBG)
+	dst := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		y0 := b.Min.Y + y*sh/h
+		y1 := b.Min.Y + (y+1)*sh/h
+		if y1 <= y0 {
+			y1 = y0 + 1
+		}
+		for x := 0; x < w; x++ {
+			x0 := b.Min.X + x*sw/w
+			x1 := b.Min.X + (x+1)*sw/w
+			if x1 <= x0 {
+				x1 = x0 + 1
+			}
+			var sr, sg, sb, sa, n float64
+			for yy := y0; yy < y1; yy++ {
+				for xx := x0; xx < x1; xx++ {
+					r, g, bl, a := src.At(xx, yy).RGBA()
+					af := float64(a) / 65535
+					sr += float64(r) / 65535 * 255 * af
+					sg += float64(g) / 65535 * 255 * af
+					sb += float64(bl) / 65535 * 255 * af
+					sa += af
+					n++
+				}
+			}
+			var c rgb
+			if n == 0 || sa/n < 0.35 {
+				c = bg
+			} else {
+				c = rgb{
+					uint8(clamp(sr / sa)),
+					uint8(clamp(sg / sa)),
+					uint8(clamp(sb / sa)),
+				}
+				if isWhiteish(c) {
+					c = bg
+				}
+			}
+			dst.SetRGBA(x, y, color.RGBA{R: c.r, G: c.g, B: c.b, A: 0xFF})
+		}
+	}
+	return dst
+}
+
+// pngBytes encodes img as PNG and returns the bytes (or nil on error), used by
+// the bounded-payload test to assert the transmit is small after downscaling.
+func pngBytes(img image.Image) []byte {
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		return nil
+	}
+	return buf.Bytes()
 }
 
 // DeleteMascot builds the escape that deletes the mascot image (a=d, by id) so the
@@ -210,6 +291,8 @@ func PlaceholderGrid(cols, rows, margin int) string {
 // idForeground returns the SGR truecolor foreground escape that encodes a 24-bit
 // Kitty image id, per the Unicode-placeholder spec (the placeholder cell's
 // foreground colour IS the image id). Only the low 24 bits are used.
+//
+//nolint:unparam // intentionally general; the one caller passes MascotImageID today.
 func idForeground(id int) string {
 	r := (id >> 16) & 0xFF
 	g := (id >> 8) & 0xFF

@@ -476,6 +476,16 @@ show the plain prompt-hint card.
 > also sends `q=2` to suppress the terminal's OK/error responses, which would
 > otherwise surface as stray input.
 >
+> The mascot is **downscaled to the target `cols×rows` cell footprint before
+> PNG re-encoding** (`downscaleMascot`, the same alpha-weighted box-average the
+> half-block path uses), so the transmitted PNG is ~tens of KB (not the ~1 MB of
+> the full 1254×1254 PNG). This matters on Ghostty: the exact
+> `a=T`/`U=1`/U+10EEEE virtual-placement pattern is known-buggy on Ghostty 1.3.1
+> stable (ghostty-org/ghostty#13056) where a large multi-chunk transmit can
+> render at a fraction of its intended width; a small, single-chunk,
+> already-at-cell-resolution PNG sidesteps the worst of that. Bounded by
+> `TestTransmitMascotPayloadBounded`.
+>
 > The Kitty high-res path is **unit-tested** (escape generation + the env detection
 > truth table) but **not live-verified** — the dev environment has no Kitty terminal.
 > The half-block path is the verified default.
