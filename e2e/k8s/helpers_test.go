@@ -39,7 +39,7 @@ import (
 // Cluster + manifest constants (ADR 0048 §4h, deploy/mecak8s/).
 const (
 	kindClusterName = "mecatl-e2e"
-	kindNodeImage   = "kindest/node:v1.32.0"
+	kindNodeImage   = "kindest/node:v1.34.3"
 	k8sNamespace    = "mecatl"
 	agentComponent  = "agent" // app.kubernetes.io/component label value
 	partOfLabel     = "mecak8s"
