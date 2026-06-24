@@ -88,8 +88,17 @@ func TestDrainRejectsNewRuns(t *testing.T) {
 // TestDrainIsIdempotent: calling Drain twice is harmless (a one-way gate).
 func TestDrainIsIdempotent(t *testing.T) {
 	svc := newDrainTestService(t)
+	if svc.IsDraining() {
+		t.Fatalf("IsDraining = true on a fresh service, want false (draining starts false)")
+	}
 	svc.Drain()
+	if !svc.IsDraining() {
+		t.Fatalf("IsDraining = false after Drain, want true")
+	}
 	svc.Drain() // must not panic or error
+	if !svc.IsDraining() {
+		t.Fatalf("IsDraining = false after double Drain, want true")
+	}
 	sess, err := svc.CreateSession(context.Background(), "/ws", session.ModeDefault, session.Limits{})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)

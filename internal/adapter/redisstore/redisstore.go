@@ -280,6 +280,17 @@ func (st *Store) ToolCall(id session.SessionID, call session.ToolCall, result se
 	_ = st.client.RPush(context.Background(), toolsKey(id), line).Err()
 }
 
+// Ping checks the Redis broker is reachable. It is the readyz health probe a
+// storage-free deployment (mecak8s) consults on /readyz: if Redis is down the
+// endpoint controller removes the pod. It uses a short timeout so a stalled
+// broker fails the probe quickly rather than wedging readiness.
+func (st *Store) Ping(ctx context.Context) error {
+	if st.client == nil {
+		return errors.New("redisstore: store not open")
+	}
+	return st.client.Ping(ctx).Err()
+}
+
 // Close releases the Redis connection. It is safe to call multiple times.
 func (st *Store) Close() error {
 	if st.client == nil {

@@ -27,3 +27,14 @@ builds:
       - CGO_ENABLED=0
     ldflags:
       - -s -w
+  # mecak8s (ADR 0048): the storage-free k8s-native agent binary. Same distroless
+  # base + build flags as mecated — it is a thin peer of mecated that composes
+  # app.Build with k8s-native defaults (Redis store + k8s lease + drain gate).
+  - id: mecak8s
+    main: ./cmd/mecak8s
+    flags:
+      - -trimpath
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w

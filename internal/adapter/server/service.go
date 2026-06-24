@@ -1174,6 +1174,16 @@ func (s *Service) Drain() {
 	s.draining.Store(true)
 }
 
+// IsDraining reports whether the drain gate is armed. It is the read-side
+// companion to Drain: a cmd binary's dynamic ReadyFunc (mecak8s /readyz)
+// closes over it so readiness flips to not-ready the moment Drain is armed,
+// without coupling the probe to the Service's internal atomic. It is the
+// ReadyFunc's read; ActiveRuns is the "how many in flight" figure. Safe to
+// call from a signal handler / HTTP handler goroutine.
+func (s *Service) IsDraining() bool {
+	return s.draining.Load()
+}
+
 // ActiveRuns reports the number of sessions this process is actively driving —
 // the count of held session leases (one per live run-entry). It is the
 // "draining: N active runs" figure a graceful shutdown logs after Drain, so the
