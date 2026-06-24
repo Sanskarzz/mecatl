@@ -1950,7 +1950,13 @@ ADR 0048):
 task e2e:k8s   # needs kind + ko + kubectl + Docker; NOT part of task test (~3-5 min)
 ```
 
-The suite uses `--mock` (`mockllm`) — fully offline, no API key, no real LLM spend.
+The suite uses `--mock` (`mockllm`) — fully offline, no API key, no real LLM spend. Export
+`OPENROUTER_API_KEY` to ALSO run the **live variant**: BeforeSuite patches the Deployment from
+`--mock` to the real OpenRouter provider (`--default-provider=openrouter --default-model=
+anthropic/claude-haiku-4.5`, the key staged via a k8s `Secret` — never a pod arg or log) and
+three additional specs run real multi-second model turns through the pods, proving the lease,
+the Redis snapshot, and the drain gate hold under a live LLM stream (not just the mock's instant
+completion). The live specs `Skip` without the key; the mock suite is unaffected either way.
 
 #### Honest shutdown contract
 

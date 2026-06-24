@@ -200,8 +200,10 @@ tasks:
       Run the kind-based k8s e2e suite (e2e/k8s/, build tag kind_e2e, ADR 0048).
       Spins a real kind cluster with a Redis StatefulSet + two storage-free
       mecak8s agent replicas and asserts lease exclusion, graceful failover,
-      and session persistence. Needs Docker + kind + ko + kubectl. NOT part of
-      `task test` (slow ~3-5 min, needs Docker).
+      and session persistence. Export OPENROUTER_API_KEY to ALSO run the LIVE
+      variant (real LLM turns through the pods proving the plumbing under load;
+      the live specs Skip without the key). Needs Docker + kind + ko + kubectl.
+      NOT part of `task test` (slow ~3-5 min mock-only, ~10-15 min with live).
     deps: [build]
     preconditions:
       - sh: command -v kind >/dev/null 2>&1
@@ -211,7 +213,12 @@ tasks:
       - sh: command -v kubectl >/dev/null 2>&1
         msg: "kubectl is not installed"
     cmds:
-      - go test -tags kind_e2e -count=1 -timeout 15m ./e2e/k8s/...
+      # 30m accommodates the LIVE specs when OPENROUTER_API_KEY is exported: a
+      # real haiku turn takes 10-30s, the live lease/persistence specs each drive
+      # 2-3 turns with FlakeAttempts(2), and the provider patch + rollout adds
+      # ~1-2 min. Without the key the live specs Skip and the suite fits in 15m;
+      # the outer bound only matters when the live variant runs.
+      - go test -tags kind_e2e -count=1 -timeout 30m ./e2e/k8s/...
 
   fuzz:
     desc: |

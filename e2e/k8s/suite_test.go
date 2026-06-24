@@ -72,6 +72,20 @@ var _ = ginkgo.BeforeSuite(func() {
 	ginkgo.By("capturing the agent pod names")
 	agentPods = podNames()
 	ginkgo.GinkgoWriter.Printf("agent pods: pod-A=%s pod-B=%s\n", agentPods[0], agentPods[1])
+
+	// LIVE PROVIDER: if OPENROUTER_API_KEY is set in the test process's
+	// environment, patch the Deployment from --mock to the real OpenRouter
+	// provider + the default-lane model (staged via a k8s Secret — the key is
+	// never logged). The mock specs run on the real-provider pods (their
+	// assertions are provider-agnostic); the live specs (live_test.go) then run
+	// real multi-second model turns proving the plumbing holds under load. The
+	// live specs Skip when the key is absent, so the mock-only run is unchanged.
+	if liveProviderEnabled() {
+		ginkgo.By("OPENROUTER_API_KEY is set — enabling the live provider")
+		enableLiveProvider()
+	} else {
+		ginkgo.By("OPENROUTER_API_KEY is not set — running the mock suite only (live specs will skip)")
+	}
 })
 
 // AfterSuite tears the cluster down unconditionally (even on failure) so a
@@ -92,6 +106,7 @@ var _ = ginkgo.Describe("mecak8s cloud-native properties (ADR 0048)", ginkgo.Ser
 	leaseExclusionSpecs()
 	failoverSpecs()
 	persistenceSpecs()
+	liveSpecs()
 })
 
 // refreshPods re-reads the two agent pod names. Called by specs that delete a

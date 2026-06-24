@@ -20,6 +20,7 @@
 package k8s_e2e_test
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -27,6 +28,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -44,7 +46,24 @@ const (
 	agentComponent  = "agent" // app.kubernetes.io/component label value
 	partOfLabel     = "mecak8s"
 	agentPodPort    = 8081 // the HTTP/SSE listener (--http-addr default in the pod)
+
+	// liveProviderSecret is the k8s Secret holding OPENROUTER_API_KEY for the live
+	// specs. The key is staged from the test process's environment into a Secret —
+	// never into a pod arg, a manifest, or a log — so it cannot leak.
+	liveProviderSecret = "openrouter-key"
+	// liveProviderModel is the default-lane model the live specs run on (the same
+	// verified-cheap lane as e2e/harness/target.go's DefaultModel).
+	liveProviderModel = "anthropic/claude-haiku-4.5"
+	// liveProviderID is the provider id the live deployment is patched to.
+	liveProviderID = "openrouter"
 )
+
+// liveProviderEnabled reports whether OPENROUTER_API_KEY is set in the test
+// process's environment — the gate for the live LLM specs. The mock specs run
+// unconditionally; the live specs Skip when this is false.
+func liveProviderEnabled() bool {
+	return os.Getenv("OPENROUTER_API_KEY") != ""
+}
 
 // --- tool availability / cluster lifecycle -----------------------------------
 
@@ -544,7 +563,198 @@ func drainRunSoft(ctx context.Context, addr, sessionID, text string) (status int
 	return resp.StatusCode, true
 }
 
-// --- command plumbing --------------------------------------------------------
+// --- live-provider patching (the live LLM e2e path) ------------------------
+
+// enableLiveProvider swaps the agent Deployment from --mock to the real
+// OpenRouter provider + the default-lane model, staged via a k8s Secret so the
+// OPENROUTER_API_KEY never reaches a pod arg, a manifest, or a log. It is called
+// ONCE in BeforeSuite (after the mock pods are Ready) when OPENROUTER_API_KEY is
+// set in the test process's environment. The mock specs then run on the real-
+// provider pods (their assertions are provider-agnostic), and the live specs run
+// after. No un-patching — kind delete cluster (AfterSuite) destroys everything.
+//
+// SECURITY: the key is read from os.Getenv ONCE and written to a Secret via a
+// `kubectl apply -f -` of a `stringData` JSON manifest (kubectl carries the value
+// to the API server over its stdin; it is never echoed to stdout/stderr, never a
+// bare argv token, never in a file). The Secret NAME is the only identifier
+// surfaced in logs — the value never is. The patch then consumes it via an
+// envFrom secretKeyRef, so the key reaches the pod ONLY through the Secret, never
+// a pod arg or a Deployment spec field.
+func enableLiveProvider() {
+	ginkgo.GinkgoHelper()
+	ctx := ginkgoSuiteCtx()
+	key := os.Getenv("OPENROUTER_API_KEY")
+	gomega.ExpectWithOffset(1, key).NotTo(gomega.BeEmpty(),
+		"enableLiveProvider called without OPENROUTER_API_KEY")
+
+	// 1. Stage the key as a k8s Secret. `kubectl apply -f -` over a stringData
+	//    JSON manifest is idempotent (create-or-replace) without a prior delete.
+	ginkgo.By("creating the openrouter-key Secret (key staged from env, never logged)")
+	// stringData keeps the key as a plaintext field inside the manifest (kubectl
+	// converts it to base64 data server-side); the manifest rides stdin, never a
+	// bare argv token, so it never appears in a shell history or ps listing.
+	envSecretApply := fmt.Sprintf(
+		`{"apiVersion":"v1","kind":"Secret","metadata":{"name":%q,"namespace":%q},"type":"Opaque","stringData":{"OPENROUTER_API_KEY":%q}}`,
+		liveProviderSecret, k8sNamespace, key)
+	applySecret := exec.CommandContext(ctx, "kubectl", "apply", "-f", "-")
+	applySecret.Stdin = strings.NewReader(envSecretApply)
+	out, err := applySecret.CombinedOutput()
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred(),
+		"kubectl apply secret %s failed\n--- output ---\n%s", liveProviderSecret, out)
+
+	// 2. Patch the Deployment: drop --mock, set --default-provider=openrouter +
+	//    --default-model=<haiku>, and consume the key from the Secret via an
+	//    envFrom-secretKeyRef. The args REPLACE the whole container args list, so
+	//    they must carry every flag the pod needs (the storage-free defaults).
+	ginkgo.By("patching mecak8s-agent to the real OpenRouter provider + model")
+	newArgs := []string{
+		"--grpc-addr=0.0.0.0:8080",
+		"--http-addr=0.0.0.0:8081",
+		"--redis-url=redis:6379",
+		"--session-lease-k8s-namespace=mecatl",
+		"--headless=true",
+		"--posture=auto",
+		"--default-provider=" + liveProviderID,
+		"--default-model=" + liveProviderModel,
+	}
+	argsJSON, _ := json.Marshal(newArgs)
+	patch := fmt.Sprintf(
+		`[{"op":"replace","path":"/spec/template/spec/containers/0/args","value":%s},`+
+			`{"op":"replace","path":"/spec/template/spec/containers/0/env","value":[{"name":"OPENROUTER_API_KEY","valueFrom":{"secretKeyRef":{"name":%q,"key":"OPENROUTER_API_KEY"}}}]}]`,
+		argsJSON, liveProviderSecret)
+	patchOut, err := exec.CommandContext(ctx, "kubectl", "patch",
+		"deployment/mecak8s-agent", "-n", k8sNamespace,
+		"--type=json", "-p", patch).CombinedOutput()
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred(),
+		"kubectl patch deployment to live provider failed\n--- output ---\n%s", patchOut)
+
+	// 3. Wait for the rollout: the RollingUpdate (maxSurge:1, maxUnavailable:0)
+	//    spins a new pod first, so readiness gates on the live provider's startup
+	//    (the openrouter adapter is construction-time only; no network at startup,
+	//    but the startupProbe still must clear).
+	ginkgo.By("waiting for the live-provider rollout to complete")
+	rolloutCtx, rolloutCancel := context.WithTimeout(ctx, 300*time.Second)
+	defer rolloutCancel()
+	rolloutOut, err := exec.CommandContext(rolloutCtx, "kubectl", "rollout", "status",
+		"deployment/mecak8s-agent", "-n", k8sNamespace,
+		"--timeout=290s").CombinedOutput()
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred(),
+		"kubectl rollout status (live provider) failed\n--- output ---\n%s", rolloutOut)
+
+	ginkgo.By("waiting for all mecak8s pods to be Ready (after the live-provider patch)")
+	waitPodsReady()
+
+	// Wait for the old pods to terminate: during a RollingUpdate with
+	// maxSurge:1, rollout status completes when the new ReplicaSet is fully
+	// available, but the old pods may still be terminating. podNames() asserts
+	// exactly 2, so wait for the transient 3-pod window to clear.
+	gomega.Eventually(func() int {
+		out := runCmdQuiet("kubectl", "get", "pods",
+			"-n", k8sNamespace,
+			"-l", "app.kubernetes.io/component="+agentComponent,
+			"-o", "jsonpath={.items[*].metadata.name}")
+		return len(strings.Fields(strings.TrimSpace(out)))
+	}, 60*time.Second, 2*time.Second).Should(gomega.Equal(2),
+		"expected exactly 2 agent pods after the live-provider rollout (old pods should be terminated)")
+
+	// Refresh the captured pod names: the rollout replaced both pods.
+	agentPods = podNames()
+	ginkgo.GinkgoWriter.Printf("live provider enabled; agent pods after rollout: pod-A=%s pod-B=%s\n",
+		agentPods[0], agentPods[1])
+}
+
+// --- SSE result parsing ------------------------------------------------------
+
+// sseResult captures the terminal `result` event from a prompt SSE stream. The
+// HTTP relay frames each Event as one `data: <json>\n\n` line; the terminal
+// event carries type="result" with a nested result{stop,text,usage}. This parses
+// the stream incrementally (a live model turn can emit many events over 10-30s)
+// and returns the first result event seen, or an error if the stream ended
+// without one. It is the "drive a real run to terminal + assert end_turn + real
+// usage" helper for the live specs — distinct from drainRun (which discards the
+// body, fine for the mock's instant completion but blind to a real run's stop).
+type sseResult struct {
+	Stop   string `json:"stop"`
+	Text   string `json:"text"`
+	Input  int64  `json:"input_tokens"`
+	Output int64  `json:"output_tokens"`
+}
+
+// drainRunSSE starts a prompt run, drains the SSE stream to terminal, and parses
+// the terminal `result` event (stop + usage). It is the live-spec counterpart of
+// drainRun: instead of discarding the body, it scans the stream for the result
+// event so the live specs can assert stop=end_turn + real (non-zero) usage — the
+// difference between "the run completed" and "a real model produced output".
+//
+// A non-2xx status returns (status, nil, nil) immediately (the caller asserts on
+// the status — e.g. the 409 lease-conflict path). On a 2xx stream that ends
+// without a result event, it returns the status + a non-nil error.
+func drainRunSSE(ctx context.Context, addr, sessionID, text string) (status int, res *sseResult, err error) {
+	ginkgo.GinkgoHelper()
+	reqBody, _ := json.Marshal(map[string]any{"text": text})
+	url := fmt.Sprintf("http://%s/v1/sessions/%s/prompt", addr, sessionID)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	status = resp.StatusCode
+	if status != http.StatusOK {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return status, nil, nil
+	}
+	// Scan the SSE stream for the `data:` line carrying type:"result". Each frame
+	// is `data: <json>\n\n`; a bufio.Scanner over lines is sufficient.
+	scanner := bufio.NewScanner(resp.Body)
+	// A single event JSON is small, but a reasoning turn's text can be long; raise
+	// the per-line budget so a large result text is not truncated.
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data: "))
+		if payload == "" {
+			continue
+		}
+		var ev struct {
+			Type   string `json:"type"`
+			Result *struct {
+				Stop  string `json:"stop"`
+				Text  string `json:"text"`
+				Usage *struct {
+					InputTokens  int64 `json:"input_tokens"`
+					OutputTokens int64 `json:"output_tokens"`
+				} `json:"usage"`
+			} `json:"result"`
+		}
+		if jerr := json.Unmarshal([]byte(payload), &ev); jerr != nil {
+			continue // not a JSON event frame (e.g. a keep-alive comment); skip
+		}
+		if ev.Type == "result" && ev.Result != nil {
+			res = &sseResult{Stop: ev.Result.Stop, Text: ev.Result.Text}
+			if ev.Result.Usage != nil {
+				res.Input = ev.Result.Usage.InputTokens
+				res.Output = ev.Result.Usage.OutputTokens
+			}
+			return status, res, nil
+		}
+	}
+	if serr := scanner.Err(); serr != nil {
+		return status, nil, fmt.Errorf("scanning SSE stream: %w", serr)
+	}
+	return status, nil, fmt.Errorf("SSE stream ended without a result event")
+}
+
+// promptLiveProviderSm is the canary prompt the live specs drive: a cheap
+// single-turn run that completes with stop=end_turn and real (non-zero) usage
+// without invoking any tools. It mirrors e2e/provider_test.go's default-lane
+// canary so the same verified-cheap lane + phrasing is exercised through the pod.
+const promptLiveProviderSm = "Reply with exactly the single word: ok. Do not call any tools."
 
 // ginkgoSuiteCtx returns a context cancelled when the ginkgo suite exits. It is
 // the parent for all kubectl/kind/ko commands so a suite abort tears them down.
