@@ -287,18 +287,35 @@ func waitPodsReady() {
 		"--timeout=180s")
 }
 
-// podNames returns the names of the agent pods (component=agent), in stable
-// sorted order so pod-A / pod-B are addressable across the suite. There are
-// exactly two (the Deployment replicas:2); the suite asserts that.
+// podNames returns the names of the agent pods (component=agent) that are
+// Running and Ready, in stable sorted order so pod-A / pod-B are addressable
+// across the suite. There are exactly two (the Deployment replicas:2); the
+// suite asserts that. Filtering to Ready pods excludes terminating pods during
+// a rolling update (the old pods leave the Ready set when /readyz flips to 503
+// via the drain gate, but they remain in the pod list during the
+// terminationGracePeriodSeconds window).
+//
+// This is an Eventually because a RollingUpdate with maxSurge:1 has a transient
+// 3-pod window: the new pods surge Ready before the old pod's preStop /drain
+// hook flips its readiness to not-ready. The rollout is "complete" (kubectl
+// rollout status returns) when the new ReplicaSet reaches replicas, NOT when the
+// old pod is gone. Waiting for exactly 2 Ready pods is the correct semantic —
+// it resolves the transient state naturally via the readiness probe, not via a
+// pod-count guess.
 func podNames() []string {
 	ginkgo.GinkgoHelper()
-	out := runCmd(ginkgoSuiteCtx(), "kubectl", "get", "pods",
-		"-n", k8sNamespace,
-		"-l", "app.kubernetes.io/component="+agentComponent,
-		"-o", "jsonpath={.items[*].metadata.name}")
-	names := strings.Fields(strings.TrimSpace(out))
-	gomega.ExpectWithOffset(1, names).To(gomega.HaveLen(2),
-		"expected exactly two agent pods (replicas:2), got %v", names)
+	var names []string
+	gomega.Eventually(func(g gomega.Gomega) {
+		out := runCmdQuiet("kubectl", "get", "pods",
+			"-n", k8sNamespace,
+			"-l", "app.kubernetes.io/component="+agentComponent,
+			"--field-selector=status.phase==Running",
+			"-o", "jsonpath={.items[?(@.status.containerStatuses[0].ready==true)].metadata.name}")
+		names = strings.Fields(strings.TrimSpace(out))
+		g.Expect(names).To(gomega.HaveLen(2),
+			"expected exactly two Ready agent pods (replicas:2), got %d: %v", len(names), names)
+	}, 120*time.Second, 2*time.Second).Should(gomega.Succeed(),
+		"did not converge on exactly two Ready agent pods")
 	return names
 }
 
@@ -644,20 +661,9 @@ func enableLiveProvider() {
 	ginkgo.By("waiting for all mecak8s pods to be Ready (after the live-provider patch)")
 	waitPodsReady()
 
-	// Wait for the old pods to terminate: during a RollingUpdate with
-	// maxSurge:1, rollout status completes when the new ReplicaSet is fully
-	// available, but the old pods may still be terminating. podNames() asserts
-	// exactly 2, so wait for the transient 3-pod window to clear.
-	gomega.Eventually(func() int {
-		out := runCmdQuiet("kubectl", "get", "pods",
-			"-n", k8sNamespace,
-			"-l", "app.kubernetes.io/component="+agentComponent,
-			"-o", "jsonpath={.items[*].metadata.name}")
-		return len(strings.Fields(strings.TrimSpace(out)))
-	}, 60*time.Second, 2*time.Second).Should(gomega.Equal(2),
-		"expected exactly 2 agent pods after the live-provider rollout (old pods should be terminated)")
-
-	// Refresh the captured pod names: the rollout replaced both pods.
+	// Refresh the captured pod names: the rollout replaced both pods. podNames()
+	// filters to Ready pods only, so the terminating old pods (still in the pod
+	// list during terminationGracePeriodSeconds) are excluded automatically.
 	agentPods = podNames()
 	ginkgo.GinkgoWriter.Printf("live provider enabled; agent pods after rollout: pod-A=%s pod-B=%s\n",
 		agentPods[0], agentPods[1])
