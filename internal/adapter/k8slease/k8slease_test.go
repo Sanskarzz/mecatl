@@ -14,6 +14,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
+	"github.com/stacklok/mecatl/engine/adapter/leaseconformance"
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/session"
 )
@@ -238,6 +239,26 @@ func TestFakeNonConflictSubset(t *testing.T) {
 		if _, err := l.Acquire(ctx, "multi-b", "owner-b"); err != nil {
 			t.Fatalf("Acquire b: %v", err)
 		}
+	})
+}
+
+// TestLeaseConformance runs the shared leaseconformance suite over k8slease —
+// the SAME suite memlease, flocklease, the grpcdriver client, and memstore pass.
+// This is the contract-unification entry: when the shared suite adds an
+// assertion, k8slease gets it automatically. The suite pins the port.SessionLease
+// contract (Acquire/Renew/Release/Expiry semantics), NOT the CAS-conflict path:
+// the fake clientset's ObjectTracker does not enforce resourceVersion CAS on
+// Update (Open Risk #1), so the "double acquire by another owner" case passes
+// via the holder-check path (Get returns the live object → ErrLeaseHeld), not a
+// 409. The CAS-conflict path is covered separately by TestUpdateConflictIsLeaseHeld
+// (PrependReactor → 409 → ErrLeaseHeld); the hand-written TestFakeNonConflictSubset
+// stays as harmless extra k8slease-specific coverage (e.g. non-owner Release is a
+// no-op).
+func TestLeaseConformance(t *testing.T) {
+	leaseconformance.Run(t, func(t *testing.T) (port.SessionLease, func(time.Duration)) {
+		clk := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+		cs := fake.NewSimpleClientset()
+		return New(cs, testNamespace, leaseconformance.TTL, clk), clk.advance
 	})
 }
 

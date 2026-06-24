@@ -125,9 +125,14 @@ func (l *Lease) Renew(ctx context.Context, in port.Lease) (port.Lease, error) {
 }
 
 // Release relinquishes a lease the caller still holds (holder + token match) by
-// deleting the object; idempotent (a NotFound, a holder/token mismatch, or a
-// concurrent change is a no-op success — Release only drops the caller's OWN
-// hold).
+// writing a TOMBSTONE: the holder is cleared and the renewTime is wound back into
+// the past so the object reads as already-expired, while leaseTransitions (the
+// fencing token) is RETAINED. This keeps the per-id token monotone across release
+// — the port.SessionLease contract a successful takeover after a release returns a
+// strictly-greater token (pinned by the shared leaseconformance suite). Deleting
+// the object instead would reset leaseTransitions to 1 on the next create and
+// break that contract. Idempotent: a NotFound, a holder/token mismatch, or a
+// concurrent change is a no-op success — Release only drops the caller's OWN hold.
 func (l *Lease) Release(ctx context.Context, in port.Lease) error {
 	leases := l.clientset.CoordinationV1().Leases(l.namespace)
 	cur, err := leases.Get(ctx, objectName(in.SessionID), metav1.GetOptions{})
@@ -140,15 +145,29 @@ func (l *Lease) Release(ctx context.Context, in port.Lease) error {
 	if derefStr(cur.Spec.HolderIdentity) != in.Owner || tokenToUint(derefInt32(cur.Spec.LeaseTransitions)) != in.Token {
 		return nil // not our hold; idempotent no-op.
 	}
-	// CAS delete on the read resourceVersion: if it changed under us, someone
-	// else took over and we have nothing to release.
-	err = leases.Delete(ctx, objectName(in.SessionID), metav1.DeleteOptions{
-		Preconditions: &metav1.Preconditions{ResourceVersion: &cur.ResourceVersion},
-	})
-	if err == nil || apierrors.IsNotFound(err) || apierrors.IsConflict(err) {
-		return nil
+	// Write a tombstone under a CAS Update: clear the holder and set renewTime into
+	// the past so the lease reads as expired, retaining leaseTransitions. A 409
+	// Conflict (someone else took over under us) is a no-op success — we have
+	// nothing to release.
+	now := l.clock.Now()
+	token := derefInt32(cur.Spec.LeaseTransitions)
+	tomb := cur.DeepCopy()
+	if tomb.Annotations == nil {
+		tomb.Annotations = map[string]string{}
 	}
-	return fmt.Errorf("k8slease: delete lease %q: %w", in.SessionID, err)
+	tomb.Annotations[rawIDAnnotation] = string(in.SessionID)
+	emptyHolder := ""
+	tomb.Spec.HolderIdentity = &emptyHolder
+	past := metav1.NewMicroTime(now.Add(-l.ttl - time.Second))
+	tomb.Spec.RenewTime = &past
+	tomb.Spec.LeaseTransitions = &token
+	if _, err := leases.Update(ctx, tomb, metav1.UpdateOptions{}); err != nil {
+		if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
+			return nil // lost the CAS race or gone — nothing to release.
+		}
+		return fmt.Errorf("k8slease: tombstone lease %q: %w", in.SessionID, err)
+	}
+	return nil
 }
 
 // createLease creates a fresh Lease object (transitions=1) and maps a 409
