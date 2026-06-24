@@ -31,6 +31,7 @@ Documentation/citation conventions are in [`docs/design/README.md`](../design/RE
 - [0037 — Engine public-API stability contract](./0037-engine-stability-contract.md)
 - [0038 — Event-sourced SessionStore rehydration (the reference fold)](./0038-event-sourced-rehydration.md)
 - [0044 — Host-supplied askID discriminator (cross-process-reconstructable askID)](./0044-host-supplied-askid-discriminator.md)
+- [0048 — mecak8s: Kubernetes-native agent harness (storage-free, managed-service state)](./0048-mecak8s.md)
 
 ### Memory & context
 - [0008 — Memory on by default](./0008-memory-on-by-default.md)
