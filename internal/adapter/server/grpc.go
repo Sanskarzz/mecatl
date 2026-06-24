@@ -365,6 +365,11 @@ func toStatus(err error) error {
 		// lease. Well-formed request, transiently owned elsewhere — FailedPrecondition
 		// (consistent with ErrNoActiveRun; HTTP maps it to 409 Conflict).
 		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, ErrUnavailable):
+		// ADR 0048 drain gate: this replica is draining (graceful shutdown) and
+		// refuses new run-entries. Unavailable (HTTP 503) so the client retries a
+		// survivor.
+		return status.Error(codes.Unavailable, err.Error())
 	case errors.Is(err, ErrNoMCPProvider):
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, ErrTeamsDisabled):

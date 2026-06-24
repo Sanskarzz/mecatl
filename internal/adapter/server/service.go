@@ -603,6 +603,14 @@ type Service struct {
 	// gate stickily stops consulting it and degrades to the no-lease path (the
 	// ErrPruneUnsupported sticky-disable precedent). Guarded by s.mu.
 	leaseDisabled bool
+
+	// draining is the cloud-native drain gate (ADR 0048, mecak8s): once armed by
+	// Drain, acquireLease rejects new run-entries with ErrUnavailable so a
+	// shutting-down replica steers new traffic to a survivor within the
+	// termination grace period. It starts false (the byte-identical default), so
+	// mecated and an undrained mecak8s are unaffected. Read with atomic.Load in
+	// the run-entry hot path (no s.mu).
+	draining atomic.Bool
 }
 
 // heldLease is one process-held session lease plus the cancel that stops its
@@ -1152,6 +1160,29 @@ func (s *Service) Close() {
 	for _, id := range leasedIDs {
 		s.releaseLease(id)
 	}
+}
+
+// Drain arms the drain gate (ADR 0048, mecak8s): subsequent run-entries
+// (StartRunContent / resumeFromAwaiting via acquireLease) are rejected with
+// ErrUnavailable so a shutting-down replica stops accepting new runs and a
+// rolling update steers traffic to a survivor. It is idempotent and safe to
+// call from a signal handler or the /drain HTTP endpoint. In-flight runs are
+// NOT cancelled here — that is the bounded GracefulStop's job in the cmd
+// binary; Drain only gates new entries. The gate is one-way: there is no
+// un-drain (a draining replica is retiring).
+func (s *Service) Drain() {
+	s.draining.Store(true)
+}
+
+// ActiveRuns reports the number of sessions this process is actively driving —
+// the count of held session leases (one per live run-entry). It is the
+// "draining: N active runs" figure a graceful shutdown logs after Drain, so the
+// operator can see how many in-flight runs the bounded GracefulStop will
+// cancel. Zero (or no lease wired) means nothing is in flight.
+func (s *Service) ActiveRuns() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.heldLeases)
 }
 
 // GetSession returns the persisted session under id, or ErrNotFound.
@@ -2104,6 +2135,17 @@ func (s *Service) appendEvent(ctx context.Context, id session.SessionID, ev sess
 // The Acquire RPC is bounded by leaseAcquireTimeout so a wedged backend cannot
 // stall run-entry indefinitely (this runs under s.runEntryMu on the hot path).
 func (s *Service) acquireLease(ctx context.Context, id session.SessionID) error {
+	// Drain gate (ADR 0048, mecak8s): once Drain is armed, refuse new run-entries
+	// BEFORE leasing/launching so a shutting-down replica steers new traffic to a
+	// survivor. Checked here (the single run-entry chokepoint covering
+	// StartRunContent + resumeFromAwaiting) so both prompt and awaiting-resume
+	// paths are gated uniformly. An in-flight same-process Approve on a LIVE run
+	// does NOT pass through acquireLease (it resolves over the channel), so a
+	// verdict on an already-running session stays allowed during drain. The gate
+	// starts false — byte-identical default for mecated and an undrained mecak8s.
+	if s.draining.Load() {
+		return fmt.Errorf("%w: %q", ErrUnavailable, id)
+	}
 	if s.cfg.SessionLease == nil {
 		return nil
 	}

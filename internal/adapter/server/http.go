@@ -1035,6 +1035,10 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		// lease. 409 Conflict — the session exists and is well-formed, it is just
 		// owned by another process right now (a later retry can succeed).
 		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, ErrUnavailable):
+		// ADR 0048 drain gate: this replica is draining (graceful shutdown) and
+		// refuses new run-entries. 503 so the client retries a survivor.
+		writeError(w, http.StatusServiceUnavailable, err.Error())
 	case errors.Is(err, ErrNoMCPProvider):
 		// No MCP provider is wired: the precondition for read/get is unmet.
 		writeError(w, http.StatusPreconditionFailed, err.Error())

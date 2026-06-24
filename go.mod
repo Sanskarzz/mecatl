@@ -9,6 +9,7 @@ require (
 	charm.land/glamour/v2 v2.0.0
 	charm.land/lipgloss/v2 v2.0.3
 	github.com/adrg/xdg v0.5.3
+	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/anthropics/anthropic-sdk-go v1.47.0
 	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/charmbracelet/colorprofile v0.4.3
@@ -23,6 +24,7 @@ require (
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
 	github.com/prometheus/procfs v0.20.1
+	github.com/redis/go-redis/v9 v9.19.0
 	github.com/stacklok/mecatl/engine v0.0.0-00010101000000-000000000000
 	github.com/stacklok/toolhive v0.28.3
 	github.com/tiktoken-go/tokenizer v0.8.0
@@ -38,7 +40,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.44.0
 	go.uber.org/goleak v1.3.0
 	go.yaml.in/yaml/v3 v3.0.4
-	golang.org/x/sync v0.20.0
+	golang.org/x/sync v0.21.0
 	golang.org/x/term v0.43.0
 	golang.org/x/time v0.15.0
 	golang.org/x/tools v0.44.0
@@ -204,7 +206,6 @@ require (
 	github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 // indirect
 	github.com/prometheus/common v0.67.5 // indirect
 	github.com/prometheus/otlptranslator v1.0.0 // indirect
-	github.com/redis/go-redis/v9 v9.19.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/sagikazarmark/locafero v0.11.0 // indirect
@@ -242,6 +243,7 @@ require (
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	github.com/yuin/goldmark v1.7.8 // indirect
 	github.com/yuin/goldmark-emoji v1.0.5 // indirect
+	github.com/yuin/gopher-lua v1.1.1 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	github.com/zalando/go-keyring v0.2.8 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect

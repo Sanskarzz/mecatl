@@ -62,4 +62,14 @@ var (
 	// elsewhere right now (a later retry, after the holder releases or its lease
 	// lapses, can succeed). Only ever returned when a SessionLease is wired.
 	ErrSessionLeasedElsewhere = errors.New("server: session is leased by another process")
+	// ErrUnavailable is returned by the run-entry funnel (acquireLease, covering
+	// StartRunContent + resumeFromAwaiting) when the server is DRAINING — it has
+	// been asked to stop accepting new runs (mecak8s graceful shutdown, ADR 0048).
+	// A drained run-entry is rejected before leasing/launching so a rolling update
+	// steers new traffic to a survivor. In-flight runs are cancelled (not drained
+	// to completion); a same-process Approve on a LIVE run is NOT a new run-entry
+	// and stays allowed (it delivers a verdict to an already-running run). Adapters
+	// map it to Unavailable / HTTP 503. The gate starts false (byte-identical
+	// default); Service.Drain arms it.
+	ErrUnavailable = errors.New("server: draining, not accepting new runs")
 )
