@@ -449,8 +449,12 @@ e2e/k8s/
 1. **Lease exclusion across replicas (THE proof):**
    - Port-forward to each agent pod directly.
    - Create a session via pod-A, start a run (mock multi-turn, lease held).
-   - POST same session to pod-B → assert **HTTP 409**.
-   - Wait for pod-A's run to complete → POST to pod-B → assert **200**.
+   - POST same session to pod-B → assert **HTTP 409** (lease held elsewhere).
+   - After pod-A's run completes → POST to pod-B → still assert **409**
+     (the lease is **session-scoped**: held past run completion, released only
+     by CloseSession / shutdown, never per-run).
+   - DELETE the session on pod-A (→ `releaseLease`) → POST to pod-B → assert
+     **200** (release enables takeover).
 
 2. **Graceful failover releases lease before TTL:**
    - Start a run on pod-A (holds the lease).
