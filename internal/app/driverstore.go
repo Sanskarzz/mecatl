@@ -26,6 +26,15 @@ func validateDriverConfig(cfg Config) error {
 	if cfg.StoreDir != "" && cfg.SessionStoreURL != "" {
 		return fmt.Errorf("--store-dir %q and --session-store-url %q are mutually exclusive: the session store is either the local JSONL dir or the remote driver, never both", cfg.StoreDir, cfg.SessionStoreURL)
 	}
+	// Redis (ADR 0048, mecak8s) is a third store option, mutually exclusive with
+	// BOTH the local dir and the gRPC driver (one store per seam — a silent
+	// precedence would hide an operator mistake).
+	if cfg.RedisURL != "" && cfg.StoreDir != "" {
+		return fmt.Errorf("--redis-url %q and --store-dir %q are mutually exclusive: the session store is either the Redis managed service or the local JSONL dir, never both", cfg.RedisURL, cfg.StoreDir)
+	}
+	if cfg.RedisURL != "" && cfg.SessionStoreURL != "" {
+		return fmt.Errorf("--redis-url %q and --session-store-url %q are mutually exclusive: the session store is either the Redis managed service or the remote gRPC driver, never both", cfg.RedisURL, cfg.SessionStoreURL)
+	}
 	if cfg.MemoryDir != "" && cfg.MemoryStoreURL != "" {
 		return fmt.Errorf("--memory-dir %q and --memory-store-url %q are mutually exclusive: the memory store is either the local flock dir or the remote driver, never both", cfg.MemoryDir, cfg.MemoryStoreURL)
 	}

@@ -4,13 +4,18 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/alicebob/miniredis/v2"
 
 	"github.com/stacklok/mecatl/engine/adapter/memstore"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
+	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/internal/adapter/agents"
 	"github.com/stacklok/mecatl/internal/adapter/grpcdriver"
 	"github.com/stacklok/mecatl/internal/adapter/hookexec"
 	"github.com/stacklok/mecatl/internal/adapter/memory"
+	"github.com/stacklok/mecatl/internal/adapter/redisstore"
 	"github.com/stacklok/mecatl/internal/adapter/store/jsonlstore"
 )
 
@@ -27,9 +32,20 @@ func TestValidateDriverConfigExclusivity(t *testing.T) {
 		{name: "local only", cfg: Config{StoreDir: "/tmp/s", MemoryDir: "/tmp/m"}},
 		{name: "drivers only", cfg: Config{SessionStoreURL: "127.0.0.1:7443", MemoryStoreURL: "127.0.0.1:7443"}},
 		{name: "mixed across seams", cfg: Config{StoreDir: "/tmp/s", MemoryStoreURL: "127.0.0.1:7443"}},
+		{name: "redis only", cfg: Config{RedisURL: "redis:6379"}},
 		{
 			name:    "session store both",
 			cfg:     Config{StoreDir: "/tmp/s", SessionStoreURL: "127.0.0.1:7443"},
+			wantErr: "mutually exclusive",
+		},
+		{
+			name:    "redis and store-dir",
+			cfg:     Config{RedisURL: "redis:6379", StoreDir: "/tmp/s"},
+			wantErr: "mutually exclusive",
+		},
+		{
+			name:    "redis and session-store-url",
+			cfg:     Config{RedisURL: "redis:6379", SessionStoreURL: "127.0.0.1:7443"},
 			wantErr: "mutually exclusive",
 		},
 		{
@@ -124,6 +140,45 @@ func TestBuildStoreDefaults(t *testing.T) {
 			t.Fatalf("buildStore(StoreDir) eventLog should be the same *jsonlstore.Store instance, got %T", eventLog)
 		}
 	})
+}
+
+// TestBuildStoreRedisURL pins the ADR-0048 Redis branch of buildSessionStore:
+// a RedisURL yields the redisstore adapter, which doubles as its own EventLog
+// (the same Store instance, like jsonlstore). The test uses an in-process
+// miniredis so it is fully offline. A Save/Load round-trip proves the adapter
+// is wired through composition, not just constructed.
+func TestBuildStoreRedisURL(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	defer mr.Close()
+	st, eventLog, closeFn, err := buildStore(Config{RedisURL: mr.Addr()})
+	if err != nil {
+		t.Fatalf("buildStore(RedisURL): %v", err)
+	}
+	defer closeFn()
+	rs, ok := st.(*redisstore.Store)
+	if !ok {
+		t.Fatalf("buildStore(RedisURL) = %T, want *redisstore.Store", st)
+	}
+	// The one redisstore Store doubles as the EventLog (same instance).
+	if el, ok := eventLog.(*redisstore.Store); !ok || el != rs {
+		t.Fatalf("buildStore(RedisURL) eventLog should be the same *redisstore.Store instance, got %T", eventLog)
+	}
+	// A Save/Load round-trip through the composition-wired adapter proves it is
+	// the real store, not a nil stub.
+	s := session.New("redis-build-test", session.ModeAccept, "/work", session.Limits{}, time.Now())
+	if err := st.Save(context.Background(), s); err != nil {
+		t.Fatalf("Save through composition-wired redisstore: %v", err)
+	}
+	got, err := st.Load(context.Background(), s.ID)
+	if err != nil {
+		t.Fatalf("Load through composition-wired redisstore: %v", err)
+	}
+	if got.ID != s.ID {
+		t.Errorf("Load.ID = %q, want %q", got.ID, s.ID)
+	}
 }
 
 // TestBuildStoreEventLogURL pins the cloud-native 3c override: an

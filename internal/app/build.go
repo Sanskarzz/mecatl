@@ -62,6 +62,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/osfs"
 	"github.com/stacklok/mecatl/internal/adapter/permconfig"
 	"github.com/stacklok/mecatl/internal/adapter/providercatalog"
+	"github.com/stacklok/mecatl/internal/adapter/redisstore"
 	httpsearch "github.com/stacklok/mecatl/internal/adapter/search"
 	"github.com/stacklok/mecatl/internal/adapter/server"
 	"github.com/stacklok/mecatl/internal/adapter/skills"
@@ -118,8 +119,16 @@ type Config struct {
 	OpenAIKey     string
 	UseMock       bool
 	StoreDir      string
-	Shell         string
-	NoBash        bool
+	// RedisURL (ADR 0048, mecak8s) points the session store + durable event log
+	// at a Redis managed service (internal/adapter/redisstore). It is mutually
+	// exclusive with StoreDir and SessionStoreURL (validateDriverConfig: one
+	// store per seam). Empty keeps today's behaviour byte-identical. The Redis
+	// adapter reuses sessnap-json/1 snapshots + the event-log envelope shape, so
+	// it is a TRANSPORT alternative to jsonlstore — validated by the same
+	// conformance suites. The Store doubles as its own EventLog (like jsonlstore).
+	RedisURL string
+	Shell    string
+	NoBash   bool
 
 	// DefaultProvider/DefaultModel are the SERVER-CONFIGURED deployment-wide
 	// default (issue #21; --default-provider / --default-model — the wire's
@@ -1811,6 +1820,17 @@ func newK8sClientset() (kubernetes.Interface, error) {
 // driver leaves the EventLog nil. The --event-log-url override is layered on top
 // in buildStore.
 func buildSessionStore(cfg Config) (port.SessionStore, port.EventLog, func(), error) {
+	// Redis (ADR 0048, mecak8s): a managed-service store. The Store doubles as
+	// its own EventLog (like jsonlstore), so wire it as both. Mutually exclusive
+	// with StoreDir/SessionStoreURL (validateDriverConfig enforces it).
+	if cfg.RedisURL != "" {
+		st, err := redisstore.New(cfg.RedisURL)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("redis store: %w", err)
+		}
+		cfg.diag().Log(context.Background(), port.LevelInfo, "session store: redis", "url", cfg.RedisURL)
+		return st, st, func() { _ = st.Close() }, nil
+	}
 	if cfg.SessionStoreURL != "" {
 		conn, closeFn, err := cfg.drivers().dial(cfg, cfg.SessionStoreURL)
 		if err != nil {
