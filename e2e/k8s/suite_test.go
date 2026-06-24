@@ -47,10 +47,21 @@ var _ = ginkgo.BeforeSuite(func() {
 	kindCreateCluster()
 
 	ginkgo.By("building the mecak8s image with ko")
-	image := koBuildMecak8s()
+	builtImage := koBuildMecak8s()
+
+	ginkgo.By("resolving the manifests to get the pod image ref")
+	resolvedImage := resolvedImageRef()
+
+	// ko build produces `ko.local:<sha>` but ko resolve produces
+	// `ko.local/mecak8s-<hash>:<sha>` — retag so kind load can load the image
+	// under the exact name the pod references.
+	if builtImage != resolvedImage {
+		ginkgo.By("retagging the image to match the resolved pod ref")
+		retagImage(builtImage, resolvedImage)
+	}
 
 	ginkgo.By("loading the image into the kind node")
-	kindLoadImage(image)
+	kindLoadImage(resolvedImage)
 
 	ginkgo.By("applying the deploy/mecak8s/ manifests")
 	applyManifests()

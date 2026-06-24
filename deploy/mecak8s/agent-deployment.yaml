@@ -59,6 +59,10 @@ spec:
       containers:
         - name: mecak8s-agent
           image: ko://github.com/stacklok/mecatl/cmd/mecak8s
+          # IfNotPresent: the image is loaded into the kind node via `kind load
+          # docker-image` (not pulled from a registry). ko.local is a local-only
+          # repo, so Always would fail trying to resolve it as a DNS name.
+          imagePullPolicy: IfNotPresent
           args:
             - --grpc-addr=0.0.0.0:8080
             - --http-addr=0.0.0.0:8081
