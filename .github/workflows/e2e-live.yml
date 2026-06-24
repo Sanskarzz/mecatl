@@ -156,3 +156,105 @@ jobs:
           include-hidden-files: true
           retention-days: 7
           if-no-files-found: warn
+
+  # Live k8s e2e suite for mecak8s — the same `task e2e:k8s` kind suite as
+  # k8s-e2e.yml, but run under the `e2e-live` label/nightly/dispatch trigger so
+  # the LIVE specs (real OpenRouter model calls inside the kind cluster) execute.
+  # The mock specs run unconditionally; the live specs skip without the key, but
+  # the job's secret gate ensures they run when the label is applied.
+  #
+  # Same trigger/gate model as the `e2e` job above (repo + label, same secret
+  # gate, same action pins). Independent concurrency group so the two live jobs
+  # run in parallel — they spend against the same provider but exercise disjoint
+  # code paths (mecatui live e2e vs mecak8s kind live e2e).
+  k8s-e2e-live:
+    name: Live k8s e2e (kind + OpenRouter)
+    runs-on: ubuntu-24.04
+    # The kind suite with live specs takes ~15-20 min; 30 is the backstop UNDER
+    # the suite's own 30m `go test -timeout` (see Taskfile.yml e2e:k8s).
+    timeout-minutes: 30
+    # Same gate as the `e2e` job: never run from a fork's copy of this workflow,
+    # and PRs run only when a maintainer opted in via the `e2e-live` label.
+    if: >-
+      github.repository == 'stacklok/mecatl' &&
+      (github.event_name != 'pull_request' ||
+       contains(github.event.pull_request.labels.*.name, 'e2e-live'))
+    # Separate group from `e2e-live` so the two live jobs run in parallel; they
+    # are independent (disjoint code paths). cancel-in-progress so a newer live
+    # k8s run supersedes an in-flight one rather than doubling the spend.
+    concurrency:
+      group: e2e-live-k8s
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          # engine/ is its own module (go.work monorepo); its go.sum is part of
+          # the build cache key alongside the root's.
+          cache-dependency-path: |
+            go.sum
+            engine/go.sum
+
+      - uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # kind: pinned version, installed via `go install` (no third-party action —
+      # the house idiom for go-installable tools). v0.32.0 is the current release.
+      - name: Install kind
+        run: go install sigs.k8s.io/kind@v0.32.0
+
+      # ko: pinned version, same `go install` idiom. v0.18.1 builds the mecak8s
+      # image from .ko.yaml onto the distroless base. KO_DOCKER_REPO=ko.local
+      # below loads it into the local container daemon with no registry push.
+      - name: Install ko
+        run: go install github.com/google/ko@v0.18.1
+
+      # kubectl is pre-installed on ubuntu-24.04 runners; no install step.
+
+      # Same secret gate as the `e2e` job: skip cleanly (green, with a visible
+      # notice) when the secret is absent — a labelled fork PR or a secretless
+      # clone reaches this step but must not hard-fail.
+      - name: Gate on OPENROUTER_API_KEY availability
+        id: gate
+        env:
+          HAS_KEY: ${{ secrets.OPENROUTER_API_KEY != '' }}
+        run: |
+          if [ "$HAS_KEY" != "true" ]; then
+            echo "::notice title=k8s-e2e-live skipped::OPENROUTER_API_KEY is not available in this context (fork PR or unconfigured secret); skipping the live k8s suite."
+          fi
+          echo "run=$HAS_KEY" >> "$GITHUB_OUTPUT"
+
+      # `task e2e:k8s` == `task build` (deps), then
+      # `go test -tags kind_e2e -count=1 -timeout 30m ./e2e/k8s/...`.
+      # KO_DOCKER_REPO=ko.local keeps the image local (no push, no credentials).
+      # OPENROUTER_API_KEY enables the live specs (the mock specs run regardless).
+      # Output is teed so the failure-artifact upload has the full log; explicit
+      # `shell: bash` gives `-o pipefail` so the tee never masks a test failure.
+      - name: task e2e:k8s
+        if: steps.gate.outputs.run == 'true'
+        shell: bash
+        env:
+          KO_DOCKER_REPO: ko.local
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: task e2e:k8s 2>&1 | tee k8s-e2e-live-output.log
+
+      # Failure-only artifact upload (mirrors k8s-e2e.yml's pattern): the tee'd
+      # test log is the deliverable of a failed run — it carries the full `go
+      # test` output (kind bring-up, pod logs, assertion failures). if-no-files-
+      # found is `warn` (not `ignore`) so a future regression in the tee path is
+      # VISIBLE in the job log instead of silent.
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: k8s-e2e-live-artifacts-${{ github.run_id }}
+          path: k8s-e2e-live-output.log
+          retention-days: 7
+          if-no-files-found: warn
