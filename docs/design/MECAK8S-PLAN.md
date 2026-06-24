@@ -523,48 +523,48 @@ e2e/k8s/
 
 Each step is independently shippable, CI-green.
 
-### Step 1: Redis adapter (`internal/adapter/redisstore/`)
+### Step 1: Redis adapter (`internal/adapter/redisstore/`) — ✅ DONE
 - `redisstore.go` + `redisstore_test.go` + `conformance_test.go`.
 - Implements `port.SessionStore` + `port.EventLog` + `PrunableStore` + `ToolCallRecorder`.
 - Conformance over `miniredis` (offline).
 - `task lint && task test` green.
 
-### Step 2: Wire Redis into `app.Build`
+### Step 2: Wire Redis into `app.Build` — ✅ DONE
 - `Config.RedisURL` + `--redis-url` flag.
 - `buildSessionStore` branch + `validateDriverConfig` mutual exclusivity.
 - ~10 lines additive. Byte-identical when empty.
 - `task lint && task test` green.
 
-### Step 3: Drain gate
+### Step 3: Drain gate — ✅ DONE
 - `atomic.Bool draining` + `Service.Drain()` + `Service.ActiveRuns()`.
 - Check in `acquireLease`. Unit-test offline.
 - Fix `cmd/mecated/main.go:1129` flag help RBAC verbs (panel M2).
 - `task lint && task test` green.
 
-### Step 4: `cmd/mecak8s/` (storage-free agent binary)
+### Step 4: `cmd/mecak8s/` (storage-free agent binary) — ✅ DONE
 - `main.go` + `flags.go` (cliconfig) + `serve.go` + `main_test.go`.
 - `--redis-url`, dynamic `ReadyFunc`, drain gate, bounded `GracefulStop`, `/drain`.
 - Offline test over mockllm + memfs.
 - `task build` produces `bin/mecak8s`.
 
-### Step 5: `.ko.yaml` + Taskfile
+### Step 5: `.ko.yaml` + Taskfile — ✅ DONE
 - New build entry for mecak8s. `ko:build:k8s`, `e2e:k8s` tasks.
 
-### Step 6: `deploy/mecak8s/` manifests
+### Step 6: `deploy/mecak8s/` manifests — ✅ DONE
 - namespace, rbac, redis-statefulset, redis-service, agent-deployment,
   agent-service, pdb, networkpolicy, kustomization.
 
-### Step 7: `e2e/k8s/` kind suite
+### Step 7: `e2e/k8s/` kind suite — ✅ DONE
 - `suite_test.go`, `lease_test.go`, `failover_test.go`, `persistence_test.go`,
   `helpers_test.go`. Gated behind `kind_e2e` tag.
 
-### Step 8: living docs
+### Step 8: living docs — 🔨 IN PROGRESS
 - Update `docs/architecture.md` (mecak8s binary paragraph + diagram + adapter table).
 - Update `docs/usage.md` (mecak8s section: flags, manifests, kind e2e).
 - Update `docs/design/PRODUCTION-READINESS.md` (mecak8s status row).
 - `task generate` / `task docs` before commit.
 
-### Step 9: CI workflow
+### Step 9: CI workflow — ✅ DONE
 - `.github/workflows/k8s-e2e.yml` on relevant-path PRs.
 
 ---
@@ -619,18 +619,18 @@ NOT TOUCHED:
 
 ## 9. Verification checklist
 
-- [ ] `task lint && task test` green (Redis adapter conformance + drain gate).
-- [ ] `task build` produces `bin/mecak8s`.
-- [ ] `ko:build:k8s` produces a distroless image.
-- [ ] `ko:resolve:k8s` renders valid manifests.
-- [ ] `task e2e:k8s` passes: lease exclusion, graceful failover, persistence.
-- [ ] `task api:check` green (no engine API change → no `api:update`).
-- [ ] `task generate` / `task docs` green.
-- [ ] `go run ./cmd/mecademo` still prints the offline session.
-- [ ] mecated's existing e2e unaffected (drain gate starts false).
-- [ ] mecated's `--session-lease-k8s-namespace` flag help matches RBAC verbs.
-- [ ] Agent pod spec has NO PVC, NO volumeMounts (storage-free verified).
-- [ ] Redis adapter passes storeconformance + eventlogconformance over miniredis.
+- [x] `task lint && task test` green (Redis adapter conformance + drain gate).
+- [x] `task build` produces `bin/mecak8s`.
+- [x] `ko:build:k8s` produces a distroless image.
+- [x] `ko:resolve:k8s` renders valid manifests.
+- [x] `task e2e:k8s` passes: lease exclusion, graceful failover, persistence.
+- [x] `task api:check` green (no engine API change → no `api:update`).
+- [x] `task generate` / `task docs` green.
+- [x] `go run ./cmd/mecademo` still prints the offline session.
+- [x] mecated's existing e2e unaffected (drain gate starts false).
+- [x] mecated's `--session-lease-k8s-namespace` flag help matches RBAC verbs.
+- [x] Agent pod spec has NO PVC, NO volumeMounts (storage-free verified).
+- [x] Redis adapter passes storeconformance + eventlogconformance over miniredis.
 
 ---
 

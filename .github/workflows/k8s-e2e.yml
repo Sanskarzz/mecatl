@@ -1,0 +1,134 @@
+# kind-based k8s e2e suite for mecak8s (ADR 0048).
+#
+# Spins a real kind cluster + Redis StatefulSet + two storage-free mecak8s agent
+# replicas and asserts lease exclusion, graceful failover, and session persistence.
+# The suite lives under e2e/k8s/ (build tag `kind_e2e`); `task e2e:k8s` runs
+# `go test -tags kind_e2e -count=1 -timeout 15m ./e2e/k8s/...`. Slow (~3-5 min) and
+# needs Docker, so it is NOT part of `task test` and runs only on relevant-path
+# changes (the mecak8s binary, the Redis store, the server surface it composes, the
+# deploy manifests, the suite itself, and the build config).
+#
+# Trigger model:
+#   - push to main, pull_request — both gated by a `paths:` filter so an unrelated
+#     doc-only or engine-only PR never pays the kind spin-up cost.
+#
+# Deliberately uses `pull_request` (NOT `pull_request_target`): this job checks out
+# and executes untrusted PR code, so it must run WITHOUT access to repo secrets —
+# the same pwn-request rationale as ci.yml. The suite is fully offline (no provider
+# key); `KO_DOCKER_REPO=ko.local` builds the image into the local Docker daemon with
+# no registry push, so no credentials are needed at all.
+#
+# All third-party actions are SHA-pinned (with a # vX.Y.Z comment) so a re-pointed
+# tag from a compromised maintainer cannot change what runs here. Pins match the
+# Stacklok house set used in ci.yml / e2e-live.yml.
+name: k8s-e2e
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - cmd/mecak8s/**
+      - internal/adapter/redisstore/**
+      - internal/adapter/server/service.go
+      - internal/adapter/server/errors.go
+      - internal/adapter/server/grpc.go
+      - internal/adapter/server/http.go
+      - deploy/mecak8s/**
+      - e2e/k8s/**
+      - .ko.yaml
+      - Taskfile.yml
+      - .github/workflows/k8s-e2e.yml
+  pull_request:
+    paths:
+      - cmd/mecak8s/**
+      - internal/adapter/redisstore/**
+      - internal/adapter/server/service.go
+      - internal/adapter/server/errors.go
+      - internal/adapter/server/grpc.go
+      - internal/adapter/server/http.go
+      - deploy/mecak8s/**
+      - e2e/k8s/**
+      - .ko.yaml
+      - Taskfile.yml
+      - .github/workflows/k8s-e2e.yml
+
+# Least-privilege: the job only reads source. The suite is fully offline; no
+# registry push and no API write are needed.
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref so a force-push doesn't pile up minutes
+# (same shape as ci.yml).
+concurrency:
+  group: k8s-e2e-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOTOOLCHAIN: local
+  GOFLAGS: -mod=readonly
+
+jobs:
+  k8s-e2e:
+    name: k8s e2e (kind)
+    runs-on: ubuntu-24.04
+    # The suite normally finishes in ~3-5 minutes; 20 covers a slow kind pull day.
+    # This is the cheap backstop UNDER the suite's own 15m `go test -timeout`.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1d1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          # engine/ is its own module (go.work monorepo); its go.sum is part of
+          # the build cache key alongside the root's.
+          cache-dependency-path: |
+            go.sum
+            engine/go.sum
+
+      - uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # kind: pinned version, installed via `go install` (no third-party action —
+      # the house idiom for go-installable tools, matching actionlint/govulncheck
+      # in ci.yml). v0.26.0 supports the Kubernetes versions the suite targets.
+      - name: Install kind
+        run: go install sigs.k8s.io/kind@v0.26.0
+
+      # ko: pinned version, same `go install` idiom. v0.17.1 builds the mecak8s
+      # image from .ko.yaml onto the distroless base. KO_DOCKER_REPO=ko.local below
+      # loads it into the local Docker daemon with no registry push.
+      - name: Install ko
+        run: go install github.com/google/ko@v0.17.1
+
+      # kubectl is pre-installed on ubuntu-24.04 runners; no install step.
+
+      # `task e2e:k8s` == `task build` (deps), then
+      # `go test -tags kind_e2e -count=1 -timeout 15m ./e2e/k8s/...`.
+      # KO_DOCKER_REPO=ko.local keeps the image local (no push, no credentials).
+      # Output is teed so the failure-artifact upload has the full log; explicit
+      # `shell: bash` gives `-o pipefail` so the tee never masks a test failure.
+      - name: task e2e:k8s
+        shell: bash
+        env:
+          KO_DOCKER_REPO: ko.local
+        run: task e2e:k8s 2>&1 | tee k8s-e2e-output.log
+
+      # Failure-only artifact upload (mirrors e2e-live.yml's pattern): the tee'd
+      # test log is the deliverable of a failed run — it carries the full `go test`
+      # output (kind bring-up, pod logs, assertion failures). if-no-files-found is
+      # `warn` (not `ignore`) so a future regression in the tee path is VISIBLE in
+      # the job log instead of silent.
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: k8s-e2e-artifacts-${{ github.run_id }}
+          path: k8s-e2e-output.log
+          retention-days: 7
+          if-no-files-found: warn

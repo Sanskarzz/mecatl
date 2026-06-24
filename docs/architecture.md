@@ -105,9 +105,11 @@ flowchart LR
     demo["cmd/mecademo"]
     tui["cmd/mecatui (gRPC client TUI; embeds app.Build when no --server)"]
     mq["cmd/mecatequi (single-shot headless; one prompt → patch + summary + exit code)"]
+    k8s["cmd/mecak8s (storage-free k8s-native agent; Redis store + k8s lease, ADR 0048)"]
     mecated --> app
     tui --> app
     mq --> app
+    k8s --> app
   end
 
   subgraph DRIVING["driving adapters — internal/adapter/server"]
@@ -139,7 +141,7 @@ flowchart LR
   subgraph DRIVEN["driven adapters — engine/adapter + internal/adapter"]
     oai["openai · mockllm"]
     fs["osfs (+CommandRunner) · memfs"]
-    st["memstore · jsonlstore · sessnap"]
+    st["memstore · jsonlstore · redisstore · sessnap"]
     tools["tools (Read/Edit/Write/Grep/Glob/WebFetch/WebSearch + optional Bash)"]
     pp["permpolicy · hookexec · modelhook"]
     tel["telemetry (OTel metrics+spans · Prometheus exporter · OTLP)"]
@@ -213,10 +215,28 @@ to the opt-in ask-reviewer, and a *main-engine* ask under `posture strict` cance
 with an actionable message (the intended CI posture is `--posture auto`). It is **forge-
 agnostic** — the GitHub-Actions glue that turns an issue into a pull request (a composite
 action + a split-privilege workflow) lives entirely under `.github/` and changes no Go.
-See `docs/adr/0028-mecatequi.md`. The three real-provider mains (`mecated`, `mecatui`,
-`mecatequi`) share provider credential + base-URL wiring through `internal/cliconfig`, so
-all three read the same `OPENAI_API_KEY` / `OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY`
+See `docs/adr/0028-mecatequi.md`. The four real-provider mains (`mecated`, `mecatui`,
+`mecatequi`, `mecak8s`) share provider credential + base-URL wiring through `internal/cliconfig`, so
+all four read the same `OPENAI_API_KEY` / `OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY`
 environment keys and register the same base-URL flags.
+
+**mecak8s — the storage-free Kubernetes-native agent (`cmd/mecak8s`).** A fifth
+composition root and a *thin peer of `mecated`* over the same `app.Build`: it composes the
+shared assembly with **k8s-native defaults** — a **Redis** session store + durable event log
+(`internal/adapter/redisstore`, ADR 0048), a `coordination.k8s.io` Lease per session
+(`internal/adapter/k8slease`, the in-cluster multi-replica single-writer path), a dynamic
+`/readyz` (drain-gated + Redis-pinged), and a bounded `GracefulStop`. The agent pods are
+**storage-free**: no PVC, no `--store-dir`, no local state — every piece of state is a
+managed service the pod talks to over the network (Redis + the k8s API server). It defaults
+`--headless=true` and `--posture=auto` (an unattended daemon, inverted from `mecated`'s
+interactive defaults), drops `mecated`'s subcommands + Prometheus/OTel admin surface, and
+exposes `--redis-url` (mutually exclusive with `--store-dir`/`--session-store-url`). The
+honest shutdown contract: new runs are rejected (503 via the drain gate) the moment SIGTERM
+or the `preStop` `httpGet /drain` fires; **in-flight runs are cancelled, not drained** (a
+multi-minute LLM turn cannot survive a rolling update within
+`terminationGracePeriodSeconds: 60`); the pod is disposable, the session is not — it is
+`Recover`-able on the successor (issue #51) from the Redis snapshot + durable event log.
+See `docs/adr/0048-mecak8s.md`.
 
 Two deliberate cycle-breaks worth noting, documented in code:
 - `port` imports `tool` and `prompt` (because `LLMRequest` carries
