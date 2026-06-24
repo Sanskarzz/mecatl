@@ -229,14 +229,12 @@ func (m *ModelsSection) UnmarshalYAML(node *yaml.Node) error {
 }
 
 // GuardrailsSection is the operator-tier `guardrails:` YAML subtree (issue #27): a
-// checker model, the per-session check cap, a master-disable, and the rule list. It
-// is parsed STRICTLY (unknown keys error).
+// checker model, a master-disable, and the rule list. It is parsed STRICTLY
+// (unknown keys error).
 type GuardrailsSection struct {
 	// Model is the checker model id / alias. Empty leaves the CLI --guardrails-model
 	// to supply it; a value here is overridden by the CLI flag when both are set.
 	Model string `yaml:"model"`
-	// MaxChecks is the per-session checker-call cap. 0 = unbounded.
-	MaxChecks int `yaml:"maxChecks"`
 	// MinContentBytes skips the checker for content shorter than this. 0 = check all.
 	MinContentBytes int `yaml:"minContentBytes"`
 	// Disabled is the YAML-level kill switch (the CLI --guardrails=off also sets it).
@@ -270,7 +268,6 @@ func (g *GuardrailsSection) UnmarshalYAML(node *yaml.Node) error {
 func (g *GuardrailsSection) strictFields() map[string]any {
 	return map[string]any{
 		"model":           &g.Model,
-		"maxChecks":       &g.MaxChecks,
 		"minContentBytes": &g.MinContentBytes,
 		"disabled":        &g.Disabled,
 		"rules":           &g.Rules,

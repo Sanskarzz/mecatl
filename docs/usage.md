@@ -1072,10 +1072,9 @@ enable axis is slot-binding, not the rule list.
 
 **Startup posture.** Build prints exactly one `guardrails: ON|OFF …` line carrying the
 RESOLVED checker model + its provenance (via `--guardrails-model`, via the `guardrail`
-slot, or via the slot superseding a differing gate value), the effective rule mode, the
-rule count, and the per-session `maxChecks`. OFF is explicit, not inferred from silence
-— either `OFF (kill-switch active …)` or `OFF (no checker model configured; …)` with
-the enable hint.
+slot, or via the slot superseding a differing gate value), the effective rule mode, and
+the rule count. OFF is explicit, not inferred from silence — either `OFF (kill-switch
+active …)` or `OFF (no checker model configured; …)` with the enable hint.
 
 ```yaml
 # ~/.config/mecatl/settings.yaml  (user-global only — NOT a checked-in project file)
@@ -1085,10 +1084,6 @@ guardrails:
                              # A bound `guardrail` model slot (--model-slot guardrail=… /
                              # models.slots.guardrail) SUPERSEDES this model AND enables
                              # guardrails on its own (ADR 0046 — configure = enable).
-  maxChecks: 50              # per-session checker-call cap — bounded SEPARATELY from
-                             # --max-run-tokens so infra spend can't starve the agent.
-                             # OMITTING maxChecks = NO cap (but the DEFAULT rule set, used when
-                             # you set only a model, gets a default cap of 200 so it can't surprise-bill).
   minContentBytes: 16        # skip a short INBOUND (post) result (cost guard; omit = check every post).
                              # Outbound (pre) args are ALWAYS inspected — a short exfil arg is the point.
   rules:                     # an explicit list REPLACES the default advisory set

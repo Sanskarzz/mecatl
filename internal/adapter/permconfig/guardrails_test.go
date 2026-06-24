@@ -16,7 +16,6 @@ import (
 const operatorGuardrailsYAML = `
 guardrails:
   model: "gpt-5"
-  maxChecks: 7
   minContentBytes: 32
   rules:
     - match: "WebFetch"
@@ -51,7 +50,7 @@ func TestOperatorGuardrailsFromCLIHonoured(t *testing.T) {
 	if g == nil {
 		t.Fatal("operator-tier guardrails must be honoured from the CLI/explicit tier")
 	}
-	if g.Model != "gpt-5" || g.MaxChecks != 7 || g.MinContentBytes != 32 || len(g.Rules) != 2 {
+	if g.Model != "gpt-5" || g.MinContentBytes != 32 || len(g.Rules) != 2 {
 		t.Fatalf("guardrails not parsed faithfully: %+v", g)
 	}
 	if g.Rules[0].Match != "WebFetch" || g.Rules[1].Mode != "advisory" {

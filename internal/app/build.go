@@ -478,10 +478,6 @@ type Config struct {
 	// per-rule prompt + fail-closed). Empty disables guardrails. Sourced only from
 	// the operator tier (user-global YAML + CLI), never the project file.
 	GuardrailsRules []GuardrailRule
-	// GuardrailsMaxChecks is the PER-SESSION checker-call cap (decision 7): checker
-	// token spend is bounded SEPARATELY from the parent's MaxRunTokens so
-	// infrastructure spend cannot starve the agent. <=0 disables the cap.
-	GuardrailsMaxChecks int
 	// GuardrailsMinContentBytes skips the checker for content shorter than this (a
 	// cost guard — trivially short content cannot carry a meaningful payload). 0
 	// checks everything.
@@ -2622,7 +2618,7 @@ func normalizeGuardrailsModel(cfg Config) (string, error) {
 //  2. nothing resolvable (no gate model, no resolvable slot) → "guardrails: OFF …" + a
 //     hint naming BOTH enable paths (bind the `guardrail` slot OR set --guardrails-model).
 //  3. configured → "guardrails: ON, checker=<resolved> (via <provenance>), mode=…, rules=N
-//     [ (default set: WebSearch, WebFetch, mcp__*)][, maxChecks=<n>]".
+//     [ (default set: WebSearch, WebFetch, mcp__*)]".
 //
 // Build-once ONLY (called from Build right after logModelRouterFacts, alongside the other
 // build-once fact emitters). NOT a loop line — the "loop emits exactly THREE lines"
@@ -2649,8 +2645,8 @@ func logGuardrailsPosture(cfg Config) {
 
 // guardrailsPostureLine composes the ON posture line as a pure helper so it can be
 // table-tested directly (TestLogGuardrailsPostureBranches). It carries the resolved
-// checker model + provenance, the effective rule mode, the rule count, whether the default
-// advisory set is in force, and the per-session maxChecks cap. Provenance: srcSlot →
+// checker model + provenance, the effective rule mode, the rule count, and whether
+// the default advisory set is in force. Provenance: srcSlot →
 // "via slot `guardrail`"; srcSlotSupersedingGate → "via slot `guardrail`, supersedes gate
 // value `<gateval>`"; srcGate → "via --guardrails-model". Mode: usedDefaults → "advisory";
 // else the highest-severity explicit-rule mode present (block > sanitize > advisory), or
@@ -2675,9 +2671,6 @@ func guardrailsPostureLine(cfg Config, model string, src guardrailSource, specs 
 	out := fmt.Sprintf("guardrails: ON, checker=%s (%s), mode=%s, rules=%d", model, provenance, mode, len(specs))
 	if usedDefaults {
 		out += " (default set: WebSearch, WebFetch, mcp__*)"
-	}
-	if mc := cfg.GuardrailsMaxChecks; mc > 0 {
-		out += fmt.Sprintf(", maxChecks=%d", mc)
 	}
 	return out
 }

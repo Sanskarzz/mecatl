@@ -65,8 +65,6 @@
 #   # model). A configured model with no rules runs the default advisory set. Leave empty
 #   # (and pass no --guardrails-model) to keep guardrails OFF.
 #   model: claude-haiku-4-6
-#   # MaxChecks is the per-session checker-call cap. 0 = unbounded.
-#   maxChecks: 0
 #   # MinContentBytes skips the checker for content shorter than this. 0 = check all.
 #   minContentBytes: 0
 #   # Disabled is the YAML-level kill switch (the CLI --guardrails=off also sets it).

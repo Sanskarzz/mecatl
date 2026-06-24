@@ -49,7 +49,6 @@ func TestRunBoundsInventoryIsComplete(t *testing.T) {
 		{"defaultCompactionRatio", 0.8}, // ALSO in engine/agent/loop.go — keep in sync
 		{"defaultCompactionTargetRatio", 0.6},
 		{"defaultContextWindowTokens", 128_000},
-		{"defaultGuardrailsMaxChecks", 200},
 	}
 
 	for _, b := range want {
@@ -67,8 +66,6 @@ func TestRunBoundsInventoryIsComplete(t *testing.T) {
 			got = defaultCompactionTargetRatio
 		case "defaultContextWindowTokens":
 			got = defaultContextWindowTokens
-		case "defaultGuardrailsMaxChecks":
-			got = defaultGuardrailsMaxChecks
 		default:
 			t.Errorf("inventory references unknown const %q — update the switch", b.name)
 			continue
@@ -114,7 +111,6 @@ func TestRunBoundsInventoryHasNoUnlistedConsts(t *testing.T) {
 		"defaultCompactionRatio":       true,
 		"defaultCompactionTargetRatio": true,
 		"defaultContextWindowTokens":   true,
-		"defaultGuardrailsMaxChecks":   true,
 	}
 
 	dir := "."                     // internal/app

@@ -275,32 +275,6 @@ func TestCheckerErrorFailClosedWhenOptedIn(t *testing.T) {
 	}
 }
 
-// (11) cost breaker → maxChecks exceeded → skip + ONE-TIME exhaustion WARN; reset is
-// per-Runner (per-session, since the factory builds one Runner per session).
-func TestCheckBudgetCapsAndSkips(t *testing.T) {
-	diag := &capDiag{}
-	chk := &fakeChecker{verdict: unsafe("bad")}
-	r := New(&passInner{}, Options{Rules: []CompiledRule{ruleBlock("Bash", "pre")}, Checker: chk, MaxChecks: 2, Diagnostics: diag})
-	for i := 0; i < 5; i++ {
-		_, _ = r.Run(context.Background(), preEvent("Bash", `{"command":"ls"}`))
-	}
-	if chk.calls != 2 {
-		t.Fatalf("budget maxChecks=2 must cap checker calls at 2, got %d", chk.calls)
-	}
-	// The exhaustion WARN fires exactly ONCE (not once per skipped call).
-	if n := diag.count("budget exhausted"); n != 1 {
-		t.Fatalf("budget-exhausted WARN must fire exactly once; fired %d", n)
-	}
-
-	// A FRESH Runner (the per-session reset) checks again — its checker is consulted.
-	freshChk := &fakeChecker{verdict: safe()}
-	fresh := New(&passInner{}, Options{Rules: []CompiledRule{ruleBlock("Bash", "pre")}, Checker: freshChk, MaxChecks: 2})
-	_, _ = fresh.Run(context.Background(), preEvent("Bash", `{"command":"ls"}`))
-	if freshChk.calls != 1 {
-		t.Fatalf("a fresh per-session Runner must check again (budget reset); calls=%d", freshChk.calls)
-	}
-}
-
 // sanitize with a NIL payload on an unsafe verdict → BLOCK fallback (Pre veto, Post
 // rewrite-to-error), never letting the unsafe content through (finding 2b).
 func TestSanitizeNilPayloadFallsBackToBlock(t *testing.T) {
@@ -402,6 +376,28 @@ func TestFailOpenEscalatesToDownWarn(t *testing.T) {
 	}
 	if n := diag.count("checker DOWN"); n != 2 {
 		t.Fatalf("a verdict must reset the streak so a new outage re-arms the DOWN WARN; fired %d", n)
+	}
+}
+
+// (11) the per-session checker call-count cap (maxChecks / checkBudget) was removed
+// (ADR 0049). The checker now runs UNBOUNDED per session: N matched calls reach the
+// checker, and no "budget"/"exhausted" diagnostic appears. This is the inverse of the
+// deleted TestCheckBudgetCapsAndSkips — it proves the cap is GONE, not merely unset.
+func TestCheckerRunsUnboundedNoCallCap(t *testing.T) {
+	const n = 12
+	diag := &capDiag{}
+	chk := &fakeChecker{verdict: safe()}
+	r := New(&passInner{}, Options{Rules: []CompiledRule{ruleBlock("Bash", "pre")}, Checker: chk, Diagnostics: diag})
+	for i := 0; i < n; i++ {
+		_, _ = r.Run(context.Background(), preEvent("Bash", `{"command":"ls"}`))
+	}
+	if chk.calls != n {
+		t.Fatalf("with no call cap ALL %d matched calls must reach the checker; got %d", n, chk.calls)
+	}
+	for _, l := range diag.lines {
+		if strings.Contains(l.msg, "budget") || strings.Contains(l.msg, "exhausted") {
+			t.Fatalf("no budget/exhaustion diagnostic may appear once the cap is removed; got %q", l.msg)
+		}
 	}
 }
 

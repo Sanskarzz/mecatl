@@ -50,7 +50,6 @@ OPERATOR-TIER LLM content-checker (issue #27). Parsed strictly. A project-tier g
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `guardrails.model` | `string` | `(empty)` | Model is the checker model id / alias. Empty leaves the CLI --guardrails-model to supply it; a value here is overridden by the CLI flag when both are set. **Enable:** Setting a model here ENABLES guardrails (the guardrails-parity enable model). A configured model with no rules runs the default advisory set. Leave empty (and pass no --guardrails-model) to keep guardrails OFF. |
-| `guardrails.maxChecks` | `int` | `0` | MaxChecks is the per-session checker-call cap. 0 = unbounded. |
 | `guardrails.minContentBytes` | `int` | `0` | MinContentBytes skips the checker for content shorter than this. 0 = check all. |
 | `guardrails.disabled` | `bool` | `false` | Disabled is the YAML-level kill switch (the CLI --guardrails=off also sets it). |
 | `guardrails.rules` | `[]guardrailrulespec` | `(absent)` | Rules is the guardrail rule list. |

@@ -67,7 +67,7 @@ reports the RESOLVED checker model + its provenance.** Concretely:
   line per Build, every state:
   - kill-switch active → `guardrails: OFF (kill-switch active via --guardrails=off)…`
   - nothing configured → `guardrails: OFF (no checker model configured; bind the \`guardrail\` model slot or set --guardrails-model to enable)`
-  - configured → `guardrails: ON, checker=<resolved> (via <provenance>), mode=<advisory|block|sanitize>, rules=N[ (default set: WebSearch, WebFetch, mcp__*)][, maxChecks=<n>]`
+  - configured → `guardrails: ON, checker=<resolved> (via <provenance>), mode=<advisory|block|sanitize>, rules=N[ (default set: WebSearch, WebFetch, mcp__*)]`
   - provenance: `srcSlot` → `via slot \`guardrail\``; `srcSlotSupersedingGate` → `via slot \`guardrail\`, supersedes gate value \`<gateval>\``; `srcGate` → `via --guardrails-model`.
 - `--help` / the `--guardrails=on` startup error name BOTH enable paths
   (`--guardrails-model` AND the `guardrail` slot). The flag stays the kill-switch only.

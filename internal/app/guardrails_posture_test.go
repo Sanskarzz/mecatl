@@ -10,7 +10,7 @@ import (
 // TestLogGuardrailsPostureBranches pins the #159 build-once posture line: exactly ONE
 // INFO per Build, one case per UX-B branch, with honest substrings (OFF no-config +
 // hint, OFF kill-switch, ON via slot defaults, ON via slot superseding gate, ON via
-// gate no slot, ON with custom rules + maxChecks). Each case asserts exactly one line.
+// gate no slot, ON with custom rules). Each case asserts exactly one line.
 func TestLogGuardrailsPostureBranches(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -63,17 +63,16 @@ func TestLogGuardrailsPostureBranches(t *testing.T) {
 			wantSubs:  []string{"guardrails: ON", "checker=gpt-5-mini", "via --guardrails-model", "mode=advisory", "default set"},
 		},
 		{
-			name: "ON with custom rules (block + rules + maxChecks)",
+			name: "ON with custom rules (block + rules)",
 			cfg: Config{
-				UseMock:             true,
-				GuardrailsModel:     "gpt-5-mini",
-				GuardrailsMaxChecks: 50,
+				UseMock:         true,
+				GuardrailsModel: "gpt-5-mini",
 				GuardrailsRules: []GuardrailRule{
 					{Match: "WebFetch", Phases: []string{"post"}, Mode: string(modelhook.ModeBlock)},
 				},
 			},
 			wantCount: 1,
-			wantSubs:  []string{"guardrails: ON", "checker=gpt-5-mini", "mode=block", "rules=1", "maxChecks=50"},
+			wantSubs:  []string{"guardrails: ON", "checker=gpt-5-mini", "mode=block", "rules=1"},
 			notSubs:   []string{"default set"},
 		},
 		{
@@ -180,7 +179,7 @@ func TestHighestSeverityGuardrailMode(t *testing.T) {
 
 // TestGuardrailsPostureLine directly table-tests the pure ON-posture helper (it was only
 // covered indirectly via the diag double). Pins provenance per source, the rules count
-// matching len(specs), and the maxChecks suffix across the usedDefaults/maxChecks matrix.
+// matching len(specs), and the default-set annotation across the usedDefaults matrix.
 func TestGuardrailsPostureLine(t *testing.T) {
 	advSpecs := []modelhook.RuleSpec{
 		{Match: "WebSearch", Phases: []string{"pre", "post"}, Mode: string(modelhook.ModeAdvisory)},
@@ -243,36 +242,22 @@ func TestGuardrailsPostureLine(t *testing.T) {
 			notSubs:      []string{"via slot", "via --guardrails-model", "supersedes"},
 		},
 		{
-			// The QA-flagged gap: usedDefaults=true + maxChecks>0 → the maxChecks suffix
-			// IS present on the default-set branch (the cap buildGuardrailsHooks
-			// applies when usedDefaults && cfg.GuardrailsMaxChecks==0 is modelled here by
-			// a positive cfg.GuardrailsMaxChecks, since the helper reads cfg directly).
-			name:         "usedDefaults=true + maxChecks>0 → maxChecks suffix present",
-			cfg:          Config{GuardrailsMaxChecks: 200},
-			model:        "gpt-5-mini",
-			src:          srcGate,
-			specs:        advSpecs,
-			usedDefaults: true,
-			wantSubs:     []string{"default set", "maxChecks=200"},
-		},
-		{
-			name:         "usedDefaults=true + maxChecks=0 → no maxChecks suffix",
+			name:         "usedDefaults=true → default set annotation present",
 			cfg:          Config{},
 			model:        "gpt-5-mini",
 			src:          srcGate,
 			specs:        advSpecs,
 			usedDefaults: true,
 			wantSubs:     []string{"default set"},
-			notSubs:      []string{"maxChecks="},
 		},
 		{
-			name:         "usedDefaults=false + maxChecks>0 → maxChecks suffix present",
-			cfg:          Config{GuardrailsMaxChecks: 50},
+			name:         "usedDefaults=false → explicit rules, no default set annotation",
+			cfg:          Config{},
 			model:        "gpt-5-mini",
 			src:          srcGate,
 			specs:        blockSpecs,
 			usedDefaults: false,
-			wantSubs:     []string{"mode=block", "rules=1", "maxChecks=50"},
+			wantSubs:     []string{"mode=block", "rules=1"},
 			notSubs:      []string{"default set"},
 		},
 	}

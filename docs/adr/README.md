@@ -64,6 +64,7 @@ Documentation/citation conventions are in [`docs/design/README.md`](../design/RE
 
 ### Governance & trust
 - [0021 — Guardrails](./0021-guardrails.md)
+- [0049 — Remove the guardrails per-session checker call-count cap](./0049-guardrails-remove-maxchecks.md)
 - [0022 — Allow-all posture](./0022-allow-all-posture.md)
 - [0023 — Workspace trust](./0023-workspace-trust.md)
 - [0024 — System-prompt research](./0024-system-prompt-research.md) *(research)*

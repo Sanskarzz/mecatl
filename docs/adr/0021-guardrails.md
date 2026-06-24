@@ -14,7 +14,7 @@ Implement guardrails as an opt-in, operator-tier-only hook adapter that decorate
 
 ## Consequences
 
-The checker fires only on the main engine (recursion guard: the checker engine itself is built with inert hooks and a tool-less catalog). A default advisory rule set applies when a model is configured but no explicit rules are authored, with an auto-applied per-session cap of 200 checker calls. The sanitize path is bounded against oversized or invalid sanitized content falling back to block. Current behaviour — enforcement modes, cost model, fail-open/closed escalation, multi-runner merge — is described in docs/architecture.md; shipped state is in the production readiness tracker.
+The checker fires only on the main engine (recursion guard: the checker engine itself is built with inert hooks and a tool-less catalog). A default advisory rule set applies when a model is configured but no explicit rules are authored; there is no per-session call-count cap (the original `maxChecks` cap was removed by [ADR 0049](./0049-guardrails-remove-maxchecks.md)). The sanitize path is bounded against oversized or invalid sanitized content falling back to block. Current behaviour — enforcement modes, cost model, fail-open/closed escalation, multi-runner merge — is described in docs/architecture.md; shipped state is in the production readiness tracker.
 
 ---
 
@@ -49,11 +49,6 @@ matched — their I/O stays on the machine. Advisory means observe-only: a findi
 an operator diagnostic, the call/result is byte-unchanged, so the operator measures
 the false-positive rate before promoting any rule to `block`/`sanitize`. Authoring an
 explicit `guardrails.rules` list **replaces** the default set entirely.
-
-Because the default set matches `mcp__*` on both directions, a default-on,
-MCP-heavy session could spend a checker call per matched call. So when the defaults
-are in force and the operator did not pin `maxChecks`, a sane non-zero per-session
-cap (200) is applied automatically — see *Cost model*.
 
 ## Threat model
 
@@ -141,20 +136,14 @@ equally-specific matchers, flagged by a load-time WARN) breaks toward the
 earlier-configured rule, so resolution is deterministic regardless of map iteration.
 A tool with no matching rule is **unchecked** — guardrails are opt-in per tool.
 
-## Cost model & the per-session budget
+## Cost model
 
-Each check is one extra LLM call. Three cost/abuse guards:
+> The per-session `maxChecks` call-count cap described in the original version of this
+> section was removed by [ADR 0049](./0049-guardrails-remove-maxchecks.md). The
+> `minContentBytes` and `maxContentBytes` guards below are unchanged.
 
-- **`maxChecks` (per session).** The number of checker calls a session may incur is
-  capped **separately** from the parent's `MaxRunTokens`: infrastructure spend must
-  not starve the agent. A fresh budget is built per session (the composition
-  constructs one `modelhook.Runner` per session), so the cap is naturally per-session
-  and resets when a new session's Runner is built. Exhaustion is a one-time WARN, then
-  a silent fail-open skip. **Omitting `maxChecks` means *no cap*** — EXCEPT when
-  guardrails are on the default rule set with no explicit `maxChecks`, in which case a
-  default cap of **200** is applied (so default-on guardrails cannot surprise-bill an
-  MCP-heavy session). An explicit `maxChecks` (including a deliberate `0` for
-  unbounded) or an explicit rule list keeps your value untouched.
+Each check is one extra LLM call. Two cost/abuse guards:
+
 - **`minContentBytes`.** Skip the checker for a trivially short **inbound (Post)**
   result that cannot carry a meaningful injection (omitting it checks every Post
   result). It applies to **Post only** — **outbound (Pre) args are always inspected
@@ -165,6 +154,10 @@ Each check is one extra LLM call. Three cost/abuse guards:
   fail-open/closed policy (fail-closed blocks; fail-open WARNs), so an attacker cannot
   emit a huge tool result to induce a silent fail-open and slip past. Advisory passes
   but logs.
+
+There is no per-session call-count cap: the checker runs per matched call, and cost
+control lives in the operator's provider/billing layer (checker token spend is not
+folded into the agent's `MaxRunTokens`).
 
 ## Fail-open vs fail-closed
 
@@ -260,8 +253,6 @@ A full config overrides the defaults with an explicit rule list:
 ```yaml
 guardrails:
   model: gpt-5-mini          # the checker model (or a --model-alias); --guardrails-model overrides
-  maxChecks: 50              # per-session checker-call cap; OMITTING it = NO cap
-                             # (a default cap of 200 applies ONLY to the default rule set)
   minContentBytes: 16        # skip a short INBOUND (post) result (omit = check every post).
                              # Never applies to outbound (pre) args — those are always inspected.
   rules:                     # an explicit list REPLACES the default advisory set

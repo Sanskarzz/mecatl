@@ -121,7 +121,6 @@ type Runner struct {
 	rules   []CompiledRule
 	checker VerdictChecker
 	diag    port.Diagnostics
-	budget  *checkBudget
 	// failures tracks the CONSECUTIVE checker-failure streak so a persistently-down
 	// checker escalates to a one-time sticky "checker DOWN" WARN (a continuously-
 	// unguarded surface under fail-open must not vanish in a per-call WARN flood).
@@ -141,11 +140,9 @@ type Options struct {
 	// Checker is the engine-backed verdict checker. A nil Checker makes the Runner a
 	// transparent pass-through to inner (the OFF posture) regardless of Rules.
 	Checker VerdictChecker
-	// Diagnostics is the operator-logging sink (advisory findings, fail-open WARN,
-	// budget-exhausted WARN). nil defaults to port.NopDiagnostics.
+	// Diagnostics is the operator-logging sink (advisory findings, fail-open WARN).
+	// nil defaults to port.NopDiagnostics.
 	Diagnostics port.Diagnostics
-	// MaxChecks is the per-session checker call cap (decision 7). <=0 disables it.
-	MaxChecks int
 	// MinContentBytes skips the checker for a Post (inbound) result shorter than this
 	// (a cost gate). It does NOT apply to Pre (outbound) args — those are always
 	// inspected, since a short exfiltration arg is the point of the Pre check. 0 checks
@@ -167,7 +164,6 @@ func New(inner port.HookRunner, opts Options) *Runner {
 		rules:           opts.Rules,
 		checker:         opts.Checker,
 		diag:            diag,
-		budget:          newCheckBudget(opts.MaxChecks),
 		failures:        &failureStreak{threshold: guardrailDownThreshold},
 		minContentBytes: opts.MinContentBytes,
 	}
@@ -196,8 +192,8 @@ func (r *Runner) Run(ctx context.Context, ev governance.HookEvent) (governance.H
 }
 
 // check runs the guardrail checker for one matched rule and maps its verdict to a
-// HookOutcome per the rule's mode. It applies the cost budget, the min-content
-// skip, the max-content bound, and the fail-open/closed policy on a checker error.
+// HookOutcome per the rule's mode. It applies the min-content skip, the max-content
+// bound, and the fail-open/closed policy on a checker error.
 func (r *Runner) check(ctx context.Context, phase Phase, rule CompiledRule, ev governance.HookEvent) governance.HookOutcome {
 	content := contentUnderReview(phase, ev)
 	// The min-content skip is a cost gate for the INBOUND (Post) direction only: a tiny
@@ -216,20 +212,6 @@ func (r *Runner) check(ctx context.Context, phase Phase, rule CompiledRule, ev g
 	// can never be silently unguarded. Advisory passes but logs.
 	if len(content) > maxContentBytes {
 		return r.onContentTooLarge(ctx, phase, rule, ev, len(content))
-	}
-
-	// Cost budget (decision 7): a per-session checker-call cap, distinct from the
-	// parent's token budget. Exhaustion is a one-time WARN, then a silent skip —
-	// FAIL-OPEN (an exhausted budget degrades to "no checker"), the same posture as a
-	// checker error in the default (non-fail-closed) mode.
-	admit, firstExhaustion := r.budget.admit()
-	if !admit {
-		if firstExhaustion {
-			r.diag.Log(ctx, port.LevelWarn,
-				"guardrails: per-session checker budget exhausted; further tool content is NOT inspected this session (raise the guardrails maxChecks to inspect more)",
-				"tool", ev.Tool, "phase", string(phase))
-		}
-		return governance.HookOutcome{}
 	}
 
 	prompt := buildCheckPrompt(phase, rule, ev.Tool, content)

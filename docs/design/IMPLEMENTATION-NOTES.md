@@ -2054,7 +2054,6 @@ new cascade tier knob does not.
 | compaction trigger ratio (composition) | 0.8 | `internal/app/build.go` (`defaultCompactionRatio`) | shared engine compactor | `Config.CompactionRatio`; **duplicated in** `engine/agent/loop.go` (`defaultCompactionRatio`) — both pinned to 0.8, keep in sync |
 | cascade compaction target ratio | 0.6 | `internal/app/build.go` (`defaultCompactionTargetRatio`) | cascade compactor reduce-toward target | not separately configurable |
 | context-window floor | 128 000 | `internal/app/build.go` (`defaultContextWindowTokens`) | context-window resolver terminal floor | `--context-window-override` wins |
-| guardrails per-session check cap | 200 | `internal/app/guardrails.go` (`defaultGuardrailsMaxChecks`) | per-session checker-call cap (auto-applied when operator enables guardrails with a model and no `maxChecks`) | operator-tier `guardrails.maxChecks` |
 
 ### Precedence (the MaxTurns axis; same shape applies to the other bounds)
 
@@ -2260,7 +2259,7 @@ three layers to keep the engine importable and the verdict shape in the adapter:
   port (keeps engine/agent types out of the adapter), `Verdict` + `ParseVerdict`
   (whole-output-single-object, the #31 discipline — **not** `session.ValidateJSON`),
   `CompileRule`/`RuleSpec`/`CompiledRule` + the most-specific-wins matcher, the
-  per-session `checkBudget`, the merge, the built-in inspection prompts. It imports
+  consecutive-failure `failureStreak`, the merge, the built-in inspection prompts. It imports
   `engine/agent` **only** for the exported fence helpers (`agent.UntrustedFence` /
   `NeutraliseFraming` / `WriteUntrustedBlock` — exported in #27 so the checker fences
   untrusted content with the **same** single source of truth as the team/ask-review
@@ -2277,8 +2276,8 @@ three layers to keep the engine importable and the verdict shape in the adapter:
   security-sensitive lone-fence stripper the ask-review AND guardrail verdict parsers
   now share — one parser, never diverging).
 - **`internal/app/guardrails.go`** — `buildGuardrailsHooks` (decorates the **main**
-  hooks at `buildEngine` + the per-session factory, so a **fresh per-session budget +
-  failure-streak** are built; returns inner unchanged when no model is set),
+  hooks at `buildEngine` + the per-session factory, so a **fresh per-session
+  failure-streak** is built; returns inner unchanged when no model is set),
   `effectiveGuardrailSpecs` (explicit rules OR the default advisory set),
   `engineGuardrailsChecker` (the `VerdictChecker` impl: `agent.RunGuardrailCheck` +
   `modelhook.ParseVerdict`), `compileGuardrailRules`, `foldOperatorGuardrails` (the
@@ -2290,10 +2289,9 @@ three layers to keep the engine importable and the verdict shape in the adapter:
 no explicit rule list guardrails take the built-in **default advisory rule set**
 (`defaultGuardrailSpecs`: WebSearch pre+post, WebFetch post, `mcp__*` pre+post, all
 advisory — the headline default, local tools deliberately unmatched). An explicit
-`guardrails.rules` list replaces it. The default set gets an auto `maxChecks`=200 when
-the operator did not pin one (it matches `mcp__*` on both directions, so it could
-otherwise surprise-bill); an explicit `maxChecks` (incl. a deliberate 0 = unbounded)
-or an explicit rule list keeps the operator's value.
+`guardrails.rules` list replaces it. There is no per-session call-count cap — the
+checker runs per matched call, and cost control lives in the operator's
+provider/billing layer (checker token spend is not folded into `MaxRunTokens`).
 
 **The #1 constraint — `PostToolUse` Block is INERT.** The tool has already run by the
 time the post hook fires (`dispatch.go` ~642-648 only emits a hook annotation). So an
@@ -2318,8 +2316,7 @@ a trusted checker model. **Advisory + every finding diagnostic is correlatable:*
 carries `session` + `call` (the `HookEvent.CallID`, threaded from `dispatch.go`) + a
 stable `guardrail-finding` marker. **Merge (decision 5):** inner FIRST, checker
 SECOND, Block-dominant, messages concat inner-first, mutation conflict → checker wins.
-**Cost/abuse:** a per-session `maxChecks` cap (bounded separately from `MaxRunTokens`)
-+ a `minContentBytes` skip **(Post/inbound ONLY — Pre/outbound args are always
+**Cost/abuse:** a `minContentBytes` skip **(Post/inbound ONLY — Pre/outbound args are always
 inspected regardless of size, since a short exfiltration arg is exactly what the Pre
 check catches)** + a `maxContentBytes` (256 KiB) bound — oversized content in an
 **enforce** mode is NOT silently passed (it routes through fail-open/closed: the

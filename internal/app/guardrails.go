@@ -37,9 +37,6 @@ func foldOperatorGuardrails(cfg Config) Config {
 	}
 	// Scalar cost knobs: YAML supplies them (no flag), but a non-zero CLI value (if a
 	// flag is ever added) would win; today these come only from YAML.
-	if cfg.GuardrailsMaxChecks == 0 {
-		cfg.GuardrailsMaxChecks = g.MaxChecks
-	}
 	if cfg.GuardrailsMinContentBytes == 0 {
 		cfg.GuardrailsMinContentBytes = g.MinContentBytes
 	}
@@ -115,7 +112,7 @@ func (e guardrailError) Error() string { return string(e) }
 // byte-identical to the pre-feature posture). It is called at BOTH main-engine hook
 // sites — buildEngine (the shared default-provider engine) and sessionEngineFactory
 // (each per-session engine, re-derived on the session's resolved provider/model) —
-// so a FRESH Runner (and thus a FRESH per-session cost budget) is built per session.
+// so a FRESH Runner is built per session.
 //
 // The checker engine is built over the supplied (provider, model, window) via the
 // child deps path (childEngineDepsForProvider), so it compacts/counts on the
@@ -125,7 +122,7 @@ func buildGuardrailsHooks(cfg Config, provReg *providerRegistry, provider port.L
 	if !guardrailsConfigured(cfg) {
 		return inner // OFF: byte-identical to no guardrails
 	}
-	specs, usedDefaults := effectiveGuardrailSpecs(cfg)
+	specs, _ := effectiveGuardrailSpecs(cfg)
 	rules, ok := compileGuardrailRules(cfg, specs)
 	if !ok {
 		// No usable rule (every spec was invalid and logged): leave inner unchanged
@@ -136,31 +133,13 @@ func buildGuardrailsHooks(cfg Config, provReg *providerRegistry, provider port.L
 	if checker == nil {
 		return inner
 	}
-	maxChecks := cfg.GuardrailsMaxChecks
-	if maxChecks == 0 && usedDefaults {
-		// The DEFAULT advisory rule set matches mcp__* on both directions, so it can
-		// surprise-bill on an MCP-heavy session. When the operator only set a model
-		// (taking the default rules) and did not pin maxChecks, apply a sane non-zero
-		// per-session cap so default-on guardrails cannot bill without bound. An
-		// explicit maxChecks (or explicit rules) keeps the operator's value, including
-		// a deliberate 0 = unbounded.
-		maxChecks = defaultGuardrailsMaxChecks
-	}
 	return modelhook.New(inner, modelhook.Options{
 		Rules:           rules,
 		Checker:         checker,
 		Diagnostics:     cfg.diag(),
-		MaxChecks:       maxChecks,
 		MinContentBytes: cfg.GuardrailsMinContentBytes,
 	})
 }
-
-// defaultGuardrailsMaxChecks is the per-session checker-call cap applied when the
-// operator enabled guardrails with only a model (taking the DEFAULT advisory rule
-// set) and did not pin maxChecks — so default-on guardrails cannot bill without
-// bound on an MCP-heavy session. An explicit maxChecks (including a deliberate 0 =
-// unbounded) or an explicit rule list keeps the operator's value untouched.
-const defaultGuardrailsMaxChecks = 200
 
 // defaultGuardrailSpecs is the built-in ADVISORY rule set applied when a guardrails
 // model is configured but the operator authored no explicit rules. It honours the
@@ -184,8 +163,8 @@ var defaultGuardrailSpecs = []modelhook.RuleSpec{
 
 // effectiveGuardrailSpecs returns the rule specs to compile: the operator's explicit
 // rules when any are configured, else the built-in default advisory set. usedDefaults
-// reports which, so buildGuardrailsHooks can apply the default cost cap only when the
-// defaults are in force.
+// reports which, so the posture line (logGuardrailsPosture) can annotate "default
+// set" only when the defaults are in force.
 func effectiveGuardrailSpecs(cfg Config) (specs []modelhook.RuleSpec, usedDefaults bool) {
 	if len(cfg.GuardrailsRules) > 0 {
 		out := make([]modelhook.RuleSpec, 0, len(cfg.GuardrailsRules))
