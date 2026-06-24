@@ -163,13 +163,16 @@ func resolvedImageRef() string {
 }
 
 // retagImage tags a source image as a target ref so kind load can load it under
-// the name the pod references. Uses docker OR podman (whichever is on PATH).
+// the name the pod references. Uses the SAME container runtime ko build used:
+// podman when KIND_EXPERIMENTAL_PROVIDER=podman is set, otherwise docker (ko's
+// default). On CI runners both are on PATH, but ko loads into Docker's daemon
+// unless KIND_EXPERIMENTAL_PROVIDER=podman redirects it — so preferring podman
+// blindly (as the old code did) would tag in podman's store while the image is
+// in Docker's.
 func retagImage(src, dst string) {
 	ginkgo.GinkgoHelper()
 	runtime := "docker"
-	if _, err := exec.LookPath("podman"); err != nil {
-		// docker is the fallback; podman is preferred when KIND_EXPERIMENTAL_PROVIDER=podman
-	} else {
+	if os.Getenv("KIND_EXPERIMENTAL_PROVIDER") == "podman" {
 		runtime = "podman"
 	}
 	runCmd(ginkgoSuiteCtx(), runtime, "tag", src, dst)
