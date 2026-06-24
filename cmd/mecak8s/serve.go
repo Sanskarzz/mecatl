@@ -20,14 +20,14 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
-	"github.com/stacklok/mecatl/internal/adapter/redisstore"
 	"github.com/stacklok/mecatl/internal/adapter/server"
 )
 
 // serve wires the built Service over gRPC + HTTP/SSE with k8s-native
-// operability: a DYNAMIC /readyz (drain-gated + Redis-pinged), a /drain
-// endpoint (the preStop hook target), and a BOUNDED GracefulStop on SIGTERM
-// that cancels in-flight runs within the termination grace period.
+// operability: a DYNAMIC /readyz (drain-gated + storage-pinged via the SAME
+// store the Service serves traffic through), a /drain endpoint (the preStop
+// hook target), and a BOUNDED GracefulStop on SIGTERM that cancels in-flight
+// runs within the termination grace period.
 //
 // HONEST SHUTDOWN CONTRACT (ADR 0048 §4d): new runs are rejected (503 via the
 // drain gate) the moment SIGTERM (or the preStop httpGet /drain) fires.
@@ -38,10 +38,11 @@ import (
 // the cloud-native disposability property, stated honestly rather than hidden
 // behind an unbounded GracefulStop that would wedge a rolling update.
 //
-// redisStore is the Redis Store app.Build wired (nil when --redis-url is
-// empty — the in-memory fallback). It is threaded in ONLY for the /readyz
-// ping; serve does not use it as a store (the Service already holds it).
-func serve(ctx context.Context, cfg config, svc *server.Service, redisStore *redisstore.Store) error {
+// Readiness closes over svc.StorageReady, which pings the SAME store the
+// Service serves traffic through (Service.StorageReady type-asserts the store
+// for a Pinger). A non-Redis store (the in-memory fallback) has no ping, so
+// readiness is drain-gated only.
+func serve(ctx context.Context, cfg config, svc *server.Service) error {
 	tlsCfg, err := buildTLSConfig(cfg)
 	if err != nil {
 		return err
@@ -71,15 +72,19 @@ func serve(ctx context.Context, cfg config, svc *server.Service, redisStore *red
 
 	// --- HTTP: health + /drain mounted OUTSIDE auth/rate-limit; the API mux
 	// wrapped in the auth middleware. The readiness probe is DYNAMIC:
-	// !draining && redisOK — so SIGTERM/preStop flips /readyz to not-ready
-	// (the endpoint controller removes the pod) and a Redis outage does too. ---
-	var ready server.ReadyFunc
-	if ping := redisPinger(redisStore); ping != nil {
-		ready = func() bool { return !svc.IsDraining() && ping() }
-	} else {
-		// No Redis store (the in-memory fallback): readiness is drain-gated only.
-		ready = func() bool { return !svc.IsDraining() }
-	}
+	// !draining && storageReady — so SIGTERM/preStop flips /readyz to
+	// not-ready (the endpoint controller removes the pod) and a Redis outage
+	// does too. StorageReady pings the SAME store the Service serves traffic
+	// through (not a second client), bounded by a short timeout so a stalled
+	// backend fails the probe quickly rather than wedging readiness. ---
+	ready := server.ReadyFunc(func() bool {
+		if svc.IsDraining() {
+			return false
+		}
+		pingCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		return svc.StorageReady(pingCtx)
+	})
 
 	httpMux := http.NewServeMux()
 	healthH := server.NewHealthHandler(ready)

@@ -12,7 +12,6 @@ import (
 
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/session"
-	"github.com/stacklok/mecatl/internal/adapter/redisstore"
 	"github.com/stacklok/mecatl/internal/adapter/server"
 	"github.com/stacklok/mecatl/internal/app"
 )
@@ -238,40 +237,53 @@ func TestDrainHTTPFlipsReadyz(t *testing.T) {
 	}
 }
 
-// TestRedisPinger asserts redisPinger: a live miniredis pings true; a closed
-// miniredis pings false (so /readyz flips not-ready on a Redis outage); a nil
-// store yields a nil pinger (drain-gated-only readiness).
-func TestRedisPinger(t *testing.T) {
-	if redisPinger(nil) != nil {
-		t.Fatal("redisPinger(nil) != nil, want nil (no Redis → drain-gated readiness)")
-	}
+// TestStorageReadyViaComposition asserts Service.StorageReady (the readiness
+// probe the /readyz ReadyFunc closes over) pings the SAME store the Service
+// serves traffic through — not a second client. Over a live miniredis it
+// reports true; after the broker closes it reports false (so /readyz flips
+// not-ready on a Redis outage); a memstore-backed service (no Ping method) is
+// always ready.
+func TestStorageReadyViaComposition(t *testing.T) {
+	// Redis-backed service: pings the store the Service serves traffic through.
 	mr, err := miniredis.Run()
 	if err != nil {
 		t.Fatalf("miniredis: %v", err)
 	}
-	st, err := redisstore.New(mr.Addr())
+	defer mr.Close()
+	built, err := app.Build(context.Background(), app.Config{
+		Workspace:               t.TempDir(),
+		UseMock:                 true,
+		NoSoul:                  true,
+		NoUserModel:             true,
+		RedisURL:                mr.Addr(),
+		PermissionsConventional: false,
+		AgentsConventional:      false,
+		Diagnostics:             port.NopDiagnostics{},
+	})
 	if err != nil {
-		t.Fatalf("redisstore.New: %v", err)
+		t.Fatalf("app.Build over Redis: %v", err)
 	}
-	defer st.Close()
-	ping := redisPinger(st)
-	if ping == nil {
-		t.Fatal("redisPinger over a live store = nil, want a func")
-	}
-	if !ping() {
-		t.Error("ping() on a live miniredis = false, want true")
+	defer built.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if !built.Service.StorageReady(ctx) {
+		t.Error("StorageReady on a live miniredis = false, want true")
 	}
 	mr.Close()
 	// After the broker closes, the ping must fail (a short-timeout ctx keeps it
 	// from wedging). Allow a brief window for the client to notice.
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if !ping() {
+		pingCtx, pingCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		if !built.Service.StorageReady(pingCtx) {
+			pingCancel()
 			return
 		}
+		pingCancel()
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Error("ping() on a closed miniredis stayed true, want false (Redis outage → /readyz not-ready)")
+	t.Error("StorageReady on a closed miniredis stayed true, want false (Redis outage → /readyz not-ready)")
 }
 
 // TestParseFlagsHasNoStoreDir asserts mecak8s wires NO --store-dir flag at all

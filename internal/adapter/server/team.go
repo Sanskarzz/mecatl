@@ -333,7 +333,19 @@ func (s *Service) CancelTeammate(_ context.Context, teamID, member string) error
 // RunTeam drives the team to quiescence, invoking sink for every member event,
 // and returns the outcome. It blocks for the team's lifetime; the gRPC handler
 // runs it on the request goroutine and forwards events to the stream.
+//
+// Like the per-session run-entry funnel (acquireLease), RunTeam honours the
+// drain gate (ADR 0048, mecak8s): once Drain is armed a draining replica
+// refuses a NEW team run BEFORE the phase flip / team claim so a shutting-down
+// pod steers team traffic to a survivor. An in-flight RunTeam is NOT cancelled
+// by Drain itself (that is the bounded GracefulStop's job). The gate starts
+// false — byte-identical default when Drain has not been called.
 func (s *Service) RunTeam(ctx context.Context, teamID string, sink func(agent.TeamEvent)) (agent.TeamOutcome, error) {
+	// Drain gate (ADR 0048, mecak8s): refuse new team runs on a draining
+	// replica before claiming the team — mirrors acquireLease's check.
+	if s.draining.Load() {
+		return agent.TeamOutcome{}, fmt.Errorf("%w: %q", ErrUnavailable, teamID)
+	}
 	ts, err := s.lookupTeam(teamID)
 	if err != nil {
 		return agent.TeamOutcome{}, err

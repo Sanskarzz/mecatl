@@ -277,7 +277,12 @@ func (st *Store) ToolCall(id session.SessionID, call session.ToolCall, result se
 	if err != nil {
 		return
 	}
-	_ = st.client.RPush(context.Background(), toolsKey(id), line).Err()
+	// Bound the audit write so a stalled Redis cannot wedge every audit call
+	// on the go-redis default timeout; the recorder has no error return, so a
+	// bounded ctx is the only way to keep a slow broker from piling up.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = st.client.RPush(ctx, toolsKey(id), line).Err()
 }
 
 // Ping checks the Redis broker is reachable. It is the readyz health probe a

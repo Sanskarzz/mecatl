@@ -56,7 +56,13 @@ spec:
       containers:
         - name: redis
           image: redis:7-alpine
-          args: ["--appendonly", "yes"]  # AOF: the EventLog durability contract (risk #7)
+          args:
+            - --appendonly
+            - "yes"  # AOF: the EventLog durability contract (risk #7)
+            - --dir
+            - /data  # self-documenting + independent of the image's default dir
+            - --appenddirname
+            - appendonlydir  # the AOF subdir; independent of image defaults
           ports:
             - name: redis
               containerPort: 6379

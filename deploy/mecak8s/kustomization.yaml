@@ -15,6 +15,7 @@ resources:
   - rbac.yaml
   - redis-statefulset.yaml
   - redis-service.yaml
+  - namespace-default-deny.yaml  # posture-level default-deny (FIRST, before the workload allows)
   - redis-networkpolicy.yaml
   - agent-deployment.yaml
   - agent-service.yaml

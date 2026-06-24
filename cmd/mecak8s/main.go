@@ -5,11 +5,9 @@
 package main
 
 import (
-	"fmt"
 	"log/slog"
 	"os"
 
-	"github.com/stacklok/mecatl/internal/adapter/redisstore"
 	"github.com/stacklok/mecatl/internal/adapter/slogdiag"
 	"github.com/stacklok/mecatl/internal/app"
 )
@@ -50,27 +48,5 @@ func run() error {
 	}
 	defer built.Close()
 
-	// The Redis store app.Build wired (nil when --redis-url is empty). It is
-	// threaded into serve ONLY for the /readyz ping; the Service already holds
-	// it as the session store. Recover it by type-asserting the built Service's
-	// store — but the Service does not expose its store, and serve only needs
-	// the Ping capability. Rather than widen server.Service, re-open a PING-
-	// ONLY handle here when --redis-url is set: it shares the broker, not the
-	// store's command streams, and a second client is cheap (go-redis pools).
-	// A nil redisStore means /readyz is drain-gated only.
-	var redisStore *redisstore.Store
-	if cfg.redisURL != "" {
-		// app.Build already pinged and would have failed startup on an
-		// unreachable broker, so this re-open is expected to succeed; a race
-		// where the broker drops between Build and here surfaces as a not-ready
-		// /readyz (the ping fails), which is exactly the desired behaviour.
-		st, rerr := redisstore.New(cfg.redisURL)
-		if rerr != nil {
-			return fmt.Errorf("redis readyz probe: %w", rerr)
-		}
-		redisStore = st
-		defer func() { _ = redisStore.Close() }()
-	}
-
-	return serve(ctx, cfg, built.Service, redisStore)
+	return serve(ctx, cfg, built.Service)
 }

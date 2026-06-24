@@ -277,7 +277,7 @@ internal/adapter/redisstore/
 - `Save` → `HSET mecatl:session:<id> blob <sessnap> mtime <now>`.
 - `Load` → `HGET mecatl:session:<id> blob`; redis.Nil → `port.ErrSessionNotFound`.
 - `Append` → `RPUSH mecatl:events:<id> <record-json>`.
-- `Read` → `LRANGE` + a lazy iterator yielding decoded events.
+- `Read` → `LRANGE` + an iterator over LRANGE results yielding decoded events.
 - `List` → `SCAN MATCH mecatl:session:*` + `HGET mtime`.
 - `Delete` → `DEL mecatl:session:<id> mecatl:events:<id> mecatl:tools:<id>`.
 - `Close` → closes the Redis client.
@@ -558,7 +558,7 @@ Each step is independently shippable, CI-green.
 - `suite_test.go`, `lease_test.go`, `failover_test.go`, `persistence_test.go`,
   `helpers_test.go`. Gated behind `kind_e2e` tag.
 
-### Step 8: living docs — 🔨 IN PROGRESS
+### Step 8: living docs — ✅ DONE
 - Update `docs/architecture.md` (mecak8s binary paragraph + diagram + adapter table).
 - Update `docs/usage.md` (mecak8s section: flags, manifests, kind e2e).
 - Update `docs/design/PRODUCTION-READINESS.md` (mecak8s status row).
@@ -585,6 +585,8 @@ NEW:
   deploy/mecak8s/rbac.yaml
   deploy/mecak8s/redis-statefulset.yaml
   deploy/mecak8s/redis-service.yaml
+  deploy/mecak8s/redis-networkpolicy.yaml
+  deploy/mecak8s/namespace-default-deny.yaml
   deploy/mecak8s/agent-deployment.yaml
   deploy/mecak8s/agent-service.yaml
   deploy/mecak8s/pdb.yaml

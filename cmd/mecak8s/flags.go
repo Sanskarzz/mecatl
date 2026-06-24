@@ -21,7 +21,6 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -30,7 +29,6 @@ import (
 
 	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/port"
-	"github.com/stacklok/mecatl/internal/adapter/redisstore"
 	"github.com/stacklok/mecatl/internal/app"
 	"github.com/stacklok/mecatl/internal/cliconfig"
 )
@@ -411,20 +409,4 @@ func privilegedProcess() bool {
 
 func sandboxDeclared() bool {
 	return os.Getenv("MECATL_SANDBOX") == "1" || os.Getenv("IS_SANDBOX") == "1"
-}
-
-// redisPinger is the ReadyFunc's Redis health probe: a short-timeout Ping on
-// the Redis store. A nil store (no --redis-url) means readiness is drain-gated
-// only (the byte-identical-to-memstore fallback). The closure is mounted on
-// /readyz so a Redis outage flips the pod not-ready and the endpoint controller
-// removes it.
-func redisPinger(st *redisstore.Store) func() bool {
-	if st == nil {
-		return nil // readiness is drain-gated only
-	}
-	return func() bool {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		return st.Ping(ctx) == nil
-	}
 }

@@ -26,9 +26,15 @@ spec:
   policyTypes:
     - Ingress
   ingress:
-    # Allow ONLY the mecak8s agent pods, on the Redis port.
+    # Allow ONLY the mecak8s agent pods, on the Redis port. The explicit
+    # namespaceSelector makes the policy self-documenting and correct even if
+    # copied to a cross-namespace topology (a podSelector-only `from` is
+    # same-namespace-today but silently breaks if the agent moves namespaces).
     - from:
-        - podSelector:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: mecatl
+          podSelector:
             matchLabels:
               app.kubernetes.io/name: mecatl
               app.kubernetes.io/part-of: mecak8s

@@ -1195,6 +1195,29 @@ func (s *Service) ActiveRuns() int {
 	return len(s.heldLeases)
 }
 
+// storagePinger is a store that can report its own readiness (e.g.
+// redisstore.Store). A store without a backend to ping (memstore, jsonlstore,
+// grpcdriver) does not implement it, and StorageReady treats it as always
+// ready — readiness is then drain-gated only.
+type storagePinger interface {
+	Ping(ctx context.Context) error
+}
+
+// StorageReady reports whether the session store is reachable. It is the
+// readiness probe the cmd binary's ReadyFunc closes over, so /readyz tests the
+// SAME store the Service serves traffic through (not a second client opened in
+// the binary). A non-pinging store (memstore, jsonlstore, grpcdriver — no
+// Ping method) is treated as always ready; a Redis store's Ping determines
+// readiness. The caller should bound ctx (e.g. 2s) so a stalled backend fails
+// the probe quickly rather than wedging readiness.
+func (s *Service) StorageReady(ctx context.Context) bool {
+	p, ok := s.cfg.Store.(storagePinger)
+	if !ok {
+		return true // a non-Redis store has no ping — always ready
+	}
+	return p.Ping(ctx) == nil
+}
+
 // GetSession returns the persisted session under id, or ErrNotFound.
 func (s *Service) GetSession(ctx context.Context, id session.SessionID) (*session.Session, error) {
 	sess, err := s.cfg.Store.Load(ctx, id)
