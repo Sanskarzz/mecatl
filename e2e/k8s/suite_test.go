@@ -28,14 +28,21 @@ func TestK8sE2E(t *testing.T) {
 	ginkgo.RunSpecs(t, "mecatl kind k8s e2e suite (ADR 0048)")
 }
 
-// BeforeSuite runs the 7-step cluster lifecycle (MECAK8S-PLAN §4h):
+// BeforeSuite runs the cluster lifecycle (MECAK8S-PLAN §4h):
 //  1. require kind/ko/kubectl (skip gracefully if missing)
 //  2. kind create cluster
-//  3. ko build mecak8s image
-//  4. kind load the image into the cluster node
-//  5. ko resolve + kubectl apply the deploy/mecak8s/ manifests
+//  3. ko resolve builds + renders the mecak8s image + manifests (ONE ref)
+//  4. save the image to a tarball + kind load image-archive into the cluster node
+//  5. kubectl apply the resolved deploy/mecak8s/ manifests (namespace first)
 //  6. kubectl wait for all part-of=mecak8s pods Ready (agent replicas + Redis)
 //  7. capture the two agent pod names
+//
+// The build+resolve is a SINGLE `ko resolve` step: it builds the image under the
+// EXACT ref the pod references (`ko.local/mecak8s-<hash>:<sha>`) and renders the
+// manifests with that ref substituted in. That ref is then saved to a tarball
+// and loaded into the kind node via `kind load image-archive` (bypassing the
+// containerd-snapshotter bridge that breaks `kind load docker-image` on some
+// Docker daemons). One build, one ref, one load — no retagging, no mismatch.
 //
 // AfterSuite deletes the cluster. The cluster is created ONCE per suite run and
 // shared across the three specs (Serial + Ordered), so the ~30s kind bring-up
@@ -46,25 +53,14 @@ var _ = ginkgo.BeforeSuite(func() {
 	ginkgo.By("creating the kind cluster")
 	kindCreateCluster()
 
-	ginkgo.By("building the mecak8s image with ko")
-	builtImage := koBuildMecak8s()
+	ginkgo.By("building + resolving the mecak8s image with ko")
+	resolvedYAML, imageRef := koResolveMecak8s()
 
-	ginkgo.By("resolving the manifests to get the pod image ref")
-	resolvedImage := resolvedImageRef()
-
-	// ko build produces `ko.local:<sha>` but ko resolve produces
-	// `ko.local/mecak8s-<hash>:<sha>` — retag so kind load can load the image
-	// under the exact name the pod references.
-	if builtImage != resolvedImage {
-		ginkgo.By("retagging the image to match the resolved pod ref")
-		retagImage(builtImage, resolvedImage)
-	}
-
-	ginkgo.By("loading the image into the kind node")
-	kindLoadImage(resolvedImage)
+	ginkgo.By("saving the image to a tarball + loading it into the kind node")
+	saveAndLoadImage(imageRef)
 
 	ginkgo.By("applying the deploy/mecak8s/ manifests")
-	applyManifests()
+	applyResolvedManifests(resolvedYAML)
 
 	ginkgo.By("waiting for all mecak8s pods to be Ready")
 	waitPodsReady()

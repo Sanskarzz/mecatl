@@ -72,15 +72,16 @@ func liveProviderEnabled() bool {
 // gate, not a failure — the Taskfile also has preconditions, but the Go code
 // skips too so a bare `go test -tags kind_e2e` does not hard-fail on a machine
 // without the toolchain. The suite header says "Needs Docker + kind + ko +
-// kubectl", but podman is an ACCEPTABLE ALTERNATIVE container runtime: kind uses
-// it via KIND_EXPERIMENTAL_PROVIDER=podman, `kind load docker-image` works
-// against podman's Docker-compatible CLI, and ko loads into the local podman
-// daemon. So EITHER docker OR podman satisfies the runtime requirement (the
-// other three tools are mandatory); without a runtime those commands hit an
-// Expect and fail the spec instead of skipping.
+// kubectl", but podman is an ACCEPTABLE ALTERNATIVE container runtime: when
+// KIND_EXPERIMENTAL_PROVIDER=podman is set, ko loads into podman's store and
+// `podman save` feeds the kind `image-archive` load. So EITHER docker OR podman
+// satisfies the runtime requirement (the other three tools are mandatory);
+// without a runtime those commands hit an Expect and fail the spec instead of
+// skipping.
 func requireTools() {
 	ginkgo.GinkgoHelper()
-	// Docker OR podman (kind supports podman via KIND_EXPERIMENTAL_PROVIDER=podman).
+	// Docker OR podman (the chosen runtime saves the image to a tarball that
+	// `kind load image-archive` reads, sidestepping the snapshotter bridge).
 	_, dockerErr := exec.LookPath("docker")
 	_, podmanErr := exec.LookPath("podman")
 	if dockerErr != nil && podmanErr != nil {
@@ -110,39 +111,18 @@ func kindDeleteCluster() {
 	_ = exec.Command("kind", "delete", "cluster", "--name", kindClusterName).Run()
 }
 
-// koBuildMecak8s builds the mecak8s image locally with ko (--bare writes the
-// image to the local container daemon and prints the ref) and returns the image
-// ref. KO_DOCKER_REPO=ko.local is set so the ref is ko.local:<sha>.
+// koResolveMecak8s is the SINGLE build+resolve step: `ko resolve -f
+// deploy/mecak8s/` builds the mecak8s image (loading it into the local container
+// daemon under `ko.local/mecak8s-<hash>:<sha>`) AND renders the manifests with
+// the `ko://` placeholder substituted by that EXACT ref. It returns the rendered
+// YAML plus the resolved image ref — ONE build, ONE ref, ONE load. There is no
+// second `ko build` producing a differently-shaped `ko.local:<sha>` bare tag, so
+// no retagging and no image-ref mismatch is possible.
 //
-// The image is loaded into whichever local daemon (docker or podman) ko detects;
-// with KO_DOCKER_REPO=ko.local, `ko build --bare ./cmd/mecak8s` loads into the
-// local daemon without needing a registry push.
-//
-// IMPORTANT: ko build produces `ko.local:<sha>` (a bare tag), but ko resolve
-// produces `ko.local/mecak8s-<hash>:<sha>` (a repo/tag). The kind node needs the
-// image under the RESOLVED name (what the pod references), so after building we
-// resolve the manifests, extract the resolved image ref, and retag the built
-// image to match before loading into kind.
-func koBuildMecak8s() string {
-	ginkgo.GinkgoHelper()
-	ctx := ginkgoSuiteCtx()
-	cmd := exec.CommandContext(ctx, "ko", "build", "--bare", "./cmd/mecak8s")
-	cmd.Dir = repoRoot()
-	cmd.Env = append(cmd.Environ(), "KO_DOCKER_REPO=ko.local")
-	out, err := cmd.Output()
-	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred(),
-		"ko build ./cmd/mecak8s failed\n--- ko output ---\n%s", out)
-	builtRef := strings.TrimSpace(string(out))
-	gomega.ExpectWithOffset(1, builtRef).NotTo(gomega.BeEmpty(), "ko build printed no image ref")
-	return builtRef
-}
-
-// resolvedImageRef renders the manifests with ko resolve and extracts the agent
-// container's image ref — the EXACT string the pod will reference. This is
-// needed because ko build produces `ko.local:<sha>` but ko resolve produces
-// `ko.local/mecak8s-<hash>:<sha>`, and the kind node must have the image under
-// the resolved name.
-func resolvedImageRef() string {
+// KO_DOCKER_REPO=ko.local keeps the image local (no registry push, no
+// credentials). The image lands in whichever local daemon ko selects (docker by
+// default; podman when the environment routes ko there).
+func koResolveMecak8s() (yaml []byte, imageRef string) {
 	ginkgo.GinkgoHelper()
 	ctx := ginkgoSuiteCtx()
 	resolve := exec.CommandContext(ctx, "ko", "resolve", "-f", "deploy/mecak8s/")
@@ -150,9 +130,18 @@ func resolvedImageRef() string {
 	resolve.Env = append(resolve.Environ(), "KO_DOCKER_REPO=ko.local")
 	out, err := resolve.Output()
 	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred(),
-		"ko resolve failed\n--- output ---\n%s", out)
-	// Extract the image: line that starts with ko.local/ (the agent image, not redis).
-	for _, line := range strings.Split(string(out), "\n") {
+		"ko resolve -f deploy/mecak8s/ failed\n--- output ---\n%s", out)
+	imageRef = extractImageRef(out)
+	return out, imageRef
+}
+
+// extractImageRef scans rendered manifests for the agent container's image line
+// — the EXACT string the pod will reference. It matches `image: ko.local/...`
+// (the built agent image), not the Redis image (pulled from Docker Hub, no
+// ko.local prefix).
+func extractImageRef(rendered []byte) string {
+	ginkgo.GinkgoHelper()
+	for _, line := range strings.Split(string(rendered), "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "image: ko.local/") {
 			return strings.TrimPrefix(line, "image: ")
@@ -162,37 +151,55 @@ func resolvedImageRef() string {
 	return ""
 }
 
-// retagImage tags a source image as a target ref so kind load can load it under
-// the name the pod references. Uses the SAME container runtime ko build used:
-// podman when KIND_EXPERIMENTAL_PROVIDER=podman is set, otherwise docker (ko's
-// default). On CI runners both are on PATH, but ko loads into Docker's daemon
-// unless KIND_EXPERIMENTAL_PROVIDER=podman redirects it — so preferring podman
-// blindly (as the old code did) would tag in podman's store while the image is
-// in Docker's.
-func retagImage(src, dst string) {
-	ginkgo.GinkgoHelper()
-	runtime := "docker"
+// containerRuntime is the local daemon ko loaded the image into: podman when
+// KIND_EXPERIMENTAL_PROVIDER=podman is set (ko routes there in that case),
+// otherwise docker (ko's default). It is the runtime whose store holds the
+// resolved image, so it is the runtime that must `save` it to a tarball.
+func containerRuntime() string {
 	if os.Getenv("KIND_EXPERIMENTAL_PROVIDER") == "podman" {
-		runtime = "podman"
+		return "podman"
 	}
-	runCmd(ginkgoSuiteCtx(), runtime, "tag", src, dst)
+	return "docker"
 }
 
-// kindLoadImage loads a local image into the kind cluster's node so the pod can
-// pull it without a registry (kind nodes do not share the host container daemon).
-// `kind load docker-image` works against EITHER docker OR podman (the latter via
-// KIND_EXPERIMENTAL_PROVIDER=podman, which makes podman's Docker-compatible CLI
-// serve the load); no change is needed for the podman path.
-func kindLoadImage(image string) {
+// saveAndLoadImage loads a local image into the kind cluster's node via a
+// tarball: `<runtime> save <ref> -o <tar>` then `kind load image-archive <tar>`.
+// This bypasses `kind load docker-image`'s containerd-snapshotter detection
+// entirely — the snapshotter bridge is a known failure on some Docker daemons
+// (the GitHub runner's overlayfs), and `image-archive` reads the tarball
+// straight into the kind node's containerd regardless of the host's snapshotter.
+// It works against EITHER docker OR podman (whichever holds the image, per
+// containerRuntime). The tarball is a transient runtime artifact, cleaned up on
+// return.
+func saveAndLoadImage(imageRef string) {
 	ginkgo.GinkgoHelper()
-	runCmd(ginkgoSuiteCtx(), "kind", "load", "docker-image", image,
-		"--name", kindClusterName)
+	ctx := ginkgoSuiteCtx()
+	runtime := containerRuntime()
+
+	tmp, err := os.CreateTemp("", "mecak8s-e2e-*.tar")
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred(), "create image tarball")
+	tmpPath := tmp.Name()
+	_ = tmp.Close()
+	defer os.Remove(tmpPath)
+
+	// `<runtime> save` writes the image (under the EXACT resolved ref the pod
+	// references) to a tarball. CombinedOutput captures save progress on stderr.
+	saveOut, err := exec.CommandContext(ctx, runtime, "save", imageRef, "-o", tmpPath).CombinedOutput()
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred(),
+		"%s save %s -o %s failed\n--- output ---\n%s", runtime, imageRef, tmpPath, saveOut)
+
+	// `kind load image-archive` loads the tarball into the kind node's containerd
+	// without touching the host snapshotter — the portable path that works on
+	// Docker (CI) and podman (local) alike.
+	loadOut, err := exec.CommandContext(ctx, "kind", "load", "image-archive", tmpPath,
+		"--name", kindClusterName).CombinedOutput()
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred(),
+		"kind load image-archive %s failed\n--- output ---\n%s", tmpPath, loadOut)
 }
 
-// applyManifests renders the deploy/mecak8s/ kustomize base with ko (substituting
-// the ko:// image placeholder with the built ref) and applies it. ko resolve
-// reads KO_DOCKER_REPO + the local container daemon; the image MUST already be
-// loaded into the kind node (kindLoadImage) so the pod can pull it.
+// applyResolvedManifests applies the pre-resolved manifests (the YAML returned
+// by koResolveMecak8s) — no second `ko resolve` call. The image MUST already be
+// loaded into the kind node (saveAndLoadImage) so the pod can pull it.
 //
 // The Kustomization resource itself leaks into ko resolve's output (a ko
 // version behavior); it must be filtered out before kubectl apply, or the API
@@ -202,15 +209,9 @@ func kindLoadImage(image string) {
 // processes documents in order, but the namespace's "active" state is set by
 // the namespace controller asynchronously — resources in that namespace fail
 // with "namespaces not found" if applied in the same invocation.
-func applyManifests() {
+func applyResolvedManifests(resolved []byte) {
 	ginkgo.GinkgoHelper()
 	ctx := ginkgoSuiteCtx()
-	resolve := exec.CommandContext(ctx, "ko", "resolve", "-f", "deploy/mecak8s/")
-	resolve.Dir = repoRoot()
-	resolve.Env = append(resolve.Environ(), "KO_DOCKER_REPO=ko.local")
-	resolved, err := resolve.Output()
-	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred(),
-		"ko resolve -f deploy/mecak8s/ failed\n--- output ---\n%s", resolved)
 
 	// Filter out the Kustomization resource (ko emits it; kubectl can't apply it).
 	filtered := filterKustomization(resolved)
