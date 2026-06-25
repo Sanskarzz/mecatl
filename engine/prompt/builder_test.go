@@ -264,31 +264,38 @@ func TestEnvBlockGitStatusSubBlock(t *testing.T) {
 	}
 }
 
-// TestDefaultToneOutputEconomy pins the output-economy contract (ADR 0041) in the
-// default StablePrefix. It asserts the four load-bearing clauses are present:
-// (1) the prose-economy scope ("PROSE ONLY") that separates brevity from
-// investigation depth — the Claude Code #32508 failure mode; (2) the minimum-code
+// TestDefaultToneOutputEconomy pins the output-economy contract (ADR 0041, as
+// rebalanced by ADR 0054) in the default StablePrefix. It asserts the load-bearing
+// clauses are present: (1) brevity scoped to the FINAL message to the client, with
+// reasoning named as a PROTECTED channel and an explicit exemption list — the
+// interleaved-reasoning regression (Claude Code #32508/#42796) where "be brief"
+// suppressed cognition; (2) the explicit thoroughness directives that push the
+// model to reason before acting and work through edge cases; (3) the minimum-code
 // ladder (the upward "does this need to exist / stdlib / dep / one line / minimum"
-// rungs) — the ponytail-measured biggest lever; (3) the safety carveout that is
+// rungs) — the ponytail-measured biggest lever; (4) the safety carveout that is
 // measured to be load-bearing against the "one-liner drops a guard" failure
-// (ponytail Axis 2); (4) the Edit-over-Write nudge — the mecatl-native economy
-// lever. All four live in StablePrefix (cache-stable, gauntlet #6). If any clause
-// is silently dropped or weakened in a future tone rewrite, this fails.
+// (ponytail Axis 2); (5) the Edit-over-Write nudge — the mecatl-native economy
+// lever. All live in StablePrefix (cache-stable, gauntlet #6). If any clause is
+// silently dropped or weakened in a future tone rewrite, this fails.
 func TestDefaultToneOutputEconomy(t *testing.T) {
 	got := prompt.Build(prompt.Config{Tools: sampleTools()}).StablePrefix
 
 	for _, want := range []string{
-		// (1) Prose-economy scope: brevity applies to PROSE, not cognition.
-		"applies to PROSE ONLY",
-		"it does not mean read less",
-		// (2) Minimum-code ladder.
+		// (1) Brevity scoped to the final message; reasoning protected; exemption.
+		"your final answer to the client",
+		"Brevity applies to what you write for the reader",
+		"It does NOT mean: read less",
+		// (2) Thoroughness directives.
+		"Reason through the problem before you change anything",
+		"work through edge cases and failure modes",
+		// (3) Minimum-code ladder.
 		"stop at the first rung that holds",
 		"does the standard library do it",
 		"already-imported dependency",
-		// (3) Safety carveout — never cut these.
+		// (4) Safety carveout — never cut these.
 		"Never cut these to hit a smaller line count",
 		"input validation at trust boundaries",
-		// (4) Edit-over-Write economy nudge.
+		// (5) Edit-over-Write economy nudge.
 		"Prefer Edit (emit only the change) over Write",
 	} {
 		if !strings.Contains(got, want) {
