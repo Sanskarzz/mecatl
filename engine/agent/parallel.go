@@ -22,13 +22,13 @@ const parallelToolName = "Parallel"
 // for an absurd number of branches is rejected rather than allowed to spawn an
 // unbounded number of child loops (and forked workspaces). Override with
 // WithMaxBranches.
-const defaultMaxBranches = 8
+const defaultMaxBranches = 16
 
 // defaultParallelConcurrency bounds how many child branches run at once. Forking and
 // running N child loops simultaneously is the point of fork-join, but it is also
 // N times the resource cost, so a worker limit keeps it bounded. Override with
 // WithParallelConcurrency.
-const defaultParallelConcurrency = 4
+const defaultParallelConcurrency = 8
 
 // Join strategies. join is normalised (trim + lower) before comparison; "" maps
 // to joinAll (today's default behaviour) and "best" is an alias of joinJudge.
@@ -333,7 +333,7 @@ func NewParallelTool(childEngine *Engine, forker tool.WorkspaceForker, opts ...P
 func (*ParallelTool) Spec() tool.ToolSpec {
 	return tool.ToolSpec{
 		Name: parallelToolName,
-		Description: "Fan out several independent tasks (up to 8) to run in PARALLEL, each in " +
+		Description: "Fan out several independent tasks (up to 16) to run in PARALLEL, each in " +
 			"its own isolated forked workspace and fresh context, then join their results into " +
 			"one summary. Use to explore multiple approaches at once or to split independent " +
 			"work. For a single task just do it yourself or use Subagent; for work where the " +

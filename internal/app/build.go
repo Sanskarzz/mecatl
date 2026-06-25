@@ -3736,7 +3736,7 @@ func buildCommandRunner(cfg Config) tool.CommandRunner {
 // The MAIN session keeps its own UNHARDENED runner (buildCommandRunner) so operator
 // hooks/pager are honoured there; only team-member shells are sandboxed. Per-command
 // timeout (~30s, applied by the runner) and the supervisor's concurrency cap
-// (defaultTeamConcurrency=4) already bound how much shell a team can run, so no extra
+// (defaultTeamConcurrency=8) already bound how much shell a team can run, so no extra
 // per-subagent deadline/semaphore is added here.
 func buildSandboxedCommandRunner(cfg Config) tool.CommandRunner {
 	if cfg.NoBash || cfg.Shell == "" {

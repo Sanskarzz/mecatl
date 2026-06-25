@@ -131,7 +131,7 @@ mailbox). See the delegation-capabilities note below.
 
 > **Delegation capabilities (Subagent / Parallel / Team).** Beyond the shared
 > `--max-run-tokens` budget (**default: unlimited**), every delegation supports: an explicit **child-concurrency
-> cap** (default 4) bounding how many children run at once; **per-call limits**
+> cap** (default 8) bounding how many children run at once; **per-call limits**
 > (`max_turns` / `max_tool_calls` / `timeout`, **tighten-only** — a call can never
 > loosen the inherited bounds) plus a **per-call model override** and a **per-call
 > token budget** (`max_run_tokens`, the preferred arg; `max_tokens` is the deprecated

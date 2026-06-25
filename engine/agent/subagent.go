@@ -45,7 +45,7 @@ const maxSubagentGoalLen = 60
 // pressure. The gate bounds ALL Subagent children — forking AND forker-less — so the
 // read-parallel fan-out cannot create unbounded child runs at once. The default
 // mirrors the team supervisor's defaultTeamConcurrency and the fork concurrency cap.
-const defaultMaxConcurrentChildren = 4
+const defaultMaxConcurrentChildren = 8
 
 // observableTool is the agent-internal seam by which a tool may forward a
 // REDACTED, allowlisted projection of its internal activity to the parent run's

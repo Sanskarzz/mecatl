@@ -103,7 +103,7 @@ const defaultMaxRounds = 48
 // planned member concurrently is the point of a round, but it is also N times the
 // resource cost, so a worker limit keeps it bounded. Override with
 // WithTeamConcurrency.
-const defaultTeamConcurrency = 4
+const defaultTeamConcurrency = 8
 
 // defaultMemberTurnBudget is the cumulative LIFETIME turn cap a single member may
 // spend across ALL rounds. The per-round session.Limits (WithTeamLimits) bound one

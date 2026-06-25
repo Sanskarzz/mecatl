@@ -130,7 +130,7 @@ security boundary:
   `MutatesParent` is decoupled from any merger (there is none); the
   `parentMutatingCaller` seam and the `SerializingMerger` are reused only by Parallel's
   single-branch merge (ADR 0040).
-- `WithMaxConcurrentChildren` (default 4; `WithMaxConcurrentSubagentShells` is a
+- `WithMaxConcurrentChildren` (default 8; `WithMaxConcurrentSubagentShells` is a
   deprecated alias) sizes the **child concurrency gate**, acquired at the top of
   `run()` for ALL children (forking and forker-less) — Subagent is read-parallel, so
   the model can fan many out; each child consumes a session + an LLM slot (and, when

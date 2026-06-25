@@ -301,14 +301,14 @@ cancellation). No wire/proto change (`session.Limits` semantics unchanged). Guar
 `agent.TestSubagentPerCall*`.
 
 **Subagent child concurrency cap.** `SubagentTool.childGate` (a counting-semaphore channel, default
-`defaultMaxConcurrentChildren = 4`, override `WithMaxConcurrentChildren`; the old
+`defaultMaxConcurrentChildren = 8`, override `WithMaxConcurrentChildren`; the old
 `WithMaxConcurrentSubagentShells` is a deprecated alias) is now acquired at the TOP of `run()` for
 ALL Subagent children — forking AND forker-less — not only the worktree-forking path. Subagent is
 read-only so the dispatcher fans out N concurrent Subagent calls in one turn; each consumes a child
 session + an LLM slot (and, when shell-bearing, a forked worktree), so the gate is the single
 fan-out brake bounding how many children run at once. This closes the previously-unbounded
 forker-LESS fan-out. The team supervisor's round was ALREADY bounded
-(`errgroup.SetLimit(s.concurrency)`, `WithTeamConcurrency`, default 4) — a code comment + the
+(`errgroup.SetLimit(s.concurrency)`, `WithTeamConcurrency`, default 8) — a code comment + the
 `TestSupervisorRoundConcurrencyBounded` guard keep a future refactor from silently dropping it.
 read-parallel/mutate-serial is UNCHANGED (the gate bounds child START, not dispatch ordering).
 Guards: `agent.TestSubagentChildGateCapsForkerlessConcurrency`,
@@ -1832,7 +1832,7 @@ reflects the operator's in-progress work — Edit/Write still dropped, no Subage
 `SubagentTool.ReadOnly()`
 stays **true**: isolation (not catalog read-only-ness) is what keeps Subagent read-parallel — its
 writes land in the worktree, never the shared base; a fork FAILURE is a tool error, NOT a
-silent fallback to the shared ws. A `WithMaxConcurrentChildren` (default 4; old
+silent fallback to the shared ws. A `WithMaxConcurrentChildren` (default 8; old
 `WithMaxConcurrentSubagentShells` is a deprecated alias) semaphore bounds concurrent children —
 ALL of them now, forking and forker-less (Subagent is read-parallel, so the model can fan out; see
 the Subagent-concurrency-cap note above). Same
@@ -2029,13 +2029,13 @@ new cascade tier knob does not.
 |---|---|---|---|---|
 | no-progress nudge cap | 2 | `engine/agent/loop.go` (`defaultNoProgressNudges`) | shared loop (main + Subagent + team member + lead synthesis + Parallel) | `Deps.MaxNoProgressNudges` ← `Config.MaxNoProgressNudges`; `<0` disables, `0`→this |
 | compaction trigger ratio | 0.8 | `engine/agent/loop.go` (`defaultCompactionRatio`) | shared loop | `Deps.CompactionRatio` ← `Config.CompactionRatio`; `(0,1]` overrides, else this |
-| child concurrency gate | 4 | `engine/agent/subagent.go` (`defaultMaxConcurrentChildren`) | Subagent fan-out (forking + forker-less) | `WithMaxConcurrentChildren`; `<1`→1 |
+| child concurrency gate | 8 | `engine/agent/subagent.go` (`defaultMaxConcurrentChildren`) | Subagent fan-out (forking + forker-less) | `WithMaxConcurrentChildren`; `<1`→1 |
 | structured-output retries | 2 | `engine/agent/subagent.go` (`defaultStructuredOutputRetries`) | per Subagent `output_schema` call | not configurable (correction re-drives) |
 | subagent run-token floor | 25 000 | `engine/agent/subagent.go` (`MinSubagentRunTokens`) | per-call `MaxRunTokensOverride` floor | tighten-only floor; raises a below-floor override |
-| Parallel fan-out cap | 8 | `engine/agent/parallel.go` (`defaultMaxBranches`) | per `Parallel` call | `WithMaxBranches`; non-positive ignored |
-| Parallel concurrency | 4 | `engine/agent/parallel.go` (`defaultParallelConcurrency`) | per `Parallel` call | `WithParallelConcurrency`; non-positive ignored |
+| Parallel fan-out cap | 16 | `engine/agent/parallel.go` (`defaultMaxBranches`) | per `Parallel` call | `WithMaxBranches`; non-positive ignored |
+| Parallel concurrency | 8 | `engine/agent/parallel.go` (`defaultParallelConcurrency`) | per `Parallel` call | `WithParallelConcurrency`; non-positive ignored |
 | team round cap | 48 | `engine/agent/teamsupervisor.go` (`defaultMaxRounds`) | per team `Run` | `WithMaxRounds` |
-| team member concurrency | 4 | `engine/agent/teamsupervisor.go` (`defaultTeamConcurrency`) | per scheduling round | `WithTeamConcurrency` |
+| team member concurrency | 8 | `engine/agent/teamsupervisor.go` (`defaultTeamConcurrency`) | per scheduling round | `WithTeamConcurrency` |
 | member lifetime turn budget | 200 | `engine/agent/teamsupervisor.go` (`defaultMemberTurnBudget`) | cumulative per member across rounds | `WithMemberTurnBudget` |
 | ask-reviewer breaker | 3 | `engine/agent/askadjudicator.go` (`DefaultAskReviewMaxDenies`) | per run (consecutive non-allow reviewer outcomes) | `Deps.ChildAskReviewMaxDenies` ← `Config.SubagentAskReviewerMaxDenies` ← `--subagent-ask-reviewer-max-denies`; `<=0`→this |
 | model-router breaker | 3 | `engine/agent/modelrouter.go` (`defaultModelRouterMaxMisses`) | per run (router circuit-breaker) | not configurable |
