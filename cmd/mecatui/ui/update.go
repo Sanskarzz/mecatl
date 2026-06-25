@@ -1547,6 +1547,12 @@ func (m Model) onIdleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.openMCP(mcpPrompts)
 	case key.Matches(msg, m.keys.Agents):
 		return m.openAgents()
+	case key.Matches(msg, m.keys.Effort):
+		// ctrl+e opens the /effort reasoning-effort picker — the same surface the
+		// /effort command opens (runEffort → openEffort). openEffort self-gates on
+		// idle + caps.ModelSelection, so when model selection is unavailable this
+		// returns the model unchanged and the key never opens an empty picker.
+		return m.openEffort()
 	case key.Matches(msg, m.keys.Cancel) && m.queuePaused != "":
 		// A run ended on a non-clean stop with staged follow-ups still queued (the
 		// paused state). Mirror the running-phase esc layering: a non-empty input is

@@ -114,6 +114,14 @@ type keyMap struct {
 	// overlay.
 	Help key.Binding
 
+	// Effort (ctrl+e) opens the /effort reasoning-effort picker (ADR 0055) — the
+	// same surface the /effort command opens. Control-modified so it never collides
+	// with textarea input. Like the /effort command it is idle-only and gated on
+	// caps.ModelSelection: openEffort returns the model unchanged (the key falls
+	// through inert) when model selection is unavailable, so ctrl+e never opens an
+	// empty picker. esc dismisses it via the shared onEffortKey overlay route.
+	Effort key.Binding
+
 	// SetGlobalDefault (ctrl+g) sets the /models picker's CURSOR row as the client
 	// global default (the model new/unseen workspaces inherit). It is CONTROL-modified
 	// deliberately: a bare 'g' is ScrollTop/JumpTop (key.Matches), and the picker's
@@ -203,6 +211,13 @@ func defaultKeys() keyMap {
 		Agents: key.NewBinding(
 			key.WithKeys("ctrl+a"),
 			key.WithHelp("ctrl+a", "agents (subagents / teams)"),
+		),
+		// ctrl+e: open the /effort reasoning-effort picker (ADR 0055). Control-modified
+		// so a bare 'e' still types into the prompt; idle-only + caps-gated inside
+		// openEffort, mirroring the /effort command.
+		Effort: key.NewBinding(
+			key.WithKeys("ctrl+e"),
+			key.WithHelp("ctrl+e", "reasoning-effort picker"),
 		),
 		// tab: switch tabs inside the agents overlay. Consulted only while the overlay
 		// owns the keyboard.

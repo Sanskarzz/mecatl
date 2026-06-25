@@ -138,6 +138,13 @@ type config struct {
 	posture        string
 	postureFlagSet bool
 
+	// Reasoning-effort tier (ADR 0055): operator-tier reasoning-effort default ("" =
+	// unset, the provider's own default applies). reasoningEffortFlagSet records an
+	// explicit --reasoning-effort so composition lets CLI out-rank the operator-global
+	// settings.yaml reasoning-effort: key (mirrors posture).
+	reasoningEffort        string
+	reasoningEffortFlagSet bool
+
 	// Security: API authentication + transport security (rate limiting is
 	// omitted — a pod is fronted by the Service/mesh, not a raw public port).
 	authToken string
@@ -254,6 +261,10 @@ func parseFlags(argv []string) (config, error) {
 	// Posture: DEFAULT "auto" (the recommended UNATTENDED single-tenant tier).
 	fs.StringVar(&cfg.posture, "posture", "auto", "OPERATOR POSTURE LADDER (strict < trusted < auto < yolo): strict prompts every mutate; trusted honours a project's ALLOW rules; auto adds allow-all + main substitution loosening (the DEFAULT, recommended UNATTENDED single-tenant tier, child injection-defense ON); yolo additionally auto-runs $()/backtick/heredoc in children. auto/yolo are refused as root outside MECATL_SANDBOX. An unknown value fails closed to strict with a WARN")
 
+	// Reasoning-effort tier (ADR 0055): operator-tier only; help text verbatim from mecated.
+	fs.StringVar(&cfg.reasoningEffort, "reasoning-effort", "",
+		"OPERATOR REASONING-EFFORT TIER (ADR 0055): auto (default — unset, the provider's own default applies) or low/medium/high/xhigh/max. OpenAI supports low/medium/high only, so xhigh/max are clamped down to high (with a WARN); Anthropic maps all five. Empty = unset (honours the operator-global settings.yaml reasoning-effort: key if present). A per-session CreateSession reasoning_effort out-ranks this default. A model with no reasoning support drops it. Operator-tier only; a project-tier reasoning-effort: key is ignored with a WARN. An unknown value fail-softs to unset with a WARN.")
+
 	// Security (no rate-limit: a pod is fronted by the Service/mesh).
 	fs.StringVar(&cfg.authToken, "auth-token", "", "bearer token required on every RPC/request (empty disables auth; or MECATL_AUTH_TOKEN). Enable before binding a non-mesh address")
 	fs.StringVar(&cfg.tlsCert, "tls-cert", "", "PEM server certificate; enables TLS on gRPC + HTTP when set with --tls-key")
@@ -297,6 +308,8 @@ func parseFlags(argv []string) (config, error) {
 		switch fl.Name {
 		case "posture":
 			cfg.postureFlagSet = true
+		case "reasoning-effort":
+			cfg.reasoningEffortFlagSet = true
 		case "subagent-model-router":
 			cfg.subagentModelRouterSet = true
 		}
@@ -380,7 +393,12 @@ func appConfig(cfg config, diag port.Diagnostics) app.Config {
 		PermissionConfigs:            cfg.permissionConfigs,
 		Posture:                      app.ParsePosture(cfg.posture),
 		PostureFlagSet:               cfg.postureFlagSet,
-		Privileged:                   privilegedProcess(),
+		// Reasoning-effort tier (ADR 0055): operator-tier only; reasoningEffortFlagSet
+		// lets CLI out-rank the operator-global settings.yaml reasoning-effort: key
+		// (folded by foldOperatorReasoningEffort in app.Build, like posture).
+		ReasoningEffort:        cfg.reasoningEffort,
+		ReasoningEffortFlagSet: cfg.reasoningEffortFlagSet,
+		Privileged:             privilegedProcess(),
 		// Interactive = !headless: the deliberate headless default. A child's
 		// unresolved ask is auto-denied / routed to the opt-in ask-reviewer.
 		Interactive: !cfg.headless,

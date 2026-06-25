@@ -46,6 +46,12 @@ func TestParseFlagsK8sDefaults(t *testing.T) {
 	if def.postureFlagSet {
 		t.Error("postureFlagSet default = true, want false (flag not given)")
 	}
+	if def.reasoningEffort != "" {
+		t.Errorf("reasoningEffort default = %q, want empty (unset = provider default)", def.reasoningEffort)
+	}
+	if def.reasoningEffortFlagSet {
+		t.Error("reasoningEffortFlagSet default = true, want false (flag not given)")
+	}
 }
 
 // TestAppConfigMapsK8sFields asserts appConfig threads the k8s-native fields
@@ -57,6 +63,7 @@ func TestAppConfigMapsK8sFields(t *testing.T) {
 		"--session-lease-k8s-namespace", "myns",
 		"--headless=false",
 		"--posture", "trusted",
+		"--reasoning-effort", "high",
 	})
 	if err != nil {
 		t.Fatalf("parseFlags: %v", err)
@@ -76,6 +83,15 @@ func TestAppConfigMapsK8sFields(t *testing.T) {
 	}
 	if !cfg.postureFlagSet {
 		t.Error("postureFlagSet = false after --posture, want true")
+	}
+	if ac.ReasoningEffort != "high" {
+		t.Errorf("app.Config ReasoningEffort = %q, want high", ac.ReasoningEffort)
+	}
+	if !ac.ReasoningEffortFlagSet {
+		t.Error("app.Config ReasoningEffortFlagSet = false after --reasoning-effort, want true")
+	}
+	if !cfg.reasoningEffortFlagSet {
+		t.Error("reasoningEffortFlagSet = false after --reasoning-effort, want true")
 	}
 }
 

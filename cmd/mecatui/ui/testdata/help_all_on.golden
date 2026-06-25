@@ -21,6 +21,7 @@
 ┃    ctrl+r        MCP resources                                                                                                                             ┃
 ┃    ctrl+p        MCP prompts                                                                                                                               ┃
 ┃    ctrl+a        agents overlay (subagents / parallel / teams · tab to switch)                                                                             ┃
+┃    ctrl+e        reasoning-effort picker                                                                                                                   ┃
 ┃    alt+m         cycle permission mode (default / plan / accept-edits)                                                                                     ┃
 ┃    ctrl+t        expand/collapse details                                                                                                                   ┃
 ┃                                                                                                                                                            ┃

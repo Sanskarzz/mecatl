@@ -69,6 +69,7 @@ func helpBody(th theme.Theme, caps client.Capabilities) string {
 		{key: "ctrl+r", action: "MCP resources", available: caps.MCP, gated: true},
 		{key: "ctrl+p", action: "MCP prompts", available: caps.MCP, gated: true},
 		{key: "ctrl+a", action: "agents overlay (subagents / parallel / teams · tab to switch)"},
+		{key: "ctrl+e", action: "reasoning-effort picker", available: caps.ModelSelection, gated: true},
 		{key: "alt+m", action: "cycle permission mode (default / plan / accept-edits)"},
 		{key: "ctrl+t", action: "expand/collapse details"},
 	})
