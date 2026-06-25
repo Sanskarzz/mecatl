@@ -489,6 +489,20 @@ show the plain prompt-hint card.
 > The Kitty high-res path is **unit-tested** (escape generation + the env detection
 > truth table) but **not live-verified** — the dev environment has no Kitty terminal.
 > The half-block path is the verified default.
+>
+> **Multiplexer caveat (tmux/screen):** a terminal multiplexer between mecatui and
+> the outer terminal does **not** pass Kitty graphics APC through by default — it
+> strips the sequences it doesn't recognise, so the transmit never reaches the
+> outer Ghostty/WezTerm and the placeholder grid paints nothing. mecatui detects a
+> multiplexer session (`$TMUX` for tmux, `$STY` for GNU screen) and **falls back to
+> the half-block path** in that case, since a Ghostty/WezTerm env signal
+> (`TERM_PROGRAM`, `GHOSTTY_*`) is inherited verbatim by the multiplexer and would
+> be a false positive. `KITTY_WINDOW_ID` and `TERM=*kitty` are kept as sufficient
+> even under a multiplexer (kitty sets them; tmux strips `KITTY_WINDOW_ID` unless
+> passthrough relays it). To use the high-res path under tmux, enable
+> `tmux set-option -g allow-passthrough on` and force the Kitty path with
+> `MECATUI_FORCE_KITTY=1`; `MECATUI_NO_KITTY=1` forces the half-block path and wins
+> over force. Truth-table-pinned by `TestDetectKittyTruthTable`.
 
 ## Keys
 

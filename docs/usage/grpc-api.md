@@ -259,3 +259,8 @@ respects the same trust model: it refuses to send `--auth-token` in cleartext to
 a non-loopback server (use `--tls`). Full flag, key, and theming reference is in
 **`docs/tui.md`**.
 
+---
+
+See also: the [HTTP/SSE API](http-sse-api.md) (the wire sibling), or the
+[operator guide index](../usage.md).
+

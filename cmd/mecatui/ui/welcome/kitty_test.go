@@ -48,6 +48,25 @@ func TestDetectKittyTruthTable(t *testing.T) {
 		{"force on", map[string]string{"MECATUI_FORCE_KITTY": "1"}, true},
 		{"no wins over force", map[string]string{"MECATUI_FORCE_KITTY": "1", "MECATUI_NO_KITTY": "1"}, false},
 		{"no over detection", map[string]string{"KITTY_WINDOW_ID": "1", "MECATUI_NO_KITTY": "true"}, false},
+		// A multiplexer (tmux/screen) between mecatui and the outer terminal does not
+		// pass Kitty graphics APC through by default, so a Ghostty/WezTerm env signal
+		// inherited by the multiplexer is a false positive: the transmit would be
+		// swallowed and the placeholder grid paints nothing. Fall back to the half-block
+		// path unless the operator force-opts-in (MECATUI_FORCE_KITTY=1 after enabling
+		// `tmux allow-passthrough on`).
+		{"ghostty env under tmux", map[string]string{"GHOSTTY_RESOURCES_DIR": "/x", "TMUX": "/tmp/sock"}, false},
+		{"ghostty term_program under tmux", map[string]string{"TERM_PROGRAM": "ghostty", "TMUX": "/tmp/sock"}, false},
+		{"wezterm under tmux", map[string]string{"TERM_PROGRAM": "WezTerm", "TMUX": "/tmp/sock"}, false},
+		{"ghostty env under screen", map[string]string{"GHOSTTY_RESOURCES_DIR": "/x", "STY": "1"}, false},
+		// KITTY_WINDOW_ID is kept as sufficient even under a multiplexer: kitty itself
+		// sets it and tmux strips it unless passthrough relays it, so a true value
+		// implies passthrough is actually forwarding kitty's env.
+		{"kitty window id under tmux", map[string]string{"KITTY_WINDOW_ID": "1", "TMUX": "/tmp/sock"}, true},
+		// Konsole is a terminal, not a multiplexer — no TMUX suppression applies.
+		{"konsole under tmux", map[string]string{"KONSOLE_VERSION": "220400", "TMUX": "/tmp/sock"}, true},
+		// The operator force-override still works under a multiplexer (for users who
+		// have enabled tmux allow-passthrough on).
+		{"force on under tmux", map[string]string{"MECATUI_FORCE_KITTY": "1", "TMUX": "/tmp/sock"}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

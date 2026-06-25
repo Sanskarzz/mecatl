@@ -42,3 +42,8 @@ missing** on compatible servers include:
 If a compatible endpoint behaves oddly, suspect missing Responses-API support
 before suspecting the harness.
 
+---
+
+See also: [model routing](model-routing.md) (slots, aliases, the router), or
+the [operator guide index](../usage.md).
+

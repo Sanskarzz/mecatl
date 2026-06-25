@@ -142,3 +142,8 @@ assumption: there is no per-user keying — "the operator" is implicitly singula
 same trust-zone assumption the soul and `docs/adr/0009-tiered-memory.md` carry. Disable
 it with `--no-user-model`.
 
+---
+
+See also: [workspace trust & posture](workspace-trust.md), or the
+[operator guide index](../usage.md).
+

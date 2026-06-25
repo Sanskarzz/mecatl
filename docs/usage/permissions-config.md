@@ -251,3 +251,8 @@ approve a concealed destructive command.
 > `defaultRules()` and rebuild. (It lives in `internal/app` so both `mecated` and
 > the embedded `mecatui` server share one ruleset.)
 
+---
+
+See also: [workspace trust & posture](workspace-trust.md), [hooks](hooks.md),
+or the [operator guide index](../usage.md).
+

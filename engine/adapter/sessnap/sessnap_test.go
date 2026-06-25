@@ -349,6 +349,7 @@ func TestSnapshotRoundTripsItemID(t *testing.T) {
 	}
 	if restoredCall == nil {
 		t.Fatalf("restored conversation has no ToolCalls in any message")
+		return
 	}
 	if restoredCall.ItemID != itemID {
 		t.Fatalf("restored ItemID = %q, want %q", restoredCall.ItemID, itemID)

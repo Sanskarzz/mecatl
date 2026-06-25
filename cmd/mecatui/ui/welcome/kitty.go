@@ -41,13 +41,22 @@ func KittyCapable() bool { return kittyCapable() }
 // correctness. A false positive would paint nothing (the placeholder cells render
 // as blanks), which is also non-fatal.
 //
+// A terminal MULTIPLEXER (tmux via $TMUX, screen via $STY) between mecatui and
+// the outer terminal does NOT pass Kitty graphics APC through by default, so a
+// Ghostty/WezTerm env signal inside a multiplexer is suppressed (fall back to the
+// half-block path) unless the operator force-opts-in with MECATUI_FORCE_KITTY=1
+// after enabling `tmux allow-passthrough on`. KITTY_WINDOW_ID and TERM=*kitty are
+// kept as sufficient even under a multiplexer (kitty sets them; a false positive
+// there only costs resolution).
+//
 // Two override envs gate testing and user control:
 //   - MECATUI_FORCE_KITTY=1 forces capable (true) regardless of detection.
 //   - MECATUI_NO_KITTY=1 forces incapable (false) and WINS over force.
 //
 // Detection (any one is sufficient): KITTY_WINDOW_ID set (kitty), TERM contains
-// "kitty", TERM_PROGRAM in {ghostty, WezTerm}, any GHOSTTY_* env present, or
-// KONSOLE_VERSION set (Konsole's Kitty support).
+// "kitty", TERM_PROGRAM in {ghostty, WezTerm} (NOT under a multiplexer), any
+// GHOSTTY_* env present (NOT under a multiplexer), or KONSOLE_VERSION set
+// (Konsole's Kitty support).
 func kittyCapable() bool {
 	return detectKitty(osEnvLookup, osEnviron)
 }
@@ -63,6 +72,20 @@ func osEnviron() []string { return os.Environ() }
 // detectKitty is the pure core of kittyCapable, taking its environment as
 // injectable functions so the truth table is unit-testable without mutating the
 // process environment.
+//
+// A terminal MULTIPLEXER (tmux, screen) between mecatui and the outer terminal
+// does not pass Kitty graphics APC through by default — it strips the sequences
+// it doesn't recognise, so the transmit never reaches the outer Ghostty/WezTerm
+// and the placeholder grid paints nothing. The env-based detection below can't
+// tell whether passthrough is actually enabled, so a multiplexer session is the
+// documented false-positive case: we fall back to the always-correct half-block
+// path unless the operator force-opts-in with MECATUI_FORCE_KITTY=1 (set this
+// after enabling `tmux allow-passthrough on`). $TMUX is the reliable signal;
+// $STY covers GNU screen. KITTY_WINDOW_ID survives a kitty-inside-tmux session
+// only when kitty is the outer terminal AND passthrough is on, so it is kept as
+// a sufficient signal (a false positive there costs resolution, never
+// correctness) — but the Ghostty/WezTerm env heuristics are gated on a
+// non-multiplexed session, since those vars are inherited verbatim by tmux.
 func detectKitty(look envLookup, environ func() []string) bool {
 	if v, ok := look("MECATUI_NO_KITTY"); ok && truthy(v) {
 		return false // explicit opt-out wins over everything.
@@ -70,24 +93,41 @@ func detectKitty(look envLookup, environ func() []string) bool {
 	if v, ok := look("MECATUI_FORCE_KITTY"); ok && truthy(v) {
 		return true
 	}
+	// A multiplexer layer (tmux/screen) does not pass Kitty graphics APC
+	// through by default. Fall back to the half-block path unless the operator
+	// force-opts-in (after enabling tmux allow-passthrough). KITTY_WINDOW_ID is
+	// the one signal kept even under a multiplexer, because kitty itself sets it
+	// and it is stripped by tmux unless passthrough relays it.
+	_, inMux := look("TMUX")
+	if !inMux {
+		if _, ok := look("STY"); ok {
+			inMux = true
+		}
+	}
 	if _, ok := look("KITTY_WINDOW_ID"); ok {
 		return true
 	}
 	if term, ok := look("TERM"); ok && strings.Contains(strings.ToLower(term), "kitty") {
 		return true
 	}
-	switch tp, _ := look("TERM_PROGRAM"); tp {
-	case "ghostty", "Ghostty", "WezTerm", "wezterm":
-		return true
+	if !inMux {
+		switch tp, _ := look("TERM_PROGRAM"); tp {
+		case "ghostty", "Ghostty", "WezTerm", "wezterm":
+			return true
+		}
 	}
 	if _, ok := look("KONSOLE_VERSION"); ok {
 		return true
 	}
-	// Any GHOSTTY_* env present (Ghostty exports several, e.g. GHOSTTY_RESOURCES_DIR)
-	// is a strong signal even when TERM_PROGRAM is unset (tmux strips it).
-	for _, kv := range environ() {
-		if strings.HasPrefix(kv, "GHOSTTY_") {
-			return true
+	if !inMux {
+		// Any GHOSTTY_* env present (Ghostty exports several, e.g. GHOSTTY_RESOURCES_DIR)
+		// is a strong signal even when TERM_PROGRAM is unset. Gated on a non-multiplexed
+		// session: tmux inherits these vars from the Ghostty shell, so under $TMUX they
+		// are a false positive (the transmit would be swallowed by the multiplexer).
+		for _, kv := range environ() {
+			if strings.HasPrefix(kv, "GHOSTTY_") {
+				return true
+			}
 		}
 	}
 	return false

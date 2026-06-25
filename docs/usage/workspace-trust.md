@@ -299,3 +299,8 @@ MECATL_SANDBOX=1 bin/mecated --mock --posture auto
 MECATL_SANDBOX=1 bin/mecated --mock --posture yolo   # == --yolo
 ```
 
+---
+
+See also: [permissions configuration](permissions-config.md), or the
+[operator guide index](../usage.md).
+

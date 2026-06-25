@@ -113,3 +113,8 @@ on timeout, and `Service.Close` releases every held `coordination.k8s.io` Lease
 (CRD/operator, HPA, managed Redis, Redis auth, fixing `mecated`'s unbounded `GracefulStop`).
 
 ---
+
+See also: [running the server (`mecated`)](mecated.md), or the
+[operator guide index](../usage.md).
+
+---

@@ -70,3 +70,7 @@ $ jq . DIR/8867….tools.jsonl
 $ jq . DIR/8867….events.jsonl
 ```
 
+---
+
+See also: the [operator guide index](../usage.md).
+

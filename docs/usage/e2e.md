@@ -40,3 +40,8 @@ In CI the suite runs as the **non-blocking** `e2e-live` workflow (nightly +
 manual dispatch + the `e2e-live` PR label) — see
 `.github/workflows/README.md`.
 
+---
+
+See also: the [gRPC API](grpc-api.md) and the [HTTP/SSE API](http-sse-api.md)
+the suite drives, or the [operator guide index](../usage.md).
+

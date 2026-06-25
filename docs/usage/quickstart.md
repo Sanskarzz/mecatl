@@ -63,3 +63,8 @@ Demo flags (`cmd/mecademo`):
 Without `--openai` the demo is fully offline. With `--openai` and no
 `OPENAI_API_KEY`, it exits with `--openai requires OPENAI_API_KEY to be set`.
 
+---
+
+See also: [prerequisites & install](install.md), [running the server](mecated.md),
+or the [operator guide index](../usage.md).
+

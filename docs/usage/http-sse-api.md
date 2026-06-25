@@ -176,3 +176,8 @@ only JSON-RPC frames.
   session store is configured (`--store-dir`); the in-memory default would lose
   the session across a restart, so the capability is withheld.
 
+---
+
+See also: the [gRPC API](grpc-api.md) (the wire sibling), or the
+[operator guide index](../usage.md).
+

@@ -129,6 +129,7 @@ func TestFoldedAwaitingSessionIsDrivable(t *testing.T) {
 	}
 	if result == nil {
 		t.Fatalf("no terminal result event")
+		return
 	}
 	if result.Stop == session.StopError {
 		t.Fatalf("resume failed (likely dangling-tool 400): %q", result.Error)

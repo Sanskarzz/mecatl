@@ -72,3 +72,8 @@ hooks := hookexec.New(map[governance.HookPhase]string{
 })
 ```
 
+---
+
+See also: [permissions configuration](permissions-config.md) (the other
+governance surface), or the [operator guide index](../usage.md).
+

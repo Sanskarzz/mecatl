@@ -440,6 +440,7 @@ func TestCancelChildMidGateWait(t *testing.T) {
 	reg.mu.Unlock()
 	if e == nil {
 		t.Fatalf("a cancelled-while-queued child must keep its registry entry (meaningful terminal)")
+		return
 	}
 	select {
 	case <-e.doneCh:
