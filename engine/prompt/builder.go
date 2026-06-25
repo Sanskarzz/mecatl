@@ -141,19 +141,32 @@ func Build(cfg Config) Layered {
 		safety = defaultSafety
 	}
 
+	hints := toolDisciplineHints(cfg.Tools)
+	inventory := toolInventory(cfg.Tools)
+
 	var b strings.Builder
+	// Pre-size to the exact StablePrefix length so it assembles in ONE allocation
+	// rather than several strings.Builder doublings — this keeps prompt-build
+	// allocs/op flat and INSENSITIVE to the length of the default role/tone/safety
+	// wording (a longer defaultTone must not tip the builder over a growth boundary
+	// and trip the allocs gate). Grow does not change the output bytes (gauntlet #6).
+	size := len(safety) + len(role) + len(tone) + len(inventory) + len("\n\n")*3
+	if hints != "" {
+		size += len(hints) + len("\n\n")
+	}
+	b.Grow(size)
 	// Safety first, before any user-provided content, to resist injection.
 	b.WriteString(safety)
 	b.WriteString("\n\n")
 	b.WriteString(role)
 	b.WriteString("\n\n")
 	b.WriteString(tone)
-	if hints := toolDisciplineHints(cfg.Tools); hints != "" {
+	if hints != "" {
 		b.WriteString("\n\n")
 		b.WriteString(hints)
 	}
 	b.WriteString("\n\n")
-	b.WriteString(toolInventory(cfg.Tools))
+	b.WriteString(inventory)
 
 	suffix := EnvBlock(cfg.Env)
 	if cfg.Env.Mode == "plan" {
