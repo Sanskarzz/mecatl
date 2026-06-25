@@ -93,6 +93,15 @@ type Config struct {
 	// returns "" and composition keeps the default tone). The composition layer
 	// interprets the token; permconfig only reads the scalar.
 	OutputEconomy string `yaml:"output-economy"`
+	// ReasoningEffort is the OPERATOR-TIER reasoning-effort scalar (ADR 0055: the
+	// neutral vocabulary "" / "auto" / "low" / "medium" / "high" / "xhigh" / "max").
+	// Like Posture/OutputEconomy it is honoured ONLY from the user-global + CLI
+	// tiers; a project-tier file's reasoning-effort: key is IGNORED with a WARN
+	// (operator-tier only, for consistency — a project cannot raise the model's
+	// reasoning spend). Empty = absent (the resolver returns "" and composition uses
+	// the provider default). The composition layer interprets + clamps the token;
+	// permconfig only reads the scalar.
+	ReasoningEffort string `yaml:"reasoning-effort"`
 }
 
 // ModelsSection is the `models:` YAML subtree (ADR 0030): a per-slot model-binding

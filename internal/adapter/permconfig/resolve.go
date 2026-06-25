@@ -150,6 +150,14 @@ type Resolver struct {
 	// (explicit files) out-ranks user-global (first-non-empty keeps CLI).
 	operatorOutputEconomy string
 
+	// operatorReasoningEffort is the OPERATOR-TIER reasoning-effort: scalar (ADR
+	// 0055), read ONCE at construction from the user-global + CLI tiers ONLY. A
+	// project-tier file's reasoning-effort: key is deliberately IGNORED (operator-
+	// tier only, for consistency with posture/output-economy — loadProjectRules WARNs
+	// when it sees one). Empty when no operator-tier file carried a reasoning-effort:
+	// scalar. CLI (explicit files) out-ranks user-global (first-non-empty keeps CLI).
+	operatorReasoningEffort string
+
 	// operatorModels is the OPERATOR-TIER models: subtree (ADR 0030), read ONCE at
 	// construction from the user-global + CLI tiers ONLY (the SOLE capture path is
 	// captureModels from loadUserRules; there is no second capture path). It carries
@@ -197,6 +205,19 @@ func (r *Resolver) OperatorOutputEconomy() string {
 		return ""
 	}
 	return r.operatorOutputEconomy
+}
+
+// OperatorReasoningEffort returns the operator-tier reasoning-effort: scalar
+// (user-global + CLI only), or "" when none was configured (ADR 0055). It is the
+// SOLE accessor the composition layer uses to read reasoning-effort from config —
+// by construction it never returns a project-tier value (a project reasoning-effort:
+// is ignored with a WARN in loadProjectRules). nil-safe. Mirrors
+// OperatorOutputEconomy().
+func (r *Resolver) OperatorReasoningEffort() string {
+	if r == nil {
+		return ""
+	}
+	return r.operatorReasoningEffort
 }
 
 // OperatorModelSlots returns the operator-tier models: subtree (user-global + CLI
@@ -436,6 +457,16 @@ func (r *Resolver) loadProjectRules(ws tool.WorkspaceReader) ([]governance.Rule,
 				"output-economy: IGNORING a project-tier output-economy: scalar (operator-tier only — set output-economy in your user-global settings.yaml or via --output-economy)",
 				"file", src.path, "root", ws.Root(), "ignored_value", strings.TrimSpace(cfg.OutputEconomy))
 		}
+		// ReasoningEffort is OPERATOR-TIER ONLY (ADR 0055), for consistency with
+		// posture/output-economy: a project file's reasoning-effort: scalar is IGNORED
+		// with a loud WARN. It is a cost/quality preference, not a security control,
+		// but keeping it operator-tier-only matches the established pattern and prevents
+		// a project from silently changing the model's reasoning spend.
+		if strings.TrimSpace(cfg.ReasoningEffort) != "" {
+			r.diag.Log(context.Background(), port.LevelWarn,
+				"reasoning-effort: IGNORING a project-tier reasoning-effort: scalar (operator-tier only — set reasoning-effort in your user-global settings.yaml or via --reasoning-effort)",
+				"file", src.path, "root", ws.Root(), "ignored_value", strings.TrimSpace(cfg.ReasoningEffort))
+		}
 		// models: is project-overridable WITHIN AN OPERATOR ALLOWLIST (ADR 0030 Phase 4),
 		// otherwise IGNORED. captureProjectModels applies the full gate (allowlist key
 		// stripped + WARN; opt-in by operator allowlist; trust gate) and merges the
@@ -592,6 +623,8 @@ func (r *Resolver) loadUserRules(report *Report) []governance.Rule {
 		r.capturePosture(cfg.Posture)
 		// Operator-tier output-economy (ADR 0041): same discipline as posture.
 		r.captureOutputEconomy(cfg.OutputEconomy)
+		// Operator-tier reasoning-effort (ADR 0055): same discipline as posture.
+		r.captureReasoningEffort(cfg.ReasoningEffort)
 		// Operator-tier models: same first-non-nil-keeps-CLI discipline (ADR 0030).
 		r.captureModels(cfg.Models)
 	}
@@ -617,6 +650,8 @@ func (r *Resolver) loadUserRules(report *Report) []governance.Rule {
 				r.capturePosture(cfg.Posture)
 				// User-global output-economy (ADR 0041): same discipline as posture.
 				r.captureOutputEconomy(cfg.OutputEconomy)
+				// User-global reasoning-effort (ADR 0055): same discipline as posture.
+				r.captureReasoningEffort(cfg.ReasoningEffort)
 				// User-global models: captured only if no higher CLI file already did.
 				r.captureModels(cfg.Models)
 			}
@@ -682,6 +717,22 @@ func (r *Resolver) captureOutputEconomy(p string) {
 		return
 	}
 	r.operatorOutputEconomy = strings.TrimSpace(p)
+}
+
+// captureReasoningEffort records the FIRST operator-tier reasoning-effort: scalar
+// seen during construction (CLI files are parsed before user-global, so CLI wins
+// on first-non-empty). It is called only from loadUserRules — the operator
+// (user-global + CLI) tiers — never from loadProjectRules, so a project file can
+// never supply reasoning-effort (operator-tier only, for consistency with
+// posture/output-economy — ADR 0055). A whitespace-only value is treated as absent.
+func (r *Resolver) captureReasoningEffort(p string) {
+	if r.operatorReasoningEffort != "" {
+		return
+	}
+	if strings.TrimSpace(p) == "" {
+		return
+	}
+	r.operatorReasoningEffort = strings.TrimSpace(p)
 }
 
 // captureModels records the FIRST operator-tier models: block seen during

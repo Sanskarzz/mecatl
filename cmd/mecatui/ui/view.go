@@ -82,6 +82,8 @@ func (m Model) View() tea.View {
 		body = renderUserModelOverlay(m.deps.Theme, m.userModel, m.caps, m.width, m.vp.Height())
 	case m.models.view != modelsNone:
 		body = renderModelsOverlay(m.deps.Theme, m.models, m.caps, m.modelProvenanceLine(), m.width, m.vp.Height())
+	case m.effort.view != effortNone:
+		body = renderEffortOverlay(m.deps.Theme, m.effort, m.effectiveModel.ReasoningEffort, m.currentModelNoReasoning(), m.width, m.vp.Height())
 	case m.worktrees.view != worktreesNone:
 		body = renderWorktreesOverlay(m.deps.Theme, m.worktrees, m.caps, m.width, m.vp.Height())
 	case m.phase == phaseIdle && m.conv.isEmpty() && !m.restartedThisRun:
@@ -269,7 +271,15 @@ func (m Model) headerIdentityParts(sid, withNext string) []string {
 	// on SessionReadyMsg). The header only CHOOSES which known string to display; it
 	// never resolves a default itself. While connecting there is NO model segment.
 	if name := m.headerModelLabel(); name != "" {
-		parts = append(parts, truncate(sanitizeTerminal(name), maxModelLen))
+		seg := truncate(sanitizeTerminal(name), maxModelLen)
+		// Reasoning-effort suffix (ADR 0055): the EFFECTIVE effort the server resolved
+		// THIS session to, appended as a subtle ` · <effort>` so it rides WITH the model
+		// segment (and sheds with it under width pressure). Shown ONLY when non-empty
+		// (auto/unset echoes "" and so never renders).
+		if eff := effortHeaderSuffix(m.effectiveModel.ReasoningEffort); eff != "" {
+			seg += " · " + eff
+		}
+		parts = append(parts, seg)
 	}
 	if withNext != "" {
 		parts = append(parts, withNext)
@@ -907,6 +917,18 @@ func short(s string) string {
 // maxModelLen caps the model name shown in the header so a long provider-scoped
 // id (e.g. "anthropic/claude-opus-4-...") can't blow out the header width.
 const maxModelLen = 24
+
+// effortHeaderSuffix returns the reasoning-effort token to show beside the model in
+// the header, or "" when nothing should render (ADR 0055). It hides the unset state
+// honestly: the server echoes "" for an unset/auto effort, and an explicit "auto"
+// (defensive — the picker maps auto→"" before sending, but an older path could echo
+// it) is treated the same. The value is server-owned, so it is terminal-sanitized.
+func effortHeaderSuffix(effort string) string {
+	if effort == "" || effort == effortAuto {
+		return ""
+	}
+	return sanitizeTerminal(effort)
+}
 
 // truncate clamps s to at most limit display runes, appending an ellipsis when
 // it overflows (the "…" counts toward limit). Rune-safe so multibyte model ids

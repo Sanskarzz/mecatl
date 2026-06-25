@@ -254,6 +254,22 @@ message CreateSessionRequest {
   // Any other value is a loud InvalidArgument, never a silent fallback to the
   // default profile. The profile is FIXED for the session lifetime.
   string profile = 6;
+
+  // reasoning_effort sets this session's reasoning-effort tier, enum-as-string
+  // (the profile / Result.stop idiom — NO proto enum, additive values):
+  //
+  //   - "" or "auto": UNSET — do not send a reasoning-effort field; the
+  //     operator default (and ultimately the provider default) applies.
+  //   - "low" / "medium" / "high" / "xhigh" / "max": the neutral effort tiers.
+  //
+  // The server NORMALISES and per-provider CLAMPS the value (OpenAI supports
+  // low/medium/high only, so xhigh/max clamp DOWN to high; Anthropic maps all
+  // five) and CAPABILITY-GATES it (a model with no reasoning support drops it).
+  // An unknown value falls back to the operator default with a WARN (it never
+  // 400s the request). It OUT-RANKS the operator default; unlike model_id it is
+  // meaningful WITHOUT a provider_id (it rides the server-default provider). The
+  // EFFECTIVE resolved value is echoed back on resolved_model.reasoning_effort.
+  string reasoning_effort = 7;
 }
 
 // ServerCapabilities reports which optional features this server has ENABLED,
@@ -371,6 +387,14 @@ message ResolvedModel {
   string model_id = 2;
   // context_window is the resolved model's context window in tokens (0 = unknown).
   int64 context_window = 3;
+  // reasoning_effort is the EFFECTIVE reasoning-effort tier this session resolved
+  // to, enum-as-string (the same neutral vocabulary as
+  // CreateSessionRequest.reasoning_effort, NO proto enum): "" when unset (the
+  // provider default applies), else the normalised + per-provider-CLAMPED token
+  // actually wired into the adapter — e.g. an OpenAI session that requested "max"
+  // echoes "high". The client renders it (e.g. in the model footer) and never
+  // recomputes it.
+  string reasoning_effort = 4;
 }
 
 // SessionCapabilities is the per-session resolved input capability: ONLY the

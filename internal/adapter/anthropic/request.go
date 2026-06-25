@@ -57,7 +57,38 @@ func (p *Provider) buildParams(req port.LLMRequest) (sdk.MessageNewParams, error
 		System:    buildSystem(req.System),
 		Thinking:  thinkingConfigFor(req.Model, maxTokens, p.thinkingBudget, p.thinkingFor),
 	}
+	// Reasoning effort (ADR 0055) rides output_config.effort, INDEPENDENT of the
+	// extended-thinking config above (both coexist on the request). Anthropic
+	// identity-maps the neutral vocabulary (low/medium/high/xhigh/max); "" / "auto"
+	// / an unrecognised token OMITS the field (the model default applies). The field
+	// is omitzero, so an empty OutputConfig is wire-omitted and the byte-stable
+	// prompt prefix is unchanged for the no-effort path.
+	if mapped, ok := outputConfigEffortFor(p.effort); ok {
+		params.OutputConfig = sdk.OutputConfigParam{Effort: mapped}
+	}
 	return params, nil
+}
+
+// outputConfigEffortFor maps the NEUTRAL composition effort token to the SDK's
+// sdk.OutputConfigEffort. Anthropic supports the full neutral vocabulary, so all
+// five tiers identity-map; "" / "auto" / any UNRECOGNISED token returns ok=false
+// (OMIT the field) — fail-soft, so a stray/forward token never 400s the request.
+func outputConfigEffortFor(token string) (sdk.OutputConfigEffort, bool) {
+	switch token {
+	case "low":
+		return sdk.OutputConfigEffortLow, true
+	case "medium":
+		return sdk.OutputConfigEffortMedium, true
+	case "high":
+		return sdk.OutputConfigEffortHigh, true
+	case "xhigh":
+		return sdk.OutputConfigEffortXhigh, true
+	case "max":
+		return sdk.OutputConfigEffortMax, true
+	default:
+		// "", "auto", or an unknown/forward token: omit output_config.effort.
+		return "", false
+	}
 }
 
 // buildSystem renders the two-layer system prompt into Anthropic's system[]

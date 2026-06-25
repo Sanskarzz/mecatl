@@ -431,6 +431,7 @@ func representativeSession(t *testing.T, id session.SessionID) *session.Session 
 	s.Profile = "no-fs"
 	s.ProviderID = "openrouter"
 	s.ModelID = "anthropic/claude-3.5-sonnet"
+	s.ReasoningEffort = "high"
 	mustOK(t, "RecordUserPrompt", s.RecordUserPrompt("please inspect the repo", []session.Message{
 		session.NewSystemMessage("project instructions: be concise"),
 	}))
@@ -504,6 +505,9 @@ func assertSessionEqual(t *testing.T, got, want *session.Session) {
 	}
 	if got.ModelID != want.ModelID {
 		t.Errorf("ModelID = %q want %q", got.ModelID, want.ModelID)
+	}
+	if got.ReasoningEffort != want.ReasoningEffort {
+		t.Errorf("ReasoningEffort = %q want %q", got.ReasoningEffort, want.ReasoningEffort)
 	}
 	if got.Usage != want.Usage {
 		t.Errorf("Usage = %+v want %+v", got.Usage, want.Usage)

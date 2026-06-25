@@ -416,13 +416,14 @@ func toProtoSession(s *session.Session, rm ResolvedModel) *mecatlv1.Session {
 // behavior. The value originates from the composition single source (see
 // Service.ResolvedModel) — this mapper never recomputes a resolution.
 func resolvedModelToProto(rm ResolvedModel) *mecatlv1.ResolvedModel {
-	if rm.ProviderID == "" && rm.ModelID == "" && rm.ContextWindow == 0 {
+	if rm.ProviderID == "" && rm.ModelID == "" && rm.ContextWindow == 0 && rm.ReasoningEffort == "" {
 		return nil
 	}
 	return &mecatlv1.ResolvedModel{
-		ProviderId:    rm.ProviderID,
-		ModelId:       rm.ModelID,
-		ContextWindow: rm.ContextWindow,
+		ProviderId:      rm.ProviderID,
+		ModelId:         rm.ModelID,
+		ContextWindow:   rm.ContextWindow,
+		ReasoningEffort: rm.ReasoningEffort,
 	}
 }
 

@@ -89,6 +89,10 @@ type SessionMeta struct {
 	// ("" / "" = server default).
 	ProviderID string
 	ModelID    string
+	// ReasoningEffort is the opaque neutral reasoning-effort token (ADR 0055), ""
+	// when unset. Opaque to the domain; carried so the rehydrated session re-mints
+	// the same-effort per-session engine via the factory.
+	ReasoningEffort string
 	// CreatedAt is the creation timestamp.
 	CreatedAt time.Time
 }
@@ -137,6 +141,7 @@ func Fold(meta SessionMeta, events iter.Seq2[session.Event, error]) (*session.Se
 	s.Profile = meta.Profile
 	s.ProviderID = meta.ProviderID
 	s.ModelID = meta.ModelID
+	s.ReasoningEffort = meta.ReasoningEffort
 
 	if f.pending != nil {
 		// AWAITING: the live session at pause time holds the assistant message WITH its

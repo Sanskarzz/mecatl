@@ -67,10 +67,14 @@ const maxStateBytes = 1 << 20 // 1 MiB
 // stateSubpath is the state file relative to the XDG state base.
 var stateSubpath = filepath.Join("mecatui", "models.yaml")
 
-// modelSelectionEntry is one persisted (provider, model) pair on disk.
+// modelSelectionEntry is one persisted (provider, model, effort) tuple on disk. The
+// reasoningEffort field (ADR 0055) is omitempty + backward-compatible: an old file
+// with no key loads "" (the auto/unset tier), and an "auto"/unset pick (the picker
+// maps auto→"" before persisting) writes no key, keeping the file clean.
 type modelSelectionEntry struct {
-	ProviderID string `yaml:"providerId"`
-	ModelID    string `yaml:"modelId"`
+	ProviderID      string `yaml:"providerId"`
+	ModelID         string `yaml:"modelId"`
+	ReasoningEffort string `yaml:"reasoningEffort,omitempty"`
 }
 
 // modelStateFile is the on-disk schema of models.yaml.
@@ -115,10 +119,31 @@ func (s *selectionStore) Load(workspace string) client.ModelSelection {
 	}
 	if key, err := realpathState(workspace); err == nil {
 		if e, found := sf.Workspaces[key]; found {
-			return client.ModelSelection{ProviderID: e.ProviderID, ModelID: e.ModelID}
+			return entrySelection(e)
 		}
 	}
-	return client.ModelSelection{ProviderID: sf.Default.ProviderID, ModelID: sf.Default.ModelID}
+	return entrySelection(sf.Default)
+}
+
+// entrySelection is the single on-disk-entry → client.ModelSelection projection,
+// threading every persisted field (provider, model, effort) so a new field is added
+// in ONE place rather than at each read site.
+func entrySelection(e modelSelectionEntry) client.ModelSelection {
+	return client.ModelSelection{
+		ProviderID:      e.ProviderID,
+		ModelID:         e.ModelID,
+		ReasoningEffort: e.ReasoningEffort,
+	}
+}
+
+// selectionEntry is the inverse: a client.ModelSelection → on-disk entry projection,
+// the single write-side mirror of entrySelection.
+func selectionEntry(sel client.ModelSelection) modelSelectionEntry {
+	return modelSelectionEntry{
+		ProviderID:      sel.ProviderID,
+		ModelID:         sel.ModelID,
+		ReasoningEffort: sel.ReasoningEffort,
+	}
 }
 
 // Save persists sel as the per-workspace entry (realpath-keyed) ONLY. It deliberately
@@ -137,7 +162,7 @@ func (s *selectionStore) Save(workspace string, sel client.ModelSelection) error
 	if sf.Workspaces == nil {
 		sf.Workspaces = make(map[string]modelSelectionEntry)
 	}
-	entry := modelSelectionEntry{ProviderID: sel.ProviderID, ModelID: sel.ModelID}
+	entry := selectionEntry(sel)
 	if key, err := realpathState(workspace); err == nil {
 		sf.Workspaces[key] = entry
 	}
@@ -168,7 +193,7 @@ func (s *selectionStore) LoadWorkspace(workspace string) (client.ModelSelection,
 	if !found {
 		return client.ModelSelection{}, false
 	}
-	return client.ModelSelection{ProviderID: e.ProviderID, ModelID: e.ModelID}, true
+	return entrySelection(e), true
 }
 
 // LoadGlobalDefault returns the global `default:` block (the zero selection when
@@ -182,7 +207,7 @@ func (s *selectionStore) LoadGlobalDefault() client.ModelSelection {
 	if !ok {
 		return client.ModelSelection{}
 	}
-	return client.ModelSelection{ProviderID: sf.Default.ProviderID, ModelID: sf.Default.ModelID}
+	return entrySelection(sf.Default)
 }
 
 // SaveGlobalDefault persists sel as the global `default:` block (the model used by
@@ -199,7 +224,7 @@ func (s *selectionStore) SaveGlobalDefault(sel client.ModelSelection) error {
 	}
 	sf, _ := s.read() // a corrupt/absent file ⇒ start fresh (never block a write)
 	sf.Version = stateVersion
-	sf.Default = modelSelectionEntry{ProviderID: sel.ProviderID, ModelID: sel.ModelID}
+	sf.Default = selectionEntry(sel)
 	out, err := yaml.Marshal(sf)
 	if err != nil {
 		return err

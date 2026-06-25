@@ -132,3 +132,26 @@ Like `posture:`/`guardrails:`, it is **operator-tier ONLY** — read from the us
 project can still influence prose style via `AGENTS.md`). A `--output-economy` flag
 **out-ranks** the YAML value; an unknown value fail-softs to the default with a WARN.
 
+#### The operator-global `reasoning-effort:` setting
+
+The reasoning-effort tier ([ADR 0055](../adr/0055-reasoning-effort.md)) can likewise be
+set once in the **user-global** `settings.yaml`, via an optional top-level
+`reasoning-effort:` string:
+
+```yaml
+# ~/.config/mecatl/settings.yaml  (user-global only)
+reasoning-effort: high   # auto | low | medium | high | xhigh | max
+```
+
+`auto` (or empty) means unset — the provider's own default applies. **OpenAI** supports
+`low`/`medium`/`high` only, so `xhigh`/`max` are **clamped down to `high`** with a WARN
+naming the requested and clamped-to values; **Anthropic** maps all five. Like
+`posture:`/`output-economy:`, it is **operator-tier ONLY** — read from the user-global
+`settings.yaml` + the CLI, **never** the project-tier file (a project-tier
+`reasoning-effort:` is ignored with a WARN — a project cannot raise the model's reasoning
+spend). A `--reasoning-effort` flag **out-ranks** the YAML value, and a per-session
+`CreateSession.reasoning_effort` out-ranks the operator default; an unknown value
+fail-softs to unset with a WARN. The effort binds the agent and its subagents — not the
+harness's internal classifier/one-turn calls (the guardrail checker, the child-ask
+reviewer, the model-router stay on the operator default).
+

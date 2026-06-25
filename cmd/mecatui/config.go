@@ -145,6 +145,13 @@ type config struct {
 	// onto app.Config.OutputEconomy/OutputEconomyFlagSet in embeddedConfig.
 	outputEconomy        string
 	outputEconomyFlagSet bool
+	// reasoningEffort is the operator-tier reasoning-effort default (ADR 0055) for
+	// the EMBEDDED server. reasoningEffortFlagSet records an explicit
+	// --reasoning-effort so CLI out-ranks the operator-global settings.yaml
+	// reasoning-effort: key. Mapped onto app.Config.ReasoningEffort/
+	// ReasoningEffortFlagSet in embeddedConfig.
+	reasoningEffort        string
+	reasoningEffortFlagSet bool
 
 	// quiet routes the embedded server's operational diagnostics (and the perf
 	// surface's startup/teardown lines) to io.Discard instead of the per-user state
@@ -299,6 +306,8 @@ func parseFlags(args []string) (config, error) {
 		"embedded server only: OPERATOR POSTURE LADDER (strict < trusted < auto < yolo): strict (default) prompts every mutate; trusted = --trust-project; auto adds allow-all + main substitution loosening (child injection-defense ON); yolo additionally auto-runs $()/backtick/heredoc in CHILDREN (injection-defense OFF). --yolo/--trust-project are aliases. auto/yolo refused as root outside MECATL_SANDBOX. Unknown value fails closed to strict.")
 	fs.StringVar(&cfg.outputEconomy, "output-economy", "",
 		"embedded server only: OPERATOR OUTPUT-ECONOMY TIER (ADR 0041): normal (default — the system prompt already carries the prose-economy + minimum-code ladder + safety carveout) or terse (additionally caps purely-explanatory answers to a few sentences, offering to elaborate rather than elaborating unprompted). Empty = unset (honours the operator-global settings.yaml output-economy: key if present). Operator-tier only; a project-tier key is ignored with a WARN. An unknown value fail-softs to the default with a WARN.")
+	fs.StringVar(&cfg.reasoningEffort, "reasoning-effort", "",
+		"embedded server only: OPERATOR REASONING-EFFORT TIER (ADR 0055): auto (default — unset, the provider default applies) or low/medium/high/xhigh/max. OpenAI supports low/medium/high only (xhigh/max clamp to high); Anthropic maps all five. Empty = unset (honours the operator-global settings.yaml reasoning-effort: key). A per-session /effort out-ranks it. Operator-tier only; a project-tier key is ignored with a WARN. An unknown value fail-softs to unset with a WARN.")
 	fs.BoolVar(&cfg.quiet, "quiet", false,
 		"discard the embedded server's operational diagnostics instead of writing them to $XDG_STATE_HOME/mecatl/mecatui.log (fallback ~/.local/state/mecatl/mecatui.log). Diagnostics NEVER go to stderr (that corrupts the TUI alt-screen); --quiet drops them entirely")
 	fs.StringVar(&cfg.memoryDir, "memory-dir", "", "embedded server only: per-project memory store directory (empty = a per-project default under $XDG_DATA_HOME/mecatui/memory)")
@@ -341,6 +350,9 @@ func parseFlags(args []string) (config, error) {
 		}
 		if f.Name == "output-economy" {
 			cfg.outputEconomyFlagSet = true
+		}
+		if f.Name == "reasoning-effort" {
+			cfg.reasoningEffortFlagSet = true
 		}
 	})
 

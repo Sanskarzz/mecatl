@@ -996,6 +996,7 @@ func (m Model) onOverlayKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 		m.onSoulKey,
 		m.onUserModelKey,
 		m.onModelsKey,
+		m.onEffortKey,
 		m.onWorktreesKey,
 	}
 	for _, route := range overlays {

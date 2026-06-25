@@ -43,6 +43,8 @@ func authoritativeKeys() []string {
 	keys = append(keys, "posture")
 	// output-economy is likewise a bare scalar Config field (ADR 0041).
 	keys = append(keys, "output-economy")
+	// reasoning-effort is likewise a bare scalar Config field (ADR 0055).
+	keys = append(keys, "reasoning-effort")
 	return keys
 }
 
@@ -168,11 +170,12 @@ func TestEveryConfigSubtreeHasAModel(t *testing.T) {
 // fails here.
 func TestSubtreeTiersAreAsPinned(t *testing.T) {
 	want := map[string]configgen.Tier{
-		"permissions":    configgen.TierProject,  // allow/ask/deny + subagent: project-settable (allows trust-gated)
-		"guardrails":     configgen.TierOperator, // operator-only: a project cannot weaken a security checker
-		"posture":        configgen.TierOperator, // operator-only: a project cannot raise the automation posture
-		"output-economy": configgen.TierOperator, // operator-only: a project cannot raise the automation posture (ADR 0041)
-		"models":         configgen.TierProject,  // operator + project (project within the operator allowlist)
+		"permissions":      configgen.TierProject,  // allow/ask/deny + subagent: project-settable (allows trust-gated)
+		"guardrails":       configgen.TierOperator, // operator-only: a project cannot weaken a security checker
+		"posture":          configgen.TierOperator, // operator-only: a project cannot raise the automation posture
+		"output-economy":   configgen.TierOperator, // operator-only: a project cannot raise the automation posture (ADR 0041)
+		"reasoning-effort": configgen.TierOperator, // operator-only: a project cannot raise the model's reasoning spend (ADR 0055)
+		"models":           configgen.TierProject,  // operator + project (project within the operator allowlist)
 	}
 	got := map[string]configgen.Tier{}
 	for _, st := range configgen.BuildModel(nil).Subtrees {

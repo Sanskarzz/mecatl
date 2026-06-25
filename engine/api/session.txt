@@ -139,7 +139,7 @@ type PendingAsk struct{AskID string; Tool string; Args json.RawMessage; Reason s
 type PermissionMode string
 type ResultPayload struct{Stop StopReason; Text string; Usage Usage; Error string}
 type Role string
-type Session struct{ID SessionID; State State; Mode PermissionMode; Conversation *Conversation; Limits Limits; Counters Counters; Usage Usage; Workspace string; Profile string; ProviderID string; ModelID string; CreatedAt time.Time}
+type Session struct{ID SessionID; State State; Mode PermissionMode; Conversation *Conversation; Limits Limits; Counters Counters; Usage Usage; Workspace string; Profile string; ProviderID string; ModelID string; ReasoningEffort string; CreatedAt time.Time}
 type SessionID string
 type State string
 type StopReason string

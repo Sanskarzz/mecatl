@@ -73,6 +73,7 @@ Documentation/citation conventions are in [`docs/design/README.md`](../design/RE
 - [0023 — Workspace trust](./0023-workspace-trust.md)
 - [0024 — System-prompt research](./0024-system-prompt-research.md) *(research)*
 - [0054 — Reasoning rebalance of the default-tone prompt](./0054-reasoning-rebalance-default-prompt.md)
+- [0055 — Reasoning-effort knob](./0055-reasoning-effort.md)
 
 ### UX & forge
 - [0025 — UX discoverability](./0025-ux-discoverability.md)

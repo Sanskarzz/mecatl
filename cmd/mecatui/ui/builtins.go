@@ -50,9 +50,11 @@ type wiredCollaborators struct {
 // (w.UserModel); /models (the model picker) only when the server advertises
 // model_selection AND a model lister is wired (w.Models); /worktrees (the
 // worktree switch overlay, issue #102) only when the server advertises
-// worktrees AND a worktree lister is wired (w.Worktrees). The order is fixed
-// (clear, help, mcp, agents, team, skills, soul, usermodel, models, worktrees)
-// and locked by a test so the palette ordering is stable.
+// worktrees AND a worktree lister is wired (w.Worktrees). /effort (the
+// reasoning-effort picker, ADR 0055) is gated identically to /models and sits
+// directly after it. The order is fixed (clear, help, mcp, agents, team, skills,
+// soul, usermodel, models, effort, worktrees) and locked by a test so the palette
+// ordering is stable.
 func builtinCommands(caps client.Capabilities, w wiredCollaborators) []builtin {
 	out := []builtin{
 		{
@@ -113,6 +115,14 @@ func builtinCommands(caps client.Capabilities, w wiredCollaborators) []builtin {
 			name: "models",
 			desc: "pick the model for the next session",
 			run:  Model.runModels,
+		})
+		// /effort picks the reasoning-effort tier (ADR 0055). Gated identically to
+		// /models — the effort is a per-session server setting that only matters when
+		// model selection is available — and sits right after it (the natural pairing).
+		out = append(out, builtin{
+			name: "effort",
+			desc: "pick the reasoning-effort tier (restarts the session)",
+			run:  Model.runEffort,
 		})
 	}
 	if caps.Worktrees && w.Worktrees {
@@ -218,6 +228,13 @@ func (m Model) runUserModel() (tea.Model, tea.Cmd) {
 // belt-and-braces here.
 func (m Model) runModels() (tea.Model, tea.Cmd) {
 	return m.openModels()
+}
+
+// runEffort opens the /effort picker (ADR 0055). Only registered when
+// caps.ModelSelection && the model lister is wired, so openEffort's own nil/idle
+// guards are belt-and-braces here.
+func (m Model) runEffort() (tea.Model, tea.Cmd) {
+	return m.openEffort()
 }
 
 // runWorktrees opens the /worktrees overlay (issue #102). Only registered when

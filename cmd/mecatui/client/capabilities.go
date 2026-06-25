@@ -78,6 +78,11 @@ type ResolvedModel struct {
 	ProviderID    string
 	ModelID       string
 	ContextWindow int64
+	// ReasoningEffort is the EFFECTIVE reasoning-effort tier this session resolved
+	// to (ADR 0055), "" when unset (provider default). The ui shows it in the model
+	// footer segment (only when non-empty). Server-owned + echoed verbatim — never
+	// recomputed by the client.
+	ReasoningEffort string
 }
 
 // resolvedModelFrom maps a proto ResolvedModel (nil-safe) to the plain struct. A
@@ -88,8 +93,9 @@ func resolvedModelFrom(m *mecatlv1.ResolvedModel) ResolvedModel {
 		return ResolvedModel{}
 	}
 	return ResolvedModel{
-		ProviderID:    m.GetProviderId(),
-		ModelID:       m.GetModelId(),
-		ContextWindow: m.GetContextWindow(),
+		ProviderID:      m.GetProviderId(),
+		ModelID:         m.GetModelId(),
+		ContextWindow:   m.GetContextWindow(),
+		ReasoningEffort: m.GetReasoningEffort(),
 	}
 }

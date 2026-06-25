@@ -32,10 +32,19 @@ type ModelInfo struct {
 type ModelSelection struct {
 	ProviderID string
 	ModelID    string
+	// ReasoningEffort is the chosen reasoning-effort tier (ADR 0055): "" / "auto"
+	// (unset — operator/provider default) or low/medium/high/xhigh/max. It is sent
+	// on CreateSession.reasoning_effort and is meaningful WITHOUT a provider/model
+	// (it rides the server-default provider), so an effort-only selection is NOT
+	// zero (IsZero counts it).
+	ReasoningEffort string
 }
 
 // IsZero reports whether the selection is empty (⇒ the server picks its default).
-func (s ModelSelection) IsZero() bool { return s.ProviderID == "" && s.ModelID == "" }
+// An effort-only selection is NOT zero (the client must still send it).
+func (s ModelSelection) IsZero() bool {
+	return s.ProviderID == "" && s.ModelID == "" && s.ReasoningEffort == ""
+}
 
 // Matches reports whether m is the model this selection names (by provider + id).
 func (s ModelSelection) Matches(m ModelInfo) bool {

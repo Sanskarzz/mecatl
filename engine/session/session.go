@@ -271,6 +271,15 @@ type Session struct {
 	// mutator). The empty pair means "server default".
 	ProviderID string
 	ModelID    string
+	// ReasoningEffort is the opaque neutral reasoning-effort token (ADR 0055) this
+	// session was bound to ("" = unset, the provider default). The aggregate STORES
+	// it but never interprets it — the neutral vocabulary, normalisation, per-provider
+	// clamp, and adapter re-mint all live in composition; only this opaque string
+	// crosses into the domain (the same inert-label posture as ProviderID/ModelID).
+	// Persisting it lets a restarted process re-mint the SAME per-session engine via
+	// the factory instead of falling to the operator default. Write-once creation
+	// label set by the composition root after New (no mutator).
+	ReasoningEffort string
 	// CreatedAt is the creation timestamp.
 	CreatedAt time.Time
 

@@ -24,6 +24,7 @@ func BuildModel(docs Docs) *Model {
 		guardrailsSubtree(docs),
 		postureSubtree(docs),
 		outputEconomySubtree(docs),
+		reasoningEffortSubtree(docs),
 		modelsSubtree(docs),
 	}}
 }
@@ -176,6 +177,28 @@ func outputEconomySubtree(docs Docs) *Subtree {
 			Default:      "(empty)",
 			Doc:          docFor(docs, "Config.OutputEconomy", "the output-economy tier (normal/terse)"),
 			ExampleValue: "terse",
+		}},
+	}
+}
+
+func reasoningEffortSubtree(docs Docs) *Subtree {
+	return &Subtree{
+		Key:  "reasoning-effort",
+		Tier: TierOperator,
+		Doc: "OPERATOR-TIER reasoning-effort scalar (ADR 0055): \"\" / \"auto\" (unset — " +
+			"the provider default) / \"low\" / \"medium\" / \"high\" / \"xhigh\" / \"max\". " +
+			"OpenAI clamps xhigh/max down to high; Anthropic maps all five. A per-session " +
+			"CreateSession.reasoning_effort out-ranks this default. A project-tier " +
+			"reasoning-effort: is IGNORED with a WARN (a project cannot raise the model's " +
+			"reasoning spend). Empty = keep the CLI/default (provider default).",
+		CommentedOut: true,
+		Scalar:       true,
+		Fields: []*Field{{
+			Key:          "reasoning-effort",
+			Type:         "string",
+			Default:      "(empty)",
+			Doc:          docFor(docs, "Config.ReasoningEffort", "the reasoning-effort tier (auto/low/medium/high/xhigh/max)"),
+			ExampleValue: "high",
 		}},
 	}
 }

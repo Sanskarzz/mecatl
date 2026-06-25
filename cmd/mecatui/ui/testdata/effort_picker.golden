@@ -1,0 +1,30 @@
+ mecatui  ·  session sess-test-00  ·  gpt-5 · medium  ·  mode default  ·  127.0.0.1:8080
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+                          ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+                          ┃                                             ┃
+                          ┃  Reasoning effort                           ┃
+                          ┃                                             ┃
+                          ┃      auto    (operator / provider default)  ┃
+                          ┃      low                                    ┃
+                          ┃    ● medium                                 ┃
+                          ┃  ╭────────────╮                             ┃
+                          ┃  │  ›   high  │                             ┃
+                          ┃  ╰────────────╯                             ┃
+                          ┃      xhigh                                  ┃
+                          ┃      max                                    ┃
+                          ┃                                             ┃
+                          ┃  ↑/↓ move · enter use · esc close           ┃
+                          ┃  ● current  ·  auto = provider default      ┃
+                          ┃                                             ┃
+                          ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+
+
+│
+│ Ask mecatl to do something…  (enter to send · shift+enter for newline · ? for help)
+│
+│
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ connected                                                                   ctx 0 · ↑0 ↓0 cache 0%
+? help · / commands · ctrl+c quit

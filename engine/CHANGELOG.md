@@ -13,6 +13,16 @@ The covered surface is the seven core packages (`session`, `governance`, `tool`,
 
 ### Added
 
+- **`session.Session.ReasoningEffort`.** A new write-once opaque creation label
+  on the `Session` aggregate (a neutral reasoning-effort token, `""` = unset),
+  sitting next to `Profile`/`ProviderID`/`ModelID` and carrying the same
+  inert-label posture (the domain stores it but never interprets it — the neutral
+  vocabulary, normalisation, per-provider clamp, and adapter re-mint all live in
+  composition). It is round-tripped by the `sessnap` snapshot and the
+  `eventsource` fold so a restarted process re-mints the same-effort per-session
+  engine. Classified Added per COMPATIBILITY.md (a new exported struct field).
+  See [ADR 0055](../docs/adr/0055-reasoning-effort.md). (reasoning-effort)
+
 - **`session.HookAdvisory`.** A new `HookDecision` value (`"advisory"`) for an
   `EvHook` carrying an advisory guardrail finding — client-visible (rendered as
   a warning notice), model-invisible (the tool result is byte-unchanged). The

@@ -7,6 +7,7 @@ import (
 
 	oai "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/responses"
+	"github.com/openai/openai-go/v3/shared"
 
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/session"
@@ -47,6 +48,54 @@ func buildParams(req port.LLMRequest) (responses.ResponseNewParams, error) {
 		params.Instructions = oai.String(instr)
 	}
 	return params, nil
+}
+
+// buildParams (method) builds the base params (the free buildParams) and then
+// stamps the construction-configured reasoning effort onto reasoning.effort (ADR
+// 0055). Effort is an adapter-CONSTRUCTION knob, NOT a port.LLMRequest field — the
+// request stays provider-neutral; the per-session engine factory re-mints the
+// adapter when a session's effort differs from the operator default. p.effort is
+// an ALREADY-CLAMPED neutral token (composition clamps xhigh/max→high for OpenAI,
+// with a diagnostic). reasoningEffortFor maps a recognised token verbatim and
+// returns ok=false (omit) for empty/"auto"/unknown (fail-soft — a stray token
+// never 400s the request).
+func (p *Provider) buildParams(req port.LLMRequest) (responses.ResponseNewParams, error) {
+	params, err := buildParams(req)
+	if err != nil {
+		return responses.ResponseNewParams{}, err
+	}
+	if mapped, ok := reasoningEffortFor(p.effort); ok {
+		params.Reasoning = shared.ReasoningParam{Effort: mapped}
+	}
+	return params, nil
+}
+
+// reasoningEffortFor maps a NEUTRAL composition effort token to the SDK's
+// shared.ReasoningEffort. It returns ok=false (OMIT the field) for "" / "auto" and
+// for any UNRECOGNISED token — fail-soft, so a stray/forward token never 400s a
+// reasoning request. Composition clamps xhigh/max→high for OpenAI BEFORE the
+// adapter sees the value (this adapter has no port.Diagnostics to narrate a
+// clamp), so in practice only low/medium/high reach here; the remaining native SDK
+// tiers (none/minimal/xhigh) are mapped too, for forward safety should composition
+// ever loosen the clamp.
+func reasoningEffortFor(token string) (shared.ReasoningEffort, bool) {
+	switch token {
+	case "low":
+		return shared.ReasoningEffortLow, true
+	case "medium":
+		return shared.ReasoningEffortMedium, true
+	case "high":
+		return shared.ReasoningEffortHigh, true
+	case "none":
+		return shared.ReasoningEffortNone, true
+	case "minimal":
+		return shared.ReasoningEffortMinimal, true
+	case "xhigh":
+		return shared.ReasoningEffortXhigh, true
+	default:
+		// "", "auto", or an unknown/forward token: omit reasoning.effort entirely.
+		return "", false
+	}
 }
 
 // buildTools converts tool specs into function ToolUnionParams. Each spec's

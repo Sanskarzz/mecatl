@@ -89,6 +89,39 @@ func modelCapability(reg *providerRegistry, providerID, modelID string) port.Pro
 	}
 }
 
+// modelReasoningSupport reports whether the (provider, model) is known to support
+// reasoning-effort, and whether that fact is KNOWN at all (ADR 0055 capability
+// gate). It mirrors modelCapability's precedence: (1) LIVE-FIRST — a live meta
+// entry's Reasoning bit is authoritative when present; (2) CATALOG floor — the
+// embedded catalog's SupportsReasoning; (3) UNKNOWN — neither source describes the
+// model (a passthrough/uncatalogued model), so known=false and the caller
+// FAILS-OPEN (sends effort anyway; the provider 400s honestly if it really cannot
+// — the same unknown=capable posture the thinking path takes). The mock provider
+// is treated as known-incapable so an offline test never sends effort to it.
+func modelReasoningSupport(reg *providerRegistry, providerID, modelID string) (supported, known bool) {
+	if providerID == providerMock {
+		return false, true
+	}
+	// (1) Live-first.
+	if reg != nil && reg.meta != nil {
+		if entry, ok := reg.meta.lookup(providerID, modelID); ok {
+			return entry.Reasoning, true
+		}
+	}
+	// (2) Catalog floor.
+	if providerID != "" && modelID != "" {
+		if p, ok := providercatalog.Default().Provider(providerID); ok {
+			for _, m := range p.Models() {
+				if m.ID() == modelID {
+					return m.SupportsReasoning(), true
+				}
+			}
+		}
+	}
+	// (3) Unknown → caller fails open.
+	return false, false
+}
+
 // modelAdapterCaps returns the wired adapter's transmit capabilities for a
 // provider (the AUTHORITY on what it can actually send), or the zero value
 // (text-only) for an unknown/unavailable provider or a nil registry — a provider

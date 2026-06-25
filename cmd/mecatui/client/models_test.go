@@ -132,6 +132,93 @@ func TestCreateSessionCarriesModelSelection(t *testing.T) {
 	})
 }
 
+// TestCreateSessionCarriesReasoningEffort asserts the proto-build point sets
+// reasoning_effort from the selection (ADR 0055), leaves it empty for an unset
+// effort, and that the response's resolved_model.reasoning_effort flows back into
+// client.ResolvedModel.ReasoningEffort (the EFFECTIVE effort the server resolved).
+func TestCreateSessionCarriesReasoningEffort(t *testing.T) {
+	t.Run("effort set on the request", func(t *testing.T) {
+		fake := &fakeModelsClient{}
+		cl := newFakeClient(fake)
+		_, _, _, err := cl.CreateSession(context.Background(), "/ws",
+			mecatlv1.PermissionMode_PERMISSION_MODE_DEFAULT,
+			ModelSelection{ProviderID: "openai", ModelID: "gpt-5", ReasoningEffort: "high"})
+		if err != nil {
+			t.Fatalf("CreateSession: %v", err)
+		}
+		if fake.lastCreate.GetReasoningEffort() != "high" {
+			t.Fatalf("request reasoning_effort = %q, want high", fake.lastCreate.GetReasoningEffort())
+		}
+	})
+	t.Run("effort-only selection (no provider/model) still carries the effort", func(t *testing.T) {
+		fake := &fakeModelsClient{}
+		cl := newFakeClient(fake)
+		_, _, _, err := cl.CreateSession(context.Background(), "/ws",
+			mecatlv1.PermissionMode_PERMISSION_MODE_DEFAULT,
+			ModelSelection{ReasoningEffort: "low"})
+		if err != nil {
+			t.Fatalf("CreateSession: %v", err)
+		}
+		if fake.lastCreate.GetReasoningEffort() != "low" {
+			t.Fatalf("request reasoning_effort = %q, want low", fake.lastCreate.GetReasoningEffort())
+		}
+		if fake.lastCreate.GetProviderId() != "" || fake.lastCreate.GetModelId() != "" {
+			t.Fatalf("effort-only selection set provider:%q model:%q, want both empty",
+				fake.lastCreate.GetProviderId(), fake.lastCreate.GetModelId())
+		}
+	})
+	t.Run("unset effort leaves the field empty", func(t *testing.T) {
+		fake := &fakeModelsClient{}
+		cl := newFakeClient(fake)
+		_, _, _, err := cl.CreateSession(context.Background(), "/ws",
+			mecatlv1.PermissionMode_PERMISSION_MODE_DEFAULT,
+			ModelSelection{ProviderID: "openai", ModelID: "gpt-5"})
+		if err != nil {
+			t.Fatalf("CreateSession: %v", err)
+		}
+		if fake.lastCreate.GetReasoningEffort() != "" {
+			t.Fatalf("unset effort set reasoning_effort = %q, want empty", fake.lastCreate.GetReasoningEffort())
+		}
+	})
+	t.Run("resolved effort flows back from the response", func(t *testing.T) {
+		// The server normalises/clamps the request (e.g. openai "max" → "high"); the
+		// EFFECTIVE value rides resolved_model.reasoning_effort and must land verbatim on
+		// the client.ResolvedModel.
+		fake := &fakeModelsClient{createResp: &mecatlv1.CreateSessionResponse{
+			SessionId: "sess-1",
+			ResolvedModel: &mecatlv1.ResolvedModel{
+				ProviderId: "openai", ModelId: "gpt-5", ReasoningEffort: "high",
+			},
+		}}
+		cl := newFakeClient(fake)
+		_, _, resolved, err := cl.CreateSession(context.Background(), "/ws",
+			mecatlv1.PermissionMode_PERMISSION_MODE_DEFAULT,
+			ModelSelection{ProviderID: "openai", ModelID: "gpt-5", ReasoningEffort: "max"})
+		if err != nil {
+			t.Fatalf("CreateSession: %v", err)
+		}
+		if resolved.ReasoningEffort != "high" {
+			t.Fatalf("resolved.ReasoningEffort = %q, want high (server-clamped, echoed back)", resolved.ReasoningEffort)
+		}
+	})
+}
+
+// TestReasoningEffortIsZero asserts an effort-only selection is NOT zero (the client
+// must still send it) while a fully-empty selection is.
+func TestReasoningEffortIsZero(t *testing.T) {
+	if (ModelSelection{ReasoningEffort: "high"}).IsZero() {
+		t.Error("an effort-only selection should NOT be zero (it must be sent)")
+	}
+	if !(ModelSelection{}).IsZero() {
+		t.Error("a fully-empty selection should be zero")
+	}
+	// Matches stays model-only — the effort does not participate.
+	sel := ModelSelection{ProviderID: "openai", ModelID: "gpt-5", ReasoningEffort: "high"}
+	if !sel.Matches(ModelInfo{ProviderID: "openai", ID: "gpt-5"}) {
+		t.Error("Matches should ignore the effort (model-only predicate)")
+	}
+}
+
 // TestModelSelectionHelpers covers IsZero + Matches (the picker's row-marker /
 // reconcile predicates).
 func TestModelSelectionHelpers(t *testing.T) {

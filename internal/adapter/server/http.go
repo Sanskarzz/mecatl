@@ -88,6 +88,12 @@ type createSessionBody struct {
 	// "no-fs" = the no-filesystem profile (REQUIRES an EMPTY workspace). Any
 	// other value is a 400.
 	Profile string `json:"profile,omitempty"`
+	// ReasoningEffort sets the session's reasoning-effort tier (ADR 0055),
+	// mirroring the proto field: "" / "auto" = unset (operator/provider default),
+	// else low/medium/high/xhigh/max. The server normalises + per-provider-clamps +
+	// capability-gates it; an unknown value falls back to the operator default with
+	// a WARN. The effective value is echoed on resolved_model.reasoning_effort.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 type limitsIn struct {
@@ -121,19 +127,20 @@ type sessionCapabilitiesJSON struct {
 // resolvedModelJSON mirrors mecatlv1.ResolvedModel for the JSON surface. It carries
 // no secret material (provider id, model id, context window only).
 type resolvedModelJSON struct {
-	ProviderID    string `json:"provider_id"`
-	ModelID       string `json:"model_id"`
-	ContextWindow int64  `json:"context_window"`
+	ProviderID      string `json:"provider_id"`
+	ModelID         string `json:"model_id"`
+	ContextWindow   int64  `json:"context_window"`
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 // resolvedModelToJSON maps the server-side ResolvedModel to its JSON form, nil for
 // the zero value (round-trips to "absent" so the client falls back to today's
 // behavior). Mirrors resolvedModelToProto.
 func resolvedModelToJSON(rm ResolvedModel) *resolvedModelJSON {
-	if rm.ProviderID == "" && rm.ModelID == "" && rm.ContextWindow == 0 {
+	if rm.ProviderID == "" && rm.ModelID == "" && rm.ContextWindow == 0 && rm.ReasoningEffort == "" {
 		return nil
 	}
-	return &resolvedModelJSON{ProviderID: rm.ProviderID, ModelID: rm.ModelID, ContextWindow: rm.ContextWindow}
+	return &resolvedModelJSON{ProviderID: rm.ProviderID, ModelID: rm.ModelID, ContextWindow: rm.ContextWindow, ReasoningEffort: rm.ReasoningEffort}
 }
 
 // serverCapabilitiesJSON mirrors mecatlv1.ServerCapabilities for the JSON
@@ -277,7 +284,7 @@ func (h *HTTPHandler) createSession(w http.ResponseWriter, r *http.Request) {
 			MaxConsecutiveFailures: body.Limits.MaxConsecutiveFailures,
 		}
 	}
-	sel := ProviderSelector{ProviderID: body.ProviderID, ModelID: body.ModelID}
+	sel := ProviderSelector{ProviderID: body.ProviderID, ModelID: body.ModelID, ReasoningEffort: body.ReasoningEffort}
 	sess, err := h.svc.CreateSessionWithProfile(r.Context(), body.Workspace, modeFromString(body.Mode), limits, sel, profile)
 	if err != nil {
 		writeServiceError(w, err)

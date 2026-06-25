@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stacklok/mecatl/cmd/mecatui/client"
@@ -66,6 +67,82 @@ func TestSelectionStoreRoundTrip(t *testing.T) {
 	// the most-recent pick.
 	if got := store3.Load(t.TempDir()); got != (client.ModelSelection{}) {
 		t.Fatalf("Load(new repo) = %+v, want the zero selection (server default)", got)
+	}
+}
+
+// TestSelectionStoreReasoningEffortRoundTrip covers save→load of the reasoningEffort
+// field (ADR 0055) for BOTH the per-workspace entry and the global default, plus the
+// LoadWorkspace path — and that an effort-only selection (no provider/model) survives.
+func TestSelectionStoreReasoningEffortRoundTrip(t *testing.T) {
+	stateHome := t.TempDir()
+	ws := t.TempDir()
+	store := newSelectionStore(fakeStateEnv(stateHome))
+
+	sel := client.ModelSelection{ProviderID: "openai", ModelID: "gpt-5", ReasoningEffort: "high"}
+	if err := store.Save(ws, sel); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// A fresh store (relaunch) reads the effort back via both Load and LoadWorkspace.
+	store2 := newSelectionStore(fakeStateEnv(stateHome))
+	if got := store2.Load(ws); got != sel {
+		t.Fatalf("Load = %+v, want %+v (effort must survive)", got, sel)
+	}
+	got, ok := store2.LoadWorkspace(ws)
+	if !ok || got != sel {
+		t.Fatalf("LoadWorkspace = %+v ok=%v, want %+v true", got, ok, sel)
+	}
+
+	// The global default carries the effort too.
+	def := client.ModelSelection{ProviderID: "openrouter", ModelID: "anthropic/claude", ReasoningEffort: "low"}
+	if err := store2.SaveGlobalDefault(def); err != nil {
+		t.Fatalf("SaveGlobalDefault: %v", err)
+	}
+	store3 := newSelectionStore(fakeStateEnv(stateHome))
+	if got := store3.LoadGlobalDefault(); got != def {
+		t.Fatalf("LoadGlobalDefault = %+v, want %+v (effort must survive)", got, def)
+	}
+
+	// An effort-only selection (no provider/model) round-trips.
+	wsB := t.TempDir()
+	effortOnly := client.ModelSelection{ReasoningEffort: "max"}
+	if err := store3.Save(wsB, effortOnly); err != nil {
+		t.Fatalf("Save(effort-only): %v", err)
+	}
+	if got := newSelectionStore(fakeStateEnv(stateHome)).Load(wsB); got != effortOnly {
+		t.Fatalf("Load(effort-only) = %+v, want %+v", got, effortOnly)
+	}
+}
+
+// TestSelectionStoreBackCompatNoEffortKey asserts a file written WITHOUT a
+// reasoningEffort key (an old client) loads "" for the effort — backward-compatible
+// and fail-soft. It also asserts an unset effort writes NO key (omitempty keeps the
+// file clean).
+func TestSelectionStoreBackCompatNoEffortKey(t *testing.T) {
+	stateHome := t.TempDir()
+	ws := t.TempDir()
+	store := newSelectionStore(fakeStateEnv(stateHome))
+
+	// Save with an UNSET effort: the file must carry no reasoningEffort key.
+	sel := client.ModelSelection{ProviderID: "openai", ModelID: "gpt-5"}
+	if err := store.Save(ws, sel); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(stateHome, "mecatui", "models.yaml"))
+	if err != nil {
+		t.Fatalf("read state file: %v", err)
+	}
+	if strings.Contains(string(data), "reasoningEffort") {
+		t.Fatalf("an unset effort must not write a reasoningEffort key (omitempty), got:\n%s", data)
+	}
+
+	// And loading such a file yields the empty effort (the auto/unset tier).
+	got := newSelectionStore(fakeStateEnv(stateHome)).Load(ws)
+	if got.ReasoningEffort != "" {
+		t.Fatalf("Load.ReasoningEffort = %q, want empty (back-compat)", got.ReasoningEffort)
+	}
+	if got != sel {
+		t.Fatalf("Load = %+v, want %+v", got, sel)
 	}
 }
 

@@ -51,6 +51,14 @@ type Provider struct {
 	maxTokensFor   maxTokensResolver // per-request resolver (WithMaxTokensResolver)
 	thinkingFor    thinkingResolver  // per-request LIVE thinking descriptor (WithThinkingResolver)
 	thinkingBudget int64
+	// effort is the reasoning-effort token stamped on every request's
+	// output_config.effort field (ADR 0055). Empty (and "auto") means OMIT the
+	// field entirely (the model default applies). Anthropic's output_config.effort
+	// is INDEPENDENT of the extended-thinking config (both coexist); identity-maps
+	// low/medium/high/xhigh/max. It is an adapter-CONSTRUCTION knob, not a
+	// port.LLMRequest field; the per-session engine factory re-mints the adapter
+	// when a session's effort differs from the operator default.
+	effort string
 }
 
 // Option configures a Provider.
@@ -63,6 +71,7 @@ type config struct {
 	maxTokensFor   maxTokensResolver
 	thinkingFor    thinkingResolver
 	thinkingBudget int64
+	effort         string
 	extra          []option.RequestOption
 }
 
@@ -116,6 +125,19 @@ func WithThinkingBudget(n int64) Option {
 	return func(c *config) { c.thinkingBudget = n }
 }
 
+// WithReasoningEffort sets the reasoning-effort token stamped on every request's
+// output_config.effort field (ADR 0055). The value is a NEUTRAL composition token;
+// Anthropic identity-maps all five tiers (low/medium/high/xhigh/max). Empty (and
+// "auto") OMITS the field — the model default applies. It is INDEPENDENT of the
+// extended-thinking config (WithThinkingBudget / WithThinkingResolver) — both
+// coexist on the request. It is an adapter-CONSTRUCTION Option, not a
+// port.LLMRequest field, so the provider stays neutral; the per-session engine
+// factory re-mints the adapter when a session's effort differs from the operator
+// default (the same factory discipline as the per-call model override).
+func WithReasoningEffort(effort string) Option {
+	return func(c *config) { c.effort = effort }
+}
+
 // WithRequestOption threads an arbitrary anthropic-sdk-go request option through
 // to the client (e.g. option.WithHeader, option.WithMaxRetries,
 // option.WithHTTPClient for a mock transport in tests). Multiple are applied in
@@ -162,6 +184,7 @@ func New(opts ...Option) *Provider {
 		maxTokensFor:   c.maxTokensFor,
 		thinkingFor:    c.thinkingFor,
 		thinkingBudget: budget,
+		effort:         c.effort,
 	}
 }
 

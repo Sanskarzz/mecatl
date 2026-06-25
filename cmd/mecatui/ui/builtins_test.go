@@ -75,8 +75,9 @@ func builtinNames(caps client.Capabilities, w wiredCollaborators) []string {
 // caps.Soul && the soul collaborator wired; /usermodel needs caps.UserModel &&
 // the user-model collaborator wired; /models needs caps.ModelSelection && the model
 // lister wired; /worktrees needs caps.Worktrees && the worktree lister wired
-// (issue #102). The fixed order is clear, help, mcp, agents, team, skills, soul,
-// usermodel, models, worktrees.
+// (issue #102); /effort is gated identically to /models and follows it (ADR 0055).
+// The fixed order is clear, help, mcp, agents, team, skills, soul, usermodel,
+// models, effort, worktrees.
 func TestBuiltinCommandsCapsFilter(t *testing.T) {
 	all := client.Capabilities{MCP: true, Agents: true, Teams: true, Skills: true, Soul: true, UserModel: true, ModelSelection: true, Worktrees: true, Posture: "auto"}
 	cases := []struct {
@@ -104,7 +105,7 @@ func TestBuiltinCommandsCapsFilter(t *testing.T) {
 		{"usermodel cap and wired", client.Capabilities{UserModel: true}, wiredCollaborators{UserModel: true}, []string{"clear", "help", "usermodel"}},
 		{"models cap but not wired", client.Capabilities{ModelSelection: true}, wiredCollaborators{}, []string{"clear", "help"}},
 		{"models wired but no cap", client.Capabilities{}, wiredCollaborators{Models: true}, []string{"clear", "help"}},
-		{"models cap and wired", client.Capabilities{ModelSelection: true}, wiredCollaborators{Models: true}, []string{"clear", "help", "models"}},
+		{"models cap and wired", client.Capabilities{ModelSelection: true}, wiredCollaborators{Models: true}, []string{"clear", "help", "models", "effort"}},
 		{"worktrees cap but not wired", client.Capabilities{Worktrees: true}, wiredCollaborators{}, []string{"clear", "help"}},
 		{"worktrees wired but no cap", client.Capabilities{}, wiredCollaborators{Worktrees: true}, []string{"clear", "help"}},
 		{"worktrees cap and wired", client.Capabilities{Worktrees: true}, wiredCollaborators{Worktrees: true}, []string{"clear", "help", "worktrees"}},
@@ -115,7 +116,7 @@ func TestBuiltinCommandsCapsFilter(t *testing.T) {
 			"all",
 			all,
 			wiredCollaborators{MCP: true, Agents: true, Skills: true, Soul: true, UserModel: true, Models: true, Worktrees: true},
-			[]string{"clear", "help", "mcp", "agents", "team", "skills", "soul", "usermodel", "models", "worktrees", "posture"},
+			[]string{"clear", "help", "mcp", "agents", "team", "skills", "soul", "usermodel", "models", "effort", "worktrees", "posture"},
 		},
 	}
 	for _, tc := range cases {

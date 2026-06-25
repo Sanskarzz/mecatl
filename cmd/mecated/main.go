@@ -421,6 +421,15 @@ type config struct {
 	// outputEconomyFlagSet is true when --output-economy was passed explicitly, so
 	// composition lets CLI out-rank the settings.yaml output-economy: key.
 	outputEconomyFlagSet bool
+	// reasoningEffort is the operator-tier reasoning-effort default (ADR 0055): ""
+	// or "auto" (unset → the provider default) or low/medium/high/xhigh/max.
+	// Operator-tier only: the operator-global settings.yaml reasoning-effort: key
+	// folds in, a project-tier key is WARN-ignored. A per-session CreateSession
+	// reasoning_effort out-ranks it.
+	reasoningEffort string
+	// reasoningEffortFlagSet is true when --reasoning-effort was passed explicitly,
+	// so composition lets CLI out-rank the settings.yaml reasoning-effort: key.
+	reasoningEffortFlagSet bool
 }
 
 // mcpServerList is a repeatable flag.Value collecting --mcp-server name=URL
@@ -950,7 +959,11 @@ func appConfig(cfg config, sink port.EventSink, recorder port.ToolCallRecorder, 
 		// lets CLI out-rank the operator-global settings.yaml output-economy: key.
 		OutputEconomy:        cfg.outputEconomy,
 		OutputEconomyFlagSet: cfg.outputEconomyFlagSet,
-		Privileged:           privilegedProcess(),
+		// Reasoning-effort tier (ADR 0055): operator-tier only; reasoningEffortFlagSet
+		// lets CLI out-rank the operator-global settings.yaml reasoning-effort: key.
+		ReasoningEffort:        cfg.reasoningEffort,
+		ReasoningEffortFlagSet: cfg.reasoningEffortFlagSet,
+		Privileged:             privilegedProcess(),
 		// mecated serves the bidi Converse + HTTP-SSE surfaces, whose clients CAN
 		// answer a permission ask (ResumeApproval) — so by default a subagent's
 		// unresolved Bash ask is SURFACED to the attached human rather than
@@ -1201,6 +1214,9 @@ func parseFlags(argv []string) (config, error) {
 	fs.StringVar(&cfg.outputEconomy, "output-economy", "",
 		"OPERATOR OUTPUT-ECONOMY TIER (ADR 0041): normal (default — the system prompt already carries the prose-economy + minimum-code ladder + safety carveout) or terse (additionally caps purely-explanatory answers to a few sentences, offering to elaborate rather than elaborating unprompted — the most over-steer-prone rule, so opt-in). Empty = unset (honours the operator-global settings.yaml output-economy: key if present). Operator-tier only; a project-tier output-economy: key is ignored with a WARN. An unknown value fail-softs to the default with a WARN.")
 
+	fs.StringVar(&cfg.reasoningEffort, "reasoning-effort", "",
+		"OPERATOR REASONING-EFFORT TIER (ADR 0055): auto (default — unset, the provider's own default applies) or low/medium/high/xhigh/max. OpenAI supports low/medium/high only, so xhigh/max are clamped down to high (with a WARN); Anthropic maps all five. Empty = unset (honours the operator-global settings.yaml reasoning-effort: key if present). A per-session CreateSession reasoning_effort out-ranks this default. A model with no reasoning support drops it. Operator-tier only; a project-tier reasoning-effort: key is ignored with a WARN. An unknown value fail-softs to unset with a WARN.")
+
 	fs.BoolVar(&cfg.acp, "acp", false, "serve the Agent Client Protocol (ACP) over stdio for an editor that spawned mecated as a subprocess (JSON-RPC 2.0 on stdin/stdout). Skips the TCP/HTTP listeners; the single session workspace is the editor-provided cwd. No TLS/auth/rate-limit (stdio is a local, parent-process trust boundary)")
 
 	fs.StringVar(&cfg.authToken, "auth-token", "", "bearer token required on every gRPC/HTTP request (or MECATL_AUTH_TOKEN; empty disables auth)")
@@ -1243,6 +1259,9 @@ func parseFlags(argv []string) (config, error) {
 		}
 		if f.Name == "output-economy" {
 			cfg.outputEconomyFlagSet = true
+		}
+		if f.Name == "reasoning-effort" {
+			cfg.reasoningEffortFlagSet = true
 		}
 	})
 

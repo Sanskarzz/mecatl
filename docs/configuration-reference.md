@@ -81,6 +81,16 @@ OPERATOR-TIER output-economy scalar (ADR 0041): "" / "normal" / "terse". "terse"
 | --- | --- | --- | --- |
 | `output-economy` | `string` | `(empty)` | OutputEconomy is the OPERATOR-TIER output-economy scalar (ADR 0041: "" / "normal" / "terse"). Like Posture it is honoured ONLY from the user-global + CLI tiers; a project-tier file's output-economy: key is IGNORED with a WARN (operator-tier only, for consistency with posture/guardrails). Empty = absent (the resolver returns "" and composition keeps the default tone). The composition layer interprets the token; permconfig only reads the scalar. |
 
+## `reasoning-effort`
+
+Tier: **operator**
+
+OPERATOR-TIER reasoning-effort scalar (ADR 0055): "" / "auto" (unset — the provider default) / "low" / "medium" / "high" / "xhigh" / "max". OpenAI clamps xhigh/max down to high; Anthropic maps all five. A per-session CreateSession.reasoning_effort out-ranks this default. A project-tier reasoning-effort: is IGNORED with a WARN (a project cannot raise the model's reasoning spend). Empty = keep the CLI/default (provider default).
+
+| Value | Type | Default | Description |
+| --- | --- | --- | --- |
+| `reasoning-effort` | `string` | `(empty)` | ReasoningEffort is the OPERATOR-TIER reasoning-effort scalar (ADR 0055: the neutral vocabulary "" / "auto" / "low" / "medium" / "high" / "xhigh" / "max"). Like Posture/OutputEconomy it is honoured ONLY from the user-global + CLI tiers; a project-tier file's reasoning-effort: key is IGNORED with a WARN (operator-tier only, for consistency — a project cannot raise the model's reasoning spend). Empty = absent (the resolver returns "" and composition uses the provider default). The composition layer interprets + clamps the token; permconfig only reads the scalar. |
+
 ## `models`
 
 Tier: **operator + project**

@@ -28,6 +28,14 @@ import (
 // it with New.
 type Provider struct {
 	client responses.ResponseService
+	// effort is the reasoning-effort token stamped on every request's
+	// reasoning.effort field (ADR 0055). Empty (and "auto") means OMIT the field
+	// entirely — the provider's own default applies, so a non-reasoning endpoint is
+	// never sent an effort it would reject. Composition supplies an ALREADY-CLAMPED
+	// neutral token (the openai xhigh/max→high clamp + its diagnostic live in
+	// composition, which has port.Diagnostics — this adapter does not); the adapter
+	// maps a recognised value verbatim and OMITS on anything else (fail-soft).
+	effort string
 }
 
 // Option configures a Provider.
@@ -36,6 +44,7 @@ type Option func(*config)
 type config struct {
 	apiKey  string
 	baseURL string
+	effort  string
 	extra   []option.RequestOption
 }
 
@@ -48,6 +57,19 @@ func WithAPIKey(key string) Option {
 // LiteLLM, a local proxy, ...) can be targeted. The SDK appends "/responses".
 func WithBaseURL(url string) Option {
 	return func(c *config) { c.baseURL = url }
+}
+
+// WithReasoningEffort sets the reasoning-effort token stamped on every request's
+// reasoning.effort field (ADR 0055). The value is a NEUTRAL composition token,
+// ALREADY CLAMPED for OpenAI (xhigh/max are clamped to high in composition, with a
+// diagnostic, because this adapter has no port.Diagnostics). Empty (and "auto")
+// OMITS the field — the provider default applies. It is an adapter-CONSTRUCTION
+// Option, not a port.LLMRequest field, so the provider stays neutral; the
+// per-session engine factory re-mints the adapter when the session's effort
+// differs from the operator default (the same factory discipline as the per-call
+// model override).
+func WithReasoningEffort(effort string) Option {
+	return func(c *config) { c.effort = effort }
 }
 
 // WithRequestOption threads an arbitrary openai-go request option through to the
@@ -74,7 +96,7 @@ func New(opts ...Option) *Provider {
 	reqOpts = append(reqOpts, c.extra...)
 
 	client := oai.NewClient(reqOpts...)
-	return &Provider{client: client.Responses}
+	return &Provider{client: client.Responses, effort: c.effort}
 }
 
 // Stream issues a streaming Responses request and yields provider-neutral
@@ -83,7 +105,7 @@ func New(opts ...Option) *Provider {
 // terminal transport error as the iterator's error. The outer error is reserved
 // for a failure to construct the request parameters.
 func (p *Provider) Stream(ctx context.Context, req port.LLMRequest) (iter.Seq2[port.Chunk, error], error) {
-	params, err := buildParams(req)
+	params, err := p.buildParams(req)
 	if err != nil {
 		return nil, err
 	}

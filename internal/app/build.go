@@ -636,6 +636,23 @@ type Config struct {
 	// operator-YAML value alone (CLI out-ranks YAML). Set by the cmd mains alongside
 	// OutputEconomy.
 	OutputEconomyFlagSet bool
+	// ReasoningEffort is the OPERATOR-TIER reasoning-effort default (ADR 0055): the
+	// neutral vocabulary "" / "auto" (unset — provider default) / "low" / "medium" /
+	// "high" / "xhigh" / "max". It is folded from the operator-YAML reasoning-effort:
+	// key by foldOperatorReasoningEffort (CLI out-ranks YAML, mirroring posture/
+	// output-economy) and threaded into the provider registry as the DEFAULT effort
+	// each adapter is built with; a per-session CreateSession.reasoning_effort
+	// OUT-RANKS it (resolveSessionEffort), re-minting the adapter via the engine
+	// factory when it differs. Operator-tier only: a project-tier reasoning-effort:
+	// key is WARN-ignored by permconfig. OpenAI clamps xhigh/max→high (with a
+	// diagnostic); Anthropic identity-maps all five tiers. NEVER a port.LLMRequest
+	// field — the loop never branches on it.
+	ReasoningEffort string
+	// ReasoningEffortFlagSet records whether the operator passed an explicit
+	// --reasoning-effort flag. When true, foldOperatorReasoningEffort leaves the
+	// operator-YAML value alone (CLI out-ranks YAML). Set by the cmd mains alongside
+	// ReasoningEffort.
+	ReasoningEffortFlagSet bool
 	// Privileged is the cmd-computed predicate "running as root WITHOUT a declared
 	// sandbox" (euid 0 && MECATL_SANDBOX/IS_SANDBOX unset). It is the input to the
 	// authoritative posture root-refusal: Build calls PostureRefusalReason AFTER the
@@ -909,6 +926,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	cfg.permResolver = buildPermResolver(cfg)
 	cfg = foldOperatorPosture(cfg)
 	cfg = foldOperatorOutputEconomy(cfg)
+	cfg = foldOperatorReasoningEffort(cfg)
 	cfg.Posture = resolvePosture(cfg, postureNoCeiling)
 	cfg = applyPosture(cfg)
 	// AUTHORITATIVE root/no-sandbox refusal: applied HERE, after the full posture fold,
@@ -1513,6 +1531,54 @@ func sessionEngineFactory(
 				resolvedModel = planModel
 			}
 		}
+		// REASONING EFFORT (ADR 0055), re-minted via the engine FACTORY — never a
+		// clone-and-swap-LLM (the "provider FIXED per session" discipline). Precedence:
+		// the per-session selector value OUT-RANKS the operator default; both normalise
+		// through resolveSessionEffort (an unknown token falls back + WARNs). The
+		// resolved neutral token is then per-provider CLAMPED here in composition (xhigh/
+		// max→high for openai, with a diagnostic — the adapter has no port.Diagnostics)
+		// and CAPABILITY-GATED (a model the catalog/live source says has NO reasoning →
+		// DEGRADE: drop the effort + WARN; an UNKNOWN model fails open and sends it, the
+		// thinking-path posture). resolvedEffort is the EFFECTIVE token echoed on
+		// resolved_model. The DEFAULT PATH stays BYTE-IDENTICAL: when the resolved effort
+		// equals the operator default the entry was built with, the shared entry.provider
+		// is reused (no re-mint); a re-mint happens ONLY when they differ and the entry
+		// exposes a remintEffort closure.
+		resolvedEffort := resolveSessionEffort(ctx, cfg, sel.ReasoningEffort)
+		resolvedEffort, clamped := clampEffortForProvider(resolvedProviderID, resolvedEffort)
+		if clamped {
+			cfg.diag().Log(ctx, port.LevelWarn,
+				"reasoning-effort: clamped for provider (this provider supports low/medium/high only)",
+				"provider", resolvedProviderID, "effort", resolvedEffort)
+		}
+		if resolvedEffort != "" {
+			if supported, known := modelReasoningSupport(reg, resolvedProviderID, resolvedModel); known && !supported {
+				cfg.diag().Log(ctx, port.LevelWarn,
+					"reasoning-effort: model does not support reasoning effort; ignoring",
+					"provider", resolvedProviderID, "model", resolvedModel, "effort", resolvedEffort)
+				resolvedEffort = ""
+			}
+		}
+		// utilityProvider is the OPERATOR-DEFAULT provider (the entry's shared
+		// .provider). Reasoning effort binds the AGENT's reasoning (the main engine) and
+		// its SUBAGENTS (the catalog parent below) — NOT the harness's own internal
+		// classifier/one-turn calls. So the three utility engines (the guardrail content
+		// checker, the child-ask reviewer, the model-router classifier) are built off
+		// THIS provider, never the session-re-minted resolvedProvider — a session that
+		// dials reasoning_effort:max must not silently raise the spend of those
+		// cost-sensitive internal calls (ADR 0055).
+		utilityProvider := resolvedProvider
+		// Re-mint ONLY when the resolved session effort differs from the OPERATOR-DEFAULT
+		// effort the entry's shared .provider was built with (the SAME normalise+clamp the
+		// registry applied at build). When they match, the shared provider is reused
+		// byte-for-byte (the byte-identical default path).
+		if entry, ok := reg.Lookup(resolvedProviderID); ok && entry.remintEffort != nil {
+			entryEffort, _ := NormalizeReasoningEffort(cfg.ReasoningEffort)
+			entryEffort, _ = clampEffortForProvider(resolvedProviderID, entryEffort)
+			if resolvedEffort != entryEffort {
+				resolvedProvider = entry.remintEffort(resolvedEffort)
+			}
+		}
 		// The compaction window is the LIVE-FIRST resolver over the resolved
 		// (provider, model) — the SAME reg.windowResolver the shared and child engines
 		// use, evaluated at the point of use. So the live ListModels picker, the session
@@ -1575,16 +1641,19 @@ func sessionEngineFactory(
 		// content checker, over the session's resolved provider/model. OFF-by-default
 		// (returns deps.Hooks unchanged when unconfigured); wired onto the MAIN engine's
 		// hooks only — buildCatalog's child hooks above stay RAW (the recursion guard).
-		deps.Hooks = buildGuardrailsHooks(cfg, reg, resolvedProvider, resolvedProviderID, resolvedModel, deps.Hooks)
+		// The three utility engines pin utilityProvider (the OPERATOR-DEFAULT effort), NOT
+		// resolvedProvider — reasoning effort binds the agent, not the harness's internal
+		// classifier/one-turn calls (ADR 0055).
+		deps.Hooks = buildGuardrailsHooks(cfg, reg, utilityProvider, resolvedProviderID, resolvedModel, deps.Hooks)
 		// The OPT-IN child-ask reviewer (issue #31), RE-DERIVED on this session's
 		// resolved (provider, model) through the same attachAskAdjudicator the shared
 		// engine uses — never a clone-and-swap of the build-time reviewer.
-		deps = attachAskAdjudicator(deps, cfg, reg, resolvedProvider, resolvedProviderID, resolvedModel)
+		deps = attachAskAdjudicator(deps, cfg, reg, utilityProvider, resolvedProviderID, resolvedModel)
 		// The OPT-IN semantic model router (ADR 0031), RE-DERIVED on this session's
 		// resolved (provider, model) through the same buildModelRouterTask the shared
 		// engine uses — the classifier compacts/counts on the session's provider, never a
 		// clone-and-swap. nil (the field stays nil) when the router is OFF.
-		deps.SubagentModelRouter = buildModelRouterTask(cfg, reg, resolvedProvider, resolvedProviderID, resolvedModel)
+		deps.SubagentModelRouter = buildModelRouterTask(cfg, reg, utilityProvider, resolvedProviderID, resolvedModel)
 		if noFS {
 			// MODEL-VISIBLE POSTURE (mandatory discoverability, the #40 pattern):
 			// tell the model up front there is no filesystem — and stop the prompt
@@ -1605,6 +1674,11 @@ func sessionEngineFactory(
 			// (resolve-at-use), so the echo and the running engine never diverge.
 			ProviderID: resolvedProviderID,
 			ModelID:    resolvedModel,
+			// The EFFECTIVE reasoning-effort this session resolved to (ADR 0055): the
+			// normalised + per-provider-clamped + capability-gated token actually wired
+			// into the (possibly re-minted) adapter. The server echoes it on
+			// resolved_model — the SAME single-source discipline as the ids.
+			ReasoningEffort: resolvedEffort,
 			// Echo the mode this engine resolved its model for (ADR 0030 Layer 3), so the
 			// Service stamps sessionEngine.builtForMode from this one source and detects a
 			// later mode→model staleness — the SAME single-source discipline as the ids.
@@ -5258,6 +5332,28 @@ func foldOperatorOutputEconomy(cfg Config) Config {
 		return cfg
 	}
 	cfg.OutputEconomy = yamlEconomy
+	return cfg
+}
+
+// foldOperatorReasoningEffort merges the OPERATOR-TIER `reasoning-effort:` YAML
+// scalar (read by the permconfig resolver from the user-global + CLI tiers ONLY —
+// never the project file, which is IGNORED with a WARN) onto cfg.ReasoningEffort.
+// A CLI --reasoning-effort (cfg.ReasoningEffortFlagSet) OUT-RANKS the YAML value.
+// It is a no-op when no operator-tier reasoning-effort: key was configured.
+// Mirrors foldOperatorOutputEconomy. cfg is taken and returned by value (ADR 0055).
+func foldOperatorReasoningEffort(cfg Config) Config {
+	if cfg.ReasoningEffortFlagSet {
+		return cfg // CLI wins; YAML cannot override an explicit flag.
+	}
+	res, ok := cfg.permResolver.(*permconfig.Resolver)
+	if !ok || res == nil {
+		return cfg
+	}
+	yamlEffort := strings.TrimSpace(res.OperatorReasoningEffort())
+	if yamlEffort == "" {
+		return cfg
+	}
+	cfg.ReasoningEffort = yamlEffort
 	return cfg
 }
 

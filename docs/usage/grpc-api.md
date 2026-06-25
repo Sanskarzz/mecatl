@@ -239,12 +239,13 @@ allow-all operator posture — same semantics, root refusal, and `MECATL_SANDBOX
 `IS_SANDBOX` env as `mecated`; see the allow-all note in §12). It is **ignored when
 dialling an external `--server`**. Note the TUI's **built-in slash commands**
 (`/clear`, `/help`, and the caps-gated `/mcp`, `/agents`, `/team`, `/skills`,
-`/soul`, `/usermodel`, `/models`, `/worktrees` — in that fixed palette order) still work
+`/soul`, `/usermodel`, `/models`, `/effort`, `/worktrees` — in that fixed palette order) still work
 regardless — they act on the TUI itself, not the server, so typing `/` always
 opens a useful palette even with workspace slash-command expansion off
 (`/agents` browses the agent-definition inventory; `/team`, also `ctrl+a`,
 opens the live agent-team overlay; `/skills` the skills inventory; `/soul` and
 `/usermodel` the persona/user-model views; `/models` the model picker;
+`/effort` picks the session's reasoning-effort tier (`auto`/`low`/`medium`/`high`/`xhigh`/`max`) and **restarts the session** to apply it (a per-session server setting, like a model switch);
 `/worktrees` the sibling-git-worktree switch — it lists the repo's worktrees and,
 on select, starts a NEW session rooted at the chosen worktree so all local tools
 bind there; gated on the server advertising `worktrees`, so it is honestly absent

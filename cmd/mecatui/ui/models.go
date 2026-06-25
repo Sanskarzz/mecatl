@@ -707,6 +707,10 @@ func renderModelsPanel(th theme.Theme, st modelsState, caps client.Capabilities,
 	b.WriteString("\n" + th.Style("muted").Render(
 		"type to filter · ↑/↓/pgup move · enter use · ctrl+g set global default · esc clear filter / close"))
 	b.WriteString("\n" + th.Style("muted").Render("● current  ★ global default"))
+	// A "reason" segment marks a model that emits reasoning; the EFFORT tier for those
+	// models is a separate per-session setting (ADR 0055) — point the user at /effort
+	// rather than building a sub-picker inside this overlay.
+	b.WriteString("\n" + th.Style("muted").Render("reason = emits reasoning · set its effort tier with /effort"))
 	return b.String()
 }
 

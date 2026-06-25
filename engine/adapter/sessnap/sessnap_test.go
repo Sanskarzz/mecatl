@@ -23,6 +23,7 @@ func runningSession(t *testing.T) *session.Session {
 	s.Profile = "no-fs"
 	s.ProviderID = "openrouter"
 	s.ModelID = "anthropic/claude-3.5-sonnet"
+	s.ReasoningEffort = "high"
 	if err := s.BeginTurn(); err != nil {
 		t.Fatalf("BeginTurn: %v", err)
 	}
@@ -77,6 +78,9 @@ func assertEquivalent(t *testing.T, got, want *session.Session) {
 	}
 	if got.ModelID != want.ModelID {
 		t.Errorf("ModelID = %q, want %q", got.ModelID, want.ModelID)
+	}
+	if got.ReasoningEffort != want.ReasoningEffort {
+		t.Errorf("ReasoningEffort = %q, want %q", got.ReasoningEffort, want.ReasoningEffort)
 	}
 	if got.Usage != want.Usage {
 		t.Errorf("Usage = %+v, want %+v", got.Usage, want.Usage)
@@ -406,7 +410,7 @@ func TestSnapshotRoundTripsPhase1Fields(t *testing.T) {
 	line := mustMarshal(t, want)
 
 	// The keys are present in the wire form (the round-trip carries real data).
-	for _, key := range []string{`"profile"`, `"provider_id"`, `"model_id"`, `"usage"`} {
+	for _, key := range []string{`"profile"`, `"provider_id"`, `"model_id"`, `"reasoning_effort"`, `"usage"`} {
 		if !strings.Contains(string(line), key) {
 			t.Errorf("marshalled snapshot missing %s key:\n%s", key, line)
 		}
@@ -418,6 +422,9 @@ func TestSnapshotRoundTripsPhase1Fields(t *testing.T) {
 	}
 	if got.Profile != "no-fs" || got.ProviderID != "openrouter" || got.ModelID != "anthropic/claude-3.5-sonnet" {
 		t.Errorf("labels not restored: profile=%q provider=%q model=%q", got.Profile, got.ProviderID, got.ModelID)
+	}
+	if got.ReasoningEffort != "high" {
+		t.Errorf("ReasoningEffort not restored: got %q want \"high\"", got.ReasoningEffort)
 	}
 	wantUsage := session.Usage{InputTokens: 900, OutputTokens: 250, CacheReadTokens: 600, CacheWriteTokens: 100}
 	if got.Usage != wantUsage {

@@ -103,6 +103,18 @@ type providerEntry struct {
 	// kept on the entry, NOT type-asserted from .provider, because openrouter and
 	// openai share the SAME openai.Provider adapter and only openrouter opts in.
 	lister modelLister
+	// remintEffort RE-MINTS this entry's provider adapter with a different
+	// reasoning-effort token (ADR 0055), returning a fresh resilience-wrapped
+	// port.LLMProvider. It captures the construction inputs (key/baseURL/resolvers/
+	// resilience config) so the per-session engine factory can build a same-provider
+	// adapter that carries the SESSION's effort when it differs from the operator
+	// default the entry's .provider was built with — the SAME factory discipline as
+	// the per-call model override (the factory owns adapter construction; effort is
+	// never a port.LLMRequest field). The DEFAULT path never calls it (the shared
+	// .provider is reused byte-for-byte). It takes an ALREADY-CLAMPED neutral effort
+	// token; "" means unset (the provider default). nil for the mock entry (it
+	// ignores effort) and for a providerConstructor test seam that did not wire one.
+	remintEffort func(effort string) port.LLMProvider
 }
 
 // providerRegistry holds the N configured providers. It is built once in Build
@@ -303,24 +315,39 @@ func newOpenAIEntry(cfg Config, id, key, baseURL string) providerEntry {
 	if cfg.providerConstructor != nil {
 		return providerEntry{id: id, provider: cfg.providerConstructor(cfg, id, key, baseURL), available: true, baseURL: baseURL}
 	}
-	opts := []openai.Option{openai.WithAPIKey(key)}
-	if baseURL != "" {
-		opts = append(opts, openai.WithBaseURL(baseURL))
+	// construct mints a resilience-wrapped openai adapter carrying the given
+	// reasoning-effort token (ADR 0055). It is the SINGLE construction path: the
+	// default .provider is construct(defaultEffort) and the per-session re-mint is
+	// construct(sessionEffort), so the two cannot drift on resilience wrapping.
+	construct := func(effort string) port.LLMProvider {
+		opts := []openai.Option{openai.WithAPIKey(key)}
+		if baseURL != "" {
+			opts = append(opts, openai.WithBaseURL(baseURL))
+		}
+		if effort != "" {
+			opts = append(opts, openai.WithReasoningEffort(effort))
+		}
+		var llm port.LLMProvider = openai.New(opts...)
+		return llmresilience.Wrap(llm, llmresilience.Config{
+			MaxAttempts:       cfg.LLMMaxAttempts,
+			BaseBackoff:       llmBaseBackoff,
+			MaxBackoff:        llmMaxBackoff,
+			PerAttemptTimeout: cfg.LLMPerAttemptTimeout,
+			StreamIdleTimeout: cfg.LLMStreamIdleTimeout,
+			BreakerThreshold:  cfg.LLMBreakerThreshold,
+			BreakerCooldown:   cfg.LLMBreakerCooldown,
+			// Provider-tag every resilience line so a multi-provider operator can tell
+			// WHICH provider stalled/opened its breaker (the lines themselves carry no
+			// provider identity otherwise).
+			Diagnostics: cfg.diag().With("provider", id),
+		})
 	}
-	var llm port.LLMProvider = openai.New(opts...)
-	llm = llmresilience.Wrap(llm, llmresilience.Config{
-		MaxAttempts:       cfg.LLMMaxAttempts,
-		BaseBackoff:       llmBaseBackoff,
-		MaxBackoff:        llmMaxBackoff,
-		PerAttemptTimeout: cfg.LLMPerAttemptTimeout,
-		StreamIdleTimeout: cfg.LLMStreamIdleTimeout,
-		BreakerThreshold:  cfg.LLMBreakerThreshold,
-		BreakerCooldown:   cfg.LLMBreakerCooldown,
-		// Provider-tag every resilience line so a multi-provider operator can tell
-		// WHICH provider stalled/opened its breaker (the lines themselves carry no
-		// provider identity otherwise).
-		Diagnostics: cfg.diag().With("provider", id),
-	})
+	// The OPERATOR-DEFAULT effort baked into the shared .provider: normalise +
+	// per-provider clamp (xhigh/max→high for openai), narrating a clamp at startup so
+	// an operator who set --reasoning-effort max against OpenAI sees the promised WARN.
+	// A per-session selector that resolves to a DIFFERENT effort re-mints via
+	// remintEffort; the default path reuses .provider byte-for-byte.
+	llm := construct(operatorDefaultEffortFor(cfg, id))
 	cfg.diag().Log(context.Background(), port.LevelInfo, "LLM resilience enabled",
 		"provider", id,
 		"max_attempts", cfg.LLMMaxAttempts,
@@ -328,7 +355,7 @@ func newOpenAIEntry(cfg Config, id, key, baseURL string) providerEntry {
 		"stream_idle_timeout", cfg.LLMStreamIdleTimeout,
 		"breaker_threshold", cfg.LLMBreakerThreshold,
 		"breaker_cooldown", cfg.LLMBreakerCooldown)
-	return providerEntry{id: id, provider: llm, available: true, baseURL: baseURL}
+	return providerEntry{id: id, provider: llm, available: true, baseURL: baseURL, remintEffort: construct}
 }
 
 // newAnthropicEntry constructs a resilience-wrapped native-Anthropic provider
@@ -352,42 +379,58 @@ func newAnthropicEntry(cfg Config, key string, meta *liveMetaStore) providerEntr
 		entry.lister = anthropicLister{inner: anthropic.NewLister(key, baseURL, cfg.liveModelHTTPClient)}
 		return entry
 	}
-	opts := []anthropic.Option{
-		anthropic.WithAPIKey(key),
-		// PER-MODEL max_tokens: each request's max_tokens is resolved LIVE-FIRST from
-		// the live-metadata store (the live output ceiling when present), else the
-		// catalogued ceiling, else the adapter's conservative default. So a per-session/
-		// sub-agent route to a smaller-ceiling model (e.g. claude-3-5-haiku=8192) never
-		// sends the default model's larger value and 400s, and a newly-released model the
-		// catalog doesn't know gets its true ceiling from the live API. The adapter stays
-		// catalog-/store-free — composition owns the closure over meta.
-		anthropic.WithMaxTokensResolver(func(model string) int {
-			return meta.outputLimitFor(providerAnthropic, model)
-		}),
-		// THINKING-FROM-LIVE: the adapter's extended-thinking mode (adaptive / manual /
-		// none) reads the LIVE descriptor (Capabilities.Thinking.Types) when the model is
-		// KNOWN, falling back to the adapter's hardcoded prefix matrix as the OFFLINE
-		// floor (known=false). This retires the stale-prefix guesswork for live runs
-		// while keeping the deterministic matrix for offline/uncatalogued models.
-		anthropic.WithThinkingResolver(func(model string) (adaptive, enabled, known bool) {
-			return meta.thinkingFor(providerAnthropic, model)
-		}),
+	// construct mints a resilience-wrapped anthropic adapter carrying the given
+	// reasoning-effort token (ADR 0055), over the SAME max-tokens + thinking
+	// resolvers. It is the SINGLE construction path: the default .provider is
+	// construct(defaultEffort) and the per-session re-mint is construct(sessionEffort),
+	// so the two cannot drift on resolvers or resilience wrapping.
+	construct := func(effort string) port.LLMProvider {
+		opts := []anthropic.Option{
+			anthropic.WithAPIKey(key),
+			// PER-MODEL max_tokens: each request's max_tokens is resolved LIVE-FIRST from
+			// the live-metadata store (the live output ceiling when present), else the
+			// catalogued ceiling, else the adapter's conservative default. So a per-session/
+			// sub-agent route to a smaller-ceiling model (e.g. claude-3-5-haiku=8192) never
+			// sends the default model's larger value and 400s, and a newly-released model the
+			// catalog doesn't know gets its true ceiling from the live API. The adapter stays
+			// catalog-/store-free — composition owns the closure over meta.
+			anthropic.WithMaxTokensResolver(func(model string) int {
+				return meta.outputLimitFor(providerAnthropic, model)
+			}),
+			// THINKING-FROM-LIVE: the adapter's extended-thinking mode (adaptive / manual /
+			// none) reads the LIVE descriptor (Capabilities.Thinking.Types) when the model is
+			// KNOWN, falling back to the adapter's hardcoded prefix matrix as the OFFLINE
+			// floor (known=false). This retires the stale-prefix guesswork for live runs
+			// while keeping the deterministic matrix for offline/uncatalogued models.
+			anthropic.WithThinkingResolver(func(model string) (adaptive, enabled, known bool) {
+				return meta.thinkingFor(providerAnthropic, model)
+			}),
+		}
+		// Reasoning effort (ADR 0055) is INDEPENDENT of the thinking config above; both
+		// coexist on the request. Anthropic identity-maps the neutral vocabulary.
+		if effort != "" {
+			opts = append(opts, anthropic.WithReasoningEffort(effort))
+		}
+		if baseURL != "" {
+			opts = append(opts, anthropic.WithBaseURL(baseURL))
+		}
+		var llm port.LLMProvider = anthropic.New(opts...)
+		return llmresilience.Wrap(llm, llmresilience.Config{
+			MaxAttempts:       cfg.LLMMaxAttempts,
+			BaseBackoff:       llmBaseBackoff,
+			MaxBackoff:        llmMaxBackoff,
+			PerAttemptTimeout: cfg.LLMPerAttemptTimeout,
+			StreamIdleTimeout: cfg.LLMStreamIdleTimeout,
+			BreakerThreshold:  cfg.LLMBreakerThreshold,
+			BreakerCooldown:   cfg.LLMBreakerCooldown,
+			// Provider-tag every resilience line (see the openai entry).
+			Diagnostics: cfg.diag().With("provider", providerAnthropic),
+		})
 	}
-	if baseURL != "" {
-		opts = append(opts, anthropic.WithBaseURL(baseURL))
-	}
-	var llm port.LLMProvider = anthropic.New(opts...)
-	llm = llmresilience.Wrap(llm, llmresilience.Config{
-		MaxAttempts:       cfg.LLMMaxAttempts,
-		BaseBackoff:       llmBaseBackoff,
-		MaxBackoff:        llmMaxBackoff,
-		PerAttemptTimeout: cfg.LLMPerAttemptTimeout,
-		StreamIdleTimeout: cfg.LLMStreamIdleTimeout,
-		BreakerThreshold:  cfg.LLMBreakerThreshold,
-		BreakerCooldown:   cfg.LLMBreakerCooldown,
-		// Provider-tag every resilience line (see the openai entry).
-		Diagnostics: cfg.diag().With("provider", providerAnthropic),
-	})
+	// The OPERATOR-DEFAULT effort baked into the shared .provider (anthropic
+	// identity-maps all five tiers, so this never clamps — but it shares the one
+	// startup-clamp-narration helper for uniformity with the openai entry).
+	llm := construct(operatorDefaultEffortFor(cfg, providerAnthropic))
 	cfg.diag().Log(context.Background(), port.LevelInfo, "LLM resilience enabled",
 		"provider", providerAnthropic,
 		"max_attempts", cfg.LLMMaxAttempts,
@@ -395,7 +438,7 @@ func newAnthropicEntry(cfg Config, key string, meta *liveMetaStore) providerEntr
 		"stream_idle_timeout", cfg.LLMStreamIdleTimeout,
 		"breaker_threshold", cfg.LLMBreakerThreshold,
 		"breaker_cooldown", cfg.LLMBreakerCooldown)
-	entry := providerEntry{id: providerAnthropic, provider: llm, available: true, baseURL: baseURL}
+	entry := providerEntry{id: providerAnthropic, provider: llm, available: true, baseURL: baseURL, remintEffort: construct}
 	// Anthropic opts into LIVE model listing: its keyed /v1/models endpoint
 	// self-describes the rich per-model metadata (output ceiling, context window,
 	// image, thinking types). The lister rides on the entry (so only anthropic

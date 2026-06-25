@@ -291,6 +291,7 @@ type Model struct {
 	soul         soulState      // soul (persona) inspection overlay state (view==soulNone when closed)
 	userModel    userModelState // user-model inspection overlay state (view==userModelNone when closed)
 	models       modelsState    // /models picker overlay state (view==modelsNone when closed)
+	effort       effortState    // /effort picker overlay state (view==effortNone when closed) — ADR 0055
 	worktrees    worktreesState // /worktrees overlay state (view==worktreesNone when closed) — issue #102
 	// activeModel is the currently-selected (provider, model) the NEXT CreateSession
 	// will carry (apply-on-next-create). Seeded from Deps.InitialModel, updated by the

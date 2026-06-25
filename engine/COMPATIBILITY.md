@@ -128,12 +128,12 @@ honour.
 | recorded stop reason (`RecordedStopReason`) | **MUST** | `EvResult.Stop` |
 | pending ask (`PendingAsk`, when awaiting) | **MUST** | the trailing `EvPermissionAsk` with no following `EvApproval`/`EvResult` |
 | cumulative `Usage` | **MUST** | the **SUM** of every per-run `EvResult.Usage` (each `EvResult.Usage` is PER-RUN; the budget brake reads the cumulative aggregate) |
-| creation metadata: id, mode, limits, workspace, profile, provider/model selector, createdAt | **MUST** (supplied out-of-band) | **NOT in any event** — provided by the caller via `eventsource.SessionMeta` |
+| creation metadata: id, mode, limits, workspace, profile, provider/model selector, reasoning-effort, createdAt | **MUST** (supplied out-of-band) | **NOT in any event** — provided by the caller via `eventsource.SessionMeta` |
 | `Counters` (turns / tool calls / consecutive failures) | run-scoped — reflects the **latest run segment** (they reset on `Reopen`), derived from the latest run's events | `EvTurnStart` (turns), `EvToolResult` (tool calls / consecutive failures) |
 | run plumbing (diagnostics binding, askID serials, ctx) | safe to lose — rebuilt fresh | n/a |
 
 **Creation metadata is not in events.** No event carries the session id, mode, limits,
-workspace, profile, provider/model selector, or createdAt. The caller — who created the
+workspace, profile, provider/model selector, reasoning-effort, or createdAt. The caller — who created the
 session — supplies them alongside the stream (there is deliberately no
 `EvSessionCreated`; ADR 0038 notes it as a possible future). `eventsource.SessionMeta`
 is the reference shape.

@@ -51,6 +51,11 @@ type Snapshot struct {
 	// restarted process re-derive the SAME per-session engine via the factory.
 	ProviderID string `json:"provider_id,omitempty"`
 	ModelID    string `json:"model_id,omitempty"`
+	// ReasoningEffort is the session's opaque neutral reasoning-effort token (ADR
+	// 0055). omitempty keeps a pre-0055 snapshot with no key decoding to "" (unset)
+	// — additive, no version bump. Persisting it lets a restarted process re-mint the
+	// SAME per-session engine (the same-effort adapter) via the factory.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 	// Usage is the cumulative run-token accounting, a POINTER for true omitempty
 	// (matching the Pending precedent): a zero Usage marshals nothing and a v1
 	// snapshot with no "usage" key decodes to a nil pointer => the zero Usage on
@@ -98,16 +103,17 @@ func Of(s *session.Session) (Snapshot, error) {
 		return Snapshot{}, ErrNilSession
 	}
 	snap := Snapshot{
-		ID:         s.ID,
-		State:      s.State,
-		Mode:       s.Mode,
-		Limits:     s.Limits,
-		Counters:   s.Counters,
-		Workspace:  s.Workspace,
-		Profile:    s.Profile,
-		ProviderID: s.ProviderID,
-		ModelID:    s.ModelID,
-		CreatedAt:  s.CreatedAt,
+		ID:              s.ID,
+		State:           s.State,
+		Mode:            s.Mode,
+		Limits:          s.Limits,
+		Counters:        s.Counters,
+		Workspace:       s.Workspace,
+		Profile:         s.Profile,
+		ProviderID:      s.ProviderID,
+		ModelID:         s.ModelID,
+		ReasoningEffort: s.ReasoningEffort,
+		CreatedAt:       s.CreatedAt,
 	}
 	// Usage is a pointer for true omitempty: only emit the key when there is spend
 	// to persist, so a zero-usage snapshot stays byte-identical to a pre-Usage one.
@@ -144,11 +150,12 @@ func (snap Snapshot) Restore() (*session.Session, error) {
 		s.Conversation.Append(fromDTO(dto))
 	}
 	// Restore the inert creation labels by direct assignment — exported authoritative
-	// values, with no state transition. Profile / ProviderID / ModelID are opaque to
-	// the domain.
+	// values, with no state transition. Profile / ProviderID / ModelID /
+	// ReasoningEffort are opaque to the domain.
 	s.Profile = snap.Profile
 	s.ProviderID = snap.ProviderID
 	s.ModelID = snap.ModelID
+	s.ReasoningEffort = snap.ReasoningEffort
 
 	// The cumulative usage to seed (a nil pointer => the zero Usage, the pre-Usage
 	// default), passed to RestoreState alongside the counters so it seeds the budget

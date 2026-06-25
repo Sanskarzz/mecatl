@@ -109,10 +109,11 @@ func (c *Client) Close() error {
 // (see resolvedModelFrom), which the ui renders as no model segment.
 func (c *Client) CreateSession(ctx context.Context, workspace string, mode mecatlv1.PermissionMode, sel ModelSelection) (string, Capabilities, ResolvedModel, error) {
 	resp, err := c.svc.CreateSession(ctx, &mecatlv1.CreateSessionRequest{
-		Workspace:  workspace,
-		Mode:       mode,
-		ProviderId: sel.ProviderID,
-		ModelId:    sel.ModelID,
+		Workspace:       workspace,
+		Mode:            mode,
+		ProviderId:      sel.ProviderID,
+		ModelId:         sel.ModelID,
+		ReasoningEffort: sel.ReasoningEffort,
 	})
 	if err != nil {
 		return "", Capabilities{}, ResolvedModel{}, fmt.Errorf("create session: %w", err)
