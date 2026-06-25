@@ -1,4 +1,4 @@
-## 10. Running mecatequi from GitHub Actions
+## 15. Running mecatequi from GitHub Actions
 
 `mecatequi` (the single-shot headless runner, `cmd/mecatequi`) runs one prompt against
 an in-process engine and emits a working-tree git diff, a machine-readable summary JSON,
@@ -105,7 +105,7 @@ permissions:
   contents: read
 jobs:
   mecatequi:
-    uses: stacklok/mecatl/.github/workflows/mecatequi-reusable.yml@v0.0.4
+    uses: stacklok/mecatl/.github/workflows/mecatequi-reusable.yml@<latest>
     permissions:
       contents: write
       pull-requests: write
@@ -188,7 +188,7 @@ The minting itself happens inside the reusable workflow's `publish` job (via
 `mention` (default `@mecatequi`), `model`, `default-provider`, `posture` (default `auto`),
 `max-run-tokens`, `max-turns` (per-run turn cap; empty uses the deployment default),
 `timeout` (default `40m`), `openai-base-url` (for an OpenAI-compatible
-endpoint), `guardrails-model` (issue #27 checker model; configuring it OR a bound `guardrail` model slot enables guardrails, ADR 0046; empty + no slot disables), `setup-script`
+endpoint), `guardrails-model` (checker model; configuring it OR a bound `guardrail` model slot enables guardrails, ADR 0046; empty + no slot disables), `setup-script`
 (multi-line shell run before the binary to install a project toolchain beyond the always-on
 `task` + golangci-lint — see the toolchain note above), `base-branch`, `pr-body-template`,
 `pr-title-template`. The escape-hatch-only knobs (`default-model`,
@@ -306,7 +306,7 @@ there is **no token and no `GOPRIVATE`** to manage:
 ```yaml
 - name: mecatequi
   id: mecatequi
-  uses: stacklok/mecatl/.github/actions/mecatequi@v0.0.4   # pin the latest released tag
+  uses: stacklok/mecatl/.github/actions/mecatequi@<latest>   # pin the latest released tag
   with:
     prompt-file: ${{ runner.temp }}/prompt.txt
     posture: auto
@@ -346,7 +346,7 @@ Easiest activation: copy the shipped `.github/mecatequi/pr-body.md.example`, edi
 `MQ_PR_TITLE_TEMPLATE` overrides the PR title (same placeholders). The **default** title is
 `<issue title> (#<n>)` — the triggering issue's title, fetched READ-only via `gh issue view`
 in the privileged publish job (the agent job holds no GitHub token), falling back to the prior
-`mecatequi: changes for issue #<n>` literal when the title can't be fetched. In a title, use
+`mecatequi: changes for issue {{issue}}` literal when the title can't be fetched. In a title, use
 the **short** placeholders (`{{issue_ref}}`, `{{issue_title}}`, `{{stop_reason}}`,
 `{{branch}}`) — prose ones like `{{what_agent_did}}` or `{{summary_table}}` flatten to one
 unwieldy line.
@@ -369,7 +369,7 @@ an argv token. Extraction is `jq` over the event JSON file into a file; the file
 the binary via `--prompt-file`; the binary fences it. Every event-derived value
 (author association, issue number, paths) is passed via `env:`. The produced patch is
 applied as data, never executed. **Defense in depth:** every agent-facing Bash shell runs
-with a secret-scrubbed environment (`internal/adapter/envscrub` — the harness's
+with a secret-scrubbed environment (the harness's
 provider/auth/forge credentials are dropped before the shell sees them), so a hijacked
 agent cannot `echo $OPENROUTER_API_KEY` / `cat /proc/self/environ` to exfiltrate them; and
 the workflow still bounds the blast radius by holding only the rotatable LLM key (no write

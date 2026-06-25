@@ -1,4 +1,4 @@
-## 6. Configuration
+## 11. Configuration
 
 ### Scaffolding a settings file (`config init`)
 
@@ -106,7 +106,7 @@ concurrently. The in-process run registry enforces single-writer WITHIN a
 process, but two replicas over one shared store have no cross-process exclusion —
 last-write-wins on the JSONL store. For a deployment that cannot guarantee
 affinity (e.g. a load balancer that may reroute a session), wire a **session
-lease** so the harness enforces single-writer itself (cloud-native Phase 4):
+lease** so the harness enforces single-writer itself:
 
 ```sh
 # Single host, several mecated processes sharing one --store-dir:
@@ -175,7 +175,7 @@ no leasing (the byte-identical default).
 Without an explicit backend, mecatl can also discover a lease from a session
 store that happens to implement the lease seam (type-assertion, like the
 retention seam); today's jsonlstore does not, so the no-flag default is no
-leasing. See `docs/adr/0027-cloud-native.md` Phase 4 for the full design.
+leasing. See `docs/adr/0027-cloud-native.md` for the full design.
 
 ### Remote content-source drivers (skills + soul)
 
@@ -220,7 +220,7 @@ share one connection with the store drivers.
 
 ### Remote content-source drivers (agent definitions + slash commands)
 
-Phase C2 completes the family with two more sources on the same protocol:
+Two more sources ride the same protocol:
 
 ```sh
 mecated --agent-source-url 127.0.0.1:7443 --command-source-url 127.0.0.1:7443
@@ -237,7 +237,7 @@ usually-inert flag would be wrong; this asymmetry vs the opt-in skills
 conventional discovery is deliberate). Defs cross the wire whole — tools,
 limits, model/provider hints, skills, hooks, scoped MCP servers — with **no
 path**: diagnostics identify a driver def as `driver: <target>`. (The
-`memory:` field — per-agent persistent memory, issue #33 — is **not** carried
+`memory:` field — per-agent persistent memory — is **not** carried
 over the driver wire in v1; a driver-served def stays cold-start.) Inline MCP
 server **headers are secret-shaped** (e.g. `Authorization`): the harness
 never logs or projects them; they ride this wire only because driver dials

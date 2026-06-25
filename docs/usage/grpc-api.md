@@ -1,4 +1,4 @@
-## 4. The gRPC API
+## 9. The gRPC API
 
 Service: `mecatl.v1.HarnessService` (`contracts/proto/mecatl/v1/harness.proto`).
 
@@ -18,7 +18,7 @@ Service: `mecatl.v1.HarnessService` (`contracts/proto/mecatl/v1/harness.proto`).
 | `ListModels` | unary | the selectable provider/model inventory — public metadata only (powers the `/models` picker; see §3) |
 | `ListAgents` | unary | the discovered agent-definition registry (name, description, resolved model, tool scope) |
 | `ListCommands` | unary | the available slash commands for a workspace (discovery only — expansion happens on the run path) |
-| `ListWorktrees` | unary | the git worktrees of a repo (discovery only — powers the mecatui `/worktrees` switch; nil-safe on a no-FS/cloud server; issue #102) |
+| `ListWorktrees` | unary | the git worktrees of a repo (discovery only — powers the mecatui `/worktrees` switch; nil-safe on a no-FS/cloud server) |
 | `ListSkills` | unary | the discovered skills inventory (name + one-line description) |
 | `GetSoul` | unary | the resolved soul's build-time snapshot: content, size/hash, provenance, trust + drift state |
 | `GetUserModel` | unary | the **live** user-model index (entry keys + descriptions; values omitted — `Recall` loads them) |
@@ -203,7 +203,7 @@ func main() {
 same gRPC `Converse` stream. After `task build` it lands at `bin/mecatui`. It
 needs no separate server by default — with no `--server` it reuses a `mecated`
 already running on `127.0.0.1:8080`, or else **hosts one in-process** over a UNIX
-socket (built via `internal/app`, the same assembly `mecated` uses):
+socket (built via the shared composition layer, the same assembly `mecated` uses):
 
 ```sh
 OPENAI_API_KEY=sk-... bin/mecatui --workspace "$PWD"   # embedded (default)
@@ -236,7 +236,7 @@ non-loopback `--perf-addr` with `--perf-mcp` is refused). This is the in-process
 way to profile a freeze in the embedded server itself.
 The embedded server also accepts `--yolo` (the
 allow-all operator posture — same semantics, root refusal, and `MECATL_SANDBOX`/
-`IS_SANDBOX` env as `mecated`; see the allow-all note in §7). It is **ignored when
+`IS_SANDBOX` env as `mecated`; see the allow-all note in §12). It is **ignored when
 dialling an external `--server`**. Note the TUI's **built-in slash commands**
 (`/clear`, `/help`, and the caps-gated `/mcp`, `/agents`, `/team`, `/skills`,
 `/soul`, `/usermodel`, `/models`, `/worktrees` — in that fixed palette order) still work
@@ -248,7 +248,7 @@ opens the live agent-team overlay; `/skills` the skills inventory; `/soul` and
 `/worktrees` the sibling-git-worktree switch — it lists the repo's worktrees and,
 on select, starts a NEW session rooted at the chosen worktree so all local tools
 bind there; gated on the server advertising `worktrees`, so it is honestly absent
-against a no-FS/cloud server; issue #102). See
+against a no-FS/cloud server). See
 `docs/tui.md` for all flags.
 
 It streams the conversation (glamour markdown for assistant text, themed cards

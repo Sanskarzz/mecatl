@@ -1,4 +1,4 @@
-## 8. Hooks
+## 13. Hooks
 
 Lifecycle hooks let an external command observe or veto agent actions. A hook is
 a phase → shell-command map; each command is run as `<shell> -c <command>`
@@ -15,16 +15,7 @@ a phase → shell-command map; each command is run as `<shell> -c <command>`
 | `Stop` | when the main loop stops |
 | `SubagentStop` | when a subagent loop stops |
 
-> v1 fully implements `PreToolUse` and `PostToolUse`; the others are defined and
-> wired as the injection seam. **`mecated` ships with no global hooks configured
-> by default** (`hookexec.New(nil)`, in the shared composition layer
-> `internal/app`), so every event is allowed. Global hooks are configured in Go
-> by passing a populated `map[governance.HookPhase]string` to
-> `hookexec.New(...)`. Separately, an **agent definition** may carry a per-def
-> `hooks:` map executed through the same `hookexec` runner for that child's
-> lifecycle phases — note this is **ungated shell on the harness host** (no
-> permission ask), which is why agent-def sources are a trust boundary (see the
-> `--agents-dir` / `--agent-source-url` notes in §3 and §6).
+> v1 fully implements `PreToolUse` and `PostToolUse`; the others are defined and wired as the injection seam. **`mecated` ships with no global hooks configured by default**, so every event is allowed. Global hooks are configured in Go in the shared composition layer. Separately, an **agent definition** may carry a per-def `hooks:` map executed through the same runner for that child's lifecycle phases — note this is **ungated shell on the harness host** (no permission ask), which is why agent-def sources are a trust boundary (see the `--agents-dir` / `--agent-source-url` notes in §3 and §11).
 
 ### The stdin contract
 
@@ -64,13 +55,7 @@ fi
 exit 0
 ```
 
-Wire it (in `internal/app` — `build.go`, where `hookexec.New(nil)` is today):
-
-```go
-hooks := hookexec.New(map[governance.HookPhase]string{
-    governance.PhasePreToolUse: "/path/to/pretooluse-guard.sh",
-})
-```
+> Wiring a global hook requires editing the shared composition layer and rebuilding — there is no config-file path for global hooks in v1. An agent definition's per-def `hooks:` map is the config-driven path.
 
 ---
 

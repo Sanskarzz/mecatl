@@ -1,4 +1,4 @@
-## 5. The HTTP / SSE API
+## 10. The HTTP / SSE API
 
 The HTTP adapter wraps the same service. Every event is emitted as one SSE
 `data:` line carrying the proto `Event` marshalled to JSON — so HTTP and gRPC
@@ -16,7 +16,7 @@ share one event shape.
 | `POST /v1/sessions/{id}/cancel` | — | `204` |
 | `POST /v1/sessions/{id}/cancel-child` | `{child_id}` | `204`; `404` for an unknown / already-finished child |
 
-**Inventory & introspection** (the HTTP mirrors of the gRPC inventory RPCs in §4):
+**Inventory & introspection** (the HTTP mirrors of the gRPC inventory RPCs in §9):
 
 | Method & path | Response |
 | --- | --- |
@@ -68,7 +68,7 @@ Optional fields:
 `mode` accepts `default`, `plan`, `acceptedits` (also `accept_edits` / `accept`);
 unknown/empty falls back to the server default (`default`). A `limits` object
 with all-zero (or omitted) fields gets the server's non-zero defaults
-substituted (see §6). `workspace` is required for the default profile —
+substituted (see §11). `workspace` is required for the default profile —
 omitting it returns `400` `{"error":"workspace is required"}`.
 
 ### Create a no-filesystem session (`profile: "no-fs"`)

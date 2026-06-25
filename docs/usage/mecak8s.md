@@ -1,3 +1,5 @@
+## 8. mecak8s (Kubernetes-native agent)
+
 ### Graceful shutdown
 
 `mecated` traps `SIGINT` / `SIGTERM`, stops accepting new work, drains the HTTP
@@ -10,9 +12,9 @@ level=INFO msg="shutdown signal received; stopping servers"
 ### mecak8s — the storage-free Kubernetes-native agent (`cmd/mecak8s`, ADR 0048)
 
 `mecak8s` is a **thin peer of `mecated`**: the same `app.Build` assembly composed with
-**k8s-native defaults** — a **Redis** session store + durable event log
-(`internal/adapter/redisstore`), a `coordination.k8s.io` Lease per session
-(`internal/adapter/k8slease`, the in-cluster multi-replica single-writer path), a dynamic
+**k8s-native defaults** — a **Redis** session store + durable event log,
+a `coordination.k8s.io` Lease per session
+(the in-cluster multi-replica single-writer path), a dynamic
 `/readyz` (drain-gated + Redis-pinged), and a bounded `GracefulStop`. The agent pods are
 **storage-free**: no PVC, no `--store-dir`, no local state — every piece of state is a
 managed service the pod talks to over the network (Redis + the k8s API server). It drops
@@ -26,7 +28,7 @@ $ go run ./cmd/mecak8s --redis-url redis:6379 --session-lease-k8s-namespace meca
 
 #### Flags
 
-`mecak8s` reuses `mecated`'s provider/model/permission/skills flags via `internal/cliconfig`
+`mecak8s` reuses `mecated`'s provider/model/permission/skills flags via the shared CLI config wiring
 (the four real-provider mains share that wiring). The k8s-native surface:
 
 | Flag | Default | Meaning |
@@ -84,8 +86,7 @@ ADR 0048):
 2. **Graceful failover releases the lease before TTL** — deleting pod-A (graceful SIGTERM →
    drain → lease release) lets a survivor take over *immediately*, not after the 30s TTL.
 3. **Session persistence across pod restart** — a session + run reaching terminal on pod-A
-   survives pod-A's deletion; a follow-up on pod-B succeeds (Redis snapshot, `Recover`/reopen
-   per issue #51).
+   survives pod-A's deletion; a follow-up on pod-B succeeds (Redis snapshot, `Recover`/reopen).
 
 ```sh
 task e2e:k8s   # needs kind + ko + kubectl + Docker; NOT part of task test (~3-5 min)
@@ -105,7 +106,7 @@ On SIGTERM (or the `preStop` `httpGet /drain`) the drain gate arms (`/readyz` �
 endpoint controller removes the pod) and new runs are rejected with **HTTP 503**. In-flight
 runs are **cancelled, not drained to completion** — a multi-minute LLM turn cannot survive a
 rolling update within `terminationGracePeriodSeconds: 60`. The pod is disposable; the
-session is not — it is **`Recover`-able on the successor** (issue #51) from the Redis
+session is not — it is **`Recover`-able on the successor** from the Redis
 snapshot + durable event log. The bounded `GracefulStop` (30s) hard-stops (`grpcSrv.Stop()`)
 on timeout, and `Service.Close` releases every held `coordination.k8s.io` Lease
 (cancel-detached) so a survivor can take over immediately, without the 30s TTL. See

@@ -20,7 +20,7 @@ go build -ldflags "-X main.version=..." -o bin/mecatui ./cmd/mecatui
 
 This produces `bin/mecated` (the server), `bin/mecatui` (the terminal UI),
 `bin/mecademo` (the offline demo), and `bin/mecatequi` (the single-shot headless
-CI/batch runner — see §10). To install the operator-facing binaries into
+CI/batch runner — see §15). To install the operator-facing binaries into
 `GOBIN` / `GOPATH/bin`:
 
 ```console
@@ -47,7 +47,7 @@ Other handy targets (`task --list` for the full set):
 | `task test:engine-standalone` | `cd engine && GOWORK=off go build ./... && go test ./...` — proves the engine's tiny closure is self-contained |
 | `task test:cover` | tests + `coverage/coverage.{out,html}` (root + engine) |
 | `task test:golden` | refresh the `mecatui` View/teatest golden files (`-update`), then re-run them |
-| `task e2e` | the **LIVE** e2e suite against OpenRouter — real money + network, needs `OPENROUTER_API_KEY` (see §10) |
+| `task e2e` | the **LIVE** e2e suite against OpenRouter — real money + network, needs `OPENROUTER_API_KEY` (see §15) |
 | `task fuzz` | bounded coverage-guided fuzzing of the security-critical parsers (`FUZZTIME=2m task fuzz`); not part of `task test` |
 | `task lint` | `golangci-lint run` + `go vet` over the root module **and** the engine module (shared config) |
 | `task vuln` | `govulncheck` (reachable-vuln scan) over the root module **and** the engine module; needs the network for the vuln DB, **not** part of `task test` |
@@ -128,7 +128,7 @@ accepting a small, documented allowlist. The **engine module is gated with NO
 allowlist** — it is clean and must stay clean. The **root app allowlists exactly
 two unfixable-upstream docker CVEs** (`GO-2026-4887`, `GO-2026-4883` in
 `github.com/docker/docker`, transitive via `github.com/stacklok/toolhive`),
-which are reachable **only** through the ToolHive adapter in `internal/` — never
+which are reachable **only** through the ToolHive adapter in the host module — never
 the engine library — and have **no upstream fix** (Fixed: N/A). They are
 accepted-risk (reviewed 2026-06-19) and the allowlist lives inline in the `vuln`
 CI job; drop them the moment a fixed docker/toolhive lands. The gate still fails

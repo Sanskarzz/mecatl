@@ -1,9 +1,9 @@
-### File-based permission config (`.mecatl/settings.yaml`, issue #13)
+### File-based permission config (`.mecatl/settings.yaml`)
 
 The built-in permission policy (read-only tools allowed; `Bash`/`Edit`/`Write`/
 `Team`/`SkillDraft` ask) can be tuned per project and per user with config files,
 **re-resolved per session** against each session's workspace root by the
-`internal/adapter/permconfig` resolver. So two sessions running in different repos
+permission-config resolver. So two sessions running in different repos
 under the same `mecated` get **different** decisions for the same tool call.
 
 **Schema** — `.mecatl/settings.yaml` (the checked-in, shared file),
@@ -21,7 +21,7 @@ permissions:
     - "Bash(git push:*)"
   deny:
     - "Bash(rm:*)"        # deny wins absolutely, in any scope
-  subagent:               # child-scoped rules (issue #32): bind ONLY subagent/member/branch engines
+  subagent:               # child-scoped rules: bind ONLY subagent/member/branch engines
     allow:
       - "Bash(go generate:*)"   # clears a child's substitution-floored ask (see "Compound-Bash & substitution safety" below) ONLY when the $(...) inners are read-only
     ask:
@@ -138,7 +138,7 @@ checked-in `settings.yaml` cannot auto-approve tool calls in an untrusted repo �
 for the main engine or its children. User-global and `--permission-config`
 (CLI) files are the operator's own and are always fully trusted.
 
-**Memory + soul are pre-approved at the floor** (issue #14) — the six memory tools
+**Memory + soul are pre-approved at the floor** — the six memory tools
 (`Remember`/`Recall`/`SearchMemory` and the cross-project `RememberUser`/`RecallUser`/
 `SearchUserModel`) and the synthetic `soul:apply` action are explicit
 `ScopeBuiltinDefault` Allows in the built-in ruleset, so by default they **do not
@@ -176,7 +176,7 @@ The import never widens: a demotion only ever moves `allow → ask`, and the
 
 > **`mecatui` defaults match `mecated`.** The embedded TUI server sets
 > `--permissions-conventional` and `--import-claude-permissions` ON, but
-> `--trust-project` is **OFF by default** (WORKSPACE-TRUST Phase 0) — unified with
+> `--trust-project` is **OFF by default** — unified with
 > `mecated`. So a project's ALLOW rules and its project soul are honoured only when
 > you pass `--trust-project` to `mecatui`; deny/ask are always honoured regardless.
 > (Earlier builds hardcoded trust ON for the TUI; that blanket-trust regression is
@@ -186,7 +186,7 @@ The import never widens: a demotion only ever moves `allow → ask`, and the
 
 ---
 
-## 7. Permissions
+## 12. Permissions
 
 ### How a decision resolves
 
@@ -245,11 +245,7 @@ grouping (which could smuggle a hidden inner command past the splitter) is
 floored at **`ask`** — an allow rule for the outer literal can never silently
 approve a concealed destructive command.
 
-> Permission rules are configured in Go in the shared composition layer
-> (`internal/app`, `defaultRules()`), via `permpolicy.NewPolicy([]governance.Rule{…})`.
-> There is no rules config file in v1; to change the shipped policy, edit
-> `defaultRules()` and rebuild. (It lives in `internal/app` so both `mecated` and
-> the embedded `mecatui` server share one ruleset.)
+> The shipped permission rules are baked into the binary (the shared composition layer used by both `mecated` and the embedded `mecatui` server). There is no rules config file in v1; changing the built-in policy requires editing the source and rebuilding.
 
 ---
 

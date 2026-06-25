@@ -1,4 +1,4 @@
-## 12. Troubleshooting / FAQ
+## 17. Troubleshooting / FAQ
 
 **`no LLM provider available: set one of ANTHROPIC_API_KEY (Claude), OPENAI_API_KEY (OpenAI), or OPENROUTER_API_KEY (one key, many models — a good first choice) …`**
 You started `mecated` with no provider key in the environment. Set

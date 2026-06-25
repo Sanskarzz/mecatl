@@ -1,4 +1,4 @@
-### Per-slot models (`models:`, ADR 0030)
+## 5. Per-slot models (`models:`, ADR 0030)
 
 #### Quickstart: pick a model per job
 
@@ -74,8 +74,8 @@ models:
     reasoning: gpt-5
   slots:                     # bind a slot (or a tier) to a selector
     compaction: cheap        # the compaction tier-4 summary call
-    ask-reviewer: cheap      # the headless child-ask reviewer (issue #31)
-    guardrail: cheap         # the LLM content checker (issue #27)
+    ask-reviewer: cheap      # the headless child-ask reviewer
+    guardrail: cheap         # the LLM content checker
     plan: reasoning          # plan-mode turns run on the reasoning model (opusplan)
     router: cheap            # the subagent model-router classifier (ADR 0031)
     # cheap: gpt-4o-mini     # a TIER key gives a default a slot falls through to
@@ -107,12 +107,12 @@ models:
   the checker ON; the flag is no longer the sole enable gate.
 - **Fail-soft**: a typo'd slot key or an alias that means *inherit* WARNs and degrades
   to the session model — a broken housekeeping slot never wedges the call.
-- **Operator-tier by default, project-overridable within an allowlist (Phase 4).** The
+- **Operator-tier by default, project-overridable within an allowlist.** The
   `models:` mapping is parsed **strictly** (an unknown top key like `slotz:` errors).
   `--model-slot`/`--model-alias` out-rank the YAML per key. By default a project-tier
   `models:` block is **ignored with a WARN** — UNLESS the operator opts in with an
   allowlist (next subsection). Team synthesis is a later ADR-0030 layer, not yet wired;
-  the subagent **router** shipped in Phase 5 (below).
+  the subagent **router** is described below.
 
 #### The subagent model router (`models.router:`, ADR 0031, enable model ADR 0042)
 
@@ -199,7 +199,7 @@ until an operator overrides them, so a skill that names them is portable but ine
 until configured. For a clean deployment-neutral posture, describe capabilities and
 let the router own the mapping.
 
-#### Project-overridable model config, capped by an operator allowlist (Phase 4)
+#### Project-overridable model config, capped by an operator allowlist
 
 A **trusted** project's `.mecatl/settings.yaml` may re-bind `models.default` /
 `models.slots` / `models.aliases` — but only to entries the operator **allowlisted**. The
@@ -226,7 +226,7 @@ models:
 ```
 
 - **Opt-in by allowlist.** With **no** operator `models.allowlist`, a project `models:`
-  block stays WARN-ignored — **byte-identical** to before Phase 4.
+  block stays WARN-ignored — **byte-identical** to the default.
 - **The allowlist is operator-tier and non-wideable.** A project-tier `models.allowlist:`
   key is always **ignored with a WARN** (a project cannot widen its own cap).
 - **Trust-gated.** An **untrusted** workspace's project `models:` block is ignored (the

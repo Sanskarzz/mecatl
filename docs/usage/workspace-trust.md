@@ -1,4 +1,6 @@
-### Declarative workspace trust (`trustedWorkspaces:`, WORKSPACE-TRUST Phase 1)
+## 6. Workspace trust & posture
+
+### Declarative workspace trust (`trustedWorkspaces:`)
 
 `--trust-project` is a **per-invocation** flag. For CI, a daemon, or a power-user
 who works repeatedly in a known-good checkout, declaring the trust once is more
@@ -45,7 +47,7 @@ registry is a **separate** file — see the next section). Both `mecated` and
   trust); it is logged, never an error that aborts startup. The composition logs
   the decision: `workspace trust trusted=… source=flag|declared|none`.
 
-### Remembered trust + drift (`trust.yaml`, WORKSPACE-TRUST Phase 2b)
+### Remembered trust + drift (`trust.yaml`)
 
 Beyond the human-authored `trustedWorkspaces:` list, mecatl keeps a
 **machine-written** trust registry at
@@ -99,7 +101,7 @@ matches** the workspace's live identity surface.
   registry never *grants* trust). The path is derived solely from your user XDG
   config dir, never from a repo-controlled path — a repo cannot self-trust.
 
-### The `mecatui` first-encounter trust prompt (WORKSPACE-TRUST Phase 2c)
+### The `mecatui` first-encounter trust prompt
 
 `mecated` is purely declarative — it never asks. But when you launch **`mecatui`**
 with its **embedded** server (the default: no `--server`, and no `mecated` already
@@ -149,7 +151,7 @@ display, so a repo directory named with embedded ANSI/OSC escapes cannot corrupt
 or spoof the prompt (CWE-150). The prompt and the registry write live in the
 `mecatui` composition root, not the render layer.
 
-### What an untrusted workspace withholds (WORKSPACE-TRUST Phase 2a)
+### What an untrusted workspace withholds
 
 Trust is **not** a kill-switch. An untrusted repo is still a fully usable coding
 agent — it degrades to **"ask the human" mode**, never **"do nothing" mode**. The
@@ -233,7 +235,7 @@ durable harm.
 tier, every agent-facing Bash shell runs with the harness's credentials scrubbed
 out of its environment, so even under `auto`/`yolo` (allow-all) the model **cannot**
 `echo $OPENROUTER_API_KEY` or `cat /proc/self/environ` to read a provider/auth key.
-The scrub (`internal/adapter/envscrub`) is a precise denylist: it drops the exact
+The scrub (the harness's secret-scrubbing layer) is a precise denylist: it drops the exact
 credential vars the harness reads (the provider keys, the websearch keys, the
 `MECATL_*`/`GH_TOKEN`/`GITHUB_TOKEN` tokens) plus secret-shaped names (`*_API_KEY`,
 `*_TOKEN`, `*_SECRET`, `*_PASSWORD`, `AWS_*`, `AZURE_*`), while keeping the whole

@@ -1,4 +1,4 @@
-### Guardrails — LLM-backed tool-content inspection (`guardrails:`, issue #27)
+## 4. Guardrails — LLM-backed tool-content inspection (`guardrails:`)
 
 Guardrails inspect the data crossing the agent's tool boundary with a **separate,
 tool-less checker model** and enforce a verdict — the *dual-LLM quarantine*. They

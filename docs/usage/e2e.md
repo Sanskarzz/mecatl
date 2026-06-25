@@ -1,4 +1,4 @@
-## 11. Live e2e suite
+## 16. Live e2e suite
 
 A live, ginkgo-driven end-to-end suite lives under `e2e/` (build tag `e2e` —
 `task build`/`task test`/`task lint` never compile it). It spawns

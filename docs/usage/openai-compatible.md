@@ -1,4 +1,4 @@
-## 9. OpenAI & compatible endpoints
+## 14. OpenAI & compatible endpoints
 
 The OpenAI provider talks to the **Responses API** (`POST /v1/responses`) via
 `github.com/openai/openai-go/v3`. The harness owns its own conversation state:

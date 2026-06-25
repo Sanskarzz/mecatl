@@ -1,3 +1,5 @@
+## 7. Skills, soul, user model
+
 ### The self-improving-skill loop (`SkillDraft` + `mecated skills promote`)
 
 `--skills-draft-dir <quarantine>` enables a **writable** `SkillDraft` tool so the
@@ -41,7 +43,7 @@ When you promote, **read the body** — it is agent-authored, untrusted,
 instruction-like text that becomes trusted on promotion. The automated injection
 scan is a backstop, not a substitute for reading it.
 
-### Persona / soul (`~/.config/mecatl/soul.md`, issue #14)
+### Persona / soul (`~/.config/mecatl/soul.md`)
 
 A **user-scoped, agent-read-only** persona fragment — the operator's "soul": who
 the agent is, its style, the posture it should take. It is read from
@@ -60,9 +62,9 @@ It is **read-only to the agent by construction**: no tool can write the soul, an
 loader has no write path. This is deliberate — a writable identity anchor is a
 prompt-injection trap (a single poisoned write would rewrite "who the agent is" across
 *every* future session). Bootstrap and edit it by hand, with a text editor. (See
-`docs/adr/0011-soul-and-user-model.md` for the threat model and the Phase-2 learning loop.)
+`docs/adr/0011-soul-and-user-model.md` for the threat model and the learning loop.)
 
-**Drift detection (issue #14, Phase 3).** The harness fingerprints the soul's content
+**Drift detection.** The harness fingerprints the soul's content
 (sha256 of the clean body) and records it in a **harness-owned sidecar** next to the
 soul file: `<soul-path>.sha256` (e.g. `~/.config/mecatl/soul.md.sha256`, or
 `PATH.sha256` for `--soul-file PATH`). On the first load with no sidecar it records the
@@ -82,7 +84,7 @@ is **detection only** — there is no automatic restore-to-baseline (that would 
 harness-held copy of the approved bytes; deferred as a future opt-in). Delete the
 `.sha256` sidecar to reset to trust-on-first-use.
 
-**Project-sourced soul + trust gate (issue #14, Phase 3, Item 2).** Besides the
+**Project-sourced soul + trust gate.** Besides the
 user-scoped soul above, the harness can also discover a **project soul** at
 `<workspace>/.mecatl/soul.md` — a persona checked into the repo (parallel to
 `.mecatl/settings.yaml`). Because it comes from a repo rather than your own config, it
@@ -100,10 +102,10 @@ an error. Precedence is **USER-WINS** (a single identity anchor, not a merge):
 
 Your **user-scoped soul is never trust-gated** — it always loads if present, regardless
 of `--trust-project`. (Note: the embedded TUI server defaults `--trust-project` OFF,
-unified with `mecated` (WORKSPACE-TRUST Phase 0), so a project `.mecatl/soul.md` is
+unified with `mecated`, so a project `.mecatl/soul.md` is
 honoured only when you pass `--trust-project` to `mecatui`.)
 
-### User model (`~/.config/mecatl/usermodel`, issue #14 Phase 2)
+### User model (`~/.config/mecatl/usermodel`)
 
 A **user-scoped, cross-project** model of durable **FACTS about the operator** — who
 they are and how they like to work. Unlike the soul (read-only) and per-project memory
