@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -15,13 +16,17 @@ import (
 // remoteTool adapts a single tool advertised by a remote MCP server into the
 // harness's tool.Tool interface. Execute proxies the call back over the live
 // MCP session; the Workspace argument is ignored because the tool runs remotely.
+//
+// It holds the owning *Server (not a *ClientSession) so Execute can re-establish
+// a dropped session transparently via Server.withSession (see reconnect.go,
+// ADR 0056).
 type remoteTool struct {
 	spec     tool.ToolSpec
 	readOnly bool
 	// remoteName is the tool's name on the server, used in the CallTool request
 	// (NOT the namespaced spec.Name the model sees).
 	remoteName string
-	session    *mcpsdk.ClientSession
+	server     *Server
 }
 
 // newRemoteTool builds a remoteTool from a server-advertised mcpsdk.Tool.
@@ -31,7 +36,7 @@ type remoteTool struct {
 // so the dispatcher serializes the call) unless the remote advertises
 // annotations.readOnlyHint == true. The schema is the remote inputSchema
 // marshaled to json.RawMessage.
-func newRemoteTool(serverName string, sess *mcpsdk.ClientSession, remote *mcpsdk.Tool) (*remoteTool, error) {
+func newRemoteTool(serverName string, srv *Server, remote *mcpsdk.Tool) (*remoteTool, error) {
 	if remote == nil {
 		return nil, fmt.Errorf("mcp: server %q advertised a nil tool", serverName)
 	}
@@ -54,7 +59,7 @@ func newRemoteTool(serverName string, sess *mcpsdk.ClientSession, remote *mcpsdk
 		},
 		readOnly:   readOnly,
 		remoteName: remote.Name,
-		session:    sess,
+		server:     srv,
 	}, nil
 }
 
@@ -107,18 +112,32 @@ func (t *remoteTool) Execute(ctx context.Context, in session.ToolCall, _ tool.Wo
 		return session.NewToolError(in.ID, fmt.Sprintf("invalid tool arguments: %v", err)), nil
 	}
 
-	res, err := t.session.CallTool(ctx, &mcpsdk.CallToolParams{
-		Name:      t.remoteName,
-		Arguments: args,
+	var res *mcpsdk.CallToolResult
+	callErr := t.server.withSession(ctx, func(sess *mcpsdk.ClientSession) error {
+		var err error
+		res, err = sess.CallTool(ctx, &mcpsdk.CallToolParams{
+			Name:      t.remoteName,
+			Arguments: args,
+		})
+		return err
 	})
-	if err != nil {
+	if callErr != nil {
 		// Propagate context cancellation as a hard Go error so the loop can
 		// distinguish an aborted turn from a recoverable tool failure.
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return session.ToolResult{}, ctxErr
 		}
-		// Transport/protocol fault: surface to the model as a tool error.
-		return session.NewToolError(in.ID, fmt.Sprintf("mcp call failed: %v", err)), nil
+		// A connection-drop after the one reconnect attempt (the retry-drop
+		// case) OR a reconnect DIAL failure (errReconnectFailed — the server
+		// could not be re-established, e.g. a genuinely-down server) is a
+		// terminal "server unavailable" — surface the clear message, not the
+		// raw transport string ("connection refused" / "context deadline
+		// exceeded"). Any other fault is surfaced verbatim.
+		if isConnectionDrop(callErr) || errors.Is(callErr, errReconnectFailed) {
+			return session.NewToolError(in.ID,
+				fmt.Sprintf("mcp call failed: MCP server %q unavailable after reconnect", t.server.Name())), nil
+		}
+		return session.NewToolError(in.ID, fmt.Sprintf("mcp call failed: %v", callErr)), nil
 	}
 
 	content := flattenContent(res.Content)

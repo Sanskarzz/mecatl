@@ -33,6 +33,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -180,12 +181,23 @@ func requestOrigin(u *url.URL) string {
 // session and the tool.Tool wrappers derived from the server's tool list, plus
 // the static snapshots of the server's resources and prompts captured once at
 // connect (v1 does NOT subscribe to list-changed notifications).
+//
+// A dropped session (the SDK's ErrConnectionClosed / errSessionMissing, surfacing
+// as "session not found" / "connection closed") is re-established transparently
+// by withSession: a single bounded reconnect attempt per call, serialized under
+// mu so N concurrent failing calls produce ONE dial. See reconnect.go and ADR 0056.
 type Server struct {
-	name      string
-	session   *mcpsdk.ClientSession
-	tools     []tool.Tool
-	resources []Resource
-	prompts   []Prompt
+	name       string
+	cfg        ServerConfig
+	diag       port.Diagnostics
+	httpClient *http.Client
+	mu         sync.Mutex
+	dropped    bool // set by a dial failure (retry flag) OR Close (terminal); cleared on a successful dial ONLY when not closed
+	closed     bool // set ONLY by Close; terminal — a post-close call never dials. Distinct from dropped (the retry flag).
+	session    *mcpsdk.ClientSession
+	tools      []tool.Tool
+	resources  []Resource
+	prompts    []Prompt
 }
 
 // Connect establishes a Streamable HTTP session to the configured MCP server,
@@ -210,6 +222,9 @@ func Connect(ctx context.Context, cfg ServerConfig, diag port.Diagnostics) (*Ser
 		return nil, fmt.Errorf("mcp: server %q requires a URL", cfg.Name)
 	}
 
+	// connectCtx bounds the one-time tool/resource/prompt listing at connect.
+	// dial applies its own establishment timeout (s.cfg.Timeout) on the passed
+	// ctx, so the handshake and the listings share this one bound.
 	timeout := cfg.Timeout
 	if timeout <= 0 {
 		timeout = defaultConnectTimeout
@@ -238,33 +253,30 @@ func Connect(ctx context.Context, cfg ServerConfig, diag port.Diagnostics) (*Ser
 		}
 	}
 
-	transport := &mcpsdk.StreamableClientTransport{
-		Endpoint:   cfg.URL,
-		HTTPClient: httpClient,
-		// This adapter only issues request/response tool calls; it does not
-		// consume server-initiated notifications (e.g. tool-list-changed).
-		// Disabling the standalone SSE GET stream avoids holding a persistent
-		// connection open, which lets sessions (and test servers) close cleanly.
-		DisableStandaloneSSE: true,
+	// srv is constructed early so dial can populate its session field; the config,
+	// diag, and httpClient are retained here because reconnect (reconnect.go) needs
+	// them to re-establish a dropped session later.
+	srv := &Server{
+		name:       cfg.Name,
+		cfg:        cfg,
+		diag:       diag,
+		httpClient: httpClient,
 	}
 
-	client := mcpsdk.NewClient(
-		&mcpsdk.Implementation{Name: clientName, Version: clientVersion},
-		nil,
-	)
-
-	sess, err := client.Connect(connectCtx, transport, nil)
+	// dial applies cfg.Timeout itself; pass the raw ctx so the handshake bound
+	// is owned in one place (the connect-time listings below share connectCtx).
+	sess, err := srv.dial(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("mcp: connect to server %q: %w", cfg.Name, err)
 	}
+	srv.session = sess
 
-	tools, err := listTools(connectCtx, cfg.Name, sess)
+	tools, err := listTools(connectCtx, cfg.Name, srv, sess)
 	if err != nil {
 		_ = sess.Close()
 		return nil, fmt.Errorf("mcp: list tools on server %q: %w", cfg.Name, err)
 	}
-
-	srv := &Server{name: cfg.Name, session: sess, tools: tools}
+	srv.tools = tools
 
 	// Resources and prompts are STATIC SNAPSHOTS taken once here, and only when
 	// the server advertised the matching capability in the initialize handshake.
@@ -294,6 +306,44 @@ func Connect(ctx context.Context, cfg ServerConfig, diag port.Diagnostics) (*Ser
 	return srv, nil
 }
 
+// dial establishes a fresh SDK ClientSession against the configured server. It
+// is the single construction site for transport + client + connect, reused by
+// Connect (initial) and reconnect (after a drop). It applies cfg.Timeout (or
+// defaultConnectTimeout) on top of the passed ctx as an establishment bound.
+//
+// dial does NOT take s.mu: the serialization point is the CALLER (reconnect),
+// so the lock is held across dial there. A standalone dial (the initial
+// Connect path) runs uncontested.
+func (s *Server) dial(ctx context.Context) (*mcpsdk.ClientSession, error) {
+	timeout := s.cfg.Timeout
+	if timeout <= 0 {
+		timeout = defaultConnectTimeout
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	transport := &mcpsdk.StreamableClientTransport{
+		Endpoint:   s.cfg.URL,
+		HTTPClient: s.httpClient,
+		// This adapter only issues request/response tool calls; it does not
+		// consume server-initiated notifications (e.g. tool-list-changed).
+		// Disabling the standalone SSE GET stream avoids holding a persistent
+		// connection open, which lets sessions (and test servers) close cleanly.
+		DisableStandaloneSSE: true,
+	}
+
+	client := mcpsdk.NewClient(
+		&mcpsdk.Implementation{Name: clientName, Version: clientVersion},
+		nil,
+	)
+
+	sess, err := client.Connect(dialCtx, transport, nil)
+	if err != nil {
+		return nil, err
+	}
+	return sess, nil
+}
+
 // serverCapabilities returns the capabilities the server advertised in the
 // initialize handshake, or nil if unavailable. It is the single place this
 // adapter inspects negotiated capabilities, so the "skip absent capability"
@@ -307,13 +357,15 @@ func serverCapabilities(sess *mcpsdk.ClientSession) *mcpsdk.ServerCapabilities {
 }
 
 // listTools pages through the server's tools and wraps each as a tool.Tool.
-func listTools(ctx context.Context, serverName string, sess *mcpsdk.ClientSession) ([]tool.Tool, error) {
+// The srv is the Server being built (its session is the freshly-connected one);
+// the wrapper holds the *Server so Execute can re-establish a dropped session.
+func listTools(ctx context.Context, serverName string, srv *Server, sess *mcpsdk.ClientSession) ([]tool.Tool, error) {
 	var tools []tool.Tool
 	for remote, err := range sess.Tools(ctx, nil) {
 		if err != nil {
 			return nil, err
 		}
-		wrapped, werr := newRemoteTool(serverName, sess, remote)
+		wrapped, werr := newRemoteTool(serverName, srv, remote)
 		if werr != nil {
 			return nil, werr
 		}
@@ -337,12 +389,20 @@ func (s *Server) Resources() []Resource { return s.resources }
 func (s *Server) Prompts() []Prompt { return s.prompts }
 
 // Close terminates the MCP session. It is safe to call once; subsequent calls
-// return the SDK's session-close result.
+// return the SDK's session-close result. It takes s.mu and sets closed (the
+// terminal flag) and dropped so a post-close call path never attempts a
+// reconnect dial: reconnect's top-of-function `if s.closed` check returns
+// errServerClosed before any dial.
 func (s *Server) Close() error {
-	if s.session == nil {
+	s.mu.Lock()
+	s.closed = true
+	s.dropped = true
+	sess := s.session
+	s.mu.Unlock()
+	if sess == nil {
 		return nil
 	}
-	return s.session.Close()
+	return sess.Close()
 }
 
 // Manager holds a set of connected MCP servers and presents their tools as a

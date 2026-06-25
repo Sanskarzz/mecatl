@@ -114,9 +114,15 @@ func (s *Server) listResources(ctx context.Context) ([]Resource, error) {
 
 // readResource fetches a single resource by URI and returns its (translated)
 // content chunks. The caller decides how to render them (flattenResourceContents
-// for the model-facing tool).
+// for the model-facing tool). The ReadResource call rides through withSession so
+// a dropped session is re-established transparently (one bounded reconnect).
 func (s *Server) readResource(ctx context.Context, uri string) ([]ResourceContents, error) {
-	res, err := s.session.ReadResource(ctx, &mcpsdk.ReadResourceParams{URI: uri})
+	var res *mcpsdk.ReadResourceResult
+	err := s.withSession(ctx, func(sess *mcpsdk.ClientSession) error {
+		var err error
+		res, err = sess.ReadResource(ctx, &mcpsdk.ReadResourceParams{URI: uri})
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}

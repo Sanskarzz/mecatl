@@ -3,6 +3,7 @@ package mcp
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -159,8 +160,17 @@ func (t readResourceTool) Execute(ctx context.Context, in session.ToolCall, _ to
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return session.ToolResult{}, ctxErr
 		}
-		// Unknown server / unknown URI / transport fault: surface to the model as a
-		// tool error so it can self-correct, never a hard Go error.
+		// A reconnect failure (errReconnectFailed — the server could not be
+		// re-established) or a connection-drop after the one reconnect attempt
+		// is surfaced as the clear "unavailable after reconnect" message, never
+		// the raw transport string — mirroring remoteTool.Execute (tool.go).
+		// ReadResource routes through Server.readResource → withSession, so the
+		// error can be either. Unknown server / unknown URI / other faults stay
+		// verbatim so the model can self-correct, never a hard Go error.
+		if isConnectionDrop(err) || errors.Is(err, errReconnectFailed) {
+			return session.NewToolError(in.ID,
+				fmt.Sprintf("read MCP resource failed: MCP server %q unavailable after reconnect", server)), nil
+		}
 		return session.NewToolError(in.ID, fmt.Sprintf("read MCP resource failed: %v", err)), nil
 	}
 	return session.NewToolResult(in.ID, contents.Text), nil

@@ -10,7 +10,10 @@ transport is **streaming-HTTP only** (the project's hard constraint): the
 stdio/command transport is never used, so no MCP server is ever `os/exec`-spawned.
 `mcp.Connect` / `mcp.NewManager` dial the configured servers, and the discovered
 tools are registered into the catalog **namespaced** `mcp__<server>__<tool>` so a
-remote tool can never collide with or shadow a built-in.
+remote tool can never collide with or shadow a built-in. A dropped session (server
+restart / 404 / closed transport) is re-established transparently with a single
+bounded reconnect attempt per call, serialized under a mutex — see
+[ADR 0056](../adr/0056-mcp-client-reconnect.md).
 
 **Progressive tool disclosure** (pattern 9) — a tool may optionally implement
 `tool.Disclosable`; the built-in `tool.Search` tool (catalog name `ToolSearch`,

@@ -123,9 +123,15 @@ func (s *Server) listPrompts(ctx context.Context) ([]Prompt, error) {
 }
 
 // getPrompt expands a named prompt with the given arguments and returns the
-// translated result.
+// translated result. The GetPrompt call rides through withSession so a dropped
+// session is re-established transparently (one bounded reconnect).
 func (s *Server) getPrompt(ctx context.Context, name string, args map[string]string) (PromptResult, error) {
-	res, err := s.session.GetPrompt(ctx, &mcpsdk.GetPromptParams{Name: name, Arguments: args})
+	var res *mcpsdk.GetPromptResult
+	err := s.withSession(ctx, func(sess *mcpsdk.ClientSession) error {
+		var err error
+		res, err = sess.GetPrompt(ctx, &mcpsdk.GetPromptParams{Name: name, Arguments: args})
+		return err
+	})
 	if err != nil {
 		return PromptResult{}, err
 	}
