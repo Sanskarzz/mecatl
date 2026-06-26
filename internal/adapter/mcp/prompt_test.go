@@ -9,8 +9,7 @@ import (
 
 func newPromptManager(t *testing.T) *Manager {
 	t.Helper()
-	url, stop := newTestServer(t, nil)
-	t.Cleanup(stop)
+	url := newTestServer(t, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	m, err := NewManager(ctx, []ServerConfig{{Name: "a", URL: url}}, nil, nil)

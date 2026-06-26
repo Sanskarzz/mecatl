@@ -282,11 +282,9 @@ jobs:
     # the gate's own fail-closed checks make a govulncheck build/network error a
     # hard FAIL (never a vacuous pass).
     #
-    # ROOT ALLOWLIST (accepted-risk, reviewed 2026-06-19):
-    #   GO-2026-4887, GO-2026-4883 — github.com/docker/docker, transitive via
-    #   github.com/stacklok/toolhive, reachable ONLY through the ToolHive MCP
-    #   source in internal/ (NOT the engine library). Fixed: N/A (no upstream
-    #   patch exists). Drop these the moment a fixed docker/toolhive lands.
+    # ROOT ALLOWLIST: empty as of 2026-06-26 — the toolhive bump to v0.31.0
+    # pulled a fixed docker/docker, clearing GO-2026-4887/4883/5617/5668/5746.
+    # Re-add a dated entry here ONLY if a new reachable vuln has no upstream fix.
     # ENGINE: STRICT — no allowlist; it is clean and must stay clean.
     # See docs/usage.md (supply-chain) + issue #118.
     steps:
@@ -316,7 +314,7 @@ jobs:
         run: |
           set -o pipefail
           go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 -format json ./... \
-            | go run .github/scripts/govulncheck-gate.go GO-2026-4887 GO-2026-4883 # v1.1.4
+            | go run .github/scripts/govulncheck-gate.go # v1.1.4 — no allowlist (toolhive v0.31.0 cleared the docker/docker vulns)
 
       - name: govulncheck (engine module — strict, no allowlist)
         shell: bash

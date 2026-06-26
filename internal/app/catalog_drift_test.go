@@ -117,7 +117,7 @@ func TestPerSessionCatalogMatchesSharedCatalog(t *testing.T) {
 	// The global server exposes a RESOURCE too, so the ListMcpResources/
 	// ReadMcpResource meta-tools actually register (their gate requires ≥1
 	// resource) and the family pin below is exercised for real.
-	url, _ := newMCPTestServerWithResource(t)
+	url := newMCPTestServerWithResource(t)
 
 	cfg := fullyLoadedCfg(t)
 	cfg.MCPServers = []mcp.ServerConfig{{Name: "globe", URL: url}}
@@ -169,7 +169,7 @@ func TestPerSessionCatalogMatchesSharedCatalog(t *testing.T) {
 	// Modulo-allowlist variant: with client MCP specs attached, the per-session
 	// catalog may differ ONLY by the client's namespaced tools (sanctioned delta 1).
 	t.Run("client specs differ only by the client namespace", func(t *testing.T) {
-		cliURL, _ := newMCPTestServer(t)
+		cliURL := newMCPTestServer(t)
 		cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
 		clientMgr, err := mcp.NewManager(cctx, []mcp.ServerConfig{{Name: "cli", URL: cliURL}}, nil, nil)

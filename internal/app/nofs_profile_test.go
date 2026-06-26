@@ -46,7 +46,7 @@ var noFSExcludedTools = []string{
 // or a file tool re-registered under no-FS all fail this equality.
 func TestNoFSCatalogProfile(t *testing.T) {
 	ctx := context.Background()
-	url, _ := newMCPTestServerWithResource(t)
+	url := newMCPTestServerWithResource(t)
 
 	cfg := fullyLoadedCfg(t)
 	cfg.MCPServers = []mcp.ServerConfig{{Name: "globe", URL: url}}
@@ -167,7 +167,7 @@ func TestNoFSSubagentChildInheritsNoFS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("memory.New: %v", err)
 	}
-	url, _ := newMCPTestServerWithResource(t)
+	url := newMCPTestServerWithResource(t)
 	a := catalogAssets{memStore: memStore, globalMgr: connectMainManager(t, "globe", url)}
 
 	var (
@@ -616,7 +616,7 @@ func TestOsfsWorkspaceFactoryEmptyRootIntercepted(t *testing.T) {
 // and nothing less (a family silently dropped from the children). Mutation-verified
 // (removing a family from noFSChildCatalog fails the equality).
 func TestNoFSChildCatalogExactDelta(t *testing.T) {
-	url, _ := newMCPTestServerWithResource(t)
+	url := newMCPTestServerWithResource(t)
 	mgr := connectMainManager(t, "globe", url)
 	memStore, err := memory.New(t.TempDir())
 	if err != nil {

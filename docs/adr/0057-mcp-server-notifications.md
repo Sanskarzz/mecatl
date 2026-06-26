@@ -48,14 +48,14 @@ its own ADR).
    reconnect re-attaches the handlers automatically. Each handler only sets a
    dirty flag + logs a `port.Diagnostics` WARN; it does **not** re-list eagerly
    (it runs on the SDK's SSE goroutine, where a network call would stall
-   notification processing and could deadlock against `s.mu`, which `reconnect`
+   notification processing — the SDK dispatches notifications sequentially over the SSE stream, so an eager 30s re-list in the handler would stall all later notifications (head-of-line blocking)
    holds across `dial`).
 3. **Lazy re-list in the accessors.** `Tools()`/`Resources()`/`Prompts()` check
    the matching `*Dirty` flag under `s.mu`; if set, they re-list over a bounded
    `context.Background()` (bounded by `s.cfg.Timeout`) and swap in the fresh
    snapshot. The re-list runs **without** `s.mu` held across the network (only
    the check and the final swap hold the lock) — holding it across
-   `liveSession`/`withSession` would deadlock against `reconnect`. On re-list
+   `liveSession` would re-enter `reconnect` which holds `s.mu` (a lock-ordering concern, not a deadlock — the handler runs on an independent goroutine). On re-list
    failure the prior snapshot stays (fail-stale, never NPE) and the dirty flag
    remains set (the next read retries).
 4. **No catalog mutation.** The registered `remoteTool` specs are untouched; a
@@ -64,11 +64,18 @@ its own ADR).
    there is no `Replace`/`Unregister`/`Remove` — so live catalog refresh is a
    harder boundary that deserves its own ADR + PR (Phase 2, referenced here).
 
-The `toolsDirty` path is effectively dormant in Phase 1: there is no live
-`Tools()` consumer after the one-shot catalog registration at connect (live
-re-registration is Phase 2). `resourcesDirty`/`promptsDirty` ARE observable in
-Phase 1 — `Manager.ListResources`/`ListPrompts` (the `ListMcpResources`/
-`ListMcpPrompts` wire surfaces) read `Resources()`/`Prompts()` live.
+The `toolsDirty` path is NOT dormant in Phase 1: `mgr.Tools()` is called on
+every per-session catalog assembly (`internal/app/catalog.go`), so a session
+created AFTER a `tools/list_changed` notification picks up the fresh tool set
+via the lazy re-list. However, already-registered `remoteTool` specs in an
+existing session's catalog are NOT updated (the catalog is append-only). This
+means two sessions created around the same notification may see different tool
+surfaces from the same server — a timing-dependent split. This is the accepted
+Phase 1 trade-off: uniform staleness would require deferring the `Tools()`
+re-list entirely, but the lazy refresh gives new sessions the current truth
+without a full Phase 2 catalog-mutation seam. `resourcesDirty`/`promptsDirty`
+are similarly observable via `Manager.ListResources`/`ListPrompts` (the
+`ListMcpResources`/`ListMcpPrompts` wire surfaces).
 
 ## Consequences
 
@@ -92,7 +99,18 @@ Phase 1 — `Manager.ListResources`/`ListPrompts` (the `ListMcpResources`/
   (LIFO order), so the client session — and its SSE reader — is torn down
   before the listener. Callers must not `defer stop()` the listener (that would
   close it before `*Server.Close`); the helpers self-register.
-- **Diagnostics** flow through `port.Diagnostics`, never `slog`.
+- **Diagnostics** flow through `port.Diagnostics`, never `slog`. The WARN is
+  deduped to the `false→true` transition (the first notification since the last
+  re-list cleared the flag), not one per notification — this bounds the log rate
+  to the read rate (caller-bounded), so a malicious server firing a
+  notification storm cannot flood the diagnostics sink.
+- **Bounded latency on the `List*` wire surfaces.** The `resourcesDirty`/
+  `promptsDirty` paths are live (backing `ListMcpResources`/`ListMcpPrompts`).
+  The first call after a `list_changed` notification pays a synchronous re-list
+  bounded by `s.cfg.Timeout` (default 30s). On timeout it fails stale (returns
+  the prior snapshot, leaves the dirty flag set; the next read retries). This is
+  the lazy-over-eager trade-off (eager refresh was rejected: it would run on the
+  SSE goroutine, risking head-of-line blocking against later notifications).
 
 ## See also
 

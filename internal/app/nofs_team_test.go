@@ -23,7 +23,7 @@ import (
 // the REAL non-read-only tool classes (memory writers AND remote MCP tools).
 func noFSTeamAssets(t *testing.T) catalogAssets {
 	t.Helper()
-	url, _ := newMCPTestServerWithResource(t)
+	url := newMCPTestServerWithResource(t)
 	memStore, err := memory.New(t.TempDir())
 	if err != nil {
 		t.Fatalf("memory.New(memStore): %v", err)

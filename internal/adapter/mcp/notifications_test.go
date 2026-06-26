@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -128,5 +129,82 @@ func TestResourceListChangedNotificationRefreshesSnapshot(t *testing.T) {
 
 	if len(s.Resources()) != 1 || s.Resources()[0].URI != "test://late" {
 		t.Errorf("Resources() = %+v, want [test://late]", s.Resources())
+	}
+}
+
+// TestPromptListChangedNotificationRefreshesSnapshot mirrors the tools/resources
+// cases for prompts: adding a prompt server-side fires
+// notifications/prompts/list_changed and the next Prompts() picks it up.
+func TestPromptListChangedNotificationRefreshesSnapshot(t *testing.T) {
+	diag := &recordingDiag{}
+	url, srv := newMutableTestServer(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	s, err := Connect(ctx, ServerConfig{Name: "fake", URL: url}, diag)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	if got := len(s.Prompts()); got != 0 {
+		t.Fatalf("baseline Prompts() = %d, want 0", got)
+	}
+
+	srv.AddPrompt(&mcpsdk.Prompt{Name: "late", Description: "added post-connect"},
+		func(_ context.Context, _ *mcpsdk.GetPromptRequest) (*mcpsdk.GetPromptResult, error) {
+			return &mcpsdk.GetPromptResult{Messages: []*mcpsdk.PromptMessage{{Role: "user", Content: &mcpsdk.TextContent{Text: "late"}}}}, nil
+		})
+
+	eventually(t, 3*time.Second, func() bool {
+		return diag.count("mcp server list changed") >= 1 && len(s.Prompts()) == 1
+	}, "expected a prompts/list_changed notification to fire and Prompts() to refresh to 1")
+
+	if len(s.Prompts()) != 1 || s.Prompts()[0].Name != "late" {
+		t.Errorf("Prompts() = %+v, want [late]", s.Prompts())
+	}
+}
+
+// TestNotificationStormLogsOncePerRefreshCycle verifies the WARN dedup: a
+// notification storm (multiple list_changed events before a re-list) logs only
+// ONE "mcp server list changed" line per refresh cycle (the false→true
+// transition), NOT one per notification. This bounds the log rate to the read
+// rate (caller-bounded), not the notification rate (server-bounded), so a
+// malicious server cannot flood the diagnostics sink.
+func TestNotificationStormLogsOncePerRefreshCycle(t *testing.T) {
+	diag := &recordingDiag{}
+	url, srv := newMutableTestServer(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	s, err := Connect(ctx, ServerConfig{Name: "fake", URL: url}, diag)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Fire multiple AddTool calls server-side, each firing a list_changed
+	// notification. They all arrive before a Tools() re-list, so the dirty flag
+	// is already true for the 2nd+ — the WARN must fire only once.
+	for i := 0; i < 5; i++ {
+		mcpsdk.AddTool(srv, &mcpsdk.Tool{Name: fmt.Sprintf("storm%d", i), Description: "storm"},
+			func(_ context.Context, _ *mcpsdk.CallToolRequest, _ noArgs) (*mcpsdk.CallToolResult, any, error) {
+				return &mcpsdk.CallToolResult{Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: "storm"}}}, nil, nil
+			})
+	}
+
+	// Wait for at least one notification to arrive + the re-list to pick up the tools.
+	eventually(t, 3*time.Second, func() bool {
+		return len(s.Tools()) == 6 // echo + 5 storm tools
+	}, "expected the storm tools to appear in Tools()")
+
+	// The WARN must be deduped: not 5× (one per AddTool notification). The
+	// exact count is interleaving-dependent — the eventually() loop polls
+	// Tools(), which clears the dirty flag, so on a loaded/-race runner a
+	// notification arriving between two polls re-arms the false→true transition
+	// and logs a 2nd WARN. Assert the dedup happened (count < 5, proving not
+	// one-per-notification) without over-constraining the exact count.
+	if got := diag.count("mcp server list changed"); got >= 5 {
+		t.Errorf("notification-storm WARN count = %d, want < 5 (deduped to the false→true transition, not one per notification)", got)
 	}
 }

@@ -85,7 +85,7 @@ func TestSessionEngineFactoryRegistersMemoryToolsForSelector(t *testing.T) {
 // per-session trigger: a zero-selector session that gets a per-session engine only
 // because client MCP specs are attached must also carry the six memory tools.
 func TestSessionEngineFactoryRegistersMemoryToolsForClientMCP(t *testing.T) {
-	url, _ := newMCPTestServer(t)
+	url := newMCPTestServer(t)
 
 	mem, um := memoryStoresForTest(t)
 	factory := memoryToolFactory(t, catalogAssets{memStore: mem, userModelStore: um})
