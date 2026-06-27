@@ -112,8 +112,15 @@ func TestBuildSubagentToolWiresForkerWhenShell(t *testing.T) {
 	if pwd == repo {
 		t.Errorf("child pwd = %q (the parent repo root); it must run in an isolated worktree", pwd)
 	}
-	if !strings.HasPrefix(pwd, taskWS) {
-		t.Errorf("child pwd = %q, want a worktree under the configured base %q", pwd, taskWS)
+	// Canonicalize taskWS the same way git/the shell resolves the worktree path
+	// (EvalSymlinks), so the prefix check holds on a symlinked temp root
+	// (macOS /var -> /private/var).
+	wantBase, err := osfs.ResolveRoot(taskWS)
+	if err != nil {
+		t.Fatalf("resolve taskWS %q: %v", taskWS, err)
+	}
+	if !strings.HasPrefix(pwd, wantBase) {
+		t.Errorf("child pwd = %q, want a worktree under the configured base %q", pwd, wantBase)
 	}
 }
 

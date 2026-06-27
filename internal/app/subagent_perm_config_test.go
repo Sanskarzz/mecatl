@@ -368,7 +368,14 @@ func TestChildPermResolverNilWorkspace(t *testing.T) {
 	root := t.TempDir()
 	pinned = childPermResolverFor(cfg, root)
 	_ = pinned.Resolve(context.Background(), someWS)
-	if len(gotWS) != 1 || gotWS[0] == nil || gotWS[0].Root() != root {
+	// Canonicalize the expected root the same way osfs.NewWorkspace does
+	// (EvalSymlinks), so the comparison is canonical-to-canonical and does
+	// not diverge on a symlinked temp root (macOS /var -> /private/var).
+	wantRoot, err := osfs.ResolveRoot(root)
+	if err != nil {
+		t.Fatalf("resolve expected root %q: %v", root, err)
+	}
+	if len(gotWS) != 1 || gotWS[0] == nil || gotWS[0].Root() != wantRoot {
 		t.Fatalf("rooted pin must resolve with the PINNED workspace, not the per-call one; inner saw %v", gotWS)
 	}
 }

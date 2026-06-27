@@ -506,6 +506,9 @@ func TestLongMediaPathPasteStaysMedia(t *testing.T) {
 		dir = filepath.Join(dir, seg)
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
+		if strings.Contains(err.Error(), "file name too long") {
+			t.Skipf("skipping: cannot construct a %d-rune path on this platform: %v", pasteCharThreshold, err)
+		}
 		t.Fatalf("MkdirAll: %v", err)
 	}
 	path := filepath.Join(dir, "long.png")

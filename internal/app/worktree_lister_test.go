@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/stacklok/mecatl/engine/port"
+	"github.com/stacklok/mecatl/internal/adapter/osfs"
 	"github.com/stacklok/mecatl/internal/adapter/server"
 )
 
@@ -82,9 +83,16 @@ func TestBuildWorktreeListerParsesPorcelain(t *testing.T) {
 	if len(wts) != 2 {
 		t.Fatalf("worktrees = %d, want 2 (base + wtB): %+v", len(wts), wts)
 	}
-	// The main worktree is first; the sibling second.
-	if wts[0].Path != base {
-		t.Errorf("worktree[0].Path = %q, want %q", wts[0].Path, base)
+	// The main worktree is first; the sibling second. git reports paths in
+	// their canonical (EvalSymlinks) form, so canonicalize the expected values
+	// the same way to avoid a symlinked-temp-root mismatch (macOS /var ->
+	// /private/var).
+	wantBase, err := osfs.ResolveRoot(base)
+	if err != nil {
+		t.Fatalf("resolve base %q: %v", base, err)
+	}
+	if wts[0].Path != wantBase {
+		t.Errorf("worktree[0].Path = %q, want %q", wts[0].Path, wantBase)
 	}
 	if wts[0].Head != head {
 		t.Errorf("worktree[0].Head = %q, want %q", wts[0].Head, head)
@@ -94,8 +102,12 @@ func TestBuildWorktreeListerParsesPorcelain(t *testing.T) {
 	}
 	// wtB path resolves through filepath.Join(base, "..", "wtB") — canonicalize.
 	wtBAbs, _ := filepath.Abs(wtB)
-	if wts[1].Path != wtBAbs {
-		t.Errorf("worktree[1].Path = %q, want %q", wts[1].Path, wtBAbs)
+	wantWtB, err := osfs.ResolveRoot(wtBAbs)
+	if err != nil {
+		t.Fatalf("resolve wtB %q: %v", wtBAbs, err)
+	}
+	if wts[1].Path != wantWtB {
+		t.Errorf("worktree[1].Path = %q, want %q", wts[1].Path, wantWtB)
 	}
 	if wts[1].Branch != "refs/heads/feature" {
 		t.Errorf("worktree[1].Branch = %q, want refs/heads/feature", wts[1].Branch)
