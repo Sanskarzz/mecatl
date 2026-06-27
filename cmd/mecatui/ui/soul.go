@@ -10,6 +10,7 @@ import (
 
 	"github.com/stacklok/mecatl/cmd/mecatui/client"
 	"github.com/stacklok/mecatl/cmd/mecatui/theme"
+	"github.com/stacklok/mecatl/cmd/mecatui/ui/platform"
 )
 
 // soulView is the active soul (persona) inspection overlay (none = closed). Like
@@ -204,7 +205,7 @@ func renderSoulPanel(th theme.Theme, st soulState, caps client.Capabilities, wid
 		b.WriteString(renderSoulBody(th, st, budget))
 	}
 
-	b.WriteString("\n" + th.Style("muted").Render("read-only persona · pgup/pgdn scroll · esc close"))
+	b.WriteString("\n" + th.Style("muted").Render("read-only persona · "+platform.ScrollKeysMarking()+" scroll · esc close"))
 	return b.String()
 }
 

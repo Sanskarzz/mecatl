@@ -51,9 +51,17 @@ func addScrollbackResult(r kpi.ScenarioResult) {
 // test process regardless of the CI host's terminal env — the view_* goldens then
 // never capture a host-varying VS16 in the yolo posture badge. Tests that exercise
 // the emoji variant override this per-test with t.Setenv (which wins and restores).
+//
+// Likewise it pins MECATUI_TEST_PLATFORM=pc so platform.Current() takes its PC
+// branch (the platform-key-markings env override), keeping the checked-in .golden
+// files on the canonical pgup/pgdn key labels regardless of which OS runs
+// `task test:golden`. Per-test t.Setenv overrides as needed.
 func TestMain(m *testing.M) {
 	if _, ok := os.LookupEnv("MECATUI_NO_EMOJI"); !ok {
 		os.Setenv("MECATUI_NO_EMOJI", "1")
+	}
+	if _, ok := os.LookupEnv("MECATUI_TEST_PLATFORM"); !ok {
+		os.Setenv("MECATUI_TEST_PLATFORM", "pc")
 	}
 	code := m.Run()
 	if path := os.Getenv("MECATL_PERF_JSON"); path != "" {

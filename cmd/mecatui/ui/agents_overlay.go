@@ -10,6 +10,7 @@ import (
 
 	"github.com/stacklok/mecatl/cmd/mecatui/client"
 	"github.com/stacklok/mecatl/cmd/mecatui/theme"
+	"github.com/stacklok/mecatl/cmd/mecatui/ui/platform"
 )
 
 // agentsTab selects which body the unified ctrl+a "agents" overlay renders. The
@@ -516,7 +517,7 @@ func renderSubagentRoster(th theme.Theme, st subagentState, fleet []subagentLane
 	// otherwise push this card past a 100-col terminal (the hint is the card's widest
 	// line, so it directly sets the overlay width — the centred card does not wrap).
 	// home/g·end/G and pgup/pgdn paging still work; the hint names the primary chords.
-	out.WriteString("\n" + muted.Render("↑/↓ select · pgup/pgdn · home/end · enter focus · x cancel · tab switch · esc close"))
+	out.WriteString("\n" + muted.Render("↑/↓ select · "+platform.ScrollKeysMarking()+" · home/end · enter focus · x cancel · tab switch · esc close"))
 	return out.String()
 }
 
@@ -766,7 +767,7 @@ func renderParallelRoster(th theme.Theme, st parallelState, groups []parallelGro
 		out.WriteString(muted.Render(fmt.Sprintf("  · +%d below", below)) + "\n")
 	}
 
-	out.WriteString("\n" + muted.Render("↑/↓ select · pgup/pgdn page · home/g·end/G first/last · enter focus · tab switch · esc close"))
+	out.WriteString("\n" + muted.Render("↑/↓ select · "+platform.ScrollKeysMarking()+" page · home/g·end/G first/last · enter focus · tab switch · esc close"))
 	return out.String()
 }
 

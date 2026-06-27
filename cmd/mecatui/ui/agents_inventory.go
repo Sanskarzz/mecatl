@@ -10,6 +10,7 @@ import (
 
 	"github.com/stacklok/mecatl/cmd/mecatui/client"
 	"github.com/stacklok/mecatl/cmd/mecatui/theme"
+	"github.com/stacklok/mecatl/cmd/mecatui/ui/platform"
 )
 
 // agentColorPalette maps the Claude Code agent-def `color` hint (one of a fixed
@@ -258,6 +259,6 @@ func renderAgentsInvPanel(th theme.Theme, st agentsInvState, caps client.Capabil
 		b.WriteString(windowRenderedLines(th, agentsInvRowLines(th, st.agents, budget), st.scroll, agentsInvBodyLines))
 	}
 
-	b.WriteString("\n" + th.Style("muted").Render("agent definitions route Subagent delegations · pgup/pgdn scroll · esc close"))
+	b.WriteString("\n" + th.Style("muted").Render("agent definitions route Subagent delegations · "+platform.ScrollKeysMarking()+" scroll · esc close"))
 	return b.String()
 }

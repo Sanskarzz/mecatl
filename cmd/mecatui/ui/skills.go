@@ -9,6 +9,7 @@ import (
 
 	"github.com/stacklok/mecatl/cmd/mecatui/client"
 	"github.com/stacklok/mecatl/cmd/mecatui/theme"
+	"github.com/stacklok/mecatl/cmd/mecatui/ui/platform"
 )
 
 // skillsView is the active skills overlay (none = closed). Like the MCP panel it
@@ -232,6 +233,6 @@ func renderSkillsPanel(th theme.Theme, st skillsState, caps client.Capabilities,
 		b.WriteString(windowRenderedLines(th, skillsRowLines(th, st.skills, budget), st.scroll, skillsBodyLines))
 	}
 
-	b.WriteString("\n" + th.Style("muted").Render("skills activate automatically when relevant · pgup/pgdn scroll · esc close"))
+	b.WriteString("\n" + th.Style("muted").Render("skills activate automatically when relevant · "+platform.ScrollKeysMarking()+" scroll · esc close"))
 	return b.String()
 }

@@ -5,6 +5,7 @@ import (
 
 	"github.com/stacklok/mecatl/cmd/mecatui/client"
 	"github.com/stacklok/mecatl/cmd/mecatui/theme"
+	"github.com/stacklok/mecatl/cmd/mecatui/ui/platform"
 	"github.com/stacklok/mecatl/cmd/mecatui/ui/welcome"
 )
 
@@ -27,8 +28,11 @@ type helpRow struct {
 }
 
 // helpKeyWidth is the fixed column width the chord keys are padded to so the
-// action column aligns. It comfortably fits the widest key ("shift+enter").
-const helpKeyWidth = 14
+// action column aligns. It accommodates the platform-adaptive scroll marking
+// (up to ~21 chars on Mac, e.g. "fn+↑/fn+↓ (pgup/pgdn)") plus the standard
+// chords (e.g. "shift+enter"); the help overlay card has ample width, so
+// widening just shifts the action column right uniformly.
+const helpKeyWidth = 22
 
 // renderHelpOverlay draws the "?" keys-&-features overlay centred over the
 // conversation region, reusing the askCard + lipgloss.Place treatment the MCP
@@ -76,7 +80,7 @@ func helpBody(th theme.Theme, caps client.Capabilities) string {
 
 	b.WriteString("\n" + muted.Render("General") + "\n")
 	writeHelpRows(&b, th, []helpRow{
-		{key: "pgup/pgdn", action: "scroll the conversation (a ↑NN% header cue shows while scrolled up)"},
+		{key: platform.ScrollKeysMarking(), action: "scroll the conversation (a ↑NN% header cue shows while scrolled up)"},
 		{key: "home/end", action: "jump to top / bottom (end resumes auto-follow)"},
 		{key: "wheel", action: "mouse-wheel scroll (alt screen only)"},
 		{key: "drag", action: "select text · drag to an edge auto-scrolls · copies on release · double-click word · triple-click line · right-click copies · esc clears"},

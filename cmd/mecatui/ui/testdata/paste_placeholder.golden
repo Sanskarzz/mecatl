@@ -54,10 +54,10 @@
               ┃                                                                     ┃
               ┃    your local agentic coding harness                                ┃
               ┃                                                                     ┃
-              ┃    ?             keys & features                                    ┃
-              ┃    /             slash commands                                     ┃
-              ┃    ctrl+a        agents (when running)                              ┃
-              ┃    ctrl+t        details                                            ┃
+              ┃    ?                     keys & features                            ┃
+              ┃    /                     slash commands                             ┃
+              ┃    ctrl+a                agents (when running)                      ┃
+              ┃    ctrl+t                details                                    ┃
               ┃                                                                     ┃
               ┃    Cross-session memory is on — I'll remember context across runs.  ┃
               ┃                                                                     ┃
