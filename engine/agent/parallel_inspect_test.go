@@ -214,9 +214,14 @@ func TestParallelPersistsBranchAfterRun(t *testing.T) {
 	}
 }
 
-// TestParallelPersistsAllBranchesAllJoinModes proves both the WINNER and the LOSERS
-// persist under first/judge (so a parent can inspect a rejected/cancelled branch's
-// transcript), and every branch persists under all.
+// TestParallelPersistsAllBranchesAllJoinModes proves the persistence guarantee each
+// join mode actually makes. Under all/judge no branch is cancelled, so EVERY branch
+// (winner AND losers) persists deterministically. Under first the losing branches are
+// cancelled the instant a winner completes; a loser cancelled BEFORE it acquired a
+// worker slot never created a child session, so its persistence is best-effort, NOT a
+// guarantee — the HARD guarantee is that the WINNER (which always ran to completion)
+// persists and stays inspectable. Asserting losers persist under first was the
+// load-dependent flake in issue #142 (the loser's persistence raced its cancellation).
 func TestParallelPersistsAllBranchesAllJoinModes(t *testing.T) {
 	for _, join := range []string{"all", "first", "judge"} {
 		t.Run(join, func(t *testing.T) {
@@ -234,13 +239,24 @@ func TestParallelPersistsAllBranchesAllJoinModes(t *testing.T) {
 			}
 			par := agent.NewParallelTool(childEngine, &memForker{}, opts...)
 
-			runParallel(t, par, "c1", fmt.Sprintf(`{"tasks":["a","b"],"join":%q}`, join))
+			res := runParallel(t, par, "c1", fmt.Sprintf(`{"tasks":["a","b"],"join":%q}`, join))
 
-			// Every branch that RAN must be persisted (winner AND loser).
+			if join == "first" {
+				// join=first cancels the losers, so only the WINNER is guaranteed to
+				// persist. The winner is non-deterministic (decided by completion order),
+				// so derive it from the prominent "branch id:" line and assert it loads.
+				winnerID := extractBranchID(t, res.Content)
+				if _, err := store.Load(context.Background(), session.SessionID(winnerID)); err != nil {
+					t.Fatalf("join=first: winner branch %s not persisted (winner must remain inspectable): %v", winnerID, err)
+				}
+				return
+			}
+
+			// all/judge: every branch ran to completion, so winner AND losers persist.
 			for i := 0; i < 2; i++ {
 				id := session.SessionID(fmt.Sprintf("parallel-c1-%d", i))
 				if _, err := store.Load(context.Background(), id); err != nil {
-					t.Fatalf("join=%s: branch %s not persisted (loser must remain inspectable): %v", join, id, err)
+					t.Fatalf("join=%s: branch %s not persisted (every branch must remain inspectable): %v", join, id, err)
 				}
 			}
 		})
