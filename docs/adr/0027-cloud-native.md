@@ -717,6 +717,9 @@ flock single-host caveat, the multi-replica posture) is in `docs/usage.md`.
 
 ## Relationship to other docs
 
+- [Cloud-Native Harness Kit — definition](../cloud-native-harness-kit.md): the
+  conceptual/positioning definition this internal arc feeds into — this ADR is the
+  mecatl-internal engineering, that doc is the kit positioning.
 - `DRIVERS.md`: the shipped distribution layer this arc builds on; its "Deliberately
   deferred" list items (cross-process GC liveness, server-wrapper promotion) intersect
   Phases 3-4.
