@@ -367,8 +367,10 @@ func TestSubagentWritableReadOnlyStaysTrue(t *testing.T) {
 }
 
 // TestSubagentModeCombinationGuards is the combination table: an unknown mode,
-// read-write+background, and read-write+agent are all rejected; read-write with no
-// writable engine wired is "not supported"; read-write+fork is ALLOWED (composes).
+// read-write+background, read-write+agent+model, and read-write+agent-without-factory are
+// all rejected; read-write+agent SUCCEEDS when the writable-specialist factory is wired
+// (ADR 0058); read-write with no writable engine wired is "not supported"; read-write+fork
+// is ALLOWED (composes).
 func TestSubagentModeCombinationGuards(t *testing.T) {
 	makeWritable := func() tool.Tool {
 		var rr atomic.Pointer[string]
@@ -403,25 +405,52 @@ func TestSubagentModeCombinationGuards(t *testing.T) {
 		}
 	})
 
-	t.Run("read-write + agent rejected", func(t *testing.T) {
+	t.Run("read-write + agent succeeds via factory", func(t *testing.T) {
+		// ADR 0058: read-write+agent is ALLOWED when the deployment wires the writable-
+		// specialist factory (WithAgentWritableEngineFactory). The factory returns a
+		// writable specialist engine (carrying a Write fakeTool + a marker summary); the
+		// call SUCCEEDS, the writable specialist ran (marker), the pre-built read-only
+		// specialist did NOT run (no map reuse), the direct-write note appears, and no
+		// fork happened (failingForker).
 		var rr atomic.Pointer[string]
+		writableSpec := writableChildWriting(t, "WRITABLE SPECIALIST RAN", &rr)
 		readOnly := childEngineWith(mockllm.New(mockllm.TextTurn("ro")), catalogWith(t))
+		prebuiltReviewer := childEngineWith(mockllm.New(mockllm.TextTurn("PREBUILT-REVIEWER")), catalogWith(t))
 		task := agent.NewSubagentTool(readOnly,
-			agent.WithWritableChildEngine(writableChildWriting(t, "ok", &rr)),
+			agent.WithWritableChildEngine(writableChildWriting(t, "should NOT run", &rr)),
 			agent.WithAgentEngines(
-				map[string]*agent.Engine{"reviewer": childEngineWith(mockllm.New(mockllm.TextTurn("r")), catalogWith(t))},
+				map[string]*agent.Engine{"reviewer": prebuiltReviewer},
 				[]agent.AgentMeta{{Name: "reviewer", Description: "reviews"}},
-			))
+			),
+			agent.WithAgentWritableEngineFactory(func(agentName string) (*agent.Engine, bool) {
+				if agentName == "reviewer" {
+					return writableSpec, true
+				}
+				return nil, false
+			}),
+			agent.WithChildForker(&failingForker{t}))
 		res := runOneSubagent(t, task, "p1", `{"prompt":"go","mode":"read-write","agent":"reviewer"}`)
-		if !res.IsError || !strings.Contains(res.Content, "agent") {
-			t.Fatalf("read-write+agent must be rejected, got %+v", res)
+		if res.IsError {
+			t.Fatalf("read-write+agent with a wired factory must succeed, got error: %q", res.Content)
+		}
+		if !strings.Contains(res.Content, "WRITABLE SPECIALIST RAN") {
+			t.Fatalf("read-write+agent must run the writable specialist (factory engine), got:\n%s", res.Content)
+		}
+		if strings.Contains(res.Content, "PREBUILT-REVIEWER") {
+			t.Fatalf("read-write+agent must NOT run the pre-built read-only specialist (no map reuse), got:\n%s", res.Content)
+		}
+		if strings.Contains(res.Content, "should NOT run") {
+			t.Fatalf("read-write+agent must NOT run the generic writable explorer, got:\n%s", res.Content)
+		}
+		if !strings.Contains(res.Content, "edited your workspace directly") {
+			t.Fatalf("read-write+agent result must carry the direct-write note, got:\n%s", res.Content)
 		}
 	})
 
 	t.Run("read-write + agent + model rejected", func(t *testing.T) {
-		// validateMode's read-write+agent arm fires FIRST (before selectChildEngine),
-		// so read-write+agent+model is rejected at the agent guard — never reaching the
-		// agent+model support path. A specialist stays read-only in v1.
+		// validateMode's read-write+agent+model arm fires FIRST (before selectChildEngine),
+		// so read-write+agent+model is rejected at the v1-scope guard — never reaching the
+		// agent+model support path. A writable specialist runs on its own resolved model.
 		var rr atomic.Pointer[string]
 		readOnly := childEngineWith(mockllm.New(mockllm.TextTurn("ro")), catalogWith(t))
 		overrideEngine := childEngineWithModel("fast", mockllm.New(mockllm.TextTurn("fast")), catalogWith(t))
@@ -431,22 +460,43 @@ func TestSubagentModeCombinationGuards(t *testing.T) {
 				map[string]*agent.Engine{"reviewer": childEngineWith(mockllm.New(mockllm.TextTurn("r")), catalogWith(t))},
 				[]agent.AgentMeta{{Name: "reviewer", Description: "reviews"}},
 			),
-			agent.WithAgentModelEngineFactory(func(string, string) (*agent.Engine, bool) { return overrideEngine, true }))
+			agent.WithAgentModelEngineFactory(func(string, string) (*agent.Engine, bool) { return overrideEngine, true }),
+			agent.WithAgentWritableEngineFactory(func(string) (*agent.Engine, bool) { return overrideEngine, true }))
 		res := runOneSubagent(t, task, "p1", `{"prompt":"go","mode":"read-write","agent":"reviewer","model":"fast"}`)
-		if !res.IsError || !strings.Contains(res.Content, "agent") {
-			t.Fatalf("read-write+agent(+model) must be rejected at the agent guard, got %+v", res)
+		if !res.IsError || !strings.Contains(res.Content, "cannot be combined with both") {
+			t.Fatalf("read-write+agent+model must be rejected with the v1-scope message, got %+v", res)
 		}
 		if strings.Contains(res.Content, "not supported in this deployment") {
-			t.Fatalf("the agent guard must fire (not the agent+model unsupported guard), got %q", res.Content)
+			t.Fatalf("the v1-scope guard must fire (not the factory-nil unsupported guard), got %q", res.Content)
 		}
 	})
 
-	t.Run("read-write unsupported when unwired", func(t *testing.T) {
-		// A plain read-only Subagent tool (no writable wiring) rejects read-write.
+	t.Run("read-write unsupported when unwired (no agent)", func(t *testing.T) {
+		// A plain read-only Subagent tool (no writable wiring) rejects read-write (the
+		// no-agent unwired case — the writable explorer path).
 		task := agent.NewSubagentTool(childEngineWith(mockllm.New(mockllm.TextTurn("ro")), catalogWith(t)))
 		res := runOneSubagent(t, task, "p1", `{"prompt":"go","mode":"read-write"}`)
 		if !res.IsError || !strings.Contains(res.Content, "not supported") {
 			t.Fatalf("read-write with no writable engine must be 'not supported', got %+v", res)
+		}
+	})
+
+	t.Run("read-write + agent unsupported without factory", func(t *testing.T) {
+		// read-write+agent with WithWritableChildEngine wired BUT no
+		// WithAgentWritableEngineFactory: the factory-nil arm rejects it as "not supported
+		// in this deployment" (a writable specialist needs the writable-specialist factory,
+		// not the generic writable explorer engine).
+		var rr atomic.Pointer[string]
+		readOnly := childEngineWith(mockllm.New(mockllm.TextTurn("ro")), catalogWith(t))
+		task := agent.NewSubagentTool(readOnly,
+			agent.WithWritableChildEngine(writableChildWriting(t, "ok", &rr)),
+			agent.WithAgentEngines(
+				map[string]*agent.Engine{"reviewer": childEngineWith(mockllm.New(mockllm.TextTurn("r")), catalogWith(t))},
+				[]agent.AgentMeta{{Name: "reviewer", Description: "reviews"}},
+			))
+		res := runOneSubagent(t, task, "p1", `{"prompt":"go","mode":"read-write","agent":"reviewer"}`)
+		if !res.IsError || !strings.Contains(res.Content, "not supported in this deployment") {
+			t.Fatalf("read-write+agent with no writable-specialist factory must be 'not supported in this deployment', got %+v", res)
 		}
 	})
 

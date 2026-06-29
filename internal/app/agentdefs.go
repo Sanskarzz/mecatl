@@ -343,11 +343,13 @@ func bashScopeMissReason(cfg Config) string {
 //  5. when allowMutating is false, drop any mutating (non-read-only) tool with a
 //     DISTINCT diagnostic — EXCEPT that when allowShell is true the Bash tool alone
 //     survives. allowMutating == true (a Mutating team member, which runs in an
-//     isolated force-copy fork) keeps every mutating tool (Edit/Write/Bash).
-//     allowMutating == false + allowShell == true (a read-only team member that the
-//     supervisor will isolate in a git worktree) keeps Bash for inspection but still
-//     drops Edit/Write. allowMutating == false + allowShell == false (a Subagent child or
-//     a base-sharing read-only member) drops every mutating tool.
+//     isolated force-copy fork; AND a writable specialist Subagent (ADR 0058), which
+//     keeps Edit/Write/Bash over the real parent workspace via the MAIN runner) keeps
+//     every mutating tool (Edit/Write/Bash). allowMutating == false + allowShell == true
+//     (a read-only team member that the supervisor will isolate in a git worktree)
+//     keeps Bash for inspection but still drops Edit/Write. allowMutating == false +
+//     allowShell == false (a Subagent child or a base-sharing read-only member) drops
+//     every mutating tool.
 //
 // available maps an available base tool name to its tool.Tool (used to read
 // ReadOnly()). It returns the kept names (sorted) and the diagnostics. The caller
@@ -676,7 +678,7 @@ func buildAgentSubagentEngines(ctx context.Context, cfg Config, provider port.LL
 		// tuple to rebuild the SAME scoped engine on the override model.
 		childProvider, pid, model, windowFn := resolveChildProvider(cfg, provReg, def, provider, parentProviderID, parentModel)
 
-		eng, mcpClose, names, skillCount := buildAgentDefEngine(ctx, cfg, def, "task:"+def.Name, reg.Detail(def.Name), childProvider, model, windowFn, base, allowShell, skillIdx, defaultHooks, runner, mainMgr)
+		eng, mcpClose, names, skillCount := buildAgentDefEngine(ctx, cfg, def, "task:"+def.Name, reg.Detail(def.Name), childProvider, model, windowFn, base, false /*allowMutating*/, allowShell, skillIdx, defaultHooks, runner, mainMgr)
 		engines[def.Name] = eng
 		closeFn = composeCloseErr(mcpClose, closeFn)
 
@@ -718,18 +720,27 @@ func buildAgentSubagentEngines(ctx context.Context, cfg Config, provider port.LL
 // by source); it is purely diagnostic.
 //
 // base is the AVAILABLE base toolset the def's catalog is scoped over
-// (baseSubagentTools(cfg)); allowShell mirrors the caller's runner-wired posture (a
-// per-def Subagent explorer keeps Bash iff a sandboxed runner is wired). skillIdx is the
-// build-once name→body preload index; defaultHooks is the inert fallback a def with no
-// scoped `hooks:` adopts. runner is the SANDBOXED command runner (nil when Bash is
-// disabled); mainMgr supplies the reference-MCP base manager (defMCPTools).
+// (baseSubagentTools(cfg)); allowMutating, when true, KEEPS workspace-mutating tools
+// (Edit/Write/Bash) over the real workspace instead of dropping them — a Mutating team
+// member (isolated force-copy fork) and a writable specialist Subagent (ADR 0058, direct-
+// write against the real parent workspace via the MAIN runner) both pass true, while a
+// read-only Subagent explorer and a read-only team member pass false (Edit/Write dropped;
+// Bash kept only when allowShell is true and the member is worktree-isolated). allowShell
+// mirrors the caller's runner-wired posture (a per-def Subagent explorer keeps Bash iff a
+// sandboxed runner is wired; allowMutating=true makes allowShell irrelevant for Bash-keep,
+// since Bash is kept unconditionally, but the factory still passes runner!=nil for
+// doc-clarity and so Bash registers with the runner). skillIdx is the build-once name→body
+// preload index; defaultHooks is the inert fallback a def with no scoped `hooks:` adopts.
+// runner is the command runner (sandboxed for a read-only explorer, the MAIN runner for a
+// writable specialist — nil when Bash is disabled); mainMgr supplies the reference-MCP
+// base manager (defMCPTools).
 //
 // It returns the engine + the def's inline-MCP close func (nil when the def opened no
 // inline server) + the scoped tool NAMES + the preloaded-skill COUNT, so callers can log
 // the "agent def engine built" INFO with the same fields the pre-extraction inline path
 // carried (tools/preloaded_skills) — the extraction must not silently drop diagnostics.
-func buildAgentDefEngine(ctx context.Context, cfg Config, def agents.AgentDef, role, source string, childProvider port.LLMProvider, model string, windowFn func() int, base map[string]tool.Tool, allowShell bool, skillIdx skillIndex, defaultHooks port.HookRunner, runner tool.CommandRunner, mainMgr *mcp.Manager) (*agent.Engine, func() error, []string, int) {
-	names, diags := scopedToolNamesMode(def, base, false, allowShell, bashScopeMissReason(cfg))
+func buildAgentDefEngine(ctx context.Context, cfg Config, def agents.AgentDef, role, source string, childProvider port.LLMProvider, model string, windowFn func() int, base map[string]tool.Tool, allowMutating, allowShell bool, skillIdx skillIndex, defaultHooks port.HookRunner, runner tool.CommandRunner, mainMgr *mcp.Manager) (*agent.Engine, func() error, []string, int) {
+	names, diags := scopedToolNamesMode(def, base, allowMutating, allowShell, bashScopeMissReason(cfg))
 	for _, d := range diags {
 		cfg.diag().Log(ctx, port.LevelWarn, "agent def tool scoping",
 			"agent", def.Name, "tool", d.tool, "reason", d.reason, "source", source)

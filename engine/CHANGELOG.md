@@ -44,6 +44,19 @@ The covered surface is the seven core packages (`session`, `governance`, `tool`,
   declined on the agent+model path (v1 scope limit); reference-only MCP is
   supported. Classified Added per COMPATIBILITY.md (a new exported Option).
 
+- **`agent.WithAgentWritableEngineFactory`.** A new `SubagentOption` injecting a
+  composition-supplied factory `func(agentName string) (*Engine, bool)` that rebuilds
+  a named specialist's scoped engine WRITABLE (`allowMutating=true` — Edit/Write survive
+  scoping) on the def's resolved provider/model, using the MAIN session's command runner
+  (direct-write parity, ADR 0041/0058). A Subagent call may now set BOTH `mode:"read-write"`
+  and `agent` (previously rejected); the specialist runs with its prompt/skills/catalog +
+  Edit/Write against the real parent workspace, dispatch-serial via `MutatesParent`,
+  `isolated:false` (A2 auto-approve does not apply). A def with inline MCP servers is
+  declined on the writable-agent path (v1 scope limit); reference-only MCP is supported.
+  `mode:"read-write"`+`agent`+`model` (all three) stays rejected (v1 scope limit — the
+  writable specialist runs on its own resolved model). Classified Added per
+  COMPATIBILITY.md (a new exported Option). (#204)
+
 ### Changed
 
 - **`tool.MaxAgentDescriptionBytes` raised 800 → 2000; `tool.MaxAgentBodyBytes`

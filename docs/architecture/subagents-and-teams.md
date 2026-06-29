@@ -68,8 +68,7 @@ prefix the feature relies on) and SAME-PROVIDER only (mutually exclusive with
 the REAL parent workspace with Edit/Write — NO fork, NO copy, NO merge-back. Its
 Edit/Write/Bash mutate the real tree IN PLACE, exactly as the main agent does, and
 git is the rollback layer — the "delegate one task and land its edits" path
-(default-wired, no flag; rejected with `agent`/`background` and under the no-FS
-profile). The result text honestly notes the edits landed directly (review with `git
+(default-wired, no flag; rejected with `background`, with `agent`+`model` together (v1 scope limit), and under the no-FS profile; `read-write`+`agent` alone runs the named specialist WRITABLE (its scoped catalog + Edit/Write via the MAIN runner, direct-write — ADR 0058) when the deployment wires the writable-specialist factory). The result text honestly notes the edits landed directly (review with `git
 diff`/`git status`); a crashed/cancelled child can leave PARTIAL edits behind
 (recoverable via git — the accepted direct-write trade-off). When
 neither `agent` nor `model` pins one, a def-less child runs on the global
@@ -112,7 +111,10 @@ security boundary:
   **Edit/Write**, over the REAL parent workspace + the MAIN session's command runner
   `buildCommandRunner` — main-session parity, NO fork — ADR 0041); it is NOT isolated
   (`isolated:false`, so the A2 isolation auto-approve does not apply to its Bash) and
-  git is the rollback. Per-def Subagent engines keep Bash via `scopedToolNamesMode`'s
+  git is the rollback. A `read-write`+`agent` call instead routes through
+  `agentWritableFactory` (`buildAgentWritableEngineFactory`): the specialist's scoped
+  engine rebuilt with `allowMutating=true` over the MAIN runner — same direct-write
+  posture, but the specialist's prompt/skills/catalog (ADR 0058). Per-def Subagent engines keep Bash via `scopedToolNamesMode`'s
   `allowShell` and share the one read-only `SubagentTool` forker. With no runner
   (`--no-bash`) the child is a Bash-less read-only explorer and no forker is wired — the
   original behaviour. The policy is **allow-all** so the child never prompts a human

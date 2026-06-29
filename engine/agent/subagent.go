@@ -363,8 +363,11 @@ type subagentArgs struct {
 	// read. Validated to the closed set {"", "read-only", "read-write"}; an unknown
 	// value is a model-addressable error. read-write is REJECTED with `background`
 	// (a detached child writing the parent tree after the turn advances is unsafe)
-	// and with `agent` (named specialists run read-only in v1); it COMPOSES with
-	// fork/model/resume/output_schema/timeout_ms/limits. Under a no-filesystem
+	// and with `agent`+`model` together (a v1 scope limit — a writable specialist
+	// runs on its own resolved model); read-write+`agent` ALONE is supported when the
+	// deployment wires the writable-specialist factory (ADR 0058), running the named
+	// specialist's scoped catalog with Edit/Write against the real workspace; it
+	// COMPOSES with fork/resume/output_schema/timeout_ms/limits. Under a no-filesystem
 	// session there is no writable child engine wired, so read-write is a
 	// model-addressable "not supported" error. Omitted (the default) = today's
 	// read-only behaviour, unchanged.
@@ -475,7 +478,7 @@ var subagentSchema = json.RawMessage(`{
     "mode": {
       "type": "string",
       "enum": ["read-only", "read-write"],
-      "description": "Workspace mode (default 'read-only'). 'read-write' gives the subagent the Edit and Write tools and lets it change files DIRECTLY in your workspace — exactly as you do — so its edits land immediately, with no copy or merge step. There is no isolation: a read-write subagent that crashes or goes wrong can leave partial edits in your working tree, the same as any interrupted edit; recover with git (git diff / git checkout / git stash) since your repository is the safety net. Use 'read-write' when you want a focused subagent to actually make and keep file changes (e.g. 'implement this fix and edit the files'); omit (or 'read-only') for an investigation that must not touch your files. Runs serially — never concurrently with your other tools — so it cannot race your own reads or writes. Cannot be combined with 'background' or 'agent'; composes with 'fork', 'model', 'resume', 'output_schema'."
+      "description": "Workspace mode (default 'read-only'). 'read-write' gives the subagent the Edit and Write tools and lets it change files DIRECTLY in your workspace — exactly as you do — so its edits land immediately, with no copy or merge step. There is no isolation: a read-write subagent that crashes or goes wrong can leave partial edits in your working tree, the same as any interrupted edit; recover with git (git diff / git checkout / git stash) since your repository is the safety net. Use 'read-write' when you want a focused subagent to actually make and keep file changes (e.g. 'implement this fix and edit the files'); omit (or 'read-only') for an investigation that must not touch your files. Runs serially — never concurrently with your other tools — so it cannot race your own reads or writes. Cannot be combined with 'background' or with 'agent'+'model' together; 'read-write'+'agent' alone runs the named specialist writable (its scoped catalog + Edit/Write against your workspace). Composes with 'fork', 'resume', 'output_schema'."
     }
   },
   "required": ["prompt"]
@@ -605,6 +608,28 @@ type SubagentTool struct {
 	// supported" message). It is layering-clean: the closure takes two strings and
 	// returns *Engine — both agent-layer types — and no adapter/proto/server type crosses.
 	agentModelFactory func(agentName, model string) (*Engine, bool)
+
+	// agentWritableFactory, when non-nil, mints a WRITABLE child engine for a
+	// mode:"read-write"+`agent` call: the named specialist's scoped engine
+	// (catalog/prompt/hooks/memory) is REBUILT with allowMutating=true so Edit/Write
+	// survive scoping, using the MAIN session's command runner (direct-write parity,
+	// ADR 0041 — no fork, no copy, no merge-back); its Edit/Write/Bash mutate the real
+	// parent tree in place, exactly as the main agent does, and git is the rollback
+	// layer. It is a composition-supplied closure mirroring WithAgentModelEngineFactory
+	// (it closes over the agent-def registry + the provider registry + the MAIN runner),
+	// so the writable specialist keeps the specialist's tools/playbook (NOT the generic
+	// explorer set) while re-deriving the provider-closing Deps for the def's resolved
+	// provider/model. The pre-built agentEngines map is read for the name-truth check
+	// only; a fresh engine is minted per call, NEVER inserted (no map mutation). It
+	// returns ok=false for an unknown agent or an inline-MCP def (a v1 scope limit —
+	// the inline manager's live session has no process-lifetime owner on a per-call
+	// engine; reference-only MCP is supported, borrowing the process-lifetime mainMgr).
+	// nil (the default, and ALWAYS on the no-FS path) means mode:"read-write"+`agent`
+	// is not supported in this deployment (a call setting both then errors with a clear
+	// "not supported in this deployment" message from validateMode). It is layering-
+	// clean: the closure takes a string and returns *Engine — both agent-layer types —
+	// and no adapter/proto/server type crosses (same shape as WithAgentModelEngineFactory).
+	agentWritableFactory func(agentName string) (*Engine, bool)
 
 	// writableChildEngine runs a mode:"read-write" child: a WRITABLE explorer whose
 	// catalog includes Edit/Write (built by the composition root over the read-only
@@ -840,9 +865,40 @@ func WithSubagentEngineFactory(f func(model string) (*Engine, bool)) SubagentOpt
 // id is out of scope (matches buildSubagentEngineFactory's existing out-of-scope comment).
 // A def with INLINE MCP servers is a v1 scope limit (the inline managers' live sessions
 // must outlive a per-call engine); the factory returns (nil, false) and selectChildEngine
-// surfaces the accurate error. read-write+agent stays rejected (validateMode fires first).
+// surfaces the accurate error. read-write+agent+model is rejected by validateMode
+// before this factory is consulted (a v1 scope limit — a writable specialist runs on
+// its own resolved model); read-write+agent ALONE routes through the separate
+// agentWritableFactory (WithAgentWritableEngineFactory), not this one.
 func WithAgentModelEngineFactory(f func(agentName, model string) (*Engine, bool)) SubagentOption {
 	return func(t *SubagentTool) { t.agentModelFactory = f }
+}
+
+// WithAgentWritableEngineFactory injects the composition-supplied factory that mints a
+// WRITABLE child engine for a mode:"read-write"+`agent` call (ADR 0058 — a writable
+// named specialist). Given an agent name it REBUILDS the named specialist's scoped
+// engine (catalog/prompt/hooks/memory) with allowMutating=true on the def's resolved
+// provider/model through the SAME contamination-safe per-provider path the startup
+// engines use (buildAgentDefEngine → newChildEngineForProvider re-derives
+// Compactor/TokenCounter/Env.Model/ContextWindow), using the MAIN session's command
+// runner (direct-write parity, ADR 0041 — no fork, no copy, no merge-back); its
+// Edit/Write/Bash mutate the REAL parent workspace in place, exactly as the main
+// agent does, and git is the rollback layer. The pre-built agentEngines map is NEVER
+// mutated (a fresh engine is minted per call). It returns (engine, true) for a known
+// reference-only-MCP def and (nil, false) for an unknown agent or a def with INLINE
+// MCP servers (a v1 scope limit — the inline manager's live session has no
+// process-lifetime owner on a per-call engine; selectChildEngine surfaces the
+// model-addressable error). Reference-only MCP servers ARE supported (they borrow the
+// process-lifetime mainMgr, no new connection).
+//
+// nil (the default, and ALWAYS on the no-FS path) leaves Subagent without writable-
+// specialist support: a mode:"read-write"+`agent` call then errors with a clear "not
+// supported in this deployment" message from validateMode. read-write+`agent`+`model`
+// together is OUT OF SCOPE for v1 (validateMode rejects it before this factory is ever
+// consulted — a writable specialist runs on its own resolved model). It is layering-
+// clean: the closure takes a string and returns *Engine — both agent-layer types —
+// and no adapter/proto/server type crosses (same shape as WithAgentModelEngineFactory).
+func WithAgentWritableEngineFactory(f func(agentName string) (*Engine, bool)) SubagentOption {
+	return func(t *SubagentTool) { t.agentWritableFactory = f }
 }
 
 // WithWritableChildEngine injects the child *Engine a mode:"read-write" Subagent
@@ -1095,10 +1151,13 @@ func (*SubagentTool) ReadOnly() bool { return true }
 // mutates the real workspace DURING its run (no fork, no merge), so the dispatcher
 // MUST keep it mutate-serial — independent of any merger (there no longer is one). It
 // returns true ONLY for a call that will ACTUALLY run writable: mode:"read-write"
-// with the writable child engine wired. A malformed/unparseable args payload returns
-// false (the call errors later anyway, and never writes).
+// with the writable child engine wired (the writable explorer) OR the agent writable
+// factory wired (a writable named specialist mutates the real tree too — ADR 0058);
+// the two are OR'd so a deployment wiring either form keeps its writable calls
+// dispatch-serial. A malformed/unparseable args payload returns false (the call
+// errors later anyway, and never writes).
 func (t *SubagentTool) MutatesParent(call session.ToolCall) bool {
-	if t.writableChildEngine == nil {
+	if t.writableChildEngine == nil && t.agentWritableFactory == nil {
 		return false
 	}
 	var args subagentArgs
@@ -1153,13 +1212,22 @@ func (t *SubagentTool) ExecuteWithParent(ctx context.Context, call session.ToolC
 // internally, optionally forwards a redacted projection of that activity, and
 // returns only the child's final summary text as a single ToolResult.
 // selectChildEngine resolves the child engine + base session limits for a Subagent call
-// from its `agent` / `model` arguments. The four cases, in precedence order:
+// from its `agent` / `model` arguments. The five cases, in precedence order:
 //   - `agent`+`model` together: REBUILDS the named specialist's scoped engine on the
 //     override model via agentModelFactory (the override runs on the def's resolved
 //     provider). The pre-built agentEngines map is never mutated. Without a wired factory
 //     the combination is unsupported (an honest error, never a silent fallback); an
-//     unknown agent or an unroutable model are model-addressable errors.
-//   - `agent` only: routes to the pre-built specialist engine (agentEngines).
+//     unknown agent or an unroutable model are model-addressable errors. (Unreachable
+//     with writable=true — validateMode rejects read-write+agent+model first.)
+//   - `agent` only + writable: routes through agentWritableFactory (a WRITABLE
+//     specialist, ADR 0058 — the def's scoped engine is rebuilt with allowMutating=true
+//     on the def's resolved model, using the MAIN runner for direct-write parity). The
+//     pre-built agentEngines map is read for the name-truth check only; a fresh engine
+//     is minted per call, never inserted. Without a wired factory the combination is
+//     "not supported in this deployment" (validateMode catches this first, but the
+//     defensive guard here is belt-and-suspenders); an inline-MCP def is a v1 scope
+//     limit (the factory returns (nil,false) and a model-addressable error surfaces).
+//   - `agent` only (read-only): routes to the pre-built specialist engine (agentEngines).
 //   - `model` only: mints a generic explorer child for the requested model via
 //     engineFactory (re-derives the provider-closing Deps).
 //   - neither: the default explorer + the Subagent tool's default limits.
@@ -1167,7 +1235,7 @@ func (t *SubagentTool) ExecuteWithParent(ctx context.Context, call session.ToolC
 // It returns ok=false with a model-addressable error ToolResult on a bad selection (an
 // unsupported combination, an unknown agent, an unwired/unroutable model), and the chosen
 // engine + limits on success.
-func (t *SubagentTool) selectChildEngine(callID session.ToolCallID, args subagentArgs, routedModel string) (engine *Engine, limits session.Limits, errResult session.ToolResult, ok bool) {
+func (t *SubagentTool) selectChildEngine(callID session.ToolCallID, args subagentArgs, writable bool, routedModel string) (engine *Engine, limits session.Limits, errResult session.ToolResult, ok bool) {
 	wantAgent := strings.TrimSpace(args.Agent)
 	wantModel := strings.TrimSpace(args.Model)
 
@@ -1175,7 +1243,9 @@ func (t *SubagentTool) selectChildEngine(callID session.ToolCallID, args subagen
 	// model. The model runs on the def's resolved provider (the factory owns that
 	// resolution), but the specialist's catalog/prompt/hooks/memory are kept — NOT the
 	// generic explorer set. The pre-built agentEngines map is read for the name-truth
-	// check only; a fresh engine is minted per call, never inserted.
+	// check only; a fresh engine is minted per call, never inserted. (validateMode
+	// rejects read-write+agent+model before this is reached with writable=true, so this
+	// arm only fires for the read-only agent+model override.)
 	if wantAgent != "" && wantModel != "" {
 		if t.agentModelFactory == nil {
 			return nil, session.Limits{}, session.NewToolError(callID,
@@ -1204,6 +1274,17 @@ func (t *SubagentTool) selectChildEngine(callID session.ToolCallID, args subagen
 	engine = t.childEngine
 	limits = t.limits // default explorer bound; a named agent with per-def limits overrides.
 	if wantAgent != "" {
+		// A WRITABLE specialist (mode:"read-write"+agent, ADR 0058) routes through
+		// agentWritableFactory; otherwise the pre-built read-only specialist engine.
+		// The name-truth check fires BEFORE the factory (an unknown name is the same
+		// model-addressable error the read-only path returns, never a factory call).
+		// The pre-built agentEngines map is read for the name-truth check ONLY; a fresh
+		// engine is minted per call, never inserted (no map reuse — a writable specialist
+		// never accidentally runs the read-only pre-built engine).
+		if writable {
+			return t.selectWritableSpecialistEngine(callID, wantAgent)
+		}
+		// read-only agent: the pre-built specialist engine.
 		eng, found := t.agentEngines[wantAgent]
 		if !found {
 			return nil, session.Limits{}, session.NewToolError(callID, "Subagent: "+t.unknownAgentHint(wantAgent)), false
@@ -1246,6 +1327,39 @@ func (t *SubagentTool) selectChildEngine(callID session.ToolCallID, args subagen
 		}
 	}
 	return engine, limits, session.ToolResult{}, true
+}
+
+// selectWritableSpecialistEngine resolves a mode:"read-write"+`agent` call to a WRITABLE
+// specialist engine via agentWritableFactory (ADR 0058): the def's scoped engine is REBUILT
+// with allowMutating=true (Edit/Write survive scoping) on the def's resolved model, using
+// the MAIN session's command runner (direct-write parity — no fork, no merge-back; the child
+// mutates the real parent tree in place, dispatch-serial via MutatesParent). The name-truth
+// check fires BEFORE the factory (an unknown name is the same model-addressable error the
+// read-only path returns, never a factory call). validateMode already rejected the unwired
+// case (agentWritableFactory==nil), so reaching here with a nil factory is a defensive
+// belt-and-suspenders "not supported in this deployment" error. The pre-built agentEngines
+// map is read for the name-truth check ONLY; a fresh engine is minted per call, never
+// inserted (no map reuse — a writable specialist never accidentally runs the read-only
+// pre-built engine). An inline-MCP def is a v1 scope limit: the factory returns (nil,false)
+// and a model-addressable error surfaces. Per-def limits still bind.
+func (t *SubagentTool) selectWritableSpecialistEngine(callID session.ToolCallID, wantAgent string) (*Engine, session.Limits, session.ToolResult, bool) {
+	if t.agentWritableFactory == nil {
+		return nil, session.Limits{}, session.NewToolError(callID,
+			"Subagent: mode:\"read-write\" with `agent` is not supported in this deployment"), false
+	}
+	if _, found := t.agentEngines[wantAgent]; !found {
+		return nil, session.Limits{}, session.NewToolError(callID, "Subagent: "+t.unknownAgentHint(wantAgent)), false
+	}
+	eng, found := t.agentWritableFactory(wantAgent)
+	if !found || eng == nil {
+		return nil, session.Limits{}, session.NewToolError(callID,
+			fmt.Sprintf("Subagent: writable specialist %q is unavailable (the def may have inline MCP servers, a v1 scope limit); omit `mode` to run it read-only, or omit `agent` for a writable explorer", wantAgent)), false
+	}
+	limits := t.limits
+	if l, found := t.agentLimits[wantAgent]; found {
+		limits = l
+	}
+	return eng, limits, session.ToolResult{}, true
 }
 
 // resolveMaxRunTokens resolves the per-call cumulative token budget from the two aliases:
@@ -1407,13 +1521,22 @@ const (
 //   - mode must be in {"", "read-only", "read-write"} — an unknown value is rejected;
 //   - read-write + background is rejected (a detached child writing the parent tree
 //     after the turn advances would race the parent — D3);
-//   - read-write + agent is rejected (named specialists run read-only in v1 — D3);
-//   - read-write with no writable child engine wired is rejected as "not supported
-//     in this deployment" — this is also the no-FS gate (D4), since the no-FS
-//     subagent tool wires no writable engine (buildNoFSSubagentTool).
+//   - read-write + agent + model together is rejected (a v1 scope limit — a writable
+//     specialist runs on its own resolved model; omit `model`, or omit `agent` for a
+//     writable explorer on a chosen model);
+//   - read-write + agent with no agentWritableFactory wired is rejected as "not
+//     supported in this deployment" (the writable-specialist path is unwired — also
+//     the no-FS gate, since the no-FS subagent tool wires no writable factory);
+//   - read-write with no writable child engine wired (the no-`agent` writable
+//     explorer case) is rejected as "not supported in this deployment" (D4).
 //
-// read-write COMPOSES with fork/model/resume/output_schema/timeout_ms/limits (no
-// guard here for those). It is a method only to read t.writableChildEngine.
+// read-write + agent ALONE is ALLOWED when the deployment wires the writable-
+// specialist factory (WithAgentWritableEngineFactory — a writable specialist, ADR
+// 0058): the named specialist's scoped engine is rebuilt with allowMutating=true on
+// the def's resolved model and runs Edit/Write/Bash against the real parent workspace
+// (direct-write parity, ADR 0041). read-write COMPOSES with fork/resume/output_schema/
+// timeout_ms/limits (no guard here for those). It is a method only to read
+// t.writableChildEngine and t.agentWritableFactory.
 func (t *SubagentTool) validateMode(callID session.ToolCallID, args subagentArgs) (writable bool, errResult session.ToolResult, ok bool) {
 	switch strings.TrimSpace(args.Mode) {
 	case "", subagentModeReadOnly:
@@ -1424,14 +1547,21 @@ func (t *SubagentTool) validateMode(callID session.ToolCallID, args subagentArgs
 		return false, session.NewToolError(callID,
 			fmt.Sprintf("Subagent: unknown mode %q; use %q (default) or %q", strings.TrimSpace(args.Mode), subagentModeReadOnly, subagentModeReadWrite)), false
 	}
+	// Arm order is load-bearing: the agent+model arm MUST fire before the agent+
+	// factory-nil arm (an agent+model call sets agent!="" and would otherwise be
+	// misclassified as a factory-nil rejection), and the agent arms MUST fire before
+	// the no-agent writable-engine-nil arm.
 	switch {
 	case args.Background:
 		return false, session.NewToolError(callID,
 			"Subagent: mode:\"read-write\" cannot be combined with `background` — a writable subagent writes directly to your workspace and must run inline (serially) so it cannot race your own edits; omit `background`"), false
-	case strings.TrimSpace(args.Agent) != "":
+	case strings.TrimSpace(args.Agent) != "" && strings.TrimSpace(args.Model) != "":
 		return false, session.NewToolError(callID,
-			"Subagent: mode:\"read-write\" cannot be combined with `agent` — named specialist agents run read-only; omit `agent` to use a writable explorer"), false
-	case t.writableChildEngine == nil:
+			"Subagent: mode:\"read-write\" cannot be combined with both `agent` and `model` — a writable named specialist runs on its own resolved model; omit `model` (or omit `agent` for a writable explorer on a chosen model)"), false
+	case strings.TrimSpace(args.Agent) != "" && t.agentWritableFactory == nil:
+		return false, session.NewToolError(callID,
+			"Subagent: mode:\"read-write\" with `agent` is not supported in this deployment"), false
+	case strings.TrimSpace(args.Agent) == "" && t.writableChildEngine == nil:
 		return false, session.NewToolError(callID,
 			"Subagent: mode:\"read-write\" (writable subagent) is not supported in this deployment"), false
 	}
@@ -1508,23 +1638,28 @@ func (t *SubagentTool) resolveEngineAndLimits(callID session.ToolCallID, args su
 		}
 		engine = eng
 	} else {
-		eng, lim, errRes, sok := t.selectChildEngine(callID, args, routedModel)
+		eng, lim, errRes, sok := t.selectChildEngine(callID, args, writable, routedModel)
 		if !sok {
 			return nil, session.Limits{}, errRes, false
 		}
 		engine, limits = eng, lim
 	}
 	// mode:"read-write" (D2/D3): the WRITABLE explorer engine wins over whatever the
-	// read-only selection chose. The combination guards (validateMode) already
-	// rejected read-write+agent and read-write+background and the unwired case, so
-	// here writable is honoured unconditionally. read-write COMPOSES with model/fork/
-	// resume, but v1 has no writable per-model factory, so the writable engine's
-	// (inherited/SubagentModel-default) model is used — the per-call `model` arg does
-	// not re-engine a writable child (an accepted v1 residual; the engine still
-	// re-derives its own window/compactor/counter at build time). The per-call
-	// turn/tool tighten-only limits below still apply. The writable child runs
-	// DIRECTLY against the parent workspace (no fork — ADR 0041); git is the rollback.
-	if writable {
+	// read-only selection chose — BUT only for the writable EXPLORER (no `agent`). A
+	// writable SPECIALIST (agent set) already got its factory engine from
+	// selectChildEngine (agentWritableFactory rebuilt the def's scoped engine with
+	// allowMutating=true), so it KEEPS that engine — clobbering it with the generic
+	// writableChildEngine would throw away the specialist's scoped catalog/prompt and
+	// run the wrong playbook. The combination guards (validateMode) already rejected
+	// read-write+agent+model and read-write+agent-unwired and read-write+background
+	// and the no-agent-unwired case. read-write COMPOSES with fork/resume (the
+	// writable explorer's inherited/SubagentModel-default model is used — v1 has no
+	// writable per-model factory; the per-call `model` arg does not re-engine a
+	// writable explorer, an accepted v1 residual; the engine still re-derives its own
+	// window/compactor/counter at build time). The per-call turn/tool tighten-only
+	// limits below still apply. The writable child runs DIRECTLY against the parent
+	// workspace (no fork — ADR 0041); git is the rollback layer.
+	if writable && strings.TrimSpace(args.Agent) == "" {
 		engine = t.writableChildEngine
 	}
 	limits.MaxTurns = tightenLimit(limits.MaxTurns, args.MaxTurns)

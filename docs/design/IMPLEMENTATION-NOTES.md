@@ -332,13 +332,14 @@ explorer set; the override runs on the def's resolved provider (cross-provider o
 stays out of scope), the model taken verbatim (no alias resolution — parity with the model-only path's opaque-string posture);
 the pre-built `agentEngines` map is never mutated (fresh engine per call); per-def limits still bind. A def with INLINE MCP
 servers is declined on the agent+model path (v1 scope limit — the inline manager's live session has no process-lifetime owner
-on a per-call engine); reference-only MCP is supported (borrows `mainMgr`). `read-write`+`agent`(+`model`) stays REJECTED
-(named specialists run read-only in v1 — `validateMode`'s `args.Agent` arm fires first). Reasoning-effort stays an
+on a per-call engine); reference-only MCP is supported (borrows `mainMgr`). `read-write`+`agent` is SUPPORTED via `WithAgentWritableEngineFactory` (`buildAgentWritableEngineFactory`): the named specialist's scoped engine is rebuilt WRITABLE (allowMutating=true, Edit/Write survive) on the def's resolved provider/model, using the MAIN command runner (direct-write parity, ADR 0041/0058); the factory returns (nil,false) for an unknown agent or an inline-MCP def (v1 scope limit); reference-only MCP is supported. `read-write`+`agent`+`model` stays REJECTED (v1 scope limit — a writable specialist runs on its own resolved model). Reasoning-effort stays an
 adapter-construction Option (the factory owns adapter construction), never a `subagentArgs`/`port.LLMRequest` field. Guards:
 `agent.TestSubagentPerCallModelRoutesToFactory`, `agent.TestSubagentPerCallModelUnknownErrors`,
 `agent.TestSubagentAgentAndModelTogetherSupported`, `agent.TestSubagentAgentPlusModelRunsScopedChildOnOverrideModel`,
 `agent.TestSubagentAgentPlusModelPerDefLimitsBind`, `app.TestBuildAgentModelEngineFactoryRebuildsDefScopeOnOverrideModel`,
-`app.TestBuildAgentModelEngineFactoryDeclinesInlineMCP`, `app.TestBuildSubagentEngineFactoryReDerivesForOverrideModel`.
+`app.TestBuildAgentModelEngineFactoryDeclinesInlineMCP`, `app.TestBuildSubagentEngineFactoryReDerivesForOverrideModel`,
+`agent.TestSubagentWritableAgentRoutesToFactoryEngine`, `agent.TestSubagentWritableAgentPerDefLimitsBind`,
+`app.TestBuildAgentWritableEngineFactoryRebuildsDefScopeWritable`, `app.TestBuildAgentWritableEngineFactoryDeclinesInlineMCP`.
 
 **Def-less child default model (`Config.SubagentModel` everywhere — issue #35).** `SubagentModel`
 (`--subagent-model`, mecated AND mecatui) used to reach only the def-RESOLVED child paths
