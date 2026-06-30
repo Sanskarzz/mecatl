@@ -15,6 +15,7 @@ import (
 	"time"
 
 	oai "github.com/openai/openai-go/v3"
+	"golang.org/x/net/http2"
 
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/session"
@@ -1046,6 +1047,8 @@ func TestBreakerCountsTransientNotPermanent(t *testing.T) {
 		{"503 transient", apiErr(503), true},
 		{"net error transient", &net.OpError{Op: "dial", Err: errors.New("refused")}, true},
 		{"deadline exceeded transient", context.DeadlineExceeded, true},
+		{"http2 stream error transient", &http2.StreamError{StreamID: 45, Code: http2.ErrCodeInternal}, true},
+		{"http2 protocol error transient", &http2.StreamError{StreamID: 1, Code: http2.ErrCodeProtocol}, true},
 		{"400 permanent", apiErr(400), false},
 		{"401 permanent", apiErr(401), false},
 		{"403 permanent", apiErr(403), false},
@@ -1109,6 +1112,72 @@ func TestBreakerOpensOnTransientBurst(t *testing.T) {
 				t.Fatalf("inner called during open breaker (calls=%d, want %d)", f.Calls(), callsAtOpen)
 			}
 		})
+	}
+}
+
+// TestHTTP2StreamErrorRetried asserts an http2.StreamError (a peer RST_STREAM /
+// INTERNAL_ERROR transport reset) is RETRIED by the resilience layer and counts
+// toward the shared breaker — the issue #208 regression. Mirrors the shape of
+// TestBreakerOpensOnTransientBurst: a burst of http2.StreamError failures opens
+// the breaker, and the 4th Stream fails fast with *BreakerError without calling
+// inner.
+func TestHTTP2StreamErrorRetried(t *testing.T) {
+	clk := &manualClock{t: time.Unix(1000, 0)}
+	streamErr := &http2.StreamError{StreamID: 45, Code: http2.ErrCodeInternal}
+	f := &fakeProvider{steps: []step{
+		{outerErr: streamErr},
+		{outerErr: streamErr},
+		{chunks: textTurn("ok")},
+	}}
+	p := Wrap(f, tinyBackoffCfg(3))
+
+	// First two attempts fail with the stream error and are retried; the third
+	// succeeds — proving http2.StreamError is classified retryable (a
+	// non-retryable error would surface after a single attempt).
+	seq, err := p.Stream(context.Background(), port.LLMRequest{})
+	if err != nil {
+		t.Fatalf("Stream err = %v, want success after retry", err)
+	}
+	got, derr := drain(t, seq)
+	if derr != nil {
+		t.Fatalf("drain error: %v", derr)
+	}
+	if len(got) == 0 || got[0].Text != "ok" {
+		t.Fatalf("got %+v, want textTurn(works)", got)
+	}
+	if c := f.Calls(); c != 3 {
+		t.Fatalf("inner called %d times, want 3 (2 retries + 1 success)", c)
+	}
+
+	// Now prove it counts toward the breaker: a fresh provider with a threshold
+	// of 3, fed nothing but stream errors, must open after 3 failures and fail
+	// fast on the 4th.
+	f2 := &fakeProvider{steps: []step{{outerErr: streamErr}}}
+	cfg := Config{
+		MaxAttempts:      1,
+		BaseBackoff:      time.Nanosecond,
+		MaxBackoff:       time.Nanosecond,
+		BreakerThreshold: 3,
+		BreakerCooldown:  30 * time.Second,
+		Clock:            clk.Now,
+	}
+	p2 := Wrap(f2, cfg)
+	for i := 0; i < 3; i++ {
+		if _, err := p2.Stream(context.Background(), port.LLMRequest{}); err == nil {
+			t.Fatalf("attempt %d: want error", i)
+		}
+	}
+	callsAtOpen := f2.Calls()
+	if callsAtOpen != 3 {
+		t.Fatalf("inner called %d times, want 3", callsAtOpen)
+	}
+	_, err = p2.Stream(context.Background(), port.LLMRequest{})
+	var be *BreakerError
+	if !errors.As(err, &be) {
+		t.Fatalf("4th Stream err = %v, want *BreakerError", err)
+	}
+	if f2.Calls() != callsAtOpen {
+		t.Fatalf("inner called during open breaker (calls=%d, want %d)", f2.Calls(), callsAtOpen)
 	}
 }
 
@@ -1352,6 +1421,8 @@ func TestDefaultClassifier(t *testing.T) {
 		{"404 not", mk(404), false},
 		{"connection error retryable", &net.OpError{Op: "dial", Err: errors.New("refused")}, true},
 		{"deadline exceeded retryable", context.DeadlineExceeded, true},
+		{"http2 stream error retryable", &http2.StreamError{StreamID: 45, Code: http2.ErrCodeInternal}, true},
+		{"wrapped http2 stream error retryable", fmt.Errorf("x: %w", &http2.StreamError{StreamID: 1, Code: http2.ErrCodeInternal}), true},
 		{"context canceled not", context.Canceled, false},
 		{"wrapped canceled not", fmt.Errorf("x: %w", context.Canceled), false},
 		{"unknown not", errors.New("mystery"), false},

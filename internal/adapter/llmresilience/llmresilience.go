@@ -52,6 +52,7 @@ import (
 	"unicode/utf8"
 
 	oai "github.com/openai/openai-go/v3"
+	"golang.org/x/net/http2"
 
 	"github.com/stacklok/mecatl/engine/port"
 )
@@ -829,7 +830,10 @@ func isCallerCanceled(ctx context.Context, err error) bool {
 // DefaultClassifier is the default retry policy. It retries:
 //   - net errors and timeouts (net.Error, os timeouts),
 //   - HTTP 408, 409, 429, and any 5xx from *openai.Error,
-//   - context.DeadlineExceeded NOT tied to the caller (per-attempt timeouts).
+//   - context.DeadlineExceeded NOT tied to the caller (per-attempt timeouts),
+//   - HTTP/2 stream errors (http2.StreamError — a peer RST_STREAM /
+//     INTERNAL_ERROR transport reset, e.g. "stream error: stream ID 45;
+//     INTERNAL_ERROR; received from peer").
 //
 // It does not retry:
 //   - context.Canceled / context.DeadlineExceeded from the caller (handled
@@ -845,6 +849,15 @@ func DefaultClassifier(err error) bool {
 	// Caller-style context cancellation is never retryable.
 	if errors.Is(err, context.Canceled) {
 		return false
+	}
+
+	// HTTP/2 stream resets (peer RST_STREAM / INTERNAL_ERROR) are transient
+	// transport-level failures — the bounded retry invariant caps the blast
+	// radius. All http2.StreamError codes are treated as retryable, matching
+	// net/http's own behaviour.
+	var h2Err *http2.StreamError
+	if errors.As(err, &h2Err) {
+		return true
 	}
 
 	// OpenAI typed API error: classify on HTTP status.
@@ -898,7 +911,8 @@ func retryableStatus(code int) bool {
 // provider is unhealthy, so 409 must not trip a shared breaker and is excluded
 // here. The breaker counts only transient provider-health failures:
 //   - true: HTTP 408, 429, any 5xx; net.Error; bare context.DeadlineExceeded
-//     (a per-attempt timeout).
+//     (a per-attempt timeout); HTTP/2 stream errors (http2.StreamError — a
+//     peer RST_STREAM / INTERNAL_ERROR transport reset).
 //   - false: HTTP 409 (request-conflict ≠ provider-unhealthy), all other 4xx
 //     (400/401/403/404/...), context.Canceled, unknown errors, nil.
 //
@@ -912,6 +926,13 @@ func isTransientForBreaker(err error) bool {
 	// Caller-style context cancellation is breaker-neutral.
 	if errors.Is(err, context.Canceled) {
 		return false
+	}
+
+	// HTTP/2 stream resets are transient transport-level provider-health
+	// signals, matching DefaultClassifier. All http2.StreamError codes count.
+	var h2Err *http2.StreamError
+	if errors.As(err, &h2Err) {
+		return true
 	}
 
 	// breakerStatus is the breaker's OWN status switch, intentionally distinct
