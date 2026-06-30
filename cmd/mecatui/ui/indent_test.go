@@ -60,9 +60,8 @@ func TestConversationIndentWidth0(t *testing.T) {
 	}
 }
 
-// TestInterTurnSpacing pins the vertical gap between turns: consecutive blocks are
-// separated by interBlockBlankLines blank lines (the CC-style breathing room) — verified
-// by counting the blank run between two adjacent blocks' content.
+// TestInterTurnSpacing pins the vertical gap between turns: user→assistant uses
+// interBlockBlankLinesCompact (1 blank line); tool boxes cluster with 0 blank lines.
 func TestInterTurnSpacing(t *testing.T) {
 	r := newTestRenderer()
 	r.setWidth(80)
@@ -87,8 +86,8 @@ func TestInterTurnSpacing(t *testing.T) {
 			sawText = true
 		}
 	}
-	if maxBlankRun != interBlockBlankLines {
-		t.Errorf("inter-turn blank run = %d, want %d (interBlockBlankLines)", maxBlankRun, interBlockBlankLines)
+	if maxBlankRun != interBlockBlankLinesCompact {
+		t.Errorf("inter-turn blank run = %d, want %d (interBlockBlankLinesCompact)", maxBlankRun, interBlockBlankLinesCompact)
 	}
 }
 
