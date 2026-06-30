@@ -15,6 +15,10 @@ type Usage struct {
 	// CacheWriteTokens is the number of input tokens written into the prompt
 	// cache on this call.
 	CacheWriteTokens int
+	// ReasoningTokens is the number of output tokens spent on internal
+	// reasoning (a subset of OutputTokens — providers bill reasoning as part of
+	// the inclusive output total; this is the breakdown, not an addend).
+	ReasoningTokens int
 }
 
 // CacheHitRate returns the fraction of input tokens that were served from the
@@ -31,8 +35,11 @@ func (u Usage) CacheHitRate() float64 {
 // (Deps.MaxRunTokens / StopBudget): InputTokens + OutputTokens. Cache tokens are
 // DELIBERATELY excluded — CacheReadTokens is a subset of InputTokens (double
 // counting it would inflate the total) and CacheWriteTokens is a write-through
-// side cost, not the model-call spend the budget bounds. The budget is a coarse
-// runaway brake, so input+output is the right, simple proxy.
+// side cost, not the model-call spend the budget bounds. ReasoningTokens is
+// likewise DELIBERATELY excluded — it is a subset of OutputTokens (providers
+// bill reasoning as part of the inclusive output total; adding it here would
+// double-count). The budget is a coarse runaway brake, so input+output is the
+// right, simple proxy.
 func (u Usage) TotalTokens() int {
 	return u.InputTokens + u.OutputTokens
 }
@@ -45,5 +52,6 @@ func (u Usage) Add(other Usage) Usage {
 		OutputTokens:     u.OutputTokens + other.OutputTokens,
 		CacheReadTokens:  u.CacheReadTokens + other.CacheReadTokens,
 		CacheWriteTokens: u.CacheWriteTokens + other.CacheWriteTokens,
+		ReasoningTokens:  u.ReasoningTokens + other.ReasoningTokens,
 	}
 }

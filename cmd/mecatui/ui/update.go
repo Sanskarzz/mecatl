@@ -2683,6 +2683,7 @@ func sumUsage(a, b client.Usage) client.Usage {
 		OutputTokens:     a.OutputTokens + b.OutputTokens,
 		CacheReadTokens:  a.CacheReadTokens + b.CacheReadTokens,
 		CacheWriteTokens: a.CacheWriteTokens + b.CacheWriteTokens,
+		ReasoningTokens:  a.ReasoningTokens + b.ReasoningTokens,
 	}
 }
 

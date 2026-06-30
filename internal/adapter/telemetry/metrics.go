@@ -122,7 +122,7 @@ const (
 	attrStop  = "stop"  // run stop reason
 	attrTool  = "tool"  // tool name
 	attrError = "error" // tool error outcome ("true"/"false")
-	attrKind  = "kind"  // token kind (input/output/cache_read/cache_write)
+	attrKind  = "kind"  // token kind (input/output/cache_read/cache_write/reasoning)
 	attrRole  = "role"  // engine role family (the closed Role* set below)
 )
 
@@ -243,7 +243,7 @@ func NewMetrics(mp metric.MeterProvider) (*Metrics, error) {
 	}
 	if m.tokens, err = meter.Int64Counter(
 		"mecatl.tokens",
-		metric.WithDescription("Total tokens accounted, by kind (input/output/cache_read/cache_write)."),
+		metric.WithDescription("Total tokens accounted, by kind (input/output/cache_read/cache_write/reasoning)."),
 		metric.WithUnit("{token}"),
 	); err != nil {
 		return nil, fmt.Errorf("telemetry: tokens counter: %w", err)
@@ -430,6 +430,7 @@ func (m *Metrics) recordResult(ctx context.Context, r *session.ResultPayload, pr
 	m.tokens.Add(ctx, int64(u.OutputTokens), withAttrs(prefix, attribute.String(attrKind, "output")))
 	m.tokens.Add(ctx, int64(u.CacheReadTokens), withAttrs(prefix, attribute.String(attrKind, "cache_read")))
 	m.tokens.Add(ctx, int64(u.CacheWriteTokens), withAttrs(prefix, attribute.String(attrKind, "cache_write")))
+	m.tokens.Add(ctx, int64(u.ReasoningTokens), withAttrs(prefix, attribute.String(attrKind, "reasoning")))
 	m.cacheHit.Record(ctx, u.CacheHitRate(), withAttrs(prefix))
 }
 

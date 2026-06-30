@@ -242,6 +242,91 @@ func TestTranslateRedactedThinkingTurn(t *testing.T) {
 	}
 }
 
+// TestTranslateReasoningTokensFromMessageDelta is a SYNTHETIC test (no live
+// re-recording) for the thinking_tokens → ReasoningTokens capture: a
+// message_delta carrying output_tokens_details.thinking_tokens must land the
+// value in ReasoningTokens on the terminal Usage chunk. It mirrors the
+// overwrite-if-nonzero semantics of outputTokens (the delta's cumulative total
+// replaces the message_start seed).
+func TestTranslateReasoningTokensFromMessageDelta(t *testing.T) {
+	var st streamState
+	// message_start seeds input/output; reasoning comes from the delta here.
+	start := sdk.MessageStreamEventUnion{Type: "message_start"}
+	start.Message.Usage.InputTokens = 100
+	start.Message.Usage.OutputTokens = 5
+	if _, err := translate(start, &st); err != nil {
+		t.Fatalf("message_start: %v", err)
+	}
+	// message_delta carries the final cumulative usage incl. thinking_tokens.
+	delta := sdk.MessageStreamEventUnion{Type: "message_delta"}
+	delta.Delta.StopReason = sdk.StopReasonEndTurn
+	delta.Usage.OutputTokens = 50
+	delta.Usage.OutputTokensDetails.ThinkingTokens = 40
+	if _, err := translate(delta, &st); err != nil {
+		t.Fatalf("message_delta: %v", err)
+	}
+	// message_stop emits the terminal ChunkUsage.
+	chunks, err := translate(sdk.MessageStreamEventUnion{Type: "message_stop"}, &st)
+	if err != nil {
+		t.Fatalf("message_stop: %v", err)
+	}
+	var usage *session.Usage
+	for _, c := range chunks {
+		if c.Kind == port.ChunkUsage {
+			usage = c.Usage
+		}
+	}
+	if usage == nil {
+		t.Fatal("no ChunkUsage emitted at message_stop")
+	}
+	if usage.ReasoningTokens != 40 {
+		t.Errorf("ReasoningTokens = %d, want 40 (from output_tokens_details.thinking_tokens)", usage.ReasoningTokens)
+	}
+	if usage.OutputTokens != 50 {
+		t.Errorf("OutputTokens = %d, want 50 (unchanged)", usage.OutputTokens)
+	}
+	// Subset guard: reasoning must not exceed the inclusive output total.
+	if usage.ReasoningTokens > usage.OutputTokens {
+		t.Errorf("ReasoningTokens %d > OutputTokens %d — must be a subset", usage.ReasoningTokens, usage.OutputTokens)
+	}
+}
+
+// TestUsageReasoningSubsetOfOutput is the anthropic reasoning half of the
+// cross-provider parity guard: every Usage chunk produced from the recorded
+// fixtures must satisfy ReasoningTokens <= OutputTokens. None of the current
+// fixtures carry thinking_tokens (so the vacuity guard is NOT asserted here —
+// the synthetic test above covers the positive case), but the subset invariant
+// is still pinned so a future fixture with thinking_tokens can't regress it.
+func TestUsageReasoningSubsetOfOutput(t *testing.T) {
+	skip := map[string]bool{
+		"error_event.sse":     true,
+		"two_text_blocks.sse": true,
+	}
+	paths, err := filepath.Glob(filepath.Join("testdata", "*.sse"))
+	if err != nil {
+		t.Fatalf("glob fixtures: %v", err)
+	}
+	if len(paths) == 0 {
+		t.Fatal("no .sse fixtures found under testdata")
+	}
+	for _, path := range paths {
+		name := filepath.Base(path)
+		if skip[name] {
+			continue
+		}
+		chunks := decodeFixture(t, name)
+		for _, c := range chunks {
+			if c.Kind != port.ChunkUsage {
+				continue
+			}
+			if c.Usage.ReasoningTokens > c.Usage.OutputTokens {
+				t.Errorf("%s: ReasoningTokens %d > OutputTokens %d — reasoning must be a subset of the inclusive output total",
+					name, c.Usage.ReasoningTokens, c.Usage.OutputTokens)
+			}
+		}
+	}
+}
+
 func TestTranslateErrorEvent(t *testing.T) {
 	_, err := decodeFixtureErr(t, "error_event.sse")
 	if err == nil {

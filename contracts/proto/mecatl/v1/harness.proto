@@ -1020,6 +1020,10 @@ message Usage {
   int64 cache_read_tokens = 3;
   // cache_write_tokens is the number of input tokens written into the cache.
   int64 cache_write_tokens = 4;
+  // reasoning_tokens is the number of output tokens spent on internal reasoning
+  // (a subset of output_tokens; providers bill reasoning as part of the
+  // inclusive output total). 0 when the provider reports no breakdown.
+  int64 reasoning_tokens = 5;
 }
 
 // --- MCP inspection surface --------------------------------------------------

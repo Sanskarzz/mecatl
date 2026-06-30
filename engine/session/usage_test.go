@@ -34,6 +34,10 @@ func TestUsageTotalTokens(t *testing.T) {
 		// Cache tokens are EXCLUDED: CacheReadTokens is a subset of InputTokens (so
 		// counting it would double-count) and CacheWriteTokens is a side cost.
 		{"cache tokens excluded", Usage{InputTokens: 100, OutputTokens: 50, CacheReadTokens: 40, CacheWriteTokens: 20}, 150},
+		// ReasoningTokens is likewise a SUBSET of OutputTokens (providers bill
+		// reasoning as part of the inclusive output total), so it is NOT added to
+		// the total — adding it would double-count.
+		{"reasoning subset of output", Usage{InputTokens: 100, OutputTokens: 50, ReasoningTokens: 40}, 150},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -45,11 +49,36 @@ func TestUsageTotalTokens(t *testing.T) {
 }
 
 func TestUsageAdd(t *testing.T) {
-	a := Usage{InputTokens: 10, OutputTokens: 1, CacheReadTokens: 2, CacheWriteTokens: 3}
-	b := Usage{InputTokens: 5, OutputTokens: 4, CacheReadTokens: 1, CacheWriteTokens: 1}
+	a := Usage{InputTokens: 10, OutputTokens: 1, CacheReadTokens: 2, CacheWriteTokens: 3, ReasoningTokens: 5}
+	b := Usage{InputTokens: 5, OutputTokens: 4, CacheReadTokens: 1, CacheWriteTokens: 1, ReasoningTokens: 2}
 	got := a.Add(b)
-	want := Usage{InputTokens: 15, OutputTokens: 5, CacheReadTokens: 3, CacheWriteTokens: 4}
+	want := Usage{InputTokens: 15, OutputTokens: 5, CacheReadTokens: 3, CacheWriteTokens: 4, ReasoningTokens: 7}
 	if got != want {
 		t.Fatalf("Add = %+v, want %+v", got, want)
+	}
+}
+
+// TestReasoningSubsetOfOutput mirrors the CacheReadTokens ⊂ InputTokens
+// invariant: a Usage where ReasoningTokens EXCEEDS OutputTokens indicates an
+// adapter put reasoning OUTSIDE the inclusive output total (the providers bill
+// reasoning as part of OutputTokens), which would double-count if TotalTokens()
+// were ever widened. This guard catches a future adapter regression early.
+func TestReasoningSubsetOfOutput(t *testing.T) {
+	tests := []struct {
+		name string
+		u    Usage
+	}{
+		{"zero", Usage{}},
+		{"output only", Usage{OutputTokens: 50}},
+		{"reasoning equals output", Usage{OutputTokens: 50, ReasoningTokens: 50}},
+		{"reasoning below output", Usage{InputTokens: 100, OutputTokens: 50, ReasoningTokens: 40}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.u.ReasoningTokens > tc.u.OutputTokens {
+				t.Fatalf("ReasoningTokens %d > OutputTokens %d — reasoning must be a subset of output (double-count guard)",
+					tc.u.ReasoningTokens, tc.u.OutputTokens)
+			}
+		})
 	}
 }

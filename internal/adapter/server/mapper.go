@@ -392,6 +392,7 @@ func toProtoUsage(u session.Usage) *mecatlv1.Usage {
 		OutputTokens:     int64(u.OutputTokens),
 		CacheReadTokens:  int64(u.CacheReadTokens),
 		CacheWriteTokens: int64(u.CacheWriteTokens),
+		ReasoningTokens:  int64(u.ReasoningTokens),
 	}
 }
 

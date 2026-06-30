@@ -28,7 +28,7 @@ func runningSession(t *testing.T) *session.Session {
 		t.Fatalf("BeginTurn: %v", err)
 	}
 	if err := s.RecordUsage(session.Usage{
-		InputTokens: 900, OutputTokens: 250, CacheReadTokens: 600, CacheWriteTokens: 100,
+		InputTokens: 900, OutputTokens: 250, CacheReadTokens: 600, CacheWriteTokens: 100, ReasoningTokens: 80,
 	}); err != nil {
 		t.Fatalf("RecordUsage: %v", err)
 	}
@@ -426,7 +426,7 @@ func TestSnapshotRoundTripsPhase1Fields(t *testing.T) {
 	if got.ReasoningEffort != "high" {
 		t.Errorf("ReasoningEffort not restored: got %q want \"high\"", got.ReasoningEffort)
 	}
-	wantUsage := session.Usage{InputTokens: 900, OutputTokens: 250, CacheReadTokens: 600, CacheWriteTokens: 100}
+	wantUsage := session.Usage{InputTokens: 900, OutputTokens: 250, CacheReadTokens: 600, CacheWriteTokens: 100, ReasoningTokens: 80}
 	if got.Usage != wantUsage {
 		t.Errorf("Usage = %+v, want %+v", got.Usage, wantUsage)
 	}

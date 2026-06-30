@@ -374,6 +374,7 @@ type Usage struct {
 	OutputTokens     int64
 	CacheReadTokens  int64
 	CacheWriteTokens int64
+	ReasoningTokens  int64
 }
 
 // Transport / lifecycle msgs (NOT from the proto stream).
@@ -566,6 +567,7 @@ func usageFrom(u *mecatlv1.Usage) Usage {
 		OutputTokens:     u.GetOutputTokens(),
 		CacheReadTokens:  u.GetCacheReadTokens(),
 		CacheWriteTokens: u.GetCacheWriteTokens(),
+		ReasoningTokens:  u.GetReasoningTokens(),
 	}
 }
 

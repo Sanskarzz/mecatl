@@ -131,10 +131,72 @@ func TestTranslateReasoningTurnWithCachedTokens(t *testing.T) {
 		// The assembled reasoning item's encrypted_content: the opaque REPLAY blob.
 		{Kind: port.ChunkReasoningItem, Text: "ENCRYPTED_BLOB"},
 		{Kind: port.ChunkText, Text: "Answer."},
-		{Kind: port.ChunkUsage, Usage: &session.Usage{InputTokens: 100, OutputTokens: 50, CacheReadTokens: 80}},
+		{Kind: port.ChunkUsage, Usage: &session.Usage{InputTokens: 100, OutputTokens: 50, CacheReadTokens: 80, ReasoningTokens: 40}},
 		{Kind: port.ChunkDone, Stop: session.StopEndTurn},
 	}
 	assertChunks(t, got, want)
+	// Negative assertion: the fixture's reasoning_tokens (40) is a subset of
+	// output_tokens (50) — providers bill reasoning as part of the inclusive
+	// output total, so it must never exceed OutputTokens.
+	for _, c := range got {
+		if c.Kind != port.ChunkUsage {
+			continue
+		}
+		if c.Usage.ReasoningTokens > c.Usage.OutputTokens {
+			t.Errorf("ReasoningTokens %d > OutputTokens %d — reasoning must be a subset of output",
+				c.Usage.ReasoningTokens, c.Usage.OutputTokens)
+		}
+	}
+}
+
+// TestUsageReasoningSubsetOfOutput is the reasoning half of the cross-provider
+// parity guard: every Usage chunk produced from the recorded fixtures must
+// satisfy ReasoningTokens <= OutputTokens (the engine/session contract that
+// ReasoningTokens ⊂ OutputTokens — OpenAI's output_tokens already INCLUDES
+// reasoning tokens, so this pins the existing mapUsage behavior). Mirrors the
+// cache-read subset guard. Fixtures are globbed so a newly recorded turn is
+// covered automatically.
+func TestUsageReasoningSubsetOfOutput(t *testing.T) {
+	// Deliberately malformed / error-path fixtures: decodeSSE returns a
+	// terminal error for these, so the happy-path helper can't decode them.
+	skip := map[string]bool{
+		"error_event.sse":                true,
+		"response_failed.sse":            true,
+		"response_failed_rate_limit.sse": true,
+		"multi_text_part_turn.sse":       true,
+	}
+	paths, err := filepath.Glob(filepath.Join("testdata", "*.sse"))
+	if err != nil {
+		t.Fatalf("glob fixtures: %v", err)
+	}
+	if len(paths) == 0 {
+		t.Fatal("no .sse fixtures found under testdata")
+	}
+	sawReasoning := false
+	for _, path := range paths {
+		name := filepath.Base(path)
+		if skip[name] {
+			continue
+		}
+		chunks := decodeFixture(t, name)
+		for _, c := range chunks {
+			if c.Kind != port.ChunkUsage {
+				continue
+			}
+			if c.Usage.ReasoningTokens > 0 {
+				sawReasoning = true
+			}
+			if c.Usage.ReasoningTokens > c.Usage.OutputTokens {
+				t.Errorf("%s: ReasoningTokens %d > OutputTokens %d — reasoning must be a subset of the inclusive output total",
+					name, c.Usage.ReasoningTokens, c.Usage.OutputTokens)
+			}
+		}
+	}
+	// Vacuity guard: if a fixture refresh drops every reasoning-bearing turn, the
+	// subset assertion above is trivially green — fail loudly instead.
+	if !sawReasoning {
+		t.Error("no fixture yielded ReasoningTokens > 0 — the subset guard is vacuous; keep at least one reasoning-bearing fixture")
+	}
 }
 
 // TestReasoningReplayUsesRealBlobNotSummary is the regression TRIPWIRE for the

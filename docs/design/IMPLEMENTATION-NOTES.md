@@ -225,12 +225,17 @@ was observed announcing actions without emitting the tool calls). `EvNoProgress`
 `Engine.drive` (Step 2, after the existing `sess.StopReason()` and `ctx.Err()` checks, before
 `BeginTurn`) against the run's accumulated `session.Usage` via `Usage.TotalTokens()`
 (input+output; cache tokens excluded — `CacheReadTokens` is a subset of `InputTokens`,
-`CacheWriteTokens` is a side cost). The subset invariant holds CROSS-PROVIDER because the
+`CacheWriteTokens` is a side cost; `ReasoningTokens` is likewise excluded — it is a subset
+of `OutputTokens`, providers billing reasoning as part of the inclusive output total, so
+adding it would double-count). The subset invariant holds CROSS-PROVIDER because the
 adapters normalize to it: OpenAI's `input_tokens` already includes cached tokens; Anthropic's
 raw `input_tokens` EXCLUDES cache reads/writes, so its adapter folds `cache_read_input_tokens`
 + `cache_creation_input_tokens` into `InputTokens` at the single `session.Usage` mapping site
 (`internal/adapter/anthropic/stream.go` `translateMessageStop`) — before that fix `--max-run-tokens`
-UNDERCOUNTED Anthropic runs (cache-served prompt tokens never hit the budget).
+UNDERCOUNTED Anthropic runs (cache-served prompt tokens never hit the budget). The reasoning
+breakdown is surfaced the same way: OpenAI's `output_tokens_details.reasoning_tokens` and
+Anthropic's `output_tokens_details.thinking_tokens` map to `ReasoningTokens` at the same two
+adapter mapping sites, as an additive observability field (NOT a budget-semantics change).
 When `total.TotalTokens() >= MaxRunTokens` the loop ends via
 `terminateComplete(…, session.StopBudget, …)` — a NON-error CLEAN terminal (completed path,
 Reopen-recoverable), so it mirrors `StopNoProgress` exactly. The boundary check means an
@@ -2119,6 +2124,15 @@ Anthropic runs correctly (previously undercounted by the cache-served portion) a
 `CacheWriteTokens` (never set before — the mecatui footer's ⊕ facet now renders for Anthropic).
 Guards: `anthropic.TestTranslateCacheWriteTurn` + the `TestUsageCacheReadSubsetOfInput` parity
 pair (one per adapter package).
+
+The same normalization site surfaces the OUTPUT breakdown: Anthropic's
+`output_tokens_details.thinking_tokens` (and OpenAI's `output_tokens_details.reasoning_tokens`)
+map to `session.Usage.ReasoningTokens` — a SUBSET of `OutputTokens` (providers bill reasoning
+as part of the inclusive output total, so `TotalTokens()` stays `input+output` and the budget
+brake is unchanged; it is an additive observability field, not a budget-semantics change).
+Guards: `anthropic.TestTranslateReasoningTokensFromMessageDelta` + the
+`TestUsageReasoningSubsetOfOutput` parity pair (one per adapter package) + the gauntlet
+`agent.TestReasoningTokensPropagateAndDoNotInflateBudget`.
 
 **Reasoning replay is PACKED INTO `Message.Reasoning` (which STAYS A STRING)**: Anthropic's
 replay unit is a LIST of `thinking{thinking,signature}` + `redacted_thinking{data}` blocks

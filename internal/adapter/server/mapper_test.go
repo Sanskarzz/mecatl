@@ -61,7 +61,7 @@ func TestToProtoTable(t *testing.T) {
 			name: "turn.end",
 			in: session.Event{Type: session.EvTurnEnd, Seq: 12, Turn: 2,
 				TurnEnd: &session.TurnEndPayload{DurationMs: 4100,
-					Usage: session.Usage{InputTokens: 1200, OutputTokens: 340, CacheReadTokens: 800, CacheWriteTokens: 100}}},
+					Usage: session.Usage{InputTokens: 1200, OutputTokens: 340, CacheReadTokens: 800, CacheWriteTokens: 100, ReasoningTokens: 40}}},
 			assert: func(t *testing.T, got *mecatlv1.Event) {
 				if got.GetType() != "turn.end" || got.GetTurn() != 2 {
 					t.Fatalf("got %+v", got)
@@ -80,7 +80,8 @@ func TestToProtoTable(t *testing.T) {
 				}
 				u := te.GetUsage()
 				if u.GetInputTokens() != 1200 || u.GetOutputTokens() != 340 ||
-					u.GetCacheReadTokens() != 800 || u.GetCacheWriteTokens() != 100 {
+					u.GetCacheReadTokens() != 800 || u.GetCacheWriteTokens() != 100 ||
+					u.GetReasoningTokens() != 40 {
 					t.Fatalf("per-turn usage mismatch: %+v", u)
 				}
 			},

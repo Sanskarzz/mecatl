@@ -90,6 +90,7 @@ type SummaryUsage struct {
 	OutputTokens     int `json:"output_tokens"`
 	CacheReadTokens  int `json:"cache_read_tokens"`
 	CacheWriteTokens int `json:"cache_write_tokens"`
+	ReasoningTokens  int `json:"reasoning_tokens"`
 	TotalTokens      int `json:"total_tokens"`
 }
 
@@ -197,6 +198,7 @@ func run(ctx context.Context, svc *server.Service, workspace string, limits sess
 			OutputTokens:     result.Usage.OutputTokens,
 			CacheReadTokens:  result.Usage.CacheReadTokens,
 			CacheWriteTokens: result.Usage.CacheWriteTokens,
+			ReasoningTokens:  result.Usage.ReasoningTokens,
 			TotalTokens:      result.Usage.TotalTokens(),
 		}
 	}
@@ -460,7 +462,7 @@ func formatEvent(ev session.Event) string {
 				fmt.Fprintf(&b, " error=%q", ev.Result.Error)
 			}
 			u := ev.Result.Usage
-			fmt.Fprintf(&b, " usage(in=%d out=%d total=%d)", u.InputTokens, u.OutputTokens, u.TotalTokens())
+			fmt.Fprintf(&b, " usage(in=%d out=%d total=%d reasoning=%d)", u.InputTokens, u.OutputTokens, u.TotalTokens(), u.ReasoningTokens)
 		}
 	}
 	return b.String()

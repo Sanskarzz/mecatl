@@ -396,12 +396,14 @@ func incompleteMessage(r responses.Response) string {
 }
 
 // mapUsage maps Responses usage accounting into the domain Usage, including the
-// cached-tokens subset into CacheReadTokens.
+// cached-tokens subset into CacheReadTokens and the reasoning-tokens subset into
+// ReasoningTokens (both subsets of their inclusive totals — see session.Usage).
 func mapUsage(u responses.ResponseUsage) session.Usage {
 	return session.Usage{
 		InputTokens:     int(u.InputTokens),
 		OutputTokens:    int(u.OutputTokens),
 		CacheReadTokens: int(u.InputTokensDetails.CachedTokens),
+		ReasoningTokens: int(u.OutputTokensDetails.ReasoningTokens),
 	}
 }
 

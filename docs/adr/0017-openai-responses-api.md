@@ -79,7 +79,7 @@ Automatic prefix caching, no opt-in: prompts ≥ **1024 tokens** eligible; hits 
 
 ## 6. Reasoning Models
 
-`reasoning.effort` (`none`…`xhigh`; GPT-5.5-class defaults `medium`) — expose as a per-task knob. Reasoning items are hidden; billed as output tokens, reported under `usage.output_tokens_details.reasoning_tokens`. `reasoning.summary` (`auto`/`detailed`) returns a human-readable summary item (streamed via `reasoning_summary_text.delta`).
+`reasoning.effort` (`none`…`xhigh`; GPT-5.5-class defaults `medium`) — expose as a per-task knob. Reasoning items are hidden; billed as output tokens, reported under `usage.output_tokens_details.reasoning_tokens` (the engine now surfaces this on `session.Usage.ReasoningTokens` as a subset of `OutputTokens` — additive observability, the budget brake is unchanged). `reasoning.summary` (`auto`/`detailed`) returns a human-readable summary item (streamed via `reasoning_summary_text.delta`).
 
 **Encrypted reasoning for stateless use:** with `store:false`, add `include:["reasoning.encrypted_content"]`; reasoning items carry `encrypted_content`; pass back verbatim. OpenAI decrypts in-memory only.
 
@@ -141,7 +141,7 @@ Use `responses.ResponseStreamAccumulator.AddChunk` rather than hand-rolling. (Ve
 
 ## 9. Usage / Limits & Error Handling
 
-Usage (on response, and `response.completed` when streaming): `usage.input_tokens`/`output_tokens`/`total_tokens`, `input_tokens_details.cached_tokens`, `output_tokens_details.reasoning_tokens`.
+Usage (on response, and `response.completed` when streaming): `usage.input_tokens`/`output_tokens`/`total_tokens`, `input_tokens_details.cached_tokens`, `output_tokens_details.reasoning_tokens` (the latter two map to `session.Usage.CacheReadTokens` and `session.Usage.ReasoningTokens` respectively — both subsets of their inclusive totals).
 
 Rate-limit headers: `x-ratelimit-{limit,remaining,reset}-{requests,tokens}`.
 

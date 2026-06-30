@@ -64,7 +64,13 @@ type streamState struct {
 	outputTokens     int64
 	cacheReadTokens  int64
 	cacheWriteTokens int64
-	stopReason       sdk.StopReason
+	// reasoningTokens is the cumulative count of output tokens spent on internal
+	// reasoning (Anthropic's output_tokens_details.thinking_tokens) — a subset of
+	// outputTokens (providers bill reasoning as part of the inclusive output
+	// total). Captured from both message_start (initial seed) and message_delta
+	// (final cumulative, overwrite-if-nonzero) mirroring outputTokens.
+	reasoningTokens int64
+	stopReason      sdk.StopReason
 
 	// reasoning is the ordered list of thinking/redacted blocks assembled across
 	// the turn; packed into one ChunkReasoningItem at message_stop so the port's
@@ -122,6 +128,9 @@ func translate(event sdk.MessageStreamEventUnion, st *streamState) ([]port.Chunk
 		st.inputTokens = event.Message.Usage.InputTokens
 		st.cacheReadTokens = event.Message.Usage.CacheReadInputTokens
 		st.cacheWriteTokens = event.Message.Usage.CacheCreationInputTokens
+		if event.Message.Usage.OutputTokensDetails.ThinkingTokens != 0 {
+			st.reasoningTokens = event.Message.Usage.OutputTokensDetails.ThinkingTokens
+		}
 		return nil, nil
 
 	case "content_block_start":
@@ -145,6 +154,9 @@ func translate(event sdk.MessageStreamEventUnion, st *streamState) ([]port.Chunk
 		}
 		if event.Usage.CacheCreationInputTokens != 0 {
 			st.cacheWriteTokens = event.Usage.CacheCreationInputTokens
+		}
+		if event.Usage.OutputTokensDetails.ThinkingTokens != 0 {
+			st.reasoningTokens = event.Usage.OutputTokensDetails.ThinkingTokens
 		}
 		return nil, nil
 
@@ -306,6 +318,7 @@ func translateMessageStop(st *streamState) ([]port.Chunk, error) {
 		OutputTokens:     int(st.outputTokens),
 		CacheReadTokens:  int(st.cacheReadTokens),
 		CacheWriteTokens: int(st.cacheWriteTokens),
+		ReasoningTokens:  int(st.reasoningTokens),
 	}
 	chunks = append(chunks,
 		port.Chunk{Kind: port.ChunkUsage, Usage: &usage},

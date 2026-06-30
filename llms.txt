@@ -1,6 +1,6 @@
 # mecatl
 
-> A markdown documentation corpus of 126 document(s) across 10 component(s), with 1469 heading(s) and 1311 resolved reference(s). Entries are ordered by importance (most-connected first). 10 document(s) excluded from rendering by emitExclude (still in the corpus: link-checked and ranked). Compactness 0.80, docs ~2.5 clicks apart.
+> A markdown documentation corpus of 126 document(s) across 10 component(s), with 1471 heading(s) and 1311 resolved reference(s). Entries are ordered by importance (most-connected first). 10 document(s) excluded from rendering by emitExclude (still in the corpus: link-checked and ranked). Compactness 0.80, docs ~2.5 clicks apart.
 
 ## Documentation
 

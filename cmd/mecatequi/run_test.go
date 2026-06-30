@@ -143,9 +143,10 @@ func TestRunEndToEndMockProvider(t *testing.T) {
 
 // TestRunUsageAndFinalTextFaithfullyCopied proves the terminal EvResult's usage and
 // final text are copied verbatim into the Summary (the honesty invariant on the
-// success path): a scripted text turn carrying explicit usage shows up in the Summary.
+// success path): a scripted text turn carrying explicit usage (incl. reasoning
+// tokens, a subset of output) shows up in the Summary.
 func TestRunUsageAndFinalTextFaithfullyCopied(t *testing.T) {
-	usage := session.Usage{InputTokens: 120, OutputTokens: 30, CacheReadTokens: 90}
+	usage := session.Usage{InputTokens: 120, OutputTokens: 30, CacheReadTokens: 90, ReasoningTokens: 20}
 	turn := mockllm.ChunksTurn(
 		mockllm.TextChunk("the deliverable answer"),
 		port.Chunk{Kind: port.ChunkUsage, Usage: &usage},
@@ -163,11 +164,11 @@ func TestRunUsageAndFinalTextFaithfullyCopied(t *testing.T) {
 	if sum.FinalText != "the deliverable answer" {
 		t.Errorf("FinalText = %q, want the terminal assistant text", sum.FinalText)
 	}
-	if sum.Usage.InputTokens != 120 || sum.Usage.OutputTokens != 30 || sum.Usage.CacheReadTokens != 90 {
+	if sum.Usage.InputTokens != 120 || sum.Usage.OutputTokens != 30 || sum.Usage.CacheReadTokens != 90 || sum.Usage.ReasoningTokens != 20 {
 		t.Errorf("usage not faithfully copied: %+v", sum.Usage)
 	}
 	if sum.Usage.TotalTokens != 150 {
-		t.Errorf("TotalTokens = %d, want 150 (input+output, cache excluded)", sum.Usage.TotalTokens)
+		t.Errorf("TotalTokens = %d, want 150 (input+output, cache and reasoning excluded as subsets)", sum.Usage.TotalTokens)
 	}
 }
 
