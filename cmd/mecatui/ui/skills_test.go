@@ -103,15 +103,21 @@ func TestSkillsPanelWrapsLongDescriptions(t *testing.T) {
 	long := "This is a deliberately long skill description that should wrap across " +
 		"several lines instead of overflowing the panel card and running off the " +
 		"right edge of the terminal the way it did before the wrapping fix landed."
-	st := skillsState{view: skillsPanel, skills: []client.Skill{{Name: "wrappy", Description: long}}}
+	sk := []client.Skill{{Name: "wrappy", Description: long}}
+	st := skillsState{view: skillsPanel, skills: sk, filtered: sk}
 
 	plain := stripANSIstr(renderSkillsPanel(th, st, client.Capabilities{Skills: true}, width))
 	indented := 0
 	for _, ln := range strings.Split(plain, "\n") {
-		if w := ansi.StringWidth(ln); w > budget {
-			t.Errorf("rendered line exceeds wrap budget %d (got %d): %q", budget, w, ln)
-		}
-		if strings.HasPrefix(ln, "  ") && strings.TrimSpace(ln) != "" {
+		// The width check guards the WRAPPED DESCRIPTION rows (the indentWrap
+		// output), not the footer hint line — the footer is a single styled
+		// hint that may run past the description wrap budget, mirroring the
+		// /models picker (whose footer likewise is not wrapped to the budget).
+		isDesc := strings.HasPrefix(ln, "  ") && strings.TrimSpace(ln) != ""
+		if isDesc {
+			if w := ansi.StringWidth(ln); w > budget {
+				t.Errorf("rendered description line exceeds wrap budget %d (got %d): %q", budget, w, ln)
+			}
 			indented++
 		}
 	}
@@ -232,20 +238,25 @@ func TestSkillsPanelSanitizesNames(t *testing.T) {
 }
 
 // TestSkillsKeySwallowsNonEsc asserts a non-esc, non-scroll key while the panel
-// is open is swallowed (handled=true) so it never leaks into idle input — and
-// that a scroll key is HANDLED (not a close, not a leak) now that the panel
-// scrolls.
+// is open feeds the filter (handled=true, so it never leaks into idle input) and
+// does NOT move the scroll offset — and that a scroll key is HANDLED (not a
+// close, not a leak). The panel is now type-to-filter (issue #176), so a typed
+// "j" accumulates into the filter rather than being swallowed outright.
 func TestSkillsKeySwallowsNonEsc(t *testing.T) {
 	m := newSkillsModel(t, sampleSkills(), client.Capabilities{Skills: true})
 	mm, cmd := m.runSkills()
 	m = feedCmd(t, mm.(Model), cmd)
 
-	mm2, _, handled := m.onSkillsKey(tea.KeyPressMsg{Code: 'j'})
+	mm2, _, handled := m.onSkillsKey(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if !handled {
-		t.Error("a non-esc key while the panel is open should be swallowed (handled=true)")
+		t.Error("a non-esc key while the panel is open should be handled (handled=true)")
 	}
-	if mm2.(Model).skills.scroll != 0 {
+	m2 := mm2.(Model)
+	if m2.skills.scroll != 0 {
 		t.Error("a non-scroll key should not move the scroll offset")
+	}
+	if got := m2.skills.filter.Value(); got != "j" {
+		t.Errorf("typing 'j' should feed the filter, got value %q want \"j\"", got)
 	}
 
 	// A scroll key is handled too (and keeps the panel open). The 2-skill sample
@@ -260,6 +271,166 @@ func TestSkillsKeySwallowsNonEsc(t *testing.T) {
 	}
 	if m3.skills.scroll != 0 {
 		t.Errorf("a fitting inventory should clamp scroll at 0, got %d", m3.skills.scroll)
+	}
+}
+
+// typeSkillsFilter feeds each rune of s into the open skills panel's focused
+// filter input via onSkillsKey (the production routing), asserting each key is
+// handled. It mirrors typeFilter in models_test.go.
+func typeSkillsFilter(t *testing.T, m Model, s string) Model {
+	t.Helper()
+	for _, r := range s {
+		mm, _, handled := m.onSkillsKey(tea.KeyPressMsg{Code: r, Text: string(r)})
+		if !handled {
+			t.Fatalf("typing %q should be handled by the open skills panel", r)
+		}
+		m = mm.(Model)
+	}
+	return m
+}
+
+// TestSkillsFilterNarrows: typing "deep" narrows to the single deep-research row,
+// the scroll clamps to 0, and the rendered body shows only deep-research.
+func TestSkillsFilterNarrows(t *testing.T) {
+	m := newSkillsModel(t, sampleSkills(), client.Capabilities{Skills: true})
+	mm, cmd := m.runSkills()
+	m = feedCmd(t, mm.(Model), cmd)
+
+	m = typeSkillsFilter(t, m, "deep")
+	if len(m.skills.filtered) != 1 {
+		t.Fatalf("filtered len = %d, want 1 (only deep-research matches)", len(m.skills.filtered))
+	}
+	if m.skills.filtered[0].Name != "deep-research" {
+		t.Fatalf("filtered[0].Name = %q, want deep-research", m.skills.filtered[0].Name)
+	}
+	if m.skills.scroll != 0 {
+		t.Errorf("scroll after narrowing = %d, want 0 (clamped)", m.skills.scroll)
+	}
+	body := stripANSIstr(m.View().Content)
+	if !strings.Contains(body, "deep-research") {
+		t.Errorf("rendered body should show deep-research, got:\n%s", body)
+	}
+	if strings.Contains(body, "code-review") {
+		t.Errorf("rendered body should NOT show the filtered-out code-review, got:\n%s", body)
+	}
+}
+
+// TestSkillsFilterCaseInsensitive: "DEEP" matches deep-research.
+func TestSkillsFilterCaseInsensitive(t *testing.T) {
+	m := newSkillsModel(t, sampleSkills(), client.Capabilities{Skills: true})
+	mm, cmd := m.runSkills()
+	m = feedCmd(t, mm.(Model), cmd)
+
+	m = typeSkillsFilter(t, m, "DEEP")
+	if len(m.skills.filtered) != 1 || m.skills.filtered[0].Name != "deep-research" {
+		t.Errorf("case-insensitive filter \"DEEP\" should match deep-research, got %+v", m.skills.filtered)
+	}
+}
+
+// TestSkillsFilterByDescription: "research" matches the deep-research DESCRIPTION
+// (not its name), proving Description is a match field.
+func TestSkillsFilterByDescription(t *testing.T) {
+	m := newSkillsModel(t, sampleSkills(), client.Capabilities{Skills: true})
+	mm, cmd := m.runSkills()
+	m = feedCmd(t, mm.(Model), cmd)
+
+	m = typeSkillsFilter(t, m, "research")
+	if len(m.skills.filtered) != 1 || m.skills.filtered[0].Name != "deep-research" {
+		t.Errorf("filter \"research\" should match deep-research by description, got %+v", m.skills.filtered)
+	}
+}
+
+// TestSkillsFilterEscClears asserts the two-stage esc: a non-empty filter is
+// cleared (panel stays open, filtered restored to the full list); a second esc
+// (now-empty filter) closes the panel.
+func TestSkillsFilterEscClears(t *testing.T) {
+	m := newSkillsModel(t, sampleSkills(), client.Capabilities{Skills: true})
+	mm, cmd := m.runSkills()
+	m = feedCmd(t, mm.(Model), cmd)
+	m = typeSkillsFilter(t, m, "deep")
+	if len(m.skills.filtered) != 1 {
+		t.Fatalf("precondition: filtered len = %d, want 1", len(m.skills.filtered))
+	}
+
+	// First esc: clears the filter, stays open.
+	mm, _, handled := m.onSkillsKey(tea.KeyPressMsg{Code: tea.KeyEsc})
+	if !handled {
+		t.Fatal("esc should be handled by the open panel")
+	}
+	m = mm.(Model)
+	if m.skills.view != skillsPanel {
+		t.Error("first esc (non-empty filter) should keep the panel open")
+	}
+	if m.skills.filter.Value() != "" {
+		t.Errorf("first esc should clear the filter, value = %q", m.skills.filter.Value())
+	}
+	if len(m.skills.filtered) != 2 {
+		t.Errorf("filtered should be restored to the full list, len = %d want 2", len(m.skills.filtered))
+	}
+
+	// Second esc: empty filter ⇒ closes.
+	mm, _, _ = m.onSkillsKey(tea.KeyPressMsg{Code: tea.KeyEsc})
+	m = mm.(Model)
+	if m.skills.view != skillsNone {
+		t.Error("second esc (empty filter) should close the panel")
+	}
+}
+
+// TestSkillsFilterNoMatchNote asserts the filter-no-match note renders (and the
+// empty-state "No skills configured" copy does NOT — the inventory is non-empty,
+// just unmatched).
+func TestSkillsFilterNoMatchNote(t *testing.T) {
+	m := newSkillsModel(t, sampleSkills(), client.Capabilities{Skills: true})
+	mm, cmd := m.runSkills()
+	m = feedCmd(t, mm.(Model), cmd)
+
+	m = typeSkillsFilter(t, m, "zzzzz")
+	if len(m.skills.filtered) != 0 {
+		t.Fatalf("filtered len = %d, want 0 (no match)", len(m.skills.filtered))
+	}
+	body := stripANSIstr(m.View().Content)
+	if !strings.Contains(body, `no skills match "zzzzz" — esc to clear`) {
+		t.Errorf("body should carry the no-match note, got:\n%s", body)
+	}
+	if strings.Contains(body, "No skills configured") {
+		t.Errorf("body should NOT carry the empty-state copy (inventory is non-empty), got:\n%s", body)
+	}
+}
+
+// TestSkillsFilterEmptyShowsFull: an empty query ⇒ filtered == skills (the full
+// list). Guards against a filter that drops everything on an empty query.
+func TestSkillsFilterEmptyShowsFull(t *testing.T) {
+	m := newSkillsModel(t, sampleSkills(), client.Capabilities{Skills: true})
+	mm, cmd := m.runSkills()
+	m = feedCmd(t, mm.(Model), cmd)
+
+	if len(m.skills.filtered) != len(m.skills.skills) {
+		t.Errorf("empty filter: filtered len = %d, want %d (== skills)", len(m.skills.filtered), len(m.skills.skills))
+	}
+}
+
+// TestSkillsFilterJKNotIntercepted guards the arrow-only routing (the j/k-in-
+// Up/Down trap, mirroring TestModelsFilterDoesNotInterceptJK): typing a query
+// containing j/k must accumulate into the filter and NOT move the scroll offset.
+func TestSkillsFilterJKNotIntercepted(t *testing.T) {
+	fs := &fakeSkills{skills: []client.Skill{
+		{Name: "kotlin-thing", Description: "a jvm skill"},
+		{Name: "java-thing", Description: "also jvm"},
+		{Name: "code-review", Description: "review a diff"},
+	}}
+	m := newSkillsModel(t, fs, client.Capabilities{Skills: true})
+	mm, cmd := m.runSkills()
+	m = feedCmd(t, mm.(Model), cmd)
+
+	m = typeSkillsFilter(t, m, "kotlin")
+	if m.skills.filter.Value() != "kotlin" {
+		t.Errorf("filter value = %q, want \"kotlin\" (k/o/t/l/i/n must type, not navigate)", m.skills.filter.Value())
+	}
+	if m.skills.scroll != 0 {
+		t.Errorf("scroll moved to %d while typing \"kotlin\"; j/k must not be intercepted as nav", m.skills.scroll)
+	}
+	if len(m.skills.filtered) != 1 || m.skills.filtered[0].Name != "kotlin-thing" {
+		t.Errorf("filter \"kotlin\" should narrow to kotlin-thing, got %+v", m.skills.filtered)
 	}
 }
 
@@ -401,6 +572,41 @@ func TestSkillsPanelScrollGolden(t *testing.T) {
 	compareGolden(t, "skills_scroll.golden", got)
 }
 
+// TestSkillsPanelGolden locks the base panel (sample skills, empty filter) so the
+// filter row + the new footer hint are part of the locked surface.
+func TestSkillsPanelGolden(t *testing.T) {
+	m := newSkillsModel(t, sampleSkills(), client.Capabilities{Skills: true})
+	mm, cmd := m.runSkills()
+	m = feedCmd(t, mm.(Model), cmd)
+	if m.skills.view != skillsPanel {
+		t.Fatalf("view = %v, want skillsPanel", m.skills.view)
+	}
+	got := stripANSI([]byte(m.View().Content))
+	compareGolden(t, "skills.golden", got)
+}
+
+// TestSkillsPanelFilteredGolden locks the panel narrowed by a filter ("deep" →
+// deep-research only), so the filtered body + the filter input value are locked.
+func TestSkillsPanelFilteredGolden(t *testing.T) {
+	m := newSkillsModel(t, sampleSkills(), client.Capabilities{Skills: true})
+	mm, cmd := m.runSkills()
+	m = feedCmd(t, mm.(Model), cmd)
+	m = typeSkillsFilter(t, m, "deep")
+	got := stripANSI([]byte(m.View().Content))
+	compareGolden(t, "skills_filtered.golden", got)
+}
+
+// TestSkillsPanelNomatchGolden locks the filter-no-match note ("zzzzz" → no
+// skills match), the distinct recovery copy a reviewer can eyeball.
+func TestSkillsPanelNomatchGolden(t *testing.T) {
+	m := newSkillsModel(t, sampleSkills(), client.Capabilities{Skills: true})
+	mm, cmd := m.runSkills()
+	m = feedCmd(t, mm.(Model), cmd)
+	m = typeSkillsFilter(t, m, "zzzzz")
+	got := stripANSI([]byte(m.View().Content))
+	compareGolden(t, "skills_nomatch.golden", got)
+}
+
 // TestSkillsEmptyStateNotEnabled asserts the panel distinguishes "skills not
 // enabled on this server" (caps.Skills false) from "enabled but none configured".
 func TestSkillsEmptyStateNotEnabled(t *testing.T) {
@@ -416,5 +622,40 @@ func TestSkillsEmptyStateNotEnabled(t *testing.T) {
 	}
 	if !strings.Contains(enabled, "No skills configured") {
 		t.Errorf("enabled empty copy = %q, want 'No skills configured'", enabled)
+	}
+}
+
+// TestFilterSkillsPreservesOrder mirrors TestModelsFilterPreservesOrder: a query
+// matching >1 row keeps the input order (the server's name-sort). A reordering
+// regression in filterSkills would pass the E2E narrowing tests but fail here.
+func TestFilterSkillsPreservesOrder(t *testing.T) {
+	in := []client.Skill{
+		{Name: "z-skill", Description: "zzz last"},
+		{Name: "a-skill", Description: "aaa first"},
+		{Name: "m-skill", Description: "mmm middle"},
+	}
+	got := filterSkills(in, "skill")
+	if len(got) != 3 {
+		t.Fatalf("filter \"skill\" → %d rows, want 3", len(got))
+	}
+	for i := range in {
+		if got[i].Name != in[i].Name {
+			t.Errorf("filtered[%d].Name = %q, want %q (input order must be preserved)", i, got[i].Name, in[i].Name)
+		}
+	}
+}
+
+// TestFilterSkillsUppercaseField exercises the field-side strings.ToLower arm: a
+// lowercase query matches an UPPERCASE field value (the existing
+// TestSkillsFilterCaseInsensitive only tests an uppercase QUERY vs lowercase fields).
+func TestFilterSkillsUppercaseField(t *testing.T) {
+	in := []client.Skill{{Name: "DEEP-RESEARCH", Description: "REVIEW"}}
+	got := filterSkills(in, "deep")
+	if len(got) != 1 {
+		t.Fatalf("filter \"deep\" vs uppercase field → %d, want 1", len(got))
+	}
+	got2 := filterSkills(in, "review")
+	if len(got2) != 1 {
+		t.Fatalf("filter \"review\" vs uppercase desc → %d, want 1", len(got2))
 	}
 }

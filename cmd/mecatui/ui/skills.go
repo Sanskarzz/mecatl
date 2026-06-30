@@ -1,9 +1,11 @@
 package ui
 
 import (
+	"strconv"
 	"strings"
 
 	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
@@ -37,11 +39,13 @@ const skillsBodyLines = 14
 // value-copy semantics hold. scroll is the 0-based index of the first visible
 // rendered row (clamped in the key handlers, reset on each RPC result).
 type skillsState struct {
-	view    skillsView
-	loading bool  // the ListSkills RPC is in flight
-	err     error // the ListSkills error, rendered distinctly (nil on success)
-	skills  []client.Skill
-	scroll  int // first visible rendered body row (clamped in the key handlers)
+	view     skillsView
+	loading  bool  // the ListSkills RPC is in flight
+	err      error // the ListSkills error, rendered distinctly (nil on success)
+	skills   []client.Skill
+	filtered []client.Skill  // subset matching filter.Value(); recomputed on each key (mirror models.filtered)
+	filter   textinput.Model // the type-to-filter input; focused while the panel is open
+	scroll   int             // first visible rendered body row (clamped in the key handlers)
 }
 
 // openSkills opens the inventory panel and fires the ListSkills RPC. Only
@@ -54,52 +58,121 @@ func (m Model) openSkills() (tea.Model, tea.Cmd) {
 	}
 	m.ta.Blur() // overlay owns the keyboard while open
 	m.skills = skillsState{view: skillsPanel, loading: true}
-	return m, client.ListSkillsCmd(m.deps.Ctx, m.deps.Skills)
+	// Open with the filter FOCUSED so the user can type to narrow immediately (the
+	// /models picker's headline affordance, mirrored here as read-only narrowing —
+	// there is no cursor/enter/select on this inventory). The filtered slice is
+	// (re)derived when the list lands in updateSkillsMsg; an empty query ⇒
+	// filtered == skills.
+	ti := textinput.New()
+	ti.Placeholder = "filter skills…"
+	ti.SetWidth(40)
+	ti.Focus()
+	m.skills.filter = ti
+	m.skills.filtered = nil
+	return m, tea.Batch(client.ListSkillsCmd(m.deps.Ctx, m.deps.Skills), textinput.Blink)
 }
 
-// closeSkills dismisses the overlay and returns focus to the prompt input.
+// closeSkills dismisses the overlay and returns focus to the prompt input. The
+// loaded list survives (the panel reopens cheaply); the filter is reset so a
+// reopen starts clean (openSkills re-News it regardless). Resetting the filter
+// to the zero value also stops the blink goroutine.
 func (m Model) closeSkills() (tea.Model, tea.Cmd) {
 	m.skills = skillsState{}
 	cmd := m.ta.Focus()
 	return m, cmd
 }
 
-// onSkillsKey routes key presses while the skills overlay is open. esc closes
-// it; the scroll keys (pgup/pgdown, up/down, home/end) move the row window over
-// a long inventory (the /soul onSoulKey pattern). Every other key is swallowed
-// (handled=true) so it never leaks into idle input. Returns handled=false only
-// when the overlay is closed so the caller falls through to normal idle key
-// handling.
+// onSkillsKey routes key presses while the skills overlay is open. The filter
+// input is FOCUSED, so the routing mirrors onModelsKey: nav keys are intercepted
+// first, everything else feeds the input (read-only narrowing — there is NO
+// cursor/enter/select arm here, unlike /models).
+//
+// The single sharp edge (mirroring models.go:121-126): keys.Up/keys.Down also
+// bind "k"/"j" (keys.go), so matching them with key.Matches would hijack a typed
+// query like "kotlin"/"java". So list nav matches the ARROW keys by msg.String()
+// ONLY; the other nav keys (pgup/pgdown/home/end) and esc are all non-printable,
+// so key.Matches against ScrollU/ScrollD/ScrollTop/ScrollBottom/Close is safe —
+// none collide with typed text.
+//
+// esc is TWO-STAGE: a non-empty filter is cleared first (the panel stays open so
+// a mistyped query can be undone without losing the open panel); an empty filter
+// closes the panel. Every key is handled=true (the open panel swallows keys),
+// unchanged. After any input-feeding key the filter is re-synced (recompute +
+// scroll clamp) and the input's cmd returned for the cursor blink.
 func (m Model) onSkillsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 	if m.skills.view == skillsNone {
 		return m, nil, false
 	}
 	switch {
 	case key.Matches(msg, m.keys.Close):
+		if m.skills.filter.Value() != "" {
+			m.skills.filter.SetValue("")
+			m = m.syncSkillsFilter()
+			return m, nil, true
+		}
 		mm, cmd := m.closeSkills()
 		return mm, cmd, true
-	case key.Matches(msg, m.keys.ScrollD), key.Matches(msg, m.keys.Down):
-		m.skills.scroll = clampScroll(m.skills.scroll+1, m.skillsRowTotal(), skillsBodyLines)
+	case msg.String() == "down":
+		m.skills.scroll = clampScroll(m.skills.scroll+1, m.skillsFilteredRowTotal(), skillsBodyLines)
 		return m, nil, true
-	case key.Matches(msg, m.keys.ScrollU), key.Matches(msg, m.keys.Up):
-		m.skills.scroll = clampScroll(m.skills.scroll-1, m.skillsRowTotal(), skillsBodyLines)
+	case msg.String() == "up":
+		m.skills.scroll = clampScroll(m.skills.scroll-1, m.skillsFilteredRowTotal(), skillsBodyLines)
+		return m, nil, true
+	case key.Matches(msg, m.keys.ScrollD):
+		m.skills.scroll = clampScroll(m.skills.scroll+1, m.skillsFilteredRowTotal(), skillsBodyLines)
+		return m, nil, true
+	case key.Matches(msg, m.keys.ScrollU):
+		m.skills.scroll = clampScroll(m.skills.scroll-1, m.skillsFilteredRowTotal(), skillsBodyLines)
 		return m, nil, true
 	case key.Matches(msg, m.keys.ScrollBottom):
-		m.skills.scroll = maxScrollOffset(m.skillsRowTotal(), skillsBodyLines)
+		m.skills.scroll = maxScrollOffset(m.skillsFilteredRowTotal(), skillsBodyLines)
 		return m, nil, true
 	case key.Matches(msg, m.keys.ScrollTop):
 		m.skills.scroll = 0
 		return m, nil, true
 	}
-	return m, nil, true
+	// Everything else feeds the focused filter input (printable runes, backspace,
+	// ←/→, …); recompute the filtered slice + clamp the scroll afterwards.
+	var cmd tea.Cmd
+	m.skills.filter, cmd = m.skills.filter.Update(msg)
+	m = m.syncSkillsFilter()
+	return m, cmd, true
 }
 
-// skillsRowTotal is the rendered body-row count the key handlers clamp the
-// scroll offset against — computed from the SAME row builder the render path
-// windows (skillsRowLines at the model's current wrap budget), so the clamp and
-// the window can never disagree about the line count.
-func (m Model) skillsRowTotal() int {
-	return len(skillsRowLines(m.deps.Theme, m.skills.skills, cardTextWidth(m.width)))
+// skillsFilteredRowTotal is the rendered body-row count over the FILTERED
+// inventory — the clamp target the key handlers use, so the scroll window and
+// the clamp can never disagree about the line count. With an empty filter
+// filtered == skills, so this doubles as the full-inventory total.
+func (m Model) skillsFilteredRowTotal() int {
+	return len(skillsRowLines(m.deps.Theme, m.skills.filtered, cardTextWidth(m.width)))
+}
+
+// filterSkills returns the skills whose Name OR Description CONTAIN q
+// (case-insensitive), preserving input order (the server's name-sort). An empty q
+// returns the full list. Mirrors filterModels.
+func filterSkills(skills []client.Skill, q string) []client.Skill {
+	if q == "" {
+		return skills
+	}
+	lq := strings.ToLower(q)
+	out := make([]client.Skill, 0, len(skills))
+	for _, s := range skills {
+		if strings.Contains(strings.ToLower(s.Name), lq) ||
+			strings.Contains(strings.ToLower(s.Description), lq) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// syncSkillsFilter recomputes the filtered slice from the current filter value
+// and clamps the scroll offset against the filtered row total (the skills panel
+// has no cursor, so scroll is the only thing to clamp). Mirrors syncModelsFilter.
+// Called on every input-feeding key and once when the list lands.
+func (m Model) syncSkillsFilter() Model {
+	m.skills.filtered = filterSkills(m.skills.skills, m.skills.filter.Value())
+	m.skills.scroll = clampScroll(m.skills.scroll, m.skillsFilteredRowTotal(), skillsBodyLines)
+	return m
 }
 
 // updateSkillsMsg reduces a client.SkillsMsg into the overlay state. It fires no
@@ -119,6 +192,9 @@ func (m Model) updateSkillsMsg(msg tea.Msg) (tea.Model, bool) {
 	m.skills.err = nil
 	m.skills.skills = sm.Skills
 	m.skills.scroll = 0
+	// Derive the filtered slice (+ clamp the scroll) from the current filter
+	// value; on a fresh open the filter is empty, so filtered == skills.
+	m = m.syncSkillsFilter()
 	return m, true
 }
 
@@ -216,6 +292,10 @@ func skillsRowLines(th theme.Theme, skills []client.Skill, budget int) []string 
 func renderSkillsPanel(th theme.Theme, st skillsState, caps client.Capabilities, width int) string {
 	var b strings.Builder
 	b.WriteString(th.Style("askTitle").Render("Skills inventory") + "\n\n")
+	// The filter input row (focused while the panel is open) sits ABOVE the body
+	// window, inside the card chrome — the same placement as the /models picker,
+	// so a user who knows one panel knows the other.
+	b.WriteString(st.filter.View() + "\n\n")
 
 	budget := cardTextWidth(width)
 	switch {
@@ -228,11 +308,17 @@ func renderSkillsPanel(th theme.Theme, st skillsState, caps client.Capabilities,
 		}
 		b.WriteString(th.Style("errorText").Render(line) + "\n")
 	case len(st.skills) == 0:
+		// Server-side empty/disabled (no inventory at all) — distinct from a filter
+		// that matched nothing.
 		b.WriteString(th.Style("muted").Render(skillsEmptyCopy(caps)) + "\n")
+	case len(st.filtered) == 0:
+		// The filter matched nothing (the inventory is non-empty). A clear, distinct
+		// note with a recovery hint; the scroll is safe (clamped to 0).
+		b.WriteString(th.Style("muted").Render("no skills match "+strconv.Quote(st.filter.Value())+" — esc to clear") + "\n")
 	default:
-		b.WriteString(windowRenderedLines(th, skillsRowLines(th, st.skills, budget), st.scroll, skillsBodyLines))
+		b.WriteString(windowRenderedLines(th, skillsRowLines(th, st.filtered, budget), st.scroll, skillsBodyLines))
 	}
 
-	b.WriteString("\n" + th.Style("muted").Render("skills activate automatically when relevant · "+platform.ScrollKeysMarking()+" scroll · esc close"))
+	b.WriteString("\n" + th.Style("muted").Render("skills activate automatically when relevant · type to filter · ↑/↓/"+platform.ScrollKeysMarking()+" scroll · esc clear filter / close"))
 	return b.String()
 }
