@@ -24,30 +24,128 @@ description: >-
 
 ### Step 1 — Elicit preferences (BEFORE any search)
 
-Ask the operator these questions before searching for models. Present them as a
-short numbered list and wait for the answers. Do NOT skip ahead — the answers
-shape the entire search.
+Ask questions **one at a time** in this exact order. Do NOT present the full
+list upfront. Wait for the operator's answer before moving to the next question.
 
-1. **Provider**: Which provider are you routing through? (OpenRouter / Anthropic
-   direct / OpenAI direct / other). All aliases must point at model ids on this
-   one provider.
-2. **Priority axis**: Where do you sit on the cost↔capability spectrum?
-   - **Cost-tiered** — prefer cheap/open models, accept slightly lower ceilings
-     (e.g. DeepSeek V4-Flash/Pro, GLM-5.2, Gemini Flash).
-   - **Capability-first** — prefer the most capable models regardless of cost
-     (e.g. Claude Opus 4.8, GPT-5.5, Gemini 3 Pro).
-   - **Balanced** — frontier where it matters, cheap where it doesn't.
-3. **Open vs proprietary**: Do you require open-weights/self-hostable models
-   (MIT/Apache), or are proprietary hosted APIs fine?
-4. **Multimodal**: Do you need image/vision input anywhere in the fleet? If so,
-   is it rare (invoke explicitly) or common (bake into a router tier)?
-5. **Target ceiling** (optional): Is there a specific competitor model you want
-   to match or beat on coding (e.g. "compete with Sonnet 4.6", "reach Opus 4.8
-   territory")?
-6. **Existing config** (optional): Paste the current `models:` block if revising
-   — note what's working and what isn't.
+Format for each question:
 
-Record the answers. These determine which models are even candidates.
+```
+───────────────────────────────
+✓ <label>: <answer>     ← repeat for each prior answer
+
+→ <current question>?
+
+  ▸ <recommended option> (recommended)
+    <other option>
+
+  yes = <recommended> · "back" to redo previous
+───────────────────────────────
+```
+
+**Q1 — Provider**
+
+```
+───────────────────────────────
+→ Provider?
+
+  ▸ OpenRouter — aggregates all vendors behind one key (recommended)
+    Anthropic direct
+    OpenAI direct
+    Other (name it)
+
+  yes = OpenRouter · "back" to redo previous
+───────────────────────────────
+```
+
+**Q2 — Priority axis**
+
+```
+───────────────────────────────
+✓ Provider: <Q1>
+
+→ Priority axis?
+
+  ▸ balanced — frontier where it matters, cheap elsewhere (recommended)
+    cost-tiered — prefer cheap/open models, accept lower ceiling
+    capability-first — most capable regardless of cost
+
+  yes = balanced · "back" to redo previous
+───────────────────────────────
+```
+
+**Q3 — Open vs proprietary**
+
+```
+───────────────────────────────
+✓ Provider: <Q1>
+✓ Priority: <Q2>
+
+→ Open-weights required?
+
+  ▸ proprietary — hosted APIs are fine (recommended)
+    open-weights — MIT/Apache only (self-hostable)
+
+  yes = proprietary · "back" to redo previous
+───────────────────────────────
+```
+
+**Q4 — Multimodal**
+
+```
+───────────────────────────────
+✓ Provider: <Q1>
+✓ Priority: <Q2>
+✓ Open-weights: <Q3>
+
+→ Image/vision input needed?
+
+  ▸ text-only — no vision needed (recommended)
+    rarely — explicit per-call via model: image
+    commonly — bake a vision tier into the router
+
+  yes = text-only · "back" to redo previous
+───────────────────────────────
+```
+
+**Q5 — Target ceiling (optional)**
+
+```
+───────────────────────────────
+✓ Provider: <Q1>
+✓ Priority: <Q2>
+✓ Open-weights: <Q3>
+✓ Vision: <Q4>
+
+→ Target coding ceiling? (optional)
+
+  ▸ skip — no specific target (recommended)
+    name a model, e.g. "Sonnet 4.6", "Opus 4.8"
+
+  yes = skip · "back" to redo previous
+───────────────────────────────
+```
+
+**Q6 — Existing config (auto-discovered, not asked blank)**
+
+Do NOT ask. Silently run `cat ~/.config/mecatl/settings.yaml`.
+
+- **Found with `models:` block** — show it fenced, then ask:
+  ```
+  ───────────────────────────────
+  ✓ Provider: <Q1> · ✓ Priority: <Q2> · ✓ Open-weights: <Q3> · ✓ Vision: <Q4> · ✓ Ceiling: <Q5>
+
+  → Found an existing models: config — use as base or start fresh?
+
+    ▸ use as base — revise only what needs changing (recommended)
+      start fresh — ignore existing config
+
+    yes = use as base · "back" to redo previous
+  ───────────────────────────────
+  ```
+
+- **Not found or no `models:` block** — skip silently, proceed to Step 2.
+
+Record all answers. These determine which models are even candidates.
 
 ### Step 2 — Search the latest benchmarks & pricing
 
@@ -155,3 +253,24 @@ After the config, include:
 
 - [`references/config-format.md`](references/config-format.md) — the complete
   `models:` YAML schema, key rules, and a worked OpenRouter example.
+
+## Interaction example
+
+Step 1 uses `AskUserQuestion` — each question renders as a native UI widget
+(radio buttons, descriptions). The operator clicks or types; no "yes"/"back"
+shortcuts needed. The five calls happen one at a time:
+
+1. `AskUserQuestion` → Provider → operator picks **OpenRouter**
+2. `AskUserQuestion` → Priority → operator picks **capability-first**
+3. `AskUserQuestion` → Licensing → operator picks **proprietary**
+4. `AskUserQuestion` → Vision → operator picks **rarely**
+5. `AskUserQuestion` → Ceiling → operator picks **Opus 4.8 territory**
+
+Then the skill silently runs `cat ~/.config/mecatl/settings.yaml`. If a
+`models:` block is found it is shown fenced and a final `AskUserQuestion`
+asks **use as base** vs **start fresh**. If not found, Step 2 starts
+immediately.
+
+After all answers are recorded the skill moves to Step 2 — searching
+benchmarks and pricing for OpenRouter models that can reach Opus 4.8 territory,
+with a vision alias for the rare-vision requirement.
