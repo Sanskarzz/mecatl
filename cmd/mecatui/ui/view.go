@@ -65,7 +65,7 @@ func (m Model) View() tea.View {
 	case m.showHelp:
 		// Help wins among the overlays (they don't coexist in practice, but help is
 		// the keyboard-owning one when set).
-		body = renderHelpOverlay(m.deps.Theme, m.caps, m.width, m.vp.Height())
+		body = renderHelpOverlay(m.deps.Theme, m.caps, m.width, m.vp.Height(), m.agentsKeyMarking(), m.jumpKeyMarking())
 	case m.phase == phaseAwaitingApproval:
 		body = m.rend.renderPermissionModal(m.ask, m.expandTools, len(m.askQueue), m.width, m.vp.Height())
 	case m.mcp.view != mcpNone:

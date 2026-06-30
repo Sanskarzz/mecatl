@@ -15,6 +15,7 @@ import (
 
 // config is the resolved CLI/env configuration for mecatui.
 type config struct {
+	keymap *cliconfig.KeyValueList
 	// server is the external mecated gRPC address (host:port). Empty means AUTO:
 	// probe the loopback default and, if nothing answers, host an embedded server
 	// in-process over a UNIX socket (see cmd/mecatui/embed).
@@ -275,6 +276,10 @@ func parseFlags(args []string) (config, error) {
 	fs.BoolVar(&cfg.noAltScreen, "inline", false, "alias for --no-alt-screen: render inline in the normal buffer, preserving native scrollback/search")
 	fs.BoolVar(&cfg.noMouse, "no-mouse", false, "disable mouse capture on the alt screen so the terminal's NATIVE click-drag selection works (for tmux/zellij/web terminals that strip OSC52, or when you prefer native select); trades away in-app mouse-wheel scroll and the in-app drag-select/copy layer. Keyboard scroll (pgup/pgdn/home/end) is unaffected. Or set MECATUI_NO_MOUSE=1")
 	fs.BoolVar(&cfg.noBanner, "no-banner", false, "disable the welcome splash (mascot + gradient wordmark); the plain prompt hint and affordance list are still shown. Also forced on under --quiet or a non-interactive stdin")
+
+	// Keymap overrides: action=chords (comma-separated), repeatable.
+	cfg.keymap = new(cliconfig.KeyValueList)
+	fs.Var(cfg.keymap, "keymap", "rebind a key: Action=chord[,chord2] (repeatable). Actions: Agents, ScrollU, ScrollD, ScrollTop, ScrollBottom, ModeSwitch, MCPPanel, Resources, Prompts, Up, Down, Choose, Close, Refresh, Tasks, Findings, JumpTop, JumpEnd, NextTab, CancelChild, ExpandTools, Help, Effort, Submit, Newline, Cancel, Paste, Quit, Allow, AllowAlways, Deny, SetGlobalDefault")
 
 	fs.StringVar(&cfg.model, "model", "", "model identifier for the embedded server (empty: use the provider-appropriate default; ignored when dialling an external server)")
 	fs.StringVar(&cfg.defaultProvider, "default-provider", "", "embedded server only: deployment-wide default provider id shared by every client (e.g. openai, openrouter, anthropic); overrides the built-in provider preference for zero-selector sessions while a client-side selection still wins. Validated FAIL-FAST at startup: an unknown or unavailable provider refuses to start")

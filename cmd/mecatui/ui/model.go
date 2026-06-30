@@ -162,6 +162,10 @@ type Deps struct {
 	// bug). Default OFF (zero cost when unset); main.go reads the env var.
 	DebugMouse bool
 
+		// KeyOverrides maps a keyMap field name (e.g. "Agents") to its replacement chord(s).
+		// nil = no overrides, byte-identical to today. Resolved+validated in composition.
+		KeyOverrides map[string][]string
+
 	// onPhase is a test-only observer (nil in production, unexported so no external
 	// caller can set it) invoked by Update on the SINGLE update goroutine after each
 	// reduced message, with the model's current phase. The teatest cases use it to
@@ -543,7 +547,7 @@ func New(deps Deps) Model {
 
 	return Model{
 		deps:  deps,
-		keys:  defaultKeys(),
+		keys:  applyKeyOverrides(defaultKeys(), deps.KeyOverrides),
 		rend:  newRenderer(th),
 		phase: phaseConnecting,
 		ta:    ta,

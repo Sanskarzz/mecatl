@@ -113,7 +113,7 @@ func TestHelpAnnotationsTrackCaps(t *testing.T) {
 }
 
 // m_helpBody renders just the help body for caps (no centering), for content
-// assertions.
+// assertions. Uses the default keys since the tests don't wire custom keymaps.
 func m_helpBody(caps client.Capabilities) string {
-	return helpBody(aztec(), caps)
+	return helpBody(aztec(), caps, "ctrl+a", "home/end")
 }

@@ -1,6 +1,9 @@
 package ui
 
-import "charm.land/bubbles/v2/key"
+import (
+	"charm.land/bubbles/v2/key"
+	"strings"
+)
 
 // keyMap is the mecatui key binding set. Submit/newline are distinguished in
 // Update via msg.String() ("enter" vs "shift+enter") because Bubble Tea v2
@@ -281,4 +284,149 @@ func defaultKeys() keyMap {
 			key.WithHelp("ctrl+g", "set global default"),
 		),
 	}
+}
+
+// applyKeyOverrides returns a copy of km with overridden key sets and rebuilt help short keys.
+// Unknown action names in ov are ignored — composition-side validator rejects them at load.
+func applyKeyOverrides(km keyMap, ov map[string][]string) keyMap {
+	if ov == nil || len(ov) == 0 {
+		return km
+	}
+	/* removed desc map; using existing binding help */
+	_ = 0
+	/*
+		"Submit":           "send",
+		"Newline":          "newline",
+		"Cancel":           "cancel run",
+		"Paste":            "paste image",
+		"Quit":             "quit",
+		"Allow":            "allow",
+		"AllowAlways":      "always allow (session)",
+		"Deny":             "deny",
+		"ScrollU":          "scroll up",
+		"ScrollD":          "scroll down",
+		"ScrollTop":        "scroll to top",
+		"ScrollBottom":     "scroll to bottom",
+		"ModeSwitch":       "switch mode",
+		"MCPPanel":         "MCP inventory",
+		"Resources":        "MCP resources",
+		"Prompts":          "MCP prompts",
+		"Agents":           "agents (subagents / teams)",
+		"Effort":           "reasoning-effort picker",
+		"NextTab":          "switch tab",
+		"CancelChild":      "cancel subagent",
+		"Up":               "up",
+		"Down":             "down",
+		"Choose":           "select",
+		"Close":            "close",
+		"Refresh":          "refresh",
+		"Tasks":            "tasks",
+		"Findings":         "findings",
+		"JumpTop":          "first",
+		"JumpEnd":          "last",
+		"ExpandTools":      "expand/collapse details",
+		"Help":             "help",
+		"SetGlobalDefault": "set global default",
+	*/
+	// helper to join chords for short help
+	join := func(list []string) string { return strings.Join(list, ",") }
+	// Copy km into a new value and override field-by-field via setters.
+	// We cannot reflect easily without import; assign explicitly for clarity.
+	if chords, ok := ov["Submit"]; ok {
+		km.Submit = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Submit.Help().Desc))
+	}
+	if chords, ok := ov["Newline"]; ok {
+		km.Newline = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Newline.Help().Desc))
+	}
+	if chords, ok := ov["Cancel"]; ok {
+		km.Cancel = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Cancel.Help().Desc))
+	}
+	if chords, ok := ov["Paste"]; ok {
+		km.Paste = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Paste.Help().Desc))
+	}
+	if chords, ok := ov["Quit"]; ok {
+		km.Quit = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Quit.Help().Desc))
+	}
+	if chords, ok := ov["Allow"]; ok {
+		km.Allow = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Allow.Help().Desc))
+	}
+	if chords, ok := ov["AllowAlways"]; ok {
+		km.AllowAlways = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.AllowAlways.Help().Desc))
+	}
+	if chords, ok := ov["Deny"]; ok {
+		km.Deny = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Deny.Help().Desc))
+	}
+	if chords, ok := ov["ScrollU"]; ok {
+		km.ScrollU = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.ScrollU.Help().Desc))
+	}
+	if chords, ok := ov["ScrollD"]; ok {
+		km.ScrollD = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.ScrollD.Help().Desc))
+	}
+	if chords, ok := ov["ScrollTop"]; ok {
+		km.ScrollTop = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.ScrollTop.Help().Desc))
+	}
+	if chords, ok := ov["ScrollBottom"]; ok {
+		km.ScrollBottom = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.ScrollBottom.Help().Desc))
+	}
+	if chords, ok := ov["ModeSwitch"]; ok {
+		km.ModeSwitch = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.ModeSwitch.Help().Desc))
+	}
+	if chords, ok := ov["MCPPanel"]; ok {
+		km.MCPPanel = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.MCPPanel.Help().Desc))
+	}
+	if chords, ok := ov["Resources"]; ok {
+		km.Resources = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Resources.Help().Desc))
+	}
+	if chords, ok := ov["Prompts"]; ok {
+		km.Prompts = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Prompts.Help().Desc))
+	}
+	if chords, ok := ov["Agents"]; ok {
+		km.Agents = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Agents.Help().Desc))
+	}
+	if chords, ok := ov["NextTab"]; ok {
+		km.NextTab = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.NextTab.Help().Desc))
+	}
+	if chords, ok := ov["CancelChild"]; ok {
+		km.CancelChild = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.CancelChild.Help().Desc))
+	}
+	if chords, ok := ov["ExpandTools"]; ok {
+		km.ExpandTools = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.ExpandTools.Help().Desc))
+	}
+	if chords, ok := ov["Help"]; ok {
+		km.Help = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Help.Help().Desc))
+	}
+	if chords, ok := ov["Effort"]; ok {
+		km.Effort = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Effort.Help().Desc))
+	}
+	if chords, ok := ov["SetGlobalDefault"]; ok {
+		km.SetGlobalDefault = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.SetGlobalDefault.Help().Desc))
+	}
+	if chords, ok := ov["Up"]; ok {
+		km.Up = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Up.Help().Desc))
+	}
+	if chords, ok := ov["Down"]; ok {
+		km.Down = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Down.Help().Desc))
+	}
+	if chords, ok := ov["Choose"]; ok {
+		km.Choose = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Choose.Help().Desc))
+	}
+	if chords, ok := ov["Close"]; ok {
+		km.Close = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Close.Help().Desc))
+	}
+	if chords, ok := ov["Refresh"]; ok {
+		km.Refresh = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Refresh.Help().Desc))
+	}
+	if chords, ok := ov["Tasks"]; ok {
+		km.Tasks = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Tasks.Help().Desc))
+	}
+	if chords, ok := ov["Findings"]; ok {
+		km.Findings = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Findings.Help().Desc))
+	}
+	if chords, ok := ov["JumpTop"]; ok {
+		km.JumpTop = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.JumpTop.Help().Desc))
+	}
+	if chords, ok := ov["JumpEnd"]; ok {
+		km.JumpEnd = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.JumpEnd.Help().Desc))
+	}
+	return km
 }
