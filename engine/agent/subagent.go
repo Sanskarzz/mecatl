@@ -231,9 +231,9 @@ type childCapableTool interface {
 // subagent is a one-shot, focused investigation: it must not run away. These
 // defaults are intentionally tighter than a typical parent session.
 var defaultChildLimits = session.Limits{
-	MaxTurns:               100,
-	MaxToolCalls:           400,
-	MaxConsecutiveFailures: 3,
+	MaxTurns:               500,
+	MaxToolCalls:           2000,
+	MaxConsecutiveFailures: 5,
 }
 
 // DefaultChildLimits returns the default per-child/per-member stop conditions a

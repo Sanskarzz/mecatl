@@ -107,7 +107,7 @@ func TestRunBoundsInventoryIsComplete(t *testing.T) {
 	} {
 		switch r.name {
 		case "defaultChildLimits":
-			wantChild := session.Limits{MaxTurns: 100, MaxToolCalls: 400, MaxConsecutiveFailures: 3}
+			wantChild := session.Limits{MaxTurns: 500, MaxToolCalls: 2000, MaxConsecutiveFailures: 5}
 			if r.limits != wantChild {
 				t.Errorf("defaultChildLimits = %+v, want %+v — update the doc table AND this inventory", r.limits, wantChild)
 			}

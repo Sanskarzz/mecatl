@@ -267,12 +267,12 @@ func TestSubagentNamedAgentLimitsBindChildSession(t *testing.T) {
 
 // TestSubagentNamedAgentNoLimitsUsesDefault proves a def with NO per-run limits (a zero
 // AgentMeta.Limits) runs under the Subagent tool's DEFAULT child limits, unchanged: the
-// child loops past 2 turns up to the default MaxTurns (100).
+// child loops past 2 turns up to the default MaxTurns (500).
 func TestSubagentNamedAgentNoLimitsUsesDefault(t *testing.T) {
 	defaultEngine := childEngineWith(mockllm.New(mockllm.TextTurn("DEFAULT")), catalogWith(t))
-	// Script more turns than the default MaxTurns (100) so the DEFAULT cap, not script
+	// Script more turns than the default MaxTurns (500) so the DEFAULT cap, not script
 	// exhaustion, is what stops the run.
-	looseEngine, looseLLM := readLoopChild(t, 120)
+	looseEngine, looseLLM := readLoopChild(t, 520)
 
 	task := agent.NewSubagentTool(defaultEngine, agent.WithAgentEngines(
 		map[string]*agent.Engine{"loose": looseEngine},

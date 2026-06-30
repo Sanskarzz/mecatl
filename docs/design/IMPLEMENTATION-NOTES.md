@@ -2046,7 +2046,7 @@ new cascade tier knob does not.
 | ask-reviewer breaker | 3 | `engine/agent/askadjudicator.go` (`DefaultAskReviewMaxDenies`) | per run (consecutive non-allow reviewer outcomes) | `Deps.ChildAskReviewMaxDenies` ← `Config.SubagentAskReviewerMaxDenies` ← `--subagent-ask-reviewer-max-denies`; `<=0`→this |
 | model-router breaker | 3 | `engine/agent/modelrouter.go` (`defaultModelRouterMaxMisses`) | per run (router circuit-breaker) | not configurable |
 | preserved-fork LRU cap | 8 | `engine/agent/forkreaper.go` (`DefaultPreservedForkCap`) | process-wide preserved-winner-fork LRU | `NewLRUForkReaper(cap)`; non-positive→this |
-| child stop limits | 100 / 400 / 3 | `engine/agent/subagent.go` (`defaultChildLimits`) | per Subagent child / team member / Parallel branch | `WithChildLimits`; agent-def frontmatter merged per-field; per-call `max_turns`/`max_tool_calls` tighten-only |
+| child stop limits | 500 / 2000 / 5 | `engine/agent/subagent.go` (`defaultChildLimits`) | per Subagent child / team member / Parallel branch | `WithChildLimits`; agent-def frontmatter merged per-field; per-call `max_turns`/`max_tool_calls` tighten-only |
 | ask-reviewer run limits | 1 / 1 / 1 | `engine/agent/askadjudicator.go` (`askReviewLimits`) | one-shot ask-reviewer run | not configurable |
 | guardrail-checker run limits | 1 / 1 / 1 | `engine/agent/guardrailcheck.go` (`guardrailCheckLimits`) | one-shot guardrail checker run | not configurable |
 
@@ -2067,7 +2067,7 @@ new cascade tier knob does not.
    `deploymentMaxToolCalls=8000` / `deploymentMaxConsecutiveFailures=5`) via
    `defaultLimits()` → `Config.Limits` → main-engine `Deps.Limits`.
 2. **Child/member default** (`engine/agent/subagent.go` `defaultChildLimits`,
-   100/400/3) is *tighter* and applies to Subagent children + team members + Parallel
+   500/2000/5) is *tighter* and applies to Subagent children + team members + Parallel
    branches unless overridden. A child inherits the deployment default ONLY through
    `WithDefaults` when a def pins one field.
 3. **Agent-def frontmatter** `maxTurns` / `maxToolCalls` → merged per-field over
