@@ -702,6 +702,13 @@ type Manager struct {
 // server does not take down the harness; the surviving servers are returned in
 // the Manager. If onError is nil, connection errors are silently skipped.
 //
+// Connections run CONCURRENTLY with a bounded fan-out (maxConnectConcurrency),
+// so N independent servers connect in ~max(handshake) instead of N×(handshake).
+// This is the dominant cost of embedded-server startup when ToolHive discovers
+// multiple workloads (issue #218): the connects were serial, each bounded by
+// defaultConnectTimeout. Order of m.servers is NOT guaranteed — callers must not
+// assume insertion order (none do; Tools/Servers are name-routed, not positional).
+//
 // NewManager returns an error only if no servers could be connected AND at
 // least one was configured, so the caller can distinguish "nothing usable" from
 // "all good".
@@ -710,25 +717,60 @@ func NewManager(ctx context.Context, configs []ServerConfig, onError func(cfg Se
 		diag = port.NopDiagnostics{}
 	}
 	m := &Manager{}
+	if len(configs) == 0 {
+		return m, nil
+	}
+
+	// Connect every server concurrently under a bounded semaphore. A per-server
+	// result is collected regardless of outcome so the attempted/lastErr accounting
+	// is identical to the prior serial loop. The cap bounds goroutine blast for an
+	// operator with dozens of static servers; it is well above the typical ToolHive
+	// default-group size so it is not the limiting factor in practice.
+	type result struct {
+		srv *Server
+		cfg ServerConfig
+		err error
+	}
+	results := make([]result, len(configs))
+	sem := make(chan struct{}, maxConnectConcurrency)
+	var wg sync.WaitGroup
+	for i, cfg := range configs {
+		wg.Add(1)
+		go func(i int, cfg ServerConfig) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			srv, err := Connect(ctx, cfg, diag)
+			results[i] = result{srv: srv, cfg: cfg, err: err}
+		}(i, cfg)
+	}
+	wg.Wait()
+
+	// Fold results in config order so the error reporting (onError + lastErr) is
+	// deterministic regardless of which connect finished first.
 	var lastErr error
-	var attempted int
-	for _, cfg := range configs {
-		attempted++
-		srv, err := Connect(ctx, cfg, diag)
-		if err != nil {
-			lastErr = err
+	for _, r := range results {
+		if r.err != nil {
+			lastErr = r.err
 			if onError != nil {
-				onError(cfg, err)
+				onError(r.cfg, r.err)
 			}
 			continue
 		}
-		m.servers = append(m.servers, srv)
+		m.servers = append(m.servers, r.srv)
 	}
-	if attempted > 0 && len(m.servers) == 0 {
+	if len(results) > 0 && len(m.servers) == 0 {
 		return m, fmt.Errorf("mcp: no servers could be connected: %w", lastErr)
 	}
 	return m, nil
 }
+
+// maxConnectConcurrency caps the number of MCP servers connecting in parallel.
+// It is well above the typical ToolHive default-group size (7) while bounding
+// goroutine/HTTP-connection fan-out for an operator with dozens of static
+// servers. Each Connect is still independently bounded by its own (or
+// defaultConnectTimeout) timeout.
+const maxConnectConcurrency = 16
 
 // Servers returns the successfully connected *Server values, for callers that
 // need the live objects (tools/close), such as the composition root and tests.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	neturl "net/url"
@@ -382,6 +383,71 @@ func TestManagerSkipsUnreachableServer(t *testing.T) {
 	}
 	if len(m.Tools()) != 3 {
 		t.Errorf("expected 3 tools from the good server, got %d", len(m.Tools()))
+	}
+}
+
+// TestManagerConnectsConcurrently asserts NewManager connects servers in
+// PARALLEL, not serially (issue #218). It stands up three real MCP servers that
+// each impose a fixed handshake delay via a wrapped handler, then asserts the
+// whole NewManager completes in materially less than the sum of the per-server
+// delays — the serial loop would take >= 3×delay; the concurrent fan-out takes
+// ~1×delay. The bound is generous (half the serial floor) so it does not flake
+// under -race scheduling, while still catching a regression to serial connect.
+func TestManagerConnectsConcurrently(t *testing.T) {
+	const perServerDelay = 250 * time.Millisecond
+	const numServers = 3
+
+	urls := make([]string, 0, numServers)
+	for i := 0; i < numServers; i++ {
+		srv := mcpsdk.NewServer(&mcpsdk.Implementation{
+			Name: fmt.Sprintf("slow-%d", i), Version: "v1"}, nil)
+		mcpsdk.AddTool(srv, &mcpsdk.Tool{
+			Name: fmt.Sprintf("t%d", i), Description: "test",
+		}, func(_ context.Context, _ *mcpsdk.CallToolRequest, _ noArgs) (*mcpsdk.CallToolResult, any, error) {
+			return &mcpsdk.CallToolResult{
+				Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: "ok"}},
+			}, nil, nil
+		})
+		handler := mcpsdk.NewStreamableHTTPHandler(func(*http.Request) *mcpsdk.Server { return srv }, nil)
+		// Wrap the handler so EVERY request (initialize + tools/list) sleeps, modelling
+		// a server with non-trivial handshake latency. This is the cost the serial loop
+		// would serialize N×; the concurrent fan-out overlaps them.
+		httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(perServerDelay)
+			handler.ServeHTTP(w, r)
+		}))
+		t.Cleanup(httpSrv.Close)
+		urls = append(urls, httpSrv.URL)
+	}
+
+	cfgs := make([]ServerConfig, numServers)
+	for i, u := range urls {
+		cfgs[i] = ServerConfig{Name: fmt.Sprintf("s%d", i), URL: u, Timeout: 10 * time.Second}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	m, err := NewManager(ctx, cfgs, nil, nil)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	t.Cleanup(func() { _ = m.Close() })
+
+	if len(m.Servers()) != numServers {
+		t.Fatalf("expected %d connected servers, got %d", numServers, len(m.Servers()))
+	}
+	// Serial connect would serialize each server's full handshake (initialize +
+	// tools/list + resources/prompts = multiple round-trips, each sleeping
+	// perServerDelay). With 3 servers that is well over 1s; the concurrent fan-out
+	// overlaps them so the whole call should be ~one server's handshake. Use a
+	// generous bound that catches a regression to the serial loop (which would
+	// take >= 3× one-server handshake) without flaking under -race scheduling.
+	if elapsed >= 1500*time.Millisecond {
+		t.Errorf("NewManager took %v, expected < 1.5s (serial connect would take ~3× a single server's handshake; parallel regressed?)",
+			elapsed)
 	}
 }
 
