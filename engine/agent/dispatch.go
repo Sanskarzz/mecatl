@@ -161,17 +161,30 @@ func (e *Engine) runReadBatch(ctx context.Context, r *Run, sess *session.Session
 			e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(out[c.ID])})
 			continue
 		}
-		effective, blocked, msg, herr := e.preHook(ctx, r, sess, turnIdx, c)
+		pre, herr := e.preHook(ctx, r, sess, turnIdx, c)
 		if herr != nil {
 			return nil, true
 		}
-		if blocked {
-			out[c.ID] = session.NewToolError(c.ID, msg)
+		if pre.blocked {
+			out[c.ID] = session.NewToolError(c.ID, pre.msg)
 			e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(out[c.ID])})
 			continue
 		}
+		if pre.askApproval {
+			// A hook BLOCK refined into an approval (ADR 0062). Sequence it HERE in
+			// Phase 1 — one ask at a time — exactly like a permission ask; it must
+			// NEVER be raised from the parallel fan-out (Phase 2). The call runs (on
+			// allow) or is denied synchronously; either way its result is recorded now
+			// and it is excluded from the concurrent execution batch.
+			res, cancelled := e.askHookApproval(ctx, r, sess, ws, turnIdx, c, t, pre.msg)
+			if cancelled {
+				return nil, true
+			}
+			out[c.ID] = res
+			continue
+		}
 		// Execute the EFFECTIVE call (args possibly rewritten by the hook).
-		toRun = append(toRun, pending{call: effective, t: t})
+		toRun = append(toRun, pending{call: pre.effective, t: t})
 	}
 
 	// Phase 2: execute the cleared read-only calls concurrently.
@@ -423,12 +436,36 @@ func (e *Engine) resolvePendingCall(ctx context.Context, r *Run, sess *session.S
 		e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
 		return res, false
 	}
-	effective, blocked, msg, herr := e.preHook(ctx, r, sess, turnIdx, pendingCall)
+	// HOOK-ORIGINATED resume (ADR 0062): a hook-blocked call that the human authorized
+	// while parked AWAITING must EXECUTE WITHOUT re-running the PreToolUse hook —
+	// re-running it would re-block (re-ask), and a fresh process has no in-memory
+	// waiver to short-circuit it. The serialized HookOriginated marker is the only
+	// durable signal that this exact blocked call was already approved, so on Allow we
+	// skip preHook and execute directly (a deny was handled above). This mirrors
+	// askHookApproval's live-path allow tail.
+	if ask.HookOriginated {
+		var enqueue time.Time
+		if e.deps.Clock != nil {
+			enqueue = e.deps.Clock.Now()
+		}
+		return e.execute(ctx, r, sess, ws, turnIdx, pendingCall, t, enqueue), false
+	}
+
+	pre, herr := e.preHook(ctx, r, sess, turnIdx, pendingCall)
 	if herr != nil {
 		return session.ToolResult{}, true // ctx cancelled while running the hook
 	}
-	if blocked {
-		res := session.NewToolError(pendingCall.ID, msg)
+	if pre.blocked {
+		res := session.NewToolError(pendingCall.ID, pre.msg)
+		e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
+		return res, false
+	}
+	// A non-hook-originated (policy) ask cannot itself yield an askable hook block on
+	// resume: a re-run preHook here that wanted to ask would have nowhere to surface
+	// (the run is already mid-resume). Treat an askApproval refinement as a terminal
+	// block on this path (fail-safe) so the resumed call never silently runs unasked.
+	if pre.askApproval {
+		res := session.NewToolError(pendingCall.ID, pre.msg)
 		e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
 		return res, false
 	}
@@ -436,7 +473,7 @@ func (e *Engine) resolvePendingCall(ctx context.Context, r *Run, sess *session.S
 	if e.deps.Clock != nil {
 		enqueue = e.deps.Clock.Now()
 	}
-	return e.execute(ctx, r, sess, ws, turnIdx, effective, t, enqueue), false
+	return e.execute(ctx, r, sess, ws, turnIdx, pre.effective, t, enqueue), false
 }
 
 // runOne handles a single (mutating or unknown) tool call serially: authorize,
@@ -470,18 +507,75 @@ func (e *Engine) runOne(ctx context.Context, r *Run, sess *session.Session, ws t
 		return res, false
 	}
 
-	effective, blocked, msg, herr := e.preHook(ctx, r, sess, turnIdx, c)
+	pre, herr := e.preHook(ctx, r, sess, turnIdx, c)
 	if herr != nil {
 		return session.ToolResult{}, true
 	}
-	if blocked {
-		res := session.NewToolError(c.ID, msg)
+	if pre.blocked {
+		res := session.NewToolError(c.ID, pre.msg)
 		e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
 		return res, false
 	}
+	if pre.askApproval {
+		// A hook BLOCK refined into an approval (ADR 0062): surface it to the human.
+		// It runs the call on allow, denies it otherwise — all serial, like a policy
+		// ask (runOne is the mutate-serial path; surfacing here never overlaps a batch).
+		return e.askHookApproval(ctx, r, sess, ws, turnIdx, c, t, pre.msg)
+	}
 
 	// Execute the EFFECTIVE call (args possibly rewritten by the PreToolUse hook).
-	return e.execute(ctx, r, sess, ws, turnIdx, effective, t, enqueue), false
+	return e.execute(ctx, r, sess, ws, turnIdx, pre.effective, t, enqueue), false
+}
+
+// surfaceAsk is the shared SPINE both ask sites (authorize's policy ask and
+// askHookApproval's guardrail ask) run: register the resolution channel BEFORE
+// pausing/emitting (so a racing Approve can't be lost) → PauseForApproval (with
+// discard-on-err) → emit EvPermissionAsk → await the verdict → ResumeWith → emit the
+// resolved EvApproval. The caller supplies the fully-built PendingAsk (each site owns
+// its own provenance bits — ConfiguredAsk/FlooredConfiguredAllow vs HookOriginated)
+// and keeps only its verdict→action tail.
+//
+// Returns: the awaited verdictResult; ok=false when ctx was cancelled while awaiting
+// (the caller terminates the call as cancelled); paused=false when PauseForApproval
+// failed (the caller synthesizes its own "cannot pause" result — the channel was
+// already discarded here). When paused is false, verdictResult/ok are zero and MUST
+// be ignored. The EvApproval is emitted here ONLY on a real verdict (ok), exactly as
+// before — a cancelled await emits none.
+func (e *Engine) surfaceAsk(ctx context.Context, r *Run, sess *session.Session, turnIdx int, ask session.PendingAsk) (res approval, ok, paused bool) {
+	ch := r.asks.register(ask.AskID)
+	if err := sess.PauseForApproval(ask); err != nil {
+		r.asks.discard(ask.AskID)
+		return approval{}, false, false
+	}
+	a := ask
+	e.emit(r, session.Event{Type: session.EvPermissionAsk, Turn: turnIdx, Ask: &a})
+
+	verdictResult, ok := r.asks.await(ctx, ask.AskID, ch)
+
+	// Resume the session regardless of verdict; the caller owns acting on the
+	// decision, so the aggregate only reconciles its own lifecycle.
+	if _, err := sess.ResumeWith(); err != nil {
+		_ = err // already resumed/terminal (e.g. cancel path); fall through.
+	}
+
+	if !ok {
+		// ctx cancelled while awaiting — no verdict, no EvApproval.
+		return approval{}, false, true
+	}
+
+	// Record the resolved verdict on the event stream (the durable EventLog consumes
+	// it at the server relay; the loop only emits — it never touches a store). Tool
+	// NAME + verdict string + askID + the opaque gated call id only — no raw args, no
+	// deny-reason body (gauntlet #7; see ApprovalPayload). AllowAlways mirrors the
+	// verdict, not the policy outcome.
+	e.emit(r, session.Event{Type: session.EvApproval, Turn: turnIdx, Approval: &session.ApprovalPayload{
+		AskID:       ask.AskID,
+		Verdict:     session.VerdictString(verdictResult.verdict),
+		Tool:        ask.Tool,
+		Call:        ask.Call,
+		AllowAlways: verdictResult.verdict == session.VerdictAllowAlways,
+	}})
+	return verdictResult, true, true
 }
 
 // authorize evaluates the permission policy for a call and, on Ask, pauses the
@@ -518,43 +612,15 @@ func (e *Engine) authorize(ctx context.Context, r *Run, sess *session.Session, w
 		FlooredConfiguredAllow: decision.FlooredConfiguredAllow,
 	}
 
-	// Register the resolution channel BEFORE pausing/emitting so an Approve that
-	// races in cannot be lost.
-	ch := r.asks.register(askID)
-	if err := sess.PauseForApproval(ask); err != nil {
-		r.asks.discard(askID)
+	verdictResult, ok, paused := e.surfaceAsk(ctx, r, sess, turnIdx, ask)
+	if !paused {
 		return governance.PermissionDecision{Effect: governance.Deny, Reason: "internal: cannot pause"}, false
 	}
-	a := ask
-	e.emit(r, session.Event{Type: session.EvPermissionAsk, Turn: turnIdx, Ask: &a})
-
-	verdictResult, ok := r.asks.await(ctx, askID, ch)
-	verdict := verdictResult.verdict
-
-	// Resume the session regardless of verdict; the loop (below) owns acting on
-	// the decision, so the aggregate only reconciles its own lifecycle.
-	if _, err := sess.ResumeWith(); err != nil {
-		// Already resumed/terminal (e.g. cancel path); fall through.
-		_ = err
-	}
-
 	if !ok {
 		// ctx cancelled while awaiting.
 		return governance.PermissionDecision{Effect: governance.Deny, Reason: "cancelled"}, true
 	}
-
-	// Record the resolved verdict on the event stream (the durable EventLog
-	// consumes it at the server relay; the loop only emits — it never touches a
-	// store). Tool NAME + verdict string + askID + the opaque gated call id only —
-	// no raw args, no deny-reason body (gauntlet #7; see ApprovalPayload).
-	// AllowAlways mirrors the verdict, not the policy outcome.
-	e.emit(r, session.Event{Type: session.EvApproval, Turn: turnIdx, Approval: &session.ApprovalPayload{
-		AskID:       askID,
-		Verdict:     session.VerdictString(verdict),
-		Tool:        c.Name,
-		Call:        c.ID,
-		AllowAlways: verdict == session.VerdictAllowAlways,
-	}})
+	verdict := verdictResult.verdict
 
 	switch verdict {
 	case session.VerdictAllowAlways:
@@ -586,12 +652,40 @@ func (e *Engine) authorize(ctx context.Context, r *Run, sess *session.Session, w
 	}
 }
 
-// preHook runs the PreToolUse hook. It returns blocked=true with the hook's
-// message when the hook vetoes the call (exit 2), and a non-nil error only when
-// ctx was cancelled (the hook ran under a cancelled context). When the hook is
-// allowed, it returns the EFFECTIVE call to execute: identical to the input call
-// unless the hook returned a non-empty HookOutcome.Mutated payload, in which case
-// the call's Args are rewritten (see the mutation note below).
+// preHookResult is the outcome of running the PreToolUse hook, normalized for every
+// caller (runOne, runReadBatch Phase 1, resolvePendingCall). Exactly one of the
+// three terminal shapes holds:
+//   - PLAIN ALLOW: blocked=false, askApproval=false — execute effective.
+//   - TERMINAL BLOCK: blocked=true, msg set — synthesize a NewToolError(msg).
+//   - ASKABLE BLOCK: askApproval=true, msg set, effective=c — surface to the human
+//     via askHookApproval (INTERACTIVE engines only; the headless degrade to a
+//     terminal block already happened inside preHook, so askApproval is never true
+//     when e.deps.Interactive is false).
+//
+// The tri-state invariant (at most one of blocked/askApproval set) is guaranteed by
+// preHook being the SOLE constructor — the struct does not enforce it. Do not build a
+// preHookResult outside preHook; a caller reading {blocked, askApproval} both true
+// would be a preHook bug, not a possible input.
+//
+// err is non-nil ONLY when ctx was cancelled (the hook ran under a cancelled
+// context); the caller then terminates as cancelled.
+type preHookResult struct {
+	effective   session.ToolCall
+	blocked     bool
+	askApproval bool
+	msg         string
+}
+
+// preHook runs the PreToolUse hook and returns a normalized preHookResult (plus a
+// cancellation error). It returns a TERMINAL block when the hook vetoes the call
+// (exit 2 / hook error), an ASKABLE block when the hook refined a Block into an
+// approval (HookOutcome.AskApproval) AND a human approver is attached
+// (e.deps.Interactive) — a HEADLESS engine DEGRADES an askable block to a terminal
+// block here, INSIDE preHook, so every caller inherits the fail-safe automatically
+// (ADR 0062) — and otherwise a PLAIN allow carrying the EFFECTIVE call to execute:
+// identical to the input call unless the hook returned a non-empty
+// HookOutcome.Mutated payload, in which case the call's Args are rewritten (see the
+// mutation note below).
 //
 // The PreToolUse HookEvent.Input is the tool's raw arguments JSON (c.Args, no
 // wrapper). HookOutcome.Mutated is interpreted SYMMETRICALLY: it is the rewritten
@@ -606,12 +700,12 @@ func (e *Engine) authorize(ctx context.Context, r *Run, sess *session.Session, w
 // and strictly more trusted than the model, so a hook is allowed to rewrite a
 // call past the policy that gated the model's original request (mirroring Claude
 // Code semantics). Callers MUST execute the returned call, not the input call.
-func (e *Engine) preHook(ctx context.Context, r *Run, sess *session.Session, turnIdx int, c session.ToolCall) (effective session.ToolCall, blocked bool, msg string, err error) {
+func (e *Engine) preHook(ctx context.Context, r *Run, sess *session.Session, turnIdx int, c session.ToolCall) (preHookResult, error) {
 	if e.deps.Hooks == nil {
-		return c, false, "", nil
+		return preHookResult{effective: c}, nil
 	}
 	if ctx.Err() != nil {
-		return c, false, "", ctx.Err()
+		return preHookResult{effective: c}, ctx.Err()
 	}
 	ev := governance.HookEvent{
 		Phase:     governance.PhasePreToolUse,
@@ -623,20 +717,27 @@ func (e *Engine) preHook(ctx context.Context, r *Run, sess *session.Session, tur
 	outcome, herr := e.deps.Hooks.Run(ctx, ev)
 	if herr != nil {
 		if ctx.Err() != nil {
-			return c, false, "", ctx.Err()
+			return preHookResult{effective: c}, ctx.Err()
 		}
 		// A hook execution error is surfaced to the model as a block annotation
 		// rather than aborting the whole run.
-		return c, true, fmt.Sprintf("PreToolUse hook error: %v", herr), nil
+		return preHookResult{blocked: true, msg: fmt.Sprintf("PreToolUse hook error: %v", herr)}, nil
 	}
 	if outcome.Block {
 		m := outcome.Message
 		if m == "" {
 			m = "blocked by PreToolUse hook"
 		}
+		// AskApproval refines the block into an approval ask — but ONLY when a human
+		// approver is attached. A headless engine DEGRADES to a terminal block here
+		// (fail-safe), so callers never see askApproval true without an interactive
+		// engine and the block annotation still fires for the operator/client.
+		if outcome.AskApproval && e.deps.Interactive {
+			return preHookResult{askApproval: true, msg: m, effective: c}, nil
+		}
 		e.emit(r, session.Event{Type: session.EvHook, Turn: turnIdx, Text: m,
 			Hook: &session.HookPayload{Phase: string(governance.PhasePreToolUse), Tool: c.Name, Decision: session.HookBlocked, CallID: c.ID}})
-		return c, true, m, nil
+		return preHookResult{blocked: true, msg: m}, nil
 	}
 	if len(outcome.Mutated) > 0 {
 		// Apply the mutation: the payload is the rewritten args JSON. Validate it as
@@ -645,7 +746,7 @@ func (e *Engine) preHook(ctx context.Context, r *Run, sess *session.Session, tur
 		if json.Valid(outcome.Mutated) {
 			e.emit(r, session.Event{Type: session.EvHook, Turn: turnIdx, Text: "PreToolUse hook rewrote tool arguments for " + c.Name,
 				Hook: &session.HookPayload{Phase: string(governance.PhasePreToolUse), Tool: c.Name, Decision: session.HookModified, CallID: c.ID}})
-			return session.NewToolCall(c.ID, c.Name, outcome.Mutated), false, "", nil
+			return preHookResult{effective: session.NewToolCall(c.ID, c.Name, outcome.Mutated)}, nil
 		}
 		e.emit(r, session.Event{Type: session.EvHook, Turn: turnIdx, Text: "PreToolUse hook returned a malformed argument mutation (ignored)",
 			Hook: &session.HookPayload{Phase: string(governance.PhasePreToolUse), Tool: c.Name, Decision: session.HookInfo, CallID: c.ID}})
@@ -656,7 +757,84 @@ func (e *Engine) preHook(ctx context.Context, r *Run, sess *session.Session, tur
 		e.emit(r, session.Event{Type: session.EvHook, Turn: turnIdx, Text: outcome.Message,
 			Hook: &session.HookPayload{Phase: string(governance.PhasePreToolUse), Tool: c.Name, Decision: session.HookAdvisory, CallID: c.ID}})
 	}
-	return c, false, "", nil
+	return preHookResult{effective: c}, nil
+}
+
+// askHookApproval surfaces a hook-originated PreToolUse block to the human as a
+// permission ask, mirroring authorize's ask block but keyed on the HOOK's reason
+// rather than a policy decision. It mints an askID, builds a HookOriginated
+// PendingAsk, registers the resolution channel, PauseForApproval → StateAwaiting,
+// emits EvPermissionAsk, and blocks on the verdict. On allow it executes the call
+// DIRECTLY (it does NOT re-run preHook — the human already authorized THIS blocked
+// call; re-running would re-block/re-ask); on AllowAlways it ALSO arms the optional
+// HookApprovalLearner so a later identical block does not re-ask. On deny/cancel it
+// synthesizes a deny/aborted result. It returns the result and a cancelled flag set
+// only when ctx was cancelled while awaiting.
+//
+// It is sequenced one-at-a-time exactly like a policy ask (runReadBatch resolves it
+// in Phase 1, never from the parallel fan-out), so two asks never surface at once.
+func (e *Engine) askHookApproval(ctx context.Context, r *Run, sess *session.Session, ws tool.Workspace, turnIdx int, c session.ToolCall, t tool.Tool, reason string) (session.ToolResult, bool) {
+	ask := session.PendingAsk{
+		AskID:          newAskID(sess.ID, sess.Counters.ToolCalls, c.ID, r.askDiscriminator),
+		Tool:           c.Name,
+		Args:           c.Args,
+		Reason:         reason,
+		Call:           c.ID,
+		HookOriginated: true,
+	}
+
+	// Run the SHARED ask spine (register → pause → emit → await → resume → EvApproval);
+	// only the verdict→action tail below is hook-specific.
+	verdictResult, ok, paused := e.surfaceAsk(ctx, r, sess, turnIdx, ask)
+	if !paused {
+		return session.NewToolError(c.ID, "internal: cannot pause for guardrail approval"), false
+	}
+	if !ok {
+		// ctx cancelled while awaiting.
+		return session.ToolResult{}, true
+	}
+	verdict := verdictResult.verdict
+
+	switch verdict {
+	case session.VerdictAllowAlways:
+		// Arm the optional waiver (HookApprovalLearner) so a later identical block in
+		// this session does not re-ask. The engine stays generic: it hands the neutral
+		// HookEvent (SessionID/Tool/Input) to the consumer, which decides the scope.
+		if learner, lok := e.deps.Hooks.(port.HookApprovalLearner); lok {
+			learner.LearnHookApproval(ctx, governance.HookEvent{
+				Phase:     governance.PhasePreToolUse,
+				Tool:      c.Name,
+				Input:     c.Args,
+				SessionID: string(sess.ID),
+				CallID:    string(c.ID),
+			})
+		}
+		// Execute DIRECTLY — do NOT re-run preHook (the human authorized this call).
+		var enqueue time.Time
+		if e.deps.Clock != nil {
+			enqueue = e.deps.Clock.Now()
+		}
+		return e.execute(ctx, r, sess, ws, turnIdx, c, t, enqueue), false
+	case session.VerdictAllowOnce:
+		var enqueue time.Time
+		if e.deps.Clock != nil {
+			enqueue = e.deps.Clock.Now()
+		}
+		return e.execute(ctx, r, sess, ws, turnIdx, c, t, enqueue), false
+	default:
+		// VerdictDeny (incl. the zero value / fail-safe). Operator visibility: a HUMAN
+		// denied a guardrail block — a distinct, grep-able record from a checker
+		// auto-block (which the modelhook adapter logs) and from the AllowAlways
+		// `guardrail-waived` line. It is a dispatch-time INFO, the sibling of authorize's
+		// policy-deny INFO (both record a call resolved against execution at the
+		// resolution site), NOT a new per-loop line. The model also sees the guardrail
+		// reason verbatim so it can re-route.
+		r.diag.Log(ctx, port.LevelInfo, "guardrail block denied by human",
+			"tool", c.Name, "turn", turnIdx, "decision", "deny")
+		res := session.NewToolError(c.ID, reason)
+		e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
+		return res, false
+	}
 }
 
 // execute runs the tool against the workspace, times it, runs the PostToolUse

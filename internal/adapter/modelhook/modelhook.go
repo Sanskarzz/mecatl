@@ -70,6 +70,11 @@ const (
 	// guardrailFindingMarker is a stable token on every finding diagnostic so an
 	// operator can grep the operator log for guardrail findings across sessions.
 	guardrailFindingMarker = "guardrail-finding"
+	// guardrailWaivedMarker is the stable token on the loud operator audit line emitted
+	// when a session WAIVER (ADR 0062, "Allow & don't ask again") authorizes a would-be
+	// block without surfacing — so an operator can grep the log for every time an
+	// enforcement was waived by a prior human verdict in the same session.
+	guardrailWaivedMarker = "guardrail-waived"
 	// guardrailDownThreshold is the consecutive-checker-failure count that escalates
 	// to the one-time "checker DOWN" sticky WARN (so a persistently-broken checker —
 	// an unguarded surface under fail-open — is impossible to miss in a per-call flood).
@@ -132,6 +137,13 @@ type Runner struct {
 	// set failClosed wins over the global (true tightens under warn; false loosens
 	// under fail). Default false (warn — the current behaviour).
 	failOnCheckerDown bool
+	// waiver is the session-keyed "Allow & don't ask again" holder (ADR 0062). A
+	// Pre-phase block first consults it: an armed, matching waiver for the session
+	// authorizes the block WITHOUT surfacing (the call runs). It is armed only from a
+	// genuine human AllowAlways verdict, routed through the engine's optional
+	// port.HookApprovalLearner — which this Runner implements (LearnHookApproval). nil
+	// is safe (Allows on nil → false) — the byte-identical no-waiver posture.
+	waiver *WaiverHolder
 }
 
 // Options configures a Runner.
@@ -153,6 +165,11 @@ type Options struct {
 	// (error/timeout): true = block all rules (fail-closed); false = warn (fail-open,
 	// the default). Per-rule failClosed overrides this when explicitly set.
 	FailOnCheckerDown bool
+	// Waiver is the shared session-keyed "Allow & don't ask again" holder (ADR 0062).
+	// nil disables the waiver path (byte-identical to off). The composition passes the
+	// SAME instance to every per-session Runner so a verdict armed on a session id is
+	// visible to whichever Runner that session's engine carries.
+	Waiver *WaiverHolder
 }
 
 // New constructs a guardrails Runner wrapping inner. When opts.Checker is nil OR no
@@ -172,14 +189,53 @@ func New(inner port.HookRunner, opts Options) *Runner {
 		failures:          &failureStreak{threshold: guardrailDownThreshold},
 		minContentBytes:   opts.MinContentBytes,
 		failOnCheckerDown: opts.FailOnCheckerDown,
+		waiver:            opts.Waiver,
 	}
 }
 
 // Compile-time assertion that *Runner satisfies the port.
 var _ port.HookRunner = (*Runner)(nil)
 
+// Compile-time assertion that *Runner ALSO satisfies the optional approval-learner
+// capability — the engine type-asserts it on Deps.Hooks and calls LearnHookApproval
+// on a human AllowAlways verdict for a hook-originated ask (ADR 0062).
+var _ port.HookApprovalLearner = (*Runner)(nil)
+
+// waiverKey is the concrete authorization key a waiver matches on for a PreToolUse
+// event: the Bash COMMAND (so two cosmetically-different invocations of the same
+// command normalize-equal), or the raw args JSON for any other tool. It is the SINGLE
+// key derivation shared by LearnHookApproval (arm) and check (consult) so the two
+// cannot drift. An unreadable Bash args object falls back to the raw input — the
+// waiver then keys on the verbatim args, still an EXACT match, never a blanket one.
+func waiverKey(ev governance.HookEvent) string {
+	if ev.Tool == "Bash" {
+		if c, ok := bashCmdFromArgs(string(ev.Input)); ok {
+			return c
+		}
+	}
+	return string(ev.Input)
+}
+
+// LearnHookApproval arms a session waiver from a human "Allow & don't ask again"
+// verdict (ADR 0062). The engine calls it with the neutral governance.HookEvent for
+// the approved hook-blocked call; the Runner derives the CONCRETE waiver key (Bash
+// command, else raw args) and arms the shared holder for an EXACT (normalized) match.
+// A nil waiver holder (the off posture) makes it a no-op (ArmFromApproval on nil is a
+// no-op).
+func (r *Runner) LearnHookApproval(_ context.Context, ev governance.HookEvent) {
+	r.waiver.ArmFromApproval(ev.SessionID, ev.Tool, waiverKey(ev))
+}
+
 // Run delegates non-tool phases straight to inner. For PreToolUse/PostToolUse it
 // runs inner FIRST, then the checker SECOND, and merges per decision 5.
+//
+// Approve-once flow (ADR 0062): a Pre-phase checker block is returned as an ASKABLE
+// block (HookOutcome{Block, AskApproval}) so an interactive engine surfaces it to the
+// human; a session WAIVER already granted by a prior AllowAlways verdict
+// short-circuits the checker entirely (no ask). A headless engine ignores AskApproval
+// and the block stands (fail-safe). The merge with inner is unchanged: block-dominant
+// (either blocks → blocked); AskApproval rides through mergeOutcomes so a checker
+// block that wants an ask keeps that bit on the merged outcome.
 func (r *Runner) Run(ctx context.Context, ev governance.HookEvent) (governance.HookOutcome, error) {
 	innerOut, innerErr := r.inner.Run(ctx, ev)
 
@@ -198,9 +254,36 @@ func (r *Runner) Run(ctx context.Context, ev governance.HookEvent) (governance.H
 }
 
 // check runs the guardrail checker for one matched rule and maps its verdict to a
-// HookOutcome per the rule's mode. It applies the min-content skip and the
-// fail-open/closed policy on a checker error/timeout.
+// HookOutcome per the rule's mode. It applies the session waiver short-circuit, the
+// min-content skip, and the fail-open/closed policy on a checker error/timeout.
 func (r *Runner) check(ctx context.Context, phase Phase, rule CompiledRule, ev governance.HookEvent) governance.HookOutcome {
+	// Session waiver (ADR 0062, "Allow & don't ask again"): a prior human AllowAlways
+	// verdict on a hook-originated ask armed a session-scoped waiver. A matching waiver
+	// authorizes a Pre-phase block WITHOUT surfacing AND without an LLM call — the call
+	// runs. It applies to Pre ONLY (the askable-block / approve-once path is
+	// PreToolUse-scoped; a Post block is the inert Mutated-to-error and was never
+	// surfaced as an ask). A loud audit line fires so the waiver is grep-able. It is
+	// consulted BEFORE the checker so a waived command costs zero latency on repeats.
+	if phase == PhasePre && r.waiver != nil {
+		if r.waiver.Allows(ev.SessionID, ev.Tool, waiverKey(ev)) {
+			r.diag.Log(ctx, port.LevelWarn,
+				"guardrails: session waiver in effect — a guardrail block was authorized by a prior 'Allow & don't ask again' verdict in this session",
+				findingFields(ev, phase, "marker", guardrailWaivedMarker)...)
+			return governance.HookOutcome{}
+		}
+	}
+	// Read-only Bash pre-filter (the local-shell cost guard): when the matched rule
+	// opts in, a Pre-phase Bash call whose command is CONFIDENTLY read-only skips the
+	// checker entirely — ZERO LLM calls, zero latency. Only mutating/outward commands
+	// reach the checker. It is fail-safe: an unparseable args object, a missing command
+	// field, or any command not provably read-only (substitution-as-verb, unknown verb)
+	// falls through to inspection. No diagnostic on the skip path — it must stay
+	// zero-cost.
+	if rule.skipReadOnlyBash && phase == PhasePre && ev.Tool == "Bash" {
+		if cmd, ok := bashCmdFromArgs(string(ev.Input)); ok && bashFullyReadOnly(cmd) {
+			return governance.HookOutcome{}
+		}
+	}
 	content := contentUnderReview(phase, ev)
 	// The min-content skip is a cost gate for the INBOUND (Post) direction only: a tiny
 	// inbound result cannot carry a meaningful injection. It must NEVER apply to the
@@ -358,19 +441,30 @@ func advisoryMessage(reason string) string {
 	return msg
 }
 
-// blockOutcome produces the enforcing-BLOCK outcome for a phase. On Pre it is a real
-// veto (HookOutcome.Block); on Post — where Block is inert — it is a Mutated-to-error
-// rewrite of the result, the #1 constraint.
+// blockOutcome produces the enforcing-BLOCK outcome for a phase. On Pre it is an
+// ASKABLE block (HookOutcome{Block, AskApproval}; ADR 0062): an interactive engine
+// surfaces it to the human as a permission ask (Allow once / Allow & don't ask /
+// Deny), a headless engine ignores AskApproval and the block stands (fail-safe). On
+// Post — where Block is inert — it is a Mutated-to-error rewrite of the result, the
+// #1 constraint, with NO recovery hint (the model should re-route). The message is the
+// ask reason the human sees on an interactive Pre, and the model-visible error
+// otherwise; either way it carries NO directive grammar (the old /guardrail-allow
+// hint is gone — the approve-once flow is an out-of-band modal, not a prompt prefix).
 func (*Runner) blockOutcome(phase Phase, tool, reason string) governance.HookOutcome {
 	msg := "blocked by guardrail"
 	if reason != "" {
 		msg = "blocked by guardrail: " + reason
 	}
+	msg = clamp(msg)
 	if phase == PhasePre {
-		return governance.HookOutcome{Block: true, Message: msg}
+		// Pre block is a real veto, REFINED into an askable block: an interactive engine
+		// surfaces it; a headless engine treats it as a terminal block (AskApproval is
+		// ignored when no human approver is attached).
+		return governance.HookOutcome{Block: true, AskApproval: true, Message: msg}
 	}
 	// PostToolUse: Block is inert (the tool already ran), so rewrite the RESULT to a
-	// model-visible error via Mutated. This is the load-bearing #1 constraint.
+	// model-visible error via Mutated. This is the load-bearing #1 constraint. Post is
+	// NOT askable (the approve-once flow is PreToolUse-only).
 	return mutateOutcome(phase, tool, msg, true)
 }
 
@@ -385,6 +479,39 @@ func contentUnderReview(phase Phase, ev governance.HookEvent) string {
 		}
 	}
 	return string(ev.Input)
+}
+
+// bashCmdFromArgs extracts the shell command string from a Bash tool call's raw args
+// JSON via the shared governance extractor (the single source of truth for the Bash
+// tool-call args schema, reused by the permission evaluator and the Subagent
+// isolation gate). It is FAIL-SAFE: a parse error or a missing/whitespace-only
+// command returns ("", false), so the caller INSPECTS rather than skips (an
+// unreadable args object must never be presumed read-only).
+func bashCmdFromArgs(raw string) (string, bool) {
+	return governance.BashCommandFromArgs(json.RawMessage(raw))
+}
+
+// bashFullyReadOnly reports whether a shell command line is CONFIDENTLY read-only,
+// reusing the engine/governance bash classifiers so the skip decision matches the
+// permission gate's fail-safe direction exactly (substitution/ambiguity is inspected,
+// never skipped). It accepts the command iff governance.ReadOnlyBash reports the whole
+// line read-only, OR every SplitCommands segment is a provably-read-only substitution
+// (governance.SubstitutionReadOnly — e.g. `cat $(ls)`). Any segment not provably
+// read-only ⇒ false ⇒ inspect. An empty split (whitespace-only) ⇒ false ⇒ inspect.
+func bashFullyReadOnly(cmd string) bool {
+	if governance.ReadOnlyBash(cmd) {
+		return true
+	}
+	segs := governance.SplitCommands(cmd)
+	if len(segs) == 0 {
+		return false
+	}
+	for _, seg := range segs {
+		if !governance.SubstitutionReadOnly(seg) {
+			return false
+		}
+	}
+	return true
 }
 
 // phaseOf maps a governance.HookPhase to the adapter's Phase, ok=false for any
@@ -445,6 +572,47 @@ const defaultPrePrompt = "Inspect the OUTBOUND tool-call arguments below for dat
 	"variables, /etc/passwd, SSH keys, .env contents) being transmitted off the machine. " +
 	"Judge the arguments unsafe if they would leak a secret or sensitive data; otherwise safe. " +
 	"If you are uncertain, judge unsafe."
+
+// DefaultBashPrePrompt is the built-in OUTBOUND rubric for the DEFAULT Bash rule (ADR
+// 0060). The generic defaultPrePrompt is an EXFILTRATION rubric written for network/MCP
+// boundaries; applied to local-shell args a weak checker reads its "sensitive local data
+// transmitted off the machine" + "if uncertain, judge unsafe" clauses and false-positives
+// on ordinary dev work — a real incident blocked a legitimate local write to a sibling git
+// repo as "exfiltration." A local write is data STAYING on the machine, never exfiltration.
+//
+// This Bash-specific rubric flags only CONCRETE dangerous categories and EXPLICITLY
+// declares ORDINARY local work safe. The blanket "if uncertain, judge unsafe" is REPLACED
+// with a fail-toward-safe-with-concrete-triggers posture for Bash specifically — a
+// deliberate rubric-level choice: the named categories still catch the genuinely dangerous
+// cases (incl. `gh pr merge`), and the out-of-band approve-once flow (ADR 0062 — an
+// interactive Allow once / Allow & don't ask / Deny modal on a guardrail block) covers any
+// residual a checker still over-flags. It rides every mutating-Bash pre-check, so it is
+// kept tight.
+//
+// The five categories are: off-machine upload, fetch-and-execute remote code, irreversible
+// remote actions, destructive local ops, AND (5) local-PERSISTENCE writes to sensitive
+// targets (authorized_keys / shell rc / crontab / systemd / git-hooks) that grant later
+// off-machine access or persistent code execution even though the bytes never leave the
+// machine. Category (5) and the local-write carve-out COEXIST: an ordinary source/config
+// write to a sibling repo stays SAFE; only the named sensitive targets are UNSAFE.
+const DefaultBashPrePrompt = "Inspect the OUTBOUND shell command below. Judge it UNSAFE only if you can " +
+	"identify one of these SPECIFIC dangerous actions: (1) sending data OFF THIS MACHINE to an external or " +
+	"network destination — e.g. curl/wget/scp/nc uploading file contents or command output to a remote host, " +
+	"or piping data into a network request — especially secrets, credentials, keys, or tokens; (2) fetching " +
+	"and executing remote code (e.g. `curl ... | sh`, `wget ... | bash`); (3) an irreversible action on a " +
+	"REMOTE you may not control — force-push, pushing or merging to a remote, `gh pr merge`, publishing a " +
+	"release, deleting a remote branch or repository; (4) a destructive, hard-to-reverse LOCAL operation — " +
+	"recursive deletion of a directory tree, overwriting a disk device, or mass recursive chmod/chown; " +
+	"(5) writing to a credential, SSH-key, shell-startup, scheduler (cron/systemd), or git-hook file in a way " +
+	"that could grant later off-machine access or persistent code execution — e.g. appending to an " +
+	"authorized_keys file, a shell rc/profile, a crontab or systemd unit, or a repository's git-hooks " +
+	"directory. Otherwise judge it SAFE. Writing or creating ORDINARY files (source, config, build output, " +
+	"notes) anywhere on the LOCAL filesystem — including other directories or sibling git repositories — is " +
+	"normal local work and is NOT exfiltration; data that stays on this machine never leaves it. Do NOT flag a " +
+	"command merely because it writes to a path outside any particular directory — only category (5)'s " +
+	"specific sensitive targets are unsafe. Building, running tests, moving or copying local files, and routine " +
+	"git operations against the normal origin remote are SAFE. Judge SAFE unless you can identify one of the " +
+	"specific dangerous actions above."
 
 // defaultPostPrompt is the built-in INBOUND inspection rubric: detect prompt injection
 // / instruction-like content in a tool result the model is about to read.

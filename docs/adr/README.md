@@ -70,6 +70,9 @@ Documentation/citation conventions are in [`docs/design/README.md`](../design/RE
 - [0051 — Surface advisory guardrail findings to the TUI](./0051-guardrails-advisory-tui-visibility.md)
 - [0052 — Global guardrails checker-down posture toggle](./0052-guardrails-checker-down-toggle.md)
 - [0053 — Flip guardrails default mode from advisory to block](./0053-guardrails-default-block.md)
+- [0060 — Add Bash to the default guardrail rule set with a read-only pre-filter](./0060-guardrails-bash-default.md)
+- [0061 — Human one-shot guardrail override (`/guardrail-allow`)](./0061-guardrails-human-override.md) *(superseded by 0062)*
+- [0062 — Out-of-band approve-once for guardrail blocks](./0062-guardrails-approve-once.md)
 - [0022 — Allow-all posture](./0022-allow-all-posture.md)
 - [0023 — Workspace trust](./0023-workspace-trust.md)
 - [0024 — System-prompt research](./0024-system-prompt-research.md) *(research)*

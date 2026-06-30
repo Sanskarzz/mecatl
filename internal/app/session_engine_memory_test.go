@@ -55,7 +55,7 @@ func memoryToolFactory(t *testing.T, assets catalogAssets) server.SessionEngineF
 	reg := twoProviderReg(oa, providerOpenAI, "gpt-5", or, providerOpenRouter)
 	store := memstore.New()
 	policy := permpolicy.NewPolicy(defaultRules(), nil)
-	return sessionEngineFactory(Config{Model: "gpt-5"}, reg, oa, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, assets)
+	return sessionEngineFactory(Config{Model: "gpt-5"}, reg, oa, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, assets, nil)
 }
 
 // TestSessionEngineFactoryRegistersMemoryToolsForSelector is the headline issue-#42
@@ -154,7 +154,7 @@ func TestSelectorSessionMemoryPromptHasMatchingTools(t *testing.T) {
 	instructions := buildInstructionAssembler(nil, memStore, nil)
 	factory := sessionEngineFactory(Config{Model: "gpt-5"}, reg, oa, memstore.New(),
 		permpolicy.NewPolicy(defaultRules(), nil), hookexec.New(nil), nil, instructions,
-		catalogAssets{memStore: memStore})
+		catalogAssets{memStore: memStore}, nil)
 
 	res, err := factory(ctx, server.ProviderSelector{ProviderID: providerOpenRouter}, nil, server.ProfileDefault, "", session.ModeDefault)
 	if err != nil {

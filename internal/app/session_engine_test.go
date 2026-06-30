@@ -169,7 +169,7 @@ func TestSessionEngineFactoryBuildsUsableEngine(t *testing.T) {
 		entries:   map[string]providerEntry{providerMock: {id: providerMock, provider: provider, available: true}},
 		defaultID: providerMock,
 	}
-	factory := sessionEngineFactory(cfg, reg, provider, store, policy, hooks, nil, prompt.RootAssembler{}, catalogAssets{})
+	factory := sessionEngineFactory(cfg, reg, provider, store, policy, hooks, nil, prompt.RootAssembler{}, catalogAssets{}, nil)
 
 	// Zero selector + no specs: the per-session engine binds the DEFAULT provider.
 	res, err := factory(context.Background(), server.ProviderSelector{}, []mcp.ServerConfig{}, server.ProfileDefault, "", session.ModeDefault)
@@ -206,7 +206,7 @@ func twoProviderFactory(t *testing.T) (server.SessionEngineFactory, *providerReg
 	}
 	store := memstore.New()
 	policy := permpolicy.NewPolicy(defaultRules(), nil)
-	factory := sessionEngineFactory(cfg, reg, oa, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{})
+	factory := sessionEngineFactory(cfg, reg, oa, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{}, nil)
 	return factory, reg
 }
 
@@ -277,7 +277,7 @@ func TestSessionEngineFactoryModelPassthrough(t *testing.T) {
 	}
 	store := memstore.New()
 	policy := permpolicy.NewPolicy(defaultRules(), nil)
-	factory := sessionEngineFactory(cfg, reg, oa, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{})
+	factory := sessionEngineFactory(cfg, reg, oa, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{}, nil)
 
 	const unknownModel = "gpt-5-preview-not-in-catalog"
 	res, err := factory(context.Background(),
@@ -371,7 +371,7 @@ func TestSelectorEngineWindowSelfCorrectsAtUse(t *testing.T) {
 	}
 	store := memstore.New()
 	policy := permpolicy.NewPolicy(defaultRules(), nil)
-	factory := sessionEngineFactory(cfg, reg, oa, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{})
+	factory := sessionEngineFactory(cfg, reg, oa, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{}, nil)
 
 	res, err := factory(context.Background(),
 		server.ProviderSelector{ProviderID: providerOpenAI, ModelID: liveModel}, nil, server.ProfileDefault, "", session.ModeDefault)
@@ -418,7 +418,7 @@ func TestSharedAndSelectorEngineResolveSameSource(t *testing.T) {
 	policy := permpolicy.NewPolicy(defaultRules(), nil)
 
 	shared := agent.NewEngine(baseEngineDeps(cfg, reg, oa, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}))
-	factory := sessionEngineFactory(cfg, reg, oa, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{})
+	factory := sessionEngineFactory(cfg, reg, oa, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{}, nil)
 	res, err := factory(context.Background(),
 		server.ProviderSelector{ProviderID: providerOpenAI, ModelID: model}, nil, server.ProfileDefault, "", session.ModeDefault)
 	if err != nil {

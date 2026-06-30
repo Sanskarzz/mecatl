@@ -1477,6 +1477,7 @@ func sessionEngineFactory(
 	mcpProvider mcp.Provider,
 	instructions prompt.InstructionAssembler,
 	assets catalogAssets,
+	guardrailWaiver *modelhook.WaiverHolder,
 ) server.SessionEngineFactory {
 	return func(ctx context.Context, sel server.ProviderSelector, specs []mcp.ServerConfig, profile server.SessionProfile, workspace string, mode session.PermissionMode) (server.SessionEngineResult, error) {
 		// Pin the CHILD permission resolver to THIS session's base root (issue
@@ -1644,7 +1645,7 @@ func sessionEngineFactory(
 		// The three utility engines pin utilityProvider (the OPERATOR-DEFAULT effort), NOT
 		// resolvedProvider — reasoning effort binds the agent, not the harness's internal
 		// classifier/one-turn calls (ADR 0055).
-		deps.Hooks = buildGuardrailsHooks(cfg, reg, utilityProvider, resolvedProviderID, resolvedModel, deps.Hooks)
+		deps.Hooks = buildGuardrailsHooks(cfg, reg, utilityProvider, resolvedProviderID, resolvedModel, deps.Hooks, guardrailWaiver)
 		// The OPT-IN child-ask reviewer (issue #31), RE-DERIVED on this session's
 		// resolved (provider, model) through the same attachAskAdjudicator the shared
 		// engine uses — never a clone-and-swap of the build-time reviewer.
@@ -2055,7 +2056,14 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 	// OFF-by-default (returns mainHooks UNCHANGED when unconfigured) and is wired ONLY
 	// here + in the per-session factory — NEVER into buildCatalog's child hooks (the
 	// recursion guard). The shared engine's checker rides the default provider/model.
-	mainHooks = buildGuardrailsHooks(cfg, reg, provider, reg.Default(), cfg.Model, mainHooks)
+	// The SHARED "Allow & don't ask again" waiver holder (ADR 0062): created ONCE here
+	// and threaded to the shared-engine Runner (below) AND the per-session factory (so
+	// every per-session Runner shares it). One instance, so a waiver armed on a session
+	// id (by the engine's HookApprovalLearner on a human AllowAlways verdict) is seen by
+	// whichever Runner that session's engine carries. It is NOT plumbed to the Service —
+	// arming is in-loop (a human verdict), never a prompt scan.
+	guardrailWaiver := modelhook.NewWaiverHolder()
+	mainHooks = buildGuardrailsHooks(cfg, reg, provider, reg.Default(), cfg.Model, mainHooks, guardrailWaiver)
 
 	deps := baseEngineDeps(cfg, reg, provider, store, policy, mainHooks, mcpProvider, instructions)
 	deps.Catalog = cat
@@ -2073,7 +2081,7 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 	// catalog is assembled over the SAME collaborators as the shared one. It keeps
 	// the UNWRAPPED hooks: the Phase-2b reviewer fires once per MAIN-engine Stop,
 	// not per per-session stop (one of the two sanctioned per-session deltas).
-	sessFactory := sessionEngineFactory(cfg, reg, provider, store, policy, hooks, mcpProvider, instructions, assets)
+	sessFactory := sessionEngineFactory(cfg, reg, provider, store, policy, hooks, mcpProvider, instructions, assets, guardrailWaiver)
 	// The build-once assets travel back to Build whole: it reads assets.skills
 	// (ListSkills snapshot), assets.userModelStore (GetUserModel lister), and
 	// assets.skillReadRoots (the workspace factory + team fork closures) off the
@@ -2657,8 +2665,8 @@ func normalizeAskReviewerModel(cfg Config) (string, error) {
 // guardrail checker fires on the MAIN loop's PreToolUse/PostToolUse phases
 // regardless of whether the deployment surfaces permission asks to a human. A
 // configured model with NO explicit rules is still ACTIVE — it takes the built-in
-// DEFAULT advisory rule set (WebSearch/WebFetch/mcp__*, observe-only), the headline
-// default. The master kill-switch (GuardrailsDisabled) turns it off. No-op under
+// DEFAULT block rule set (WebSearch/WebFetch/mcp__*/Bash, enforcing — ADR 0060/0053),
+// the headline default. The master kill-switch (GuardrailsDisabled) turns it off. No-op under
 // UseMock. It is now VALIDATE-ONLY: it no longer emits the build-once ACTIVE fact.
 // The always-one-line posture — ON|OFF carrying the RESOLVED checker model + its
 // provenance, which this function never computed (it only validated the GATE value)
@@ -2732,14 +2740,13 @@ func logGuardrailsPosture(cfg Config) {
 // guardrailsPostureLine composes the ON posture line as a pure helper so it can be
 // table-tested directly (TestLogGuardrailsPostureBranches). It carries the resolved
 // checker model + provenance, the effective rule mode, the rule count, and whether
-// the default advisory set is in force. Provenance: srcSlot →
+// the default set is in force. Provenance: srcSlot →
 // "via slot `guardrail`"; srcSlotSupersedingGate → "via slot `guardrail`, supersedes gate
-// value `<gateval>`"; srcGate → "via --guardrails-model". Mode: usedDefaults → "advisory";
-// else the highest-severity explicit-rule mode present (block > sanitize > advisory), or
-// "mixed" only if a lower-severity mode coexists with block/sanitize in a way the
-// highest-severity roll-up would hide — we report the highest-severity present (block >
-// sanitize > advisory), so "mixed" is unreachable under the severity ordering; it is kept
-// as the honest fallback for an unforeseen mode string.
+// value `<gateval>`"; srcGate → "via --guardrails-model". Mode: the highest-severity mode
+// present across the RESOLVED specs (block > sanitize > advisory) — the default set is
+// block (ADR 0060), so the default-set branch reports block unless a defaultMode override
+// or a yolo demotion lowered it (both already baked into specs). "mixed" is unreachable
+// under the severity roll-up; it is kept as the honest fallback for an unforeseen mode.
 func guardrailsPostureLine(cfg Config, model string, src guardrailSource, specs []modelhook.RuleSpec, usedDefaults bool) string {
 	var provenance string
 	switch src {
@@ -2750,13 +2757,23 @@ func guardrailsPostureLine(cfg Config, model string, src guardrailSource, specs 
 	case srcGate:
 		provenance = "via --guardrails-model"
 	}
-	mode := "advisory"
-	if !usedDefaults {
-		mode = highestSeverityGuardrailMode(specs)
-	}
+	// Mode is the highest-severity mode across the RESOLVED specs — for BOTH the
+	// default-set and explicit-rule branches. The default set is block (ADR 0060), so
+	// the default-set branch honestly reports mode=block (a prior version hardcoded
+	// "advisory" here, misreporting the enforcing default as observe-only); a
+	// defaultMode override or a yolo demotion is already baked into specs, so this
+	// reflects it.
+	mode := highestSeverityGuardrailMode(specs)
 	out := fmt.Sprintf("guardrails: ON, checker=%s (%s), mode=%s, rules=%d", model, provenance, mode, len(specs))
 	if usedDefaults {
 		out += " (default set: WebSearch, WebFetch, mcp__*)"
+	}
+	// Posture coupling (ADR 0062): under yolo every rule was demoted to advisory at
+	// compile time (demoteForPosture). Surface that SECURITY DOWNGRADE at startup so an
+	// operator sees it in the log, not only in the docs — `mode=` already reflects the
+	// demoted specs for explicit rules; the note states WHY it is advisory.
+	if cfg.Posture >= PostureYolo {
+		out += " — DEMOTED to advisory by posture yolo (no block, no ask)"
 	}
 	return out
 }

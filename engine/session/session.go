@@ -209,9 +209,26 @@ type PendingAsk struct {
 	// one the configured policy already allows with provably read-only
 	// substitution contents — so an approval layer may relax the floor without
 	// surfacing it. Same run-scoped, never-serialized posture as ConfiguredAsk.
-	// Mutually exclusive with it (a third ask-provenance signal would warrant a
-	// single enum on both this value object and the governance decision).
+	// Mutually exclusive with it (a third RUN-SCOPED ask-provenance signal would
+	// warrant collapsing these two into a single enum on both this value object and
+	// the governance decision; HookOriginated below is NOT that third signal — it is
+	// a different, SERIALIZED axis, see its note).
 	FlooredConfiguredAllow bool
+	// HookOriginated marks an ask that arose from a PreToolUse hook BLOCK refined
+	// into an approval (governance.HookOutcome.AskApproval; ADR 0062), NOT from the
+	// permission policy. It is SERIALIZED (json:"hook_originated,omitempty") and is
+	// DELIBERATELY a bool, NOT folded into an AskOrigin enum with
+	// ConfiguredAsk/FlooredConfiguredAllow: those two are RUN-SCOPED policy hints that
+	// are never serialized (an old snapshot deserializing false is harmless because a
+	// policy ask is never resumed from one), whereas HookOriginated is CROSS-PROCESS
+	// LOAD-BEARING — the awaiting-resume path (Engine.ResumeApproval →
+	// resolvePendingCall) runs in a FRESH process and keys the skip-preHook branch on
+	// it (an Allow must EXECUTE the tool WITHOUT re-running the PreToolUse hook, which
+	// would re-block / re-ask). Collapsing a serialized correctness marker into an
+	// enum with two ephemeral hints would conflate two different lifetimes and
+	// serialization contracts — so it stays its own bool. (If a SECOND serialized
+	// provenance bit ever appears, THEN extract a serialized AskOrigin enum.)
+	HookOriginated bool `json:"hook_originated,omitempty"`
 }
 
 // Errors returned by the Session state machine.

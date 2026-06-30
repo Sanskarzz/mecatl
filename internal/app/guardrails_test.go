@@ -2,8 +2,10 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
@@ -14,6 +16,127 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/modelhook"
 	"github.com/stacklok/mecatl/internal/adapter/permconfig"
 )
+
+// promptCapturingChecker records the assembled CheckRequest.Prompt for the LAST call,
+// so a routing test can assert WHICH rubric the Runner built for a given (tool, phase).
+// It returns a safe verdict so the call passes through unchanged.
+type promptCapturingChecker struct{ lastPrompt string }
+
+func (c *promptCapturingChecker) Check(_ context.Context, req modelhook.CheckRequest) (modelhook.Verdict, error) {
+	c.lastPrompt = req.Prompt
+	safe := true
+	return modelhook.Verdict{Safe: &safe}, nil
+}
+
+// TestDefaultBashRuleRoutesToBashRubric is the KEY wiring test for the false-positive
+// fix (ADR 0060): the DEFAULT Bash rule must route a Pre Bash check to
+// modelhook.DefaultBashPrePrompt (the local-writes-are-safe rubric), while Web/MCP Pre
+// checks keep the generic exfiltration rubric. It drives the REAL compiled default
+// rule set through a Runner with a prompt-capturing checker — so it proves the
+// false-positive class is structurally addressed, not just that a const exists.
+func TestDefaultBashRuleRoutesToBashRubric(t *testing.T) {
+	cfg := Config{UseMock: true, GuardrailsModel: "checker-model"}
+	specs, usedDefaults := effectiveGuardrailSpecs(cfg)
+	if !usedDefaults {
+		t.Fatal("model-only must use the default set")
+	}
+	rules, ok := compileGuardrailRules(cfg, specs)
+	if !ok {
+		t.Fatal("default rules must compile")
+	}
+	chk := &promptCapturingChecker{}
+	runner := modelhook.New(hookexec.New(nil), modelhook.Options{Rules: rules, Checker: chk})
+
+	// A MUTATING Bash command (read-only would be skipped by the pre-filter and never
+	// reach the checker). Assert the captured rubric is the Bash one.
+	bashArgs, _ := json.Marshal(map[string]string{"command": "cat hello > /other/repo/file"})
+	if _, err := runner.Run(context.Background(), governance.HookEvent{
+		Phase: governance.PhasePreToolUse, Tool: "Bash", Input: bashArgs,
+	}); err != nil {
+		t.Fatalf("Bash pre run: %v", err)
+	}
+	if chk.lastPrompt == "" {
+		t.Fatal("the mutating Bash command must have reached the checker")
+	}
+	if !strings.Contains(chk.lastPrompt, "is NOT exfiltration") ||
+		!strings.Contains(chk.lastPrompt, "data that stays") {
+		t.Fatalf("the Bash Pre check must use the Bash rubric (local writes are safe); got:\n%s", chk.lastPrompt)
+	}
+	if strings.Contains(chk.lastPrompt, "If you are uncertain, judge unsafe") {
+		t.Fatal("the Bash rubric must NOT carry the generic 'if uncertain, judge unsafe' clause")
+	}
+
+	// A WebSearch Pre check must still use the GENERIC exfiltration rubric.
+	chk.lastPrompt = ""
+	if _, err := runner.Run(context.Background(), governance.HookEvent{
+		Phase: governance.PhasePreToolUse, Tool: "WebSearch", Input: json.RawMessage(`{"query":"x"}`),
+	}); err != nil {
+		t.Fatalf("WebSearch pre run: %v", err)
+	}
+	if !strings.Contains(chk.lastPrompt, "If you are uncertain, judge unsafe") {
+		t.Fatalf("the WebSearch Pre check must keep the generic exfiltration rubric; got:\n%s", chk.lastPrompt)
+	}
+	if strings.Contains(chk.lastPrompt, "is NOT exfiltration") {
+		t.Fatal("the WebSearch rubric must NOT be the Bash rubric")
+	}
+
+	// An mcp__* Pre check must also use the GENERIC rubric.
+	chk.lastPrompt = ""
+	if _, err := runner.Run(context.Background(), governance.HookEvent{
+		Phase: governance.PhasePreToolUse, Tool: "mcp__github__create_pr", Input: json.RawMessage(`{"x":"y"}`),
+	}); err != nil {
+		t.Fatalf("mcp pre run: %v", err)
+	}
+	if !strings.Contains(chk.lastPrompt, "If you are uncertain, judge unsafe") {
+		t.Fatalf("an mcp__* Pre check must keep the generic exfiltration rubric; got:\n%s", chk.lastPrompt)
+	}
+}
+
+// TestDefaultBashSpecCarriesBashRubric pins the spec-level wiring: the default Bash
+// entry carries modelhook.DefaultBashPrePrompt as its Prompt (and Web/MCP do not).
+func TestDefaultBashSpecCarriesBashRubric(t *testing.T) {
+	specs, _ := effectiveGuardrailSpecs(Config{UseMock: true, GuardrailsModel: "m"})
+	for _, s := range specs {
+		switch s.Match {
+		case "Bash":
+			if s.Prompt != modelhook.DefaultBashPrePrompt {
+				t.Fatalf("the default Bash spec must carry DefaultBashPrePrompt; got %q", s.Prompt)
+			}
+		default:
+			if s.Prompt != "" {
+				t.Fatalf("the default %s spec must carry NO prompt (uses the built-in default); got %q", s.Match, s.Prompt)
+			}
+		}
+	}
+}
+
+// TestExplicitBashRuleDoesNotInheritBashRubric: an OPERATOR explicit Bash rule with no
+// prompt does NOT inherit the default Bash rubric (least-surprising — an explicit rule
+// opts out of the default-set conveniences). It falls back to the built-in
+// defaultPrePrompt (asserted via the generic rubric's distinguishing text).
+func TestExplicitBashRuleDoesNotInheritBashRubric(t *testing.T) {
+	cfg := Config{UseMock: true, GuardrailsModel: "m",
+		GuardrailsRules: []GuardrailRule{{Match: "Bash", Phases: []string{"pre"}, Mode: "block"}}}
+	specs, usedDefaults := effectiveGuardrailSpecs(cfg)
+	if usedDefaults {
+		t.Fatal("explicit rules must not use defaults")
+	}
+	if len(specs) != 1 || specs[0].Prompt != "" {
+		t.Fatalf("an explicit Bash rule must carry no prompt (falls back to defaultPrePrompt); got %+v", specs)
+	}
+	rules, _ := compileGuardrailRules(cfg, specs)
+	chk := &promptCapturingChecker{}
+	runner := modelhook.New(hookexec.New(nil), modelhook.Options{Rules: rules, Checker: chk})
+	bashArgs, _ := json.Marshal(map[string]string{"command": "cp a b"})
+	if _, err := runner.Run(context.Background(), governance.HookEvent{
+		Phase: governance.PhasePreToolUse, Tool: "Bash", Input: bashArgs,
+	}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(chk.lastPrompt, "If you are uncertain, judge unsafe") {
+		t.Fatalf("an explicit Bash rule (no prompt) must use the generic defaultPrePrompt; got:\n%s", chk.lastPrompt)
+	}
+}
 
 // (15) fail-fast unknown guardrails model: the loud-misconfig posture, mirroring the
 // ask-reviewer normalization. Empty = off, an unknown bare token / inherit-alias is a
@@ -177,50 +300,171 @@ func TestGuardrailsOffReturnsInnerUnchanged(t *testing.T) {
 	llm := mockllm.New()
 
 	// No model at all → OFF (byte-identical to no guardrails).
-	if got := buildGuardrailsHooks(Config{UseMock: true}, nil, llm, "mock", "m", inner); got != port.HookRunner(inner) {
+	if got := buildGuardrailsHooks(Config{UseMock: true}, nil, llm, "mock", "m", inner, nil); got != port.HookRunner(inner) {
 		t.Fatal("unconfigured guardrails (no model) must return inner unchanged (OFF byte-identical)")
 	}
 	// The master kill-switch wins over a full config.
 	cfg := Config{UseMock: true, GuardrailsModel: "x", GuardrailsRules: []GuardrailRule{{Match: "*"}}, GuardrailsDisabled: true}
-	if got := buildGuardrailsHooks(cfg, nil, llm, "mock", "m", inner); got != port.HookRunner(inner) {
+	if got := buildGuardrailsHooks(cfg, nil, llm, "mock", "m", inner, nil); got != port.HookRunner(inner) {
 		t.Fatal("--guardrails=off must return inner unchanged")
 	}
 }
 
-// A model with NO explicit rules WRAPS inner with the DEFAULT advisory rule set (the
-// headline default: ON advisory for WebSearch/WebFetch/mcp__*).
+// A model with NO explicit rules WRAPS inner with the DEFAULT block rule set (the
+// headline default: ON block for WebSearch/WebFetch/mcp__* + Bash with a read-only
+// pre-filter — ADR 0060).
 func TestGuardrailsModelOnlyShipsDefaultBlock(t *testing.T) {
 	inner := hookexec.New(nil)
 	llm := mockllm.New()
 	cfg := Config{UseMock: true, GuardrailsModel: "checker-model"}
-	got := buildGuardrailsHooks(cfg, nil, llm, "mock", "m", inner)
+	got := buildGuardrailsHooks(cfg, nil, llm, "mock", "m", inner, nil)
 	if got == port.HookRunner(inner) {
 		t.Fatal("a guardrails model with no explicit rules must ship the DEFAULT block rules, not stay inert")
 	}
-	// The default set is exactly WebSearch/WebFetch/mcp__*; assert it compiles to 3.
+	// The default set is WebSearch/WebFetch/mcp__* + Bash; assert it compiles to 4.
 	specs, usedDefaults := effectiveGuardrailSpecs(cfg)
-	if !usedDefaults || len(specs) != 3 {
-		t.Fatalf("model-only must use the 3-rule default set; usedDefaults=%v n=%d", usedDefaults, len(specs))
+	if !usedDefaults || len(specs) != 4 {
+		t.Fatalf("model-only must use the 4-rule default set; usedDefaults=%v n=%d", usedDefaults, len(specs))
 	}
 	for _, s := range specs {
 		if s.Mode != string(modelhook.ModeBlock) {
 			t.Fatalf("default rules must be block (enforcement); got %q for %q", s.Mode, s.Match)
 		}
 	}
+	// The Bash spec is present with pre-only, block, and the read-only pre-filter on.
+	var bash *modelhook.RuleSpec
+	for i := range specs {
+		if specs[i].Match == "Bash" {
+			bash = &specs[i]
+		}
+	}
+	if bash == nil {
+		t.Fatal("the default set must include a Bash rule (ADR 0060)")
+	}
+	if len(bash.Phases) != 1 || bash.Phases[0] != "pre" {
+		t.Fatalf("the default Bash rule must be pre-only; phases=%v", bash.Phases)
+	}
+	if bash.Mode != string(modelhook.ModeBlock) {
+		t.Fatalf("the default Bash rule must be block; got %q", bash.Mode)
+	}
+	if !bash.SkipReadOnlyBash {
+		t.Fatal("the default Bash rule must carry SkipReadOnlyBash (the read-only pre-filter)")
+	}
+}
+
+// TestGuardrailsSharedWaiverReachesRunner: buildGuardrailsHooks threads the SHARED
+// waiver holder into the Runner it builds, so a verdict-armed waiver (ADR 0062, armed
+// by the engine via the Runner's HookApprovalLearner) is the SAME holder a later block
+// consults. A nil waiver is byte-identical to no waiver path (every block surfaces).
+// This is the composition-side proof that the waiver holder is shared, not per-Runner.
+func TestGuardrailsSharedWaiverReachesRunner(t *testing.T) {
+	inner := hookexec.New(nil)
+	llm := mockllm.New()
+	cfg := Config{UseMock: true, GuardrailsModel: "checker-model",
+		GuardrailsRules: []GuardrailRule{{Match: "Bash", Phases: []string{"pre"}, Mode: "block"}}}
+
+	waiver := modelhook.NewWaiverHolder()
+	waiver.ArmFromApproval("s-shared", "Bash", "gh pr merge 7")
+
+	// The checker is engine-backed (UseMock); verify the WIRING: the Runner built with
+	// the shared waiver is distinct from inner (it wrapped), and the shared waiver still
+	// authorizes its EXACT command (the holder is shared, not copied/cleared at
+	// construction). Matching is exact-equality (ADR 0062 / CWE-863), so the same key.
+	got := buildGuardrailsHooks(cfg, nil, llm, "mock", "m", inner, waiver)
+	if got == port.HookRunner(inner) {
+		t.Fatal("a configured guardrail must wrap inner")
+	}
+	if !waiver.Allows("s-shared", "Bash", "gh pr merge 7") {
+		t.Fatal("the shared waiver must remain armed after wiring (the holder is shared)")
+	}
+
+	// nil waiver: still wraps (guardrail is configured) but the waiver path is off —
+	// byte-identical to the pre-waiver posture (no panic, no behaviour change).
+	gotNil := buildGuardrailsHooks(cfg, nil, llm, "mock", "m", hookexec.New(nil), nil)
+	if gotNil == nil {
+		t.Fatal("a configured guardrail with a nil waiver must still build a Runner")
+	}
+}
+
+// TestGuardrailsPostureCouplingDemotesOnlyYolo (ADR 0062, sub-decision B): posture
+// yolo demotes every guardrail rule to advisory (observe-only); strict/trusted/auto
+// keep the configured enforcing mode (under auto the approve-once ask IS the
+// enforcement, gated on interactivity, not posture).
+func TestGuardrailsPostureCouplingDemotesOnlyYolo(t *testing.T) {
+	rules := []GuardrailRule{{Match: "Bash", Phases: []string{"pre"}, Mode: "block"}}
+	for _, tc := range []struct {
+		posture  Posture
+		wantMode string
+	}{
+		{PostureStrict, "block"},
+		{PostureTrusted, "block"},
+		{PostureAuto, "block"},
+		{PostureYolo, string(modelhook.ModeAdvisory)},
+	} {
+		cfg := Config{UseMock: true, GuardrailsModel: "m", GuardrailsRules: rules, Posture: tc.posture}
+		specs, _ := effectiveGuardrailSpecs(cfg)
+		if len(specs) != 1 {
+			t.Fatalf("%s: want 1 spec, got %d", tc.posture, len(specs))
+		}
+		if specs[0].Mode != tc.wantMode {
+			t.Fatalf("posture %s: want mode %q, got %q", tc.posture, tc.wantMode, specs[0].Mode)
+		}
+	}
+}
+
+// TestGuardrailsPostureCouplingDemotesDefaults: the yolo demotion also applies to the
+// built-in default rule set (not just operator-authored rules).
+func TestGuardrailsPostureCouplingDemotesDefaults(t *testing.T) {
+	cfg := Config{UseMock: true, GuardrailsModel: "m", Posture: PostureYolo}
+	specs, usedDefaults := effectiveGuardrailSpecs(cfg)
+	if !usedDefaults {
+		t.Fatal("no explicit rules: must use the default set")
+	}
+	for _, s := range specs {
+		if s.Mode != string(modelhook.ModeAdvisory) {
+			t.Fatalf("under yolo every default rule must be advisory; got %q for %q", s.Mode, s.Match)
+		}
+	}
 }
 
 // TestGuardrailsDefaultModeAdvisory tests the defaultMode override: setting
-// defaultMode:advisory downgrades the built-in defaults to observe-only.
+// defaultMode:advisory downgrades the built-in defaults to observe-only WHILE
+// preserving the Bash read-only pre-filter flag (the mode flip must not strip it).
 func TestGuardrailsDefaultModeAdvisory(t *testing.T) {
 	cfg := Config{UseMock: true, GuardrailsModel: "checker-model", GuardrailsDefaultMode: "advisory"}
 	specs, usedDefaults := effectiveGuardrailSpecs(cfg)
-	if !usedDefaults || len(specs) != 3 {
-		t.Fatalf("model-only with defaultMode must still use the 3-rule default set; usedDefaults=%v n=%d", usedDefaults, len(specs))
+	if !usedDefaults || len(specs) != 4 {
+		t.Fatalf("model-only with defaultMode must still use the 4-rule default set; usedDefaults=%v n=%d", usedDefaults, len(specs))
 	}
 	for _, s := range specs {
 		if s.Mode != string(modelhook.ModeAdvisory) {
 			t.Fatalf("defaultMode:advisory must downgrade defaults to advisory; got %q for %q", s.Mode, s.Match)
 		}
+		if s.Match == "Bash" && !s.SkipReadOnlyBash {
+			t.Fatal("the defaultMode flip must PRESERVE the Bash read-only pre-filter flag")
+		}
+	}
+}
+
+// TestGuardrailsExplicitRulesReplaceDefaults: an explicit rules list replaces the
+// built-in defaults entirely — the default Bash rule is gone, and an explicit Bash
+// rule does NOT inherit SkipReadOnlyBash (operator Bash rules inspect EVERYTHING).
+func TestGuardrailsExplicitRulesReplaceDefaults(t *testing.T) {
+	cfg := Config{
+		UseMock:         true,
+		GuardrailsModel: "checker-model",
+		GuardrailsRules: []GuardrailRule{{Match: "Bash", Phases: []string{"pre"}, Mode: "block"}},
+	}
+	specs, usedDefaults := effectiveGuardrailSpecs(cfg)
+	if usedDefaults {
+		t.Fatal("explicit rules must REPLACE the defaults (usedDefaults=false)")
+	}
+	if len(specs) != 1 || specs[0].Match != "Bash" {
+		t.Fatalf("explicit rules must be the sole rules; got %+v", specs)
+	}
+	// The default WebSearch/WebFetch/mcp__* rules are gone (replaced).
+	if specs[0].SkipReadOnlyBash {
+		t.Fatal("an explicit Bash rule must NOT carry SkipReadOnlyBash — operator Bash rules inspect every command")
 	}
 }
 
@@ -229,7 +473,7 @@ func TestGuardrailsConfiguredWrapsInner(t *testing.T) {
 	inner := hookexec.New(nil)
 	llm := mockllm.New()
 	cfg := Config{UseMock: true, GuardrailsModel: "checker-model", GuardrailsRules: []GuardrailRule{{Match: "WebFetch", Phases: []string{"post"}}}}
-	got := buildGuardrailsHooks(cfg, nil, llm, "mock", "m", inner)
+	got := buildGuardrailsHooks(cfg, nil, llm, "mock", "m", inner, nil)
 	if got == port.HookRunner(inner) {
 		t.Fatal("a configured guardrail must WRAP inner, not return it unchanged")
 	}

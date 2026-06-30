@@ -1495,6 +1495,14 @@ func (s *Service) StartRunContent(ctx context.Context, id session.SessionID, tex
 	if text == "" && len(parts) == 0 {
 		return nil, fmt.Errorf("%w: prompt text or parts is required", ErrInvalidArgument)
 	}
+	// NOTE (ADR 0062): there is NO prompt-channel scan here. The guardrails
+	// approve-once flow is OUT-OF-BAND — a PreToolUse guardrail block surfaces to the
+	// human as an ordinary permission ask (Allow once / Allow & don't ask / Deny) and
+	// is resolved via Approve(askID, verdict), reusing the existing approval machinery.
+	// The session "Allow & don't ask again" waiver is armed IN-LOOP from a genuine
+	// human AllowAlways verdict, never from a parsed directive in `text`. This replaces
+	// the removed ADR-0061 /guardrail-allow prompt directive (no scan, no strip, no
+	// near-miss WARN). The `text` param flows straight through.
 	// loadAndReopen (not GetSession): a session that cleanly completed a prior turn
 	// is in StateCompleted, and the engine's RecordUserPrompt rejects a terminal
 	// state — so an in-process follow-up prompt (interactive multi-turn chat, a

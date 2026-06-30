@@ -63,7 +63,7 @@ func defaultLiveWindowServiceCfg(t *testing.T, reg *providerRegistry, provider *
 	model := cfg.Model
 	store := memstore.New()
 	policy := permpolicy.NewPolicy(defaultRules(), nil)
-	realFactory := sessionEngineFactory(cfg, reg, provider, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{})
+	realFactory := sessionEngineFactory(cfg, reg, provider, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{}, nil)
 	var factoryCalls int
 	factory := countingSessionEngineFactory(realFactory, &factoryCalls)
 

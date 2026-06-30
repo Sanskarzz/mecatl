@@ -126,7 +126,13 @@ func (e guardrailError) Error() string { return string(e) }
 // child deps path (childEngineDepsForProvider), so it compacts/counts on the
 // session's provider and carries the recursion-guard posture (inert hooks, nil
 // reviewer, Interactive false, tool-less catalog).
-func buildGuardrailsHooks(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, inner port.HookRunner) port.HookRunner {
+// waiver is the SHARED "Allow & don't ask again" holder (ADR 0062): the SAME instance
+// must reach every Runner site (the shared engine + each per-session engine) so a
+// verdict armed on a session id is visible to whichever Runner that session's engine
+// carries. It is armed by the engine via the Runner's port.HookApprovalLearner on a
+// human AllowAlways verdict — NOT from a prompt scan. nil is the byte-identical
+// no-waiver posture (Allows on nil → false).
+func buildGuardrailsHooks(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, inner port.HookRunner, waiver *modelhook.WaiverHolder) port.HookRunner {
 	if !guardrailsConfigured(cfg) {
 		return inner // OFF: byte-identical to no guardrails
 	}
@@ -147,6 +153,7 @@ func buildGuardrailsHooks(cfg Config, provReg *providerRegistry, provider port.L
 		Diagnostics:       cfg.diag(),
 		MinContentBytes:   cfg.GuardrailsMinContentBytes,
 		FailOnCheckerDown: strings.EqualFold(strings.TrimSpace(cfg.GuardrailsOnCheckerDown), "fail"),
+		Waiver:            waiver,
 	})
 }
 
@@ -154,8 +161,18 @@ func buildGuardrailsHooks(cfg Config, provReg *providerRegistry, provider port.L
 // model is configured but the operator authored no explicit rules. Enabling
 // guardrails is the opt-in to spend — the default posture is enforcement (block),
 // not observe-only. Advisory is available via the defaultMode key or an explicit
-// rule list. Local tools (Read/Edit/Write/Bash/Grep/Glob) are deliberately NOT
-// matched.
+// rule list.
+//
+// Bash IS matched (pre, block) so a configured guardrail protects the local-shell
+// blast radius out of the box (the motivating incident: an agent ran
+// `gh pr merge --squash` as a Bash call and merged its own PR unattended; the old
+// default set only matched WebSearch/WebFetch/mcp__* so guardrails never saw it). To
+// avoid an LLM call on every shell command, the Bash rule carries SkipReadOnlyBash:
+// the modelhook adapter's read-only pre-filter lets a confidently-read-only Pre Bash
+// command bypass the checker entirely, so ONLY mutating/outward commands are
+// inspected. The pre-filter is fail-safe — an ambiguous/substitution command is still
+// inspected. The OTHER local tools (Read/Edit/Write/Grep/Glob) remain deliberately
+// unmatched. See ADR 0060.
 var defaultGuardrailSpecs = []modelhook.RuleSpec{
 	// Outbound search/fetch args (a query/URL carrying a secret) AND inbound results
 	// (a fetched page / search snippet carrying an injection).
@@ -166,12 +183,33 @@ var defaultGuardrailSpecs = []modelhook.RuleSpec{
 	// All MCP tools, both directions: outbound args (exfil into an MCP call body) and
 	// inbound results (injection in an MCP server's response).
 	{Match: "mcp__*", Phases: []string{"pre", "post"}, Mode: string(modelhook.ModeBlock)},
+	// Local shell (the #1 blast radius). Pre only — inspect the OUTBOUND command for a
+	// mutating/outward action (e.g. `gh pr merge`, a push, a destructive write). The
+	// read-only pre-filter (SkipReadOnlyBash) skips the checker for a confidently
+	// read-only command, so a guardrail-protected shell costs an LLM call ONLY on a
+	// mutating/outward command, not on every `ls`/`grep`/`git status`. It carries a
+	// Bash-SPECIFIC rubric (modelhook.DefaultBashPrePrompt): the generic exfiltration
+	// rubric (defaultPrePrompt) false-positives on ordinary local writes (a local write
+	// is data STAYING on the machine, not exfiltration), so Bash gets a concrete-trigger,
+	// fail-toward-safe rubric instead. ADR 0060.
+	{Match: "Bash", Phases: []string{"pre"}, Mode: string(modelhook.ModeBlock), SkipReadOnlyBash: true, Prompt: modelhook.DefaultBashPrePrompt},
 }
 
 // effectiveGuardrailSpecs returns the rule specs to compile: the operator's explicit
-// rules when any are configured, else the built-in default advisory set. usedDefaults
-// reports which, so the posture line (logGuardrailsPosture) can annotate "default
-// set" only when the defaults are in force.
+// rules when any are configured, else the built-in default BLOCK set (ADR 0060).
+// usedDefaults reports which, so the posture line (logGuardrailsPosture) can annotate
+// "default set" only when the defaults are in force.
+//
+// Posture-coupling (ADR 0062, sub-decision B): under posture YOLO ONLY (the
+// truly-off, gate-free tier that maps to Claude Code's bypassPermissions) ALL
+// guardrail rule modes are DEMOTED to advisory (observe-only) by demoteForPosture —
+// it never blocks or asks, it only logs + emits an EvHook. strict/trusted/AUTO keep
+// ENFORCING: under auto the approve-once ask IS the auto-mode behaviour (the checker
+// blocks, an interactive human allows once — CC auto-mode parity), so demoting auto
+// would remove that very behaviour. The interactive approve-once path is gated on
+// Deps.Interactive, NOT on posture. This is composition-only (no engine change) and
+// posture is operator-tier, consistent with guardrails being operator-tier (no
+// project-tier downgrade).
 func effectiveGuardrailSpecs(cfg Config) (specs []modelhook.RuleSpec, usedDefaults bool) {
 	if len(cfg.GuardrailsRules) > 0 {
 		out := make([]modelhook.RuleSpec, 0, len(cfg.GuardrailsRules))
@@ -179,7 +217,7 @@ func effectiveGuardrailSpecs(cfg Config) (specs []modelhook.RuleSpec, usedDefaul
 			out = append(out, modelhook.RuleSpec{
 				Match:         gr.Match,
 				Phases:        gr.Phases,
-				Mode:          gr.Mode,
+				Mode:          demoteForPosture(cfg, gr.Mode),
 				Prompt:        gr.Prompt,
 				FailClosed:    gr.FailClosed,
 				FailClosedSet: gr.FailClosedSet,
@@ -198,19 +236,32 @@ func effectiveGuardrailSpecs(cfg Config) (specs []modelhook.RuleSpec, usedDefaul
 		if dm := strings.TrimSpace(cfg.GuardrailsDefaultMode); dm != "" {
 			s.Mode = dm
 		}
+		s.Mode = demoteForPosture(cfg, s.Mode)
 		out[i] = s
 	}
 	return out, true
 }
 
+// demoteForPosture demotes an enforcing guardrail mode (block/sanitize) to advisory
+// under posture YOLO ONLY (ADR 0062, sub-decision B; CC bypassPermissions parity).
+// strict/trusted/auto keep the configured mode — under auto the approve-once ask IS
+// the enforcement behaviour. It is the SINGLE posture→mode coupling point so the
+// default-set and operator-rule branches cannot drift.
+func demoteForPosture(cfg Config, mode string) string {
+	if cfg.Posture < PostureYolo {
+		return mode
+	}
+	return string(modelhook.ModeAdvisory)
+}
+
 // guardrailsConfigured reports whether guardrails are switched on: a checker model
 // is configured — via --guardrails-model OR a bound `guardrail` model slot (ADR 0046,
 // configure = enable, the router-parity model of ADR 0042) — AND the master kill-switch
-// is not set. A model with NO explicit rules is still ON — it takes the default advisory
-// rule set (effectiveGuardrailSpecs), honouring the headline default. The kill-switch
-// (--guardrails=off → GuardrailsDisabled) wins over any config. Resolution precedence
-// is unchanged: a bound slot SUPERSEDES the gate value's model (see
-// resolveGuardrailsCheckerModel).
+// is not set. A model with NO explicit rules is still ON — it takes the default BLOCK
+// rule set (effectiveGuardrailSpecs, ADR 0060; the model being configured is the opt-in
+// to spend). The kill-switch (--guardrails=off → GuardrailsDisabled) wins over any
+// config. Resolution precedence is unchanged: a bound slot SUPERSEDES the gate value's
+// model (see resolveGuardrailsCheckerModel).
 func guardrailsConfigured(cfg Config) bool {
 	if cfg.GuardrailsDisabled {
 		return false

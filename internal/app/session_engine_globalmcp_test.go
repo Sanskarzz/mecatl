@@ -36,7 +36,7 @@ func globalMCPFactory(t *testing.T, globalMgr *mcp.Manager) (server.SessionEngin
 	}
 	store := memstore.New()
 	policy := permpolicy.NewPolicy(defaultRules(), nil)
-	factory := sessionEngineFactory(cfg, reg, oa, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{globalMgr: globalMgr})
+	factory := sessionEngineFactory(cfg, reg, oa, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{globalMgr: globalMgr}, nil)
 	return factory, reg
 }
 
@@ -87,7 +87,7 @@ func TestSessionEngineFactoryMountsGlobalMCPToolsForSelector(t *testing.T) {
 	}
 	store := memstore.New()
 	policy := permpolicy.NewPolicy(defaultRules(), nil)
-	factory2 := sessionEngineFactory(Config{Model: "default-model"}, reg2, or2, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{globalMgr: globalMgr})
+	factory2 := sessionEngineFactory(Config{Model: "default-model"}, reg2, or2, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{globalMgr: globalMgr}, nil)
 	res2, err := factory2(context.Background(), server.ProviderSelector{ProviderID: providerOpenRouter}, nil, server.ProfileDefault, "", session.ModeDefault)
 	if err != nil {
 		t.Fatalf("factory(dispatch): %v", err)
@@ -220,7 +220,7 @@ func runSelectorSubagentRefAndCheckEcho(t *testing.T, globalMgr *mcp.Manager, sp
 	}
 	store := memstore.New()
 	policy := permpolicy.NewPolicy(defaultRules(), nil)
-	factory := sessionEngineFactory(Config{Model: "gpt-5"}, reg, oa, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{globalMgr: globalMgr, agentReg: defs})
+	factory := sessionEngineFactory(Config{Model: "gpt-5"}, reg, oa, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{globalMgr: globalMgr, agentReg: defs}, nil)
 
 	res, err := factory(context.Background(), server.ProviderSelector{ProviderID: providerOpenRouter}, specs, server.ProfileDefault, "", session.ModeDefault)
 	if err != nil {
@@ -308,7 +308,7 @@ func TestSelectorClientToolCollisionGlobalWins(t *testing.T) {
 	}
 	store := memstore.New()
 	policy := permpolicy.NewPolicy(defaultRules(), nil)
-	factory := sessionEngineFactory(Config{Model: "default-model"}, reg, oa, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{globalMgr: globalMgr})
+	factory := sessionEngineFactory(Config{Model: "default-model"}, reg, oa, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{globalMgr: globalMgr}, nil)
 
 	res, err := factory(context.Background(), server.ProviderSelector{ProviderID: providerOpenRouter},
 		[]mcp.ServerConfig{{Name: "globe", URL: cURL}, {Name: "other", URL: oURL}}, server.ProfileDefault, "", session.ModeDefault)

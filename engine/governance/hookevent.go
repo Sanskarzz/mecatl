@@ -73,4 +73,20 @@ type HookOutcome struct {
 	// NOTE for PostToolUse: the loop emits the EFFECTIVE (rewritten) result, so the
 	// client stream and the model's recorded history agree — no hidden divergence.
 	Mutated json.RawMessage
+	// AskApproval REFINES a Block into an ASKABLE block: it is meaningful ONLY on a
+	// PreToolUse outcome with Block == true. When set, an INTERACTIVE engine
+	// (Deps.Interactive) surfaces the block to the human as an ordinary permission
+	// ask (PauseForApproval → StateAwaiting → EvPermissionAsk → Approve), reusing the
+	// EXISTING approval machinery instead of dead-ending the call: an allow runs the
+	// tool, a deny refuses it. A NON-interactive (headless) engine IGNORES this bit
+	// and the Block stands — the byte-identical, fail-safe terminal block. It is also
+	// ignored on PostToolUse (where Block is inert) and whenever Block is false.
+	// Mutated is ignored when AskApproval is set (an askable block does not also
+	// rewrite args). A hook that does not understand this field leaves it false, which
+	// is exactly the pre-feature behaviour. An INERT AskApproval — set with Block ==
+	// false, or on any non-PreToolUse phase — is a SILENT NO-OP that fails OPEN to the
+	// ordinary outcome (a plain allow / the phase's normal handling), NEVER to a block:
+	// AskApproval only REFINES an existing PreToolUse Block, it never creates one.
+	// (ADR 0062.)
+	AskApproval bool
 }

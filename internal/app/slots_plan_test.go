@@ -142,7 +142,7 @@ func planFactory(t *testing.T, sessionModel, planModel string) server.SessionEng
 	reg := regForTest(provider, providerOpenAI, sessionModel)
 	store := memstore.New()
 	policy := permpolicy.NewPolicy(defaultRules(), nil)
-	return sessionEngineFactory(cfg, reg, provider, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{})
+	return sessionEngineFactory(cfg, reg, provider, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{}, nil)
 }
 
 // TestSessionEngineFactoryPlanVsExecute is the FACTORY-level Phase 3 guard (ADR 0030
@@ -192,7 +192,7 @@ func TestSessionEngineFactoryNoPlanSlotByteIdentical(t *testing.T) {
 	cfg := Config{Model: sessionModel} // no plan slot
 	provider := mockllm.New(mockllm.TextTurn("X"))
 	reg := regForTest(provider, providerOpenAI, sessionModel)
-	factory := sessionEngineFactory(cfg, reg, provider, memstore.New(), permpolicy.NewPolicy(defaultRules(), nil), hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{})
+	factory := sessionEngineFactory(cfg, reg, provider, memstore.New(), permpolicy.NewPolicy(defaultRules(), nil), hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{}, nil)
 	ctx := context.Background()
 
 	plan, err := factory(ctx, server.ProviderSelector{}, nil, server.ProfileDefault, "", session.ModePlan)

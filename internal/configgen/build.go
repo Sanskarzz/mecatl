@@ -123,7 +123,8 @@ func guardrailsSubtree(docs Docs) *Subtree {
 		switch f.Key {
 		case "model":
 			f.EnableNote = "Setting a model here ENABLES guardrails (the guardrails-parity " +
-				"enable model). A configured model with no rules runs the default advisory set. " +
+				"enable model). A configured model with no rules runs the default BLOCK set " +
+				"(WebSearch/WebFetch/mcp__*/Bash, enforcing; downgrade via defaultMode: advisory). " +
 				"Leave empty (and pass no --guardrails-model) to keep guardrails OFF."
 			f.ExampleValue = "claude-haiku-4-6"
 		case "rules":

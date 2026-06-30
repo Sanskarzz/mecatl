@@ -725,7 +725,7 @@ func TestSessionEngineCommandExpanderUsesStashedDriverSource(t *testing.T) {
 	provider := mockllm.New(mockllm.TextTurn("done one"), mockllm.TextTurn("done two"))
 	factory := sessionEngineFactory(cfg, regForTest(provider, providerMock, cfg.Model), provider,
 		memstore.New(), permpolicy.NewPolicy(defaultRules(), nil), hookexec.New(nil), nil,
-		prompt.RootAssembler{}, catalogAssets{})
+		prompt.RootAssembler{}, catalogAssets{}, nil)
 
 	for i := range 2 {
 		res, ferr := factory(ctx, server.ProviderSelector{ProviderID: providerMock}, nil, server.ProfileDefault, "", session.ModeDefault)

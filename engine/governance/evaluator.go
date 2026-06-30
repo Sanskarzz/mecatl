@@ -2,7 +2,7 @@ package governance
 
 import (
 	"encoding/json"
-	"sort"
+	"strings"
 )
 
 // readOnlyTools are tools whose use never mutates the workspace and are therefore
@@ -171,7 +171,7 @@ func (*Evaluator) LearnableRule(tool string, args json.RawMessage) (Rule, bool) 
 // derived pattern is returned as-is so the caller refuses a tool-wide grant.
 func learnablePattern(tool string, args json.RawMessage) (string, bool) {
 	if tool == "Bash" {
-		cmd := bashCommand(args)
+		cmd, _ := BashCommandFromArgs(args)
 		if cmd == "" {
 			return "", false
 		}
@@ -203,7 +203,8 @@ func planModeDecision(tool string, args json.RawMessage) (PermissionDecision, bo
 		}, true
 	}
 	if tool == "Bash" {
-		if cmd := bashCommand(args); cmd != "" && !ReadOnlyBash(cmd) {
+		cmd, ok := BashCommandFromArgs(args)
+		if ok && !ReadOnlyBash(cmd) {
 			return PermissionDecision{
 				Effect: Deny,
 				Reason: "plan mode is active: this Bash command is not read-only and is not permitted; present a plan and exit plan mode first",
@@ -238,7 +239,7 @@ func (e *Evaluator) resolve(rules []Rule, tool string, args json.RawMessage) Per
 // construction: a configured Ask on any segment makes the floor-free fold
 // not-Allow.
 func (e *Evaluator) resolveBash(rules []Rule, args json.RawMessage) PermissionDecision {
-	cmd := bashCommand(args)
+	cmd, _ := BashCommandFromArgs(args)
 	subs := SplitCommands(cmd)
 	if len(subs) == 0 {
 		// No parseable command: evaluate against the raw (empty) pattern.
@@ -531,45 +532,37 @@ func nonBashPattern(_ string, args json.RawMessage) string {
 	return ""
 }
 
-// bashCommand extracts the command string from a Bash tool call's arguments,
-// tolerating the common "command" / "cmd" field names. An empty result means the
-// arguments could not be parsed.
-func bashCommand(args json.RawMessage) string {
+// BashCommandFromArgs extracts the command string from a Bash tool call's raw
+// args JSON. It reads the "command" field, then "cmd" as a fallback, returning
+// the first non-empty (after TrimSpace) string. It is FAIL-SAFE: a JSON parse
+// error OR neither field carrying a non-empty string returns ("", false), so a
+// caller that gates a safety decision on the result INSPECTS rather than skips
+// (an unreadable args object must never be presumed read-only). This is the
+// single shared extraction for the Bash tool-call args schema — the governance
+// evaluator, the Subagent isolation gate, and the guardrail Bash pre-filter all
+// call it, so a schema change lands in one place.
+func BashCommandFromArgs(args json.RawMessage) (string, bool) {
 	if len(args) == 0 {
-		return ""
+		return "", false
 	}
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(args, &m); err != nil {
-		return ""
+		return "", false
 	}
-	for _, key := range sortedKeysPreferred(m, "command", "cmd") {
+	for _, key := range []string{"command", "cmd"} {
+		rawVal, present := m[key]
+		if !present {
+			continue
+		}
 		var s string
-		if json.Unmarshal(m[key], &s) == nil && s != "" {
-			return s
+		if err := json.Unmarshal(rawVal, &s); err != nil {
+			continue
+		}
+		if strings.TrimSpace(s) != "" {
+			return s, true
 		}
 	}
-	return ""
-}
-
-// sortedKeysPreferred returns preferred keys first (in the given order) followed
-// by any remaining keys sorted, so command extraction is deterministic.
-func sortedKeysPreferred(m map[string]json.RawMessage, preferred ...string) []string {
-	out := make([]string, 0, len(m))
-	seen := map[string]bool{}
-	for _, p := range preferred {
-		if _, ok := m[p]; ok {
-			out = append(out, p)
-			seen[p] = true
-		}
-	}
-	rest := make([]string, 0, len(m))
-	for k := range m {
-		if !seen[k] {
-			rest = append(rest, k)
-		}
-	}
-	sort.Strings(rest)
-	return append(out, rest...)
+	return "", false
 }
 
 // IsReadOnlyTool reports whether a non-Bash tool is unconditionally read-only.

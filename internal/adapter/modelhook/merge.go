@@ -59,6 +59,12 @@ func mutateOutcome(phase Phase, _ string, payload string, isError bool) governan
 // decision 5: Block-DOMINANT (either blocks → blocked, messages concatenated
 // inner-first), and on a mutation CONFLICT the checker (security) WINS. A zero
 // checker outcome (safe / advisory / skipped) returns inner unchanged.
+//
+// ADR 0062: the checker's AskApproval bit (a Pre block refined into an approval ask)
+// rides through onto the merged outcome — when the checker wants the block surfaced as
+// an ask, the merged block stays askable. The bit is meaningful only on a Pre Block,
+// so propagating the checker's value verbatim is correct (an inner-only block carries
+// AskApproval false, the terminal-block behaviour unchanged).
 func mergeOutcomes(inner, check governance.HookOutcome) governance.HookOutcome {
 	if isZeroOutcome(check) {
 		return inner
@@ -71,6 +77,10 @@ func mergeOutcomes(inner, check governance.HookOutcome) governance.HookOutcome {
 	if check.Block {
 		out.Block = true
 	}
+	// The checker's AskApproval refinement rides onto the merged outcome (ADR 0062).
+	if check.AskApproval {
+		out.AskApproval = true
+	}
 	out.Message = concatMessages(inner.Message, check.Message)
 
 	// Mutation conflict → checker wins (security). The checker's Mutated replaces the
@@ -81,10 +91,12 @@ func mergeOutcomes(inner, check governance.HookOutcome) governance.HookOutcome {
 	return out
 }
 
-// isZeroOutcome reports whether o carries no block, no message, and no mutation —
-// the "checker did nothing" outcome (safe verdict, advisory finding, or a skip).
+// isZeroOutcome reports whether o carries no block, no message, no mutation, and no
+// ask refinement — the "checker did nothing" outcome (safe verdict, advisory finding,
+// or a skip). AskApproval is only ever set alongside Block, so it never independently
+// flips this, but the predicate stays honest.
 func isZeroOutcome(o governance.HookOutcome) bool {
-	return !o.Block && o.Message == "" && len(o.Mutated) == 0
+	return !o.Block && o.Message == "" && len(o.Mutated) == 0 && !o.AskApproval
 }
 
 // concatMessages joins two hook messages inner-first, dropping empties, so a merged

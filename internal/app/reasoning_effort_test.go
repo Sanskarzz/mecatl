@@ -230,7 +230,7 @@ func TestFactoryRemintsOnEffortDiffersFromDefault(t *testing.T) {
 	reg, _, reminted := regWithRemintRecorder("DEFAULT-REPLY")
 	cfg := Config{Model: "gpt-5"} // operator default effort unset
 	factory := sessionEngineFactory(cfg, reg, reg.entries[providerOpenAI].provider,
-		memstore.New(), permpolicy.NewPolicy(defaultRules(), nil), hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{})
+		memstore.New(), permpolicy.NewPolicy(defaultRules(), nil), hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{}, nil)
 
 	res, err := factory(context.Background(),
 		server.ProviderSelector{ProviderID: providerOpenAI, ModelID: "gpt-5", ReasoningEffort: "high"},
@@ -267,7 +267,7 @@ func TestFactoryDegradesOnNoReasoningModel(t *testing.T) {
 	})
 	cfg := Config{Model: "gpt-5", Diagnostics: rec}
 	factory := sessionEngineFactory(cfg, reg, reg.entries[providerOpenAI].provider,
-		memstore.New(), permpolicy.NewPolicy(defaultRules(), nil), hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{})
+		memstore.New(), permpolicy.NewPolicy(defaultRules(), nil), hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{}, nil)
 
 	res, err := factory(context.Background(),
 		server.ProviderSelector{ProviderID: providerOpenAI, ModelID: "no-reason-model", ReasoningEffort: "high"},
@@ -294,7 +294,7 @@ func TestFactoryDegradesOnNoReasoningModel(t *testing.T) {
 func TestFactoryFailsOpenOnUnknownModel(t *testing.T) {
 	reg, _, reminted := regWithRemintRecorder("DEFAULT-REPLY")
 	factory := sessionEngineFactory(Config{Model: "gpt-5"}, reg, reg.entries[providerOpenAI].provider,
-		memstore.New(), permpolicy.NewPolicy(defaultRules(), nil), hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{})
+		memstore.New(), permpolicy.NewPolicy(defaultRules(), nil), hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{}, nil)
 
 	res, err := factory(context.Background(),
 		server.ProviderSelector{ProviderID: providerOpenAI, ModelID: "totally-unknown-model", ReasoningEffort: "high"},
@@ -317,7 +317,7 @@ func TestFactoryFailsOpenOnUnknownModel(t *testing.T) {
 func TestFactoryClampsForOpenAIAndEchoes(t *testing.T) {
 	reg, _, reminted := regWithRemintRecorder("DEFAULT-REPLY")
 	factory := sessionEngineFactory(Config{Model: "gpt-5"}, reg, reg.entries[providerOpenAI].provider,
-		memstore.New(), permpolicy.NewPolicy(defaultRules(), nil), hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{})
+		memstore.New(), permpolicy.NewPolicy(defaultRules(), nil), hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{}, nil)
 
 	res, err := factory(context.Background(),
 		server.ProviderSelector{ProviderID: providerOpenAI, ModelID: "gpt-5", ReasoningEffort: "max"},
@@ -340,7 +340,7 @@ func TestFactoryClampsForOpenAIAndEchoes(t *testing.T) {
 func TestFactoryDefaultPathNoRemint(t *testing.T) {
 	reg, _, reminted := regWithRemintRecorder("DEFAULT-REPLY")
 	factory := sessionEngineFactory(Config{Model: "gpt-5"}, reg, reg.entries[providerOpenAI].provider,
-		memstore.New(), permpolicy.NewPolicy(defaultRules(), nil), hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{})
+		memstore.New(), permpolicy.NewPolicy(defaultRules(), nil), hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{}, nil)
 
 	// A model-only selector (no effort) must NOT re-mint.
 	res, err := factory(context.Background(),
@@ -374,7 +374,7 @@ func TestServiceToRealFactoryRemintsClampedEffort(t *testing.T) {
 	reg, _, reminted := regWithRemintRecorder("DEFAULT-REPLY")
 	store := memstore.New()
 	factory := sessionEngineFactory(Config{Model: "gpt-5"}, reg, reg.entries[providerOpenAI].provider,
-		store, permpolicy.NewPolicy(defaultRules(), nil), hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{})
+		store, permpolicy.NewPolicy(defaultRules(), nil), hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{}, nil)
 
 	svc, err := server.NewService(server.Config{
 		Engine: agent.NewEngine(agent.Deps{

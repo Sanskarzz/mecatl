@@ -2279,7 +2279,7 @@ three layers to keep the engine importable and the verdict shape in the adapter:
 - **`internal/app/guardrails.go`** — `buildGuardrailsHooks` (decorates the **main**
   hooks at `buildEngine` + the per-session factory, so a **fresh per-session
   failure-streak** is built; returns inner unchanged when no model is set),
-  `effectiveGuardrailSpecs` (explicit rules OR the default advisory set),
+  `effectiveGuardrailSpecs` (explicit rules OR the default BLOCK set, ADR 0060/0053),
   `engineGuardrailsChecker` (the `VerdictChecker` impl: `agent.RunGuardrailCheck` +
   `modelhook.ParseVerdict`), `compileGuardrailRules`, `foldOperatorGuardrails` (the
   operator-tier YAML fold — CLI out-ranks YAML for model/disable, rules come from
@@ -2287,12 +2287,42 @@ three layers to keep the engine importable and the verdict shape in the adapter:
   ACTIVE fact).
 
 **Default-on with no rules.** A configured checker model is the opt-in-to-spend; with
-no explicit rule list guardrails take the built-in **default advisory rule set**
-(`defaultGuardrailSpecs`: WebSearch pre+post, WebFetch post, `mcp__*` pre+post, all
-advisory — the headline default, local tools deliberately unmatched). An explicit
-`guardrails.rules` list replaces it. There is no per-session call-count cap — the
-checker runs per matched call, and cost control lives in the operator's
-provider/billing layer (checker token spend is not folded into `MaxRunTokens`).
+no explicit rule list guardrails take the built-in **default block rule set**
+(`defaultGuardrailSpecs`: WebSearch pre+post, WebFetch post, `mcp__*` pre+post, and
+`Bash` pre — all block, the headline default; ADR 0053 flipped advisory→block, ADR
+0060 added `Bash`). The `Bash` rule carries a **read-only pre-filter**
+(`SkipReadOnlyBash`): the modelhook adapter skips the checker entirely for a Pre Bash
+command it can prove read-only (reusing `governance.ReadOnlyBash`/`SplitCommands`/
+`SubstitutionReadOnly` — fail-safe: substitution/ambiguity is inspected), so a
+guardrail-protected shell costs an LLM call ONLY on a mutating/outward command (e.g.
+`gh pr merge`), not on every `ls`. The OTHER local tools (Read/Edit/Write/Grep/Glob)
+remain deliberately unmatched. An explicit `guardrails.rules` list replaces the
+defaults (an operator's explicit `Bash` rule does NOT inherit the pre-filter — it
+inspects every command). There is no per-session call-count cap — the checker runs per
+matched call, and cost control lives in the operator's provider/billing layer (checker
+token spend is not folded into `MaxRunTokens`).
+
+**Per-tool rubric routing (ADR 0060).** `buildCheckPrompt` calls `rubric(phase, rule)`,
+which prefers a rule's non-empty `prompt` over the built-in default — the SAME seam
+operator custom prompts use. The default **Bash** rule wires `Prompt:
+modelhook.DefaultBashPrePrompt` (an EXPORTED const), so a Pre Bash check routes to a
+Bash-SPECIFIC rubric; **Web/MCP** rules leave `Prompt` empty and keep the generic
+`defaultPrePrompt`. Why: `defaultPrePrompt` is an exfiltration rubric for network/MCP
+boundaries — its "sensitive local data transmitted off the machine" + "if uncertain,
+judge unsafe" clauses false-positive on local-shell args (a real incident blocked a
+legitimate write to a sibling repo as "exfiltration"; a local write is data STAYING on
+the machine). `DefaultBashPrePrompt` flags only FIVE concrete dangerous categories
+(off-machine upload, `curl … | sh`, irreversible remote actions incl. `gh pr merge`,
+destructive local ops, AND local-PERSISTENCE writes to sensitive targets — authorized_keys
+/ shell rc / crontab / systemd / git-hooks — which never leave the machine so the first
+four miss them) and EXPLICITLY declares ORDINARY local writes/builds/tests/origin-remote
+git SAFE (category 5 and the local-write carve-out coexist: a normal source write to a
+sibling repo stays SAFE, only the named sensitive targets are UNSAFE), replacing the
+blanket "if uncertain, judge unsafe" with "judge SAFE unless a specific dangerous action
+is identifiable" — a deliberate precision-over-recall posture for the local shell, with
+the out-of-band approve-once ask (ADR 0062) as the residual recovery. An operator's
+explicit `Bash` rule with no `prompt:` falls back to `defaultPrePrompt` (least-surprising
+— an explicit rule opts out of the default-set conveniences).
 
 **The #1 constraint — `PostToolUse` Block is INERT.** The tool has already run by the
 time the post hook fires (`dispatch.go` ~642-648 only emits a hook annotation). So an
@@ -2330,6 +2360,54 @@ lost in a per-call WARN flood. **Operator-tier config:** the `guardrails:` YAML 
 is read by `permconfig.Resolver.OperatorGuardrails()` from the **user-global + CLI
 tiers only** — a project-tier block is ignored with a WARN (the trust inversion: a
 project weakening a checker is a downgrade), parsed strictly (unknown sub-key = error).
+
+**Out-of-band approve-once — the askable block ([ADR 0062](../adr/0062-guardrails-approve-once.md), supersedes 0061's prompt directive).**
+A `block` is not a permanent dead-end: it surfaces to the human as an ORDINARY permission
+ask, reusing the existing approval machinery, instead of the removed `/guardrail-allow`
+prompt directive.
+
+- **Engine seam (generic, no guardrail vocabulary).** `governance.HookOutcome.AskApproval`
+  (a `bool`, meaningful only on a PreToolUse `Block`) REFINES a block into an askable
+  block. `engine/agent`'s `preHook` returns a normalized `preHookResult{effective,
+  blocked, askApproval, msg}`; on `{Block, AskApproval}` with `Deps.Interactive` it routes
+  to `askHookApproval` — mint askID, build a `session.PendingAsk{HookOriginated:true}`,
+  `PauseForApproval` → StateAwaiting → emit `EvPermissionAsk` → block on the verdict — the
+  mirror of `authorize`'s policy-ask block. Allow once / Allow always EXECUTE the call
+  DIRECTLY (NOT re-running preHook — the human authorized THIS call); Deny → error result.
+  The headless degrade lives INSIDE `preHook` (a non-`Interactive` engine returns a
+  terminal `blocked` result and emits the `HookBlocked` annotation), so every caller
+  (`runOne`, `runReadBatch` Phase 1, `resolvePendingCall`) inherits the fail-safe. The ask
+  is sequenced one-at-a-time in dispatch (Phase 1, never the parallel fan-out).
+- **Resume skip (the load-bearing serialized marker).** `session.PendingAsk.HookOriginated`
+  (`json:"hook_originated,omitempty"`, SERIALIZED — unlike run-scoped
+  `ConfiguredAsk`/`FlooredConfiguredAllow`) survives a snapshot. The awaiting-resume path
+  (`Engine.ResumeApproval` → `resolvePendingCall`) RE-RUNS preHook on Allow, which for a
+  hook ask would re-block in a fresh process with no in-memory waiver — so when
+  `ask.HookOriginated` it SKIPS preHook and executes directly. Without the serialized
+  marker a resumed guardrail ask re-asks (pinned by a snapshot round-trip test).
+- **Session waiver ("Allow & don't ask again").** A new OPTIONAL `port.HookApprovalLearner`
+  (`LearnHookApproval(ctx, governance.HookEvent)`) is type-asserted on `Deps.Hooks` and
+  called by `askHookApproval` ONLY on a `VerdictAllowAlways` verdict for a hook ask (no
+  method added to `HookRunner` — that would break the API). The `modelhook.Runner`
+  implements it by arming `modelhook.WaiverHolder` (session-keyed; tool-exact + Bash
+  command-substring, the matching shape inherited from the deleted `OverrideScope`). The
+  Runner's `check` consults the waiver FIRST on a Pre phase — a hit returns the empty
+  allow outcome WITHOUT an LLM call and logs a `guardrail-waived` audit line. In-memory
+  only (NOT persisted — the SAFE direction); session-keying gives child isolation for
+  free (the Runner is main-engine-only). The holder is created ONCE in `buildEngine` and
+  threaded to BOTH Runner sites (shared engine + per-session factory); nil = byte-identical
+  no-waiver posture. It is NOT plumbed to the Service — arming is in-loop from a human
+  verdict, never a prompt scan (so there is no `Service.StartRunContent` scan at all).
+- **`blockOutcome` (the single would-be-block funnel).** Pre → `{Block, AskApproval}`
+  (askable; headless degrades in the engine); Post → the inert Mutated-to-error rewrite
+  UNCHANGED (the approve-once flow is PreToolUse-only; `AskApproval` is ignored on Post).
+  `mergeOutcomes` propagates `AskApproval` so a checker block that wants an ask keeps the
+  bit on the merged outcome. The block message carries NO directive grammar.
+- **Posture-coupling (composition-only).** `internal/app`'s `demoteForPosture` (the SINGLE
+  posture→mode coupling point, consumed by both branches of `effectiveGuardrailSpecs`)
+  demotes every rule to advisory under posture **yolo ONLY** (CC `bypassPermissions`
+  parity). strict/trusted/**auto** keep enforcing — under `auto` the interactive
+  approve-once ask IS the enforcement (gated on `Deps.Interactive`, not on posture).
 
 ### `workspacetrust` (WORKSPACE-TRUST — see `WORKSPACE-TRUST-SPIKE.md`)
 

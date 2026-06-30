@@ -23,6 +23,7 @@ const ScopeLocalProject Scope = 2
 const ScopeManaged Scope = 0
 const ScopeSharedProject Scope = 3
 const ScopeUser Scope = 4
+func BashCommandFromArgs(args json.RawMessage) (string, bool)
 func Canonicalize(cmd string) string
 func HasSubstitutionOrGrouping(seg string) bool
 func IsReadOnlyTool(tool string) bool
@@ -38,7 +39,7 @@ type Effect string
 type Evaluator struct{}
 type EvaluatorOption func(*Evaluator)
 type HookEvent struct{Phase HookPhase; Tool string; Input json.RawMessage; SessionID string; CallID string}
-type HookOutcome struct{Block bool; Message string; Mutated json.RawMessage}
+type HookOutcome struct{Block bool; Message string; Mutated json.RawMessage; AskApproval bool}
 type HookPhase string
 type PermissionDecision struct{Effect Effect; Reason string; ConfiguredAsk bool; FlooredConfiguredAllow bool}
 type Rule struct{Scope Scope; Tool string; Pattern string; Effect Effect; Exact bool; Audience Audience}

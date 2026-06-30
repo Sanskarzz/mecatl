@@ -3127,25 +3127,12 @@ func resolveChildAsk(run *Run, ask session.PendingAsk, posture childPosture) {
 }
 
 // bashCmdFromArgs extracts the Bash command string from a pending ask's raw args,
-// reusing the same field tolerance the governance evaluator uses. Empty on a parse
-// failure (then IsolationApprovable("") is false — fail safe).
+// delegating to the shared governance extractor (the single source of truth for the
+// Bash tool-call args schema). Empty on a parse failure (then
+// IsolationApprovable("") is false — fail safe).
 func bashCmdFromArgs(args json.RawMessage) string {
-	if len(args) == 0 {
-		return ""
-	}
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(args, &m); err != nil {
-		return ""
-	}
-	for _, key := range []string{"command", "cmd"} {
-		if raw, ok := m[key]; ok {
-			var s string
-			if json.Unmarshal(raw, &s) == nil && s != "" {
-				return s
-			}
-		}
-	}
-	return ""
+	cmd, _ := governance.BashCommandFromArgs(args)
+	return cmd
 }
 
 // fireSubagentStop runs the SubagentStop lifecycle hook for a finished child run.
