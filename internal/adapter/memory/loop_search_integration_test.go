@@ -66,6 +66,7 @@ func TestSearchMemoryToolThroughLoop(t *testing.T) {
 	res := toolResultEvent(evs)
 	if res == nil {
 		t.Fatalf("no tool result event in %v", typesOf(evs))
+		return
 	}
 	if res.IsError {
 		t.Fatalf("SearchMemory result is an error: %q", res.Content)

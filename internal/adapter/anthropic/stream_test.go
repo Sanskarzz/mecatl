@@ -278,6 +278,7 @@ func TestTranslateReasoningTokensFromMessageDelta(t *testing.T) {
 	}
 	if usage == nil {
 		t.Fatal("no ChunkUsage emitted at message_stop")
+		return
 	}
 	if usage.ReasoningTokens != 40 {
 		t.Errorf("ReasoningTokens = %d, want 40 (from output_tokens_details.thinking_tokens)", usage.ReasoningTokens)
@@ -358,6 +359,7 @@ func TestTranslateToolArgsSplitAcrossDeltas(t *testing.T) {
 	}
 	if call == nil {
 		t.Fatal("no tool call assembled")
+		return
 	}
 	want := `{"path":"a/b.go","content":"package main"}`
 	if string(call.Args) != want {
@@ -377,6 +379,7 @@ func TestTranslateEmptyArgsToolCall(t *testing.T) {
 	}
 	if call == nil {
 		t.Fatal("no tool call assembled")
+		return
 	}
 	if string(call.Args) != "{}" {
 		t.Fatalf("empty-args call Args = %q, want {}", call.Args)

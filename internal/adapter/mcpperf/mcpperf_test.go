@@ -503,6 +503,7 @@ func TestLifecycleCaptureCPUProfileRawLink(t *testing.T) {
 	}
 	if link == nil {
 		t.Fatalf("expected a resource_link content item")
+		return
 	}
 	if link.URI != pprofProfilePath {
 		t.Errorf("link URI = %q, want %q", link.URI, pprofProfilePath)
@@ -694,6 +695,7 @@ func TestServerIdentityAndInstructions(t *testing.T) {
 	init := sess.InitializeResult()
 	if init == nil {
 		t.Fatal("nil initialize result")
+		return
 	}
 	if init.ServerInfo == nil || init.ServerInfo.Name != serverName {
 		t.Errorf("server name = %+v, want %q", init.ServerInfo, serverName)

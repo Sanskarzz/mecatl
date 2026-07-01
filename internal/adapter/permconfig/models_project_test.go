@@ -72,6 +72,7 @@ func TestProjectModelsHonouredWithinAllowlist(t *testing.T) {
 	got := r.ProjectModelBindings(ws)
 	if got == nil {
 		t.Fatal("a trusted project models: block must be captured when an operator allowlist exists")
+		return
 	}
 	if got.Default != "opus-id" {
 		t.Fatalf("project default not captured: %q", got.Default)
@@ -141,6 +142,7 @@ models:
 	got := r.ProjectModelBindings(ws)
 	if got == nil {
 		t.Fatal("the rest of the project block must still be honoured after stripping allowlist")
+		return
 	}
 	if len(got.Allowlist) != 0 {
 		t.Fatalf("the project allowlist: key must be stripped; got %+v", got.Allowlist)

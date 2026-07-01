@@ -26,9 +26,11 @@ func TestUserImageBase64Block(t *testing.T) {
 	imgBlock := m.Content[1].OfImage
 	if imgBlock == nil {
 		t.Fatal("second block should be an image block")
+		return
 	}
 	if imgBlock.Source.OfBase64 == nil {
 		t.Fatal("image source should be base64")
+		return
 	}
 	if string(imgBlock.Source.OfBase64.MediaType) != "image/png" {
 		t.Errorf("media_type = %q, want image/png", imgBlock.Source.OfBase64.MediaType)
