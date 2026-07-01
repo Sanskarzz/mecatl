@@ -1,3 +1,10 @@
+matlatl: notice [suggested-links-truncated] suggested-link list capped at 1000 (or a hub neighbour above the fan-out limit was skipped); additional pairs were not reported
+matlatl: notice [config] .matlatl.yml: emitExclude matches reachability root ".claude/skills/cut-release/SKILL.md"; it will not render on the consumption surfaces (reachability is unaffected)
+matlatl: notice [config] .matlatl.yml: emitExclude matches reachability root ".claude/skills/dev-pipeline/SKILL.md"; it will not render on the consumption surfaces (reachability is unaffected)
+matlatl: notice [config] .matlatl.yml: emitExclude matches reachability root ".claude/skills/mecatl-model-router-config/SKILL.md"; it will not render on the consumption surfaces (reachability is unaffected)
+matlatl: notice [config] .matlatl.yml: emitExclude matches reachability root ".claude/skills/panel-review/SKILL.md"; it will not render on the consumption surfaces (reachability is unaffected)
+matlatl: notice [config] .matlatl.yml: emitExclude matches reachability root ".claude/skills/perf-mcp-interpretation/SKILL.md"; it will not render on the consumption surfaces (reachability is unaffected)
+matlatl: notice [config] .matlatl.yml: emitExclude matches reachability root ".claude/skills/perf-optimization/SKILL.md"; it will not render on the consumption surfaces (reachability is unaffected)
 # mecatl
 
 > A markdown documentation corpus of 126 document(s) across 10 component(s), with 1471 heading(s) and 1311 resolved reference(s). Entries are ordered by importance (most-connected first). 10 document(s) excluded from rendering by emitExclude (still in the corpus: link-checked and ranked). Compactness 0.80, docs ~2.5 clicks apart.

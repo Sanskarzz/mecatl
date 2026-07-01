@@ -1,3 +1,5 @@
+// Package keymap validates rebindable-key overrides for mecatui.
+// It provides action-name normalization and collision detection across key scopes.
 package keymap
 
 import (
@@ -53,17 +55,14 @@ var validActions = map[string]struct{}{
 // scope membership per action.
 var (
 	globalOpen = map[string]struct{}{
-		"Submit":       {}, "Newline": {}, "Cancel": {}, "Paste": {}, "Quit": {},
-		"ScrollU":      {}, "ScrollD": {}, "ScrollTop": {}, "ScrollBottom": {},
-		"ModeSwitch":   {}, "MCPPanel": {}, "Resources": {}, "Prompts": {},
-		"Agents":       {}, "ExpandTools": {}, "Help": {}, "Effort": {},
+		"Submit": {}, "Newline": {}, "Cancel": {}, "Paste": {}, "Quit": {},
+		"ScrollU": {}, "ScrollD": {}, "ScrollTop": {}, "ScrollBottom": {},
+		"ModeSwitch": {}, "MCPPanel": {}, "Resources": {}, "Prompts": {},
+		"Agents": {}, "ExpandTools": {}, "Help": {}, "Effort": {},
 	}
 	overlayInternal = map[string]struct{}{
 		"Up": {}, "Down": {}, "Choose": {}, "Close": {}, "Refresh": {}, "Tasks": {}, "Findings": {},
 		"JumpTop": {}, "JumpEnd": {}, "NextTab": {}, "CancelChild": {},
-	}
-	approval = map[string]struct{}{
-		"Allow": {}, "AllowAlways": {}, "Deny": {},
 	}
 )
 
@@ -124,10 +123,7 @@ func Validate(res Resolved) error {
 		}
 	}
 	// 5) Submit vs Newline distinct.
-	if err := rejectPairOverlap(res.ByAction["Submit"], res.ByAction["Newline"], "Submit", "Newline"); err != nil {
-		return err
-	}
-	return nil
+	return rejectPairOverlap(res.ByAction["Submit"], res.ByAction["Newline"], "Submit", "Newline")
 }
 
 // isBarePrintableRune reports true for a single-rune chord (length==1).

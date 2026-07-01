@@ -41,7 +41,7 @@ func TestValidateOverlayCollision(t *testing.T) {
 
 func TestValidateGlobalCollision(t *testing.T) {
 	res, err := Parse(map[string][]string{
-		"Agents":     {"ctrl+a"},
+		"Agents":      {"ctrl+a"},
 		"ExpandTools": {"ctrl+a"},
 	})
 	if err != nil {
