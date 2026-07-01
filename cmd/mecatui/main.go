@@ -177,6 +177,11 @@ func run(args []string) error {
 		DebugMouse: os.Getenv("MECATUI_DEBUG_MOUSE") != "",
 	}
 
+	// Apply keymap overrides (CLI for now).
+	if err := applyKeyOverridesToDeps(cfg, &deps); err != nil {
+		return err
+	}
+
 	prog := tea.NewProgram(ui.New(deps), tea.WithContext(ctx))
 	_, err = prog.Run()
 	return err
@@ -189,6 +194,30 @@ func run(args []string) error {
 //   - --server set:     dial that external address with the TLS/auth flags.
 //   - --server empty:   AUTO — if a server already answers on the loopback default,
 //     reuse it (plaintext); otherwise host an embedded server over a UNIX socket.
+
+// keyOverridesFromConfig merges CLI --keymap entries into a map[string][]string.
+// YAML wiring will be added in a later step; for now only CLI is consulted.
+func keyOverridesFromConfig(cfg config) map[string][]string {
+	if cfg.keymap == nil || len(*cfg.keymap) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(*cfg.keymap))
+	for action, val := range map[string]string(*cfg.keymap) {
+		// val is comma-separated chords; trim spaces
+		parts := make([]string, 0, 1)
+		for _, p := range strings.Split(val, ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				parts = append(parts, p)
+			}
+		}
+		if len(parts) > 0 {
+			out[action] = parts
+		}
+	}
+	return out
+}
+
 func resolveTransport(ctx context.Context, cfg config) (target string, dial client.DialConfig, cleanup func(), err error) {
 	noop := func() {}
 

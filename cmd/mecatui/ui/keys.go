@@ -1,6 +1,10 @@
 package ui
 
-import "charm.land/bubbles/v2/key"
+import (
+	"strings"
+
+	"charm.land/bubbles/v2/key"
+)
 
 // keyMap is the mecatui key binding set. Submit/newline are distinguished in
 // Update via msg.String() ("enter" vs "shift+enter") because Bubble Tea v2
@@ -281,4 +285,121 @@ func defaultKeys() keyMap {
 			key.WithHelp("ctrl+g", "set global default"),
 		),
 	}
+}
+
+// applyKeyOverrides returns a copy of km with overridden key sets and rebuilt help short keys.
+// Unknown action names in ov are ignored — composition-side validator rejects them at load.
+func applyKeyOverrides(km keyMap, ov map[string][]string) keyMap {
+	if len(ov) == 0 {
+		return km
+	}
+
+	join := func(list []string) string { return strings.Join(list, ",") }
+
+	// bindingSetter is a closure that replaces one field of km with a new binding.
+	type bindingSetter func(chords []string)
+	setters := map[string]bindingSetter{
+		"Submit": func(chords []string) {
+			km.Submit = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Submit.Help().Desc))
+		},
+		"Newline": func(chords []string) {
+			km.Newline = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Newline.Help().Desc))
+		},
+		"Cancel": func(chords []string) {
+			km.Cancel = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Cancel.Help().Desc))
+		},
+		"Paste": func(chords []string) {
+			km.Paste = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Paste.Help().Desc))
+		},
+		"Quit": func(chords []string) {
+			km.Quit = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Quit.Help().Desc))
+		},
+		"Allow": func(chords []string) {
+			km.Allow = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Allow.Help().Desc))
+		},
+		"AllowAlways": func(chords []string) {
+			km.AllowAlways = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.AllowAlways.Help().Desc))
+		},
+		"Deny": func(chords []string) {
+			km.Deny = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Deny.Help().Desc))
+		},
+		"ScrollU": func(chords []string) {
+			km.ScrollU = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.ScrollU.Help().Desc))
+		},
+		"ScrollD": func(chords []string) {
+			km.ScrollD = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.ScrollD.Help().Desc))
+		},
+		"ScrollTop": func(chords []string) {
+			km.ScrollTop = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.ScrollTop.Help().Desc))
+		},
+		"ScrollBottom": func(chords []string) {
+			km.ScrollBottom = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.ScrollBottom.Help().Desc))
+		},
+		"ModeSwitch": func(chords []string) {
+			km.ModeSwitch = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.ModeSwitch.Help().Desc))
+		},
+		"MCPPanel": func(chords []string) {
+			km.MCPPanel = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.MCPPanel.Help().Desc))
+		},
+		"Resources": func(chords []string) {
+			km.Resources = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Resources.Help().Desc))
+		},
+		"Prompts": func(chords []string) {
+			km.Prompts = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Prompts.Help().Desc))
+		},
+		"Agents": func(chords []string) {
+			km.Agents = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Agents.Help().Desc))
+		},
+		"NextTab": func(chords []string) {
+			km.NextTab = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.NextTab.Help().Desc))
+		},
+		"CancelChild": func(chords []string) {
+			km.CancelChild = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.CancelChild.Help().Desc))
+		},
+		"ExpandTools": func(chords []string) {
+			km.ExpandTools = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.ExpandTools.Help().Desc))
+		},
+		"Help": func(chords []string) {
+			km.Help = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Help.Help().Desc))
+		},
+		"Effort": func(chords []string) {
+			km.Effort = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Effort.Help().Desc))
+		},
+		"SetGlobalDefault": func(chords []string) {
+			km.SetGlobalDefault = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.SetGlobalDefault.Help().Desc))
+		},
+		"Up": func(chords []string) {
+			km.Up = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Up.Help().Desc))
+		},
+		"Down": func(chords []string) {
+			km.Down = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Down.Help().Desc))
+		},
+		"Choose": func(chords []string) {
+			km.Choose = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Choose.Help().Desc))
+		},
+		"Close": func(chords []string) {
+			km.Close = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Close.Help().Desc))
+		},
+		"Refresh": func(chords []string) {
+			km.Refresh = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Refresh.Help().Desc))
+		},
+		"Tasks": func(chords []string) {
+			km.Tasks = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Tasks.Help().Desc))
+		},
+		"Findings": func(chords []string) {
+			km.Findings = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Findings.Help().Desc))
+		},
+		"JumpTop": func(chords []string) {
+			km.JumpTop = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.JumpTop.Help().Desc))
+		},
+		"JumpEnd": func(chords []string) {
+			km.JumpEnd = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.JumpEnd.Help().Desc))
+		},
+	}
+	for name, set := range setters {
+		if chords, ok := ov[name]; ok {
+			set(chords)
+		}
+	}
+	return km
 }

@@ -39,13 +39,16 @@ const helpKeyWidth = 22
 // and agents overlays use. Every availability decision reads the relayed caps
 // (not a ui-local guess), so the same overlay honestly reflects an embedded
 // default (mcp/commands/skills off) and an external mecated with everything on.
-func renderHelpOverlay(th theme.Theme, caps client.Capabilities, width, height int) string {
-	return centerCard(th, helpBody(th, caps), width, height)
+// agentsKey and jumpKey reflect the LIVE key bindings so a rebinding propagates here.
+func renderHelpOverlay(th theme.Theme, caps client.Capabilities, width, height int, agentsKey, jumpKey string) string {
+	return centerCard(th, helpBody(th, caps, agentsKey, jumpKey), width, height)
 }
 
 // helpBody builds the overlay's text: a title, grouped chord sections (each row
 // caps-annotated), the skills clarification, and the close hint.
-func helpBody(th theme.Theme, caps client.Capabilities) string {
+// agentsKey and jumpKey are the LIVE key markings from the model's keyMap,
+// so a rebinding propagates here.
+func helpBody(th theme.Theme, caps client.Capabilities, agentsKey, jumpKey string) string {
 	muted := th.Style("muted")
 	var b strings.Builder
 
@@ -72,7 +75,7 @@ func helpBody(th theme.Theme, caps client.Capabilities) string {
 		{key: "ctrl+o", action: "MCP inventory", available: caps.MCP, gated: true},
 		{key: "ctrl+r", action: "MCP resources", available: caps.MCP, gated: true},
 		{key: "ctrl+p", action: "MCP prompts", available: caps.MCP, gated: true},
-		{key: "ctrl+a", action: "agents overlay (subagents / parallel / teams · tab to switch)"},
+		{key: agentsKey, action: "agents overlay (subagents / parallel / teams · tab to switch)"},
 		{key: "ctrl+e", action: "reasoning-effort picker", available: caps.ModelSelection, gated: true},
 		{key: "alt+m", action: "cycle permission mode (default / plan / accept-edits)"},
 		{key: "ctrl+t", action: "expand/collapse details"},
@@ -81,7 +84,7 @@ func helpBody(th theme.Theme, caps client.Capabilities) string {
 	b.WriteString("\n" + muted.Render("General") + "\n")
 	writeHelpRows(&b, th, []helpRow{
 		{key: platform.ScrollKeysMarking(), action: "scroll the conversation (a ↑NN% header cue shows while scrolled up)"},
-		{key: "home/end", action: "jump to top / bottom (end resumes auto-follow)"},
+		{key: jumpKey, action: "jump to top / bottom (end resumes auto-follow)"},
 		{key: "wheel", action: "mouse-wheel scroll (alt screen only)"},
 		{key: "drag", action: "select text · drag to an edge auto-scrolls · copies on release · double-click word · triple-click line · right-click copies · esc clears"},
 		{key: "middle-click", action: "paste the primary selection into the prompt (X11/Wayland; shift+middle-click pastes via the terminal instead)"},
@@ -136,6 +139,32 @@ func helpBody(th theme.Theme, caps client.Capabilities) string {
 
 	b.WriteString("\n" + muted.Render("esc or ? to close"))
 	return b.String()
+}
+
+// jumpKeyMarking returns the live scroll-top/scroll-bottom key marking from the
+// keyMap (first keys joined with "/"), so a rebinding propagates here.
+func (m Model) jumpKeyMarking() string {
+	top := m.keys.ScrollTop.Keys()
+	bot := m.keys.ScrollBottom.Keys()
+	// Both have at least one key by construction (the default binding).
+	topKey := "home"
+	botKey := "end"
+	if len(top) > 0 {
+		topKey = top[0]
+	}
+	if len(bot) > 0 {
+		botKey = bot[0]
+	}
+	return topKey + "/" + botKey
+}
+
+// agentsKeyMarking returns the current agents overlay key (first key in binding) for help/affordance labels.
+func (m Model) agentsKeyMarking() string {
+	keys := m.keys.Agents.Keys()
+	if len(keys) > 0 {
+		return keys[0]
+	}
+	return "ctrl+a"
 }
 
 // writeHelpRows renders a group of chord rows. An available (or ungated) row uses
@@ -194,7 +223,7 @@ func (m Model) legacyZeroStateBody() string {
 	var b strings.Builder
 	b.WriteString(th.Style("askTitle").Render("Welcome to mecatui") + "\n\n")
 	b.WriteString(th.Style("toolArgs").Render("  Type a request below and press enter.") + "\n\n")
-	writeHelpRows(&b, th, zeroStateRows())
+	writeHelpRows(&b, th, zeroStateRows(m.agentsKeyMarking()))
 	if note := m.zeroStateMemoryNote(); note != "" {
 		b.WriteString("\n" + note + "\n")
 	}
@@ -206,7 +235,7 @@ func (m Model) legacyZeroStateBody() string {
 // the legacy card so the rows stay byte-equivalent in semantics.
 func (m Model) zeroStateAffordanceRows() []string {
 	var b strings.Builder
-	writeHelpRows(&b, m.deps.Theme, zeroStateRows())
+	writeHelpRows(&b, m.deps.Theme, zeroStateRows(m.agentsKeyMarking()))
 	return strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
 }
 
@@ -232,16 +261,15 @@ func (m Model) zeroStateModelName() string {
 
 // zeroStateRows is the affordance list on the welcome card. Every row is now
 // UNCONDITIONAL — "?" / "/" (built-in commands always exist) / "ctrl+t" were always
-// always-on, and "ctrl+a" (the unified agents overlay) is no longer caps-gated because
-// subagents are always available via Subagent (teams are the only optional half). So it
-// takes no caps argument; the caps-conditional welcome content (the memory note) lives
-// in renderZeroState. Rows are rendered ungated (no [not enabled] tags on the welcome
-// card — it advertises only what's on).
-func zeroStateRows() []helpRow {
+// always-on, and the agents key (default "ctrl+a") reflects the LIVE binding so a
+// rebinding propagates here. It takes no caps argument; the caps-conditional
+// welcome content (the memory note) lives in renderZeroState. Rows are rendered
+// ungated (no [not enabled] tags on the welcome card — it advertises only what's on).
+func zeroStateRows(agentsKey string) []helpRow {
 	return []helpRow{
 		{key: "?", action: "keys & features"},
 		{key: "/", action: "slash commands"},
-		{key: "ctrl+a", action: "agents (when running)"},
+		{key: agentsKey, action: "agents (when running)"},
 		{key: "ctrl+t", action: "details"},
 	}
 }
