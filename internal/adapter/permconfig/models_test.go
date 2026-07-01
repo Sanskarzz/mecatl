@@ -32,6 +32,7 @@ func TestOperatorModelsFromCLIHonoured(t *testing.T) {
 	m := r.OperatorModelSlots()
 	if m == nil {
 		t.Fatal("operator-tier models must be honoured from the CLI/explicit tier")
+		return
 	}
 	if m.Slots["compaction"] != "cheap" || m.Slots["guardrail"] != "fast" {
 		t.Fatalf("slots not parsed faithfully: %+v", m.Slots)

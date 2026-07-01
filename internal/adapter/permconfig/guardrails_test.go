@@ -49,6 +49,7 @@ func TestOperatorGuardrailsFromCLIHonoured(t *testing.T) {
 	g := r.OperatorGuardrails()
 	if g == nil {
 		t.Fatal("operator-tier guardrails must be honoured from the CLI/explicit tier")
+		return
 	}
 	if g.Model != "gpt-5" || g.MinContentBytes != 32 || len(g.Rules) != 2 {
 		t.Fatalf("guardrails not parsed faithfully: %+v", g)

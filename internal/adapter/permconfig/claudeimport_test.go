@@ -27,6 +27,7 @@ func TestClaudeImportWebFetchDomainAllowDemotedToAsk(t *testing.T) {
 	r := findRule(rules, "WebFetch", "domain:example.com")
 	if r == nil {
 		t.Fatalf("WebFetch rule missing: %+v", rules)
+		return
 	}
 	if r.Effect != governance.Ask {
 		t.Fatalf("WebFetch domain allow must be DEMOTED to Ask, got %v", r.Effect)
@@ -50,6 +51,7 @@ func TestClaudeImportWebSearchAllowNotDemoted(t *testing.T) {
 	r := findRule(rules, "WebSearch", "")
 	if r == nil {
 		t.Fatalf("WebSearch rule missing: %+v", rules)
+		return
 	}
 	if r.Effect != governance.Allow {
 		t.Fatalf("bare WebSearch allow must import VERBATIM as Allow (no demotion), got %v", r.Effect)
@@ -70,6 +72,7 @@ func TestClaudeImportTildeLeftInert(t *testing.T) {
 	r := findRule(rules, "Read", "~/.zshrc")
 	if r == nil {
 		t.Fatalf("Read rule missing: %+v", rules)
+		return
 	}
 	if r.Pattern != "~/.zshrc" {
 		t.Fatalf("the \"~\" must be left UNEXPANDED, got %q", r.Pattern)

@@ -191,6 +191,7 @@ func TestModelMetadata(t *testing.T) {
 	}
 	if gpt5 == nil {
 		t.Fatal("openai/gpt-5 not found in curated catalog")
+		return
 	}
 	if gpt5.Name() != "GPT-5" {
 		t.Errorf("Name() = %q, want GPT-5", gpt5.Name())
@@ -230,6 +231,7 @@ func TestOpenRouterGLM52Metadata(t *testing.T) {
 	}
 	if glm52 == nil {
 		t.Fatal("z-ai/glm-5.2 not found in curated OpenRouter allowlist")
+		return
 	}
 	if glm52.Name() != "GLM-5.2" {
 		t.Errorf("Name() = %q, want GLM-5.2", glm52.Name())
