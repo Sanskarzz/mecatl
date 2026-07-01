@@ -16,6 +16,7 @@ func TestRegisterProviderFlagsRegistersThree(t *testing.T) {
 		f := fs.Lookup(name)
 		if f == nil {
 			t.Fatalf("flag --%s not registered", name)
+			return
 		}
 		if f.Usage == "" {
 			t.Errorf("flag --%s has empty help (default fallback should fill it)", name)
@@ -193,6 +194,7 @@ func TestRegisterModelFlagsRegistersBoth(t *testing.T) {
 	for _, name := range []string{"model-alias", "model-slot"} {
 		if f := fs.Lookup(name); f == nil {
 			t.Fatalf("flag --%s not registered", name)
+			return
 		}
 	}
 	// A zero ModelFlagHelp uses the mecated-style defaults.

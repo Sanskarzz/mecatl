@@ -59,6 +59,7 @@ permissions:
 		r := findRule(rules, "Bash", w.pattern)
 		if r == nil {
 			t.Fatalf("rule %q missing: %+v", w.pattern, rules)
+			return
 		}
 		if r.Effect != w.effect || r.Audience != w.audience || r.Scope != governance.ScopeSharedProject {
 			t.Fatalf("rule %q = {effect %v, audience %v, scope %v}, want {%v, %v, %v}",
@@ -210,6 +211,7 @@ func TestClaudeImportAudienceTagging(t *testing.T) {
 		r := findRule(rules, c.tool, c.pattern)
 		if r == nil {
 			t.Fatalf("imported rule %s(%s) missing: %+v", c.tool, c.pattern, rules)
+			return
 		}
 		if r.Effect != c.effect || r.Audience != c.audience {
 			t.Fatalf("imported %s(%s) = {%v, audience %v}, want {%v, %v}",
