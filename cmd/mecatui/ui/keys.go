@@ -14,6 +14,12 @@ type keyMap struct {
 	Submit  key.Binding
 	Newline key.Binding
 	Cancel  key.Binding
+	// EditBack (↑) pulls the merged staged follow-up queue back into the textarea for
+	// editing. It is consulted ONLY on an EMPTY input line with a non-empty queue (see
+	// onRunningKey / onIdleKey), so ↑ over a draft stays a plain textarea/scroll key; it
+	// is non-destructive (the queue is moved into the input, not dropped — distinct from
+	// esc, which clears outright). Live both mid-run and while a paused queue is held.
+	EditBack key.Binding
 	// Paste (ctrl+v) reads the OS clipboard: an image stages as an inline media
 	// attachment ([Image #N]), text inserts into the prompt. Distinct from a
 	// bracketed paste (tea.PasteMsg, handled by onPaste) which never reaches here.
@@ -149,6 +155,10 @@ func defaultKeys() keyMap {
 		Cancel: key.NewBinding(
 			key.WithKeys("esc"),
 			key.WithHelp("esc", "cancel run"),
+		),
+		EditBack: key.NewBinding(
+			key.WithKeys("up"),
+			key.WithHelp("↑", "edit queued"),
 		),
 		Paste: key.NewBinding(
 			key.WithKeys("ctrl+v"),
@@ -307,6 +317,9 @@ func applyKeyOverrides(km keyMap, ov map[string][]string) keyMap {
 		},
 		"Cancel": func(chords []string) {
 			km.Cancel = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Cancel.Help().Desc))
+		},
+		"EditBack": func(chords []string) {
+			km.EditBack = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.EditBack.Help().Desc))
 		},
 		"Paste": func(chords []string) {
 			km.Paste = key.NewBinding(key.WithKeys(chords...), key.WithHelp(join(chords), km.Paste.Help().Desc))

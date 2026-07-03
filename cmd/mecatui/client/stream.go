@@ -70,7 +70,7 @@ func (s *Stream) ReadLoop(ctx context.Context, out chan<- tea.Msg) {
 				emit(ctx, out, StreamClosedMsg{})
 				return
 			}
-			emit(ctx, out, StreamErrMsg{Err: err})
+			emit(ctx, out, StreamErrMsg{Err: err, Transient: TransientStreamErr(err)})
 			return
 		}
 		if m := EventToMsg(resp.GetEvent()); m != nil {

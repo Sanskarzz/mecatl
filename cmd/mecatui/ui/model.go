@@ -197,9 +197,15 @@ type Deps struct {
 // maxQueued caps the number of follow-up prompts that may be staged while a run
 // streams. A further enqueue over the cap is rejected with a muted "queue full"
 // status and the input is kept, so a typo'd burst can't grow the queue without
-// bound. The drain is one-at-a-time FIFO (see drainQueue), so the cap is the only
-// backpressure the queue needs.
+// bound. The drain MERGES the whole queue into one prompt (see drainQueue), so the
+// cap is the only backpressure the queue needs.
 const maxQueued = 16
+
+// queueMergeSep joins multiple staged follow-ups into ONE prompt when the queue
+// drains (or is pulled back for editing). The blank-line separator keeps each
+// staged instruction as its own paragraph in the merged prompt (and in the
+// textarea on an edit-back), which reads naturally as a multi-part request.
+const queueMergeSep = "\n\n"
 
 // phase is the model's coarse state machine.
 type phase int
@@ -285,7 +291,7 @@ type Model struct {
 	skills       skillsState    // skills-inventory overlay state (view==skillsNone when closed)
 	palette      paletteState   // slash-command palette (open when the input starts with "/")
 	mention      mentionState   // @-file-mention completion menu (open when the trailing word is an "@token"); mutually exclusive with palette
-	queued       []string       // follow-up prompts staged while a run streams; drained FIFO on a clean stop (see drainQueue)
+	queued       []string       // follow-up prompts staged while a run streams; MERGED into one prompt and drained on a clean/transient stop (see drainQueue)
 	queuePaused  string         // non-empty when a run ended on a non-clean stop with a non-empty queue: the stop reason holding the queue (see drainQueue/renderQueue)
 	team         teamState      // unified ctrl+a agents overlay: container open flag + Teams-tab state (view==teamNone when closed)
 	agentsTab    agentsTab      // active tab in the unified agents overlay (Subagents | Parallel | Teams)

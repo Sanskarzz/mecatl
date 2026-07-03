@@ -516,12 +516,13 @@ show the plain prompt-hint card.
 | Key | Action |
 |---|---|
 | `enter` (idle) | send the prompt |
-| `enter` (while a run streams) | **queue a follow-up** (staged, sent when the turn ends) |
+| `enter` (while a run streams) | **queue a follow-up** (staged; the whole queue is **merged into one prompt** and sent when the turn ends) |
+| `↑` (empty input, non-empty queue) | **edit queued** — pull the merged staged follow-ups back into the input for revising (non-destructive; the queue is emptied into the textarea, not dropped). Works both mid-run and while a paused queue is held. |
 | `shift+enter` (or `ctrl+j`) | newline in the input |
 | paste (bracketed) | insert clipboard text into the prompt; a single pasted **media-file path** is staged as an attachment instead, and a **large** paste (≥ 2000 chars — alone or combined with the current input — or ≥ 30 lines) is staged behind a `[Pasted text #N]` placeholder appended at the end of the input, expanding on send (ignored while an overlay/modal is open) |
 | `ctrl+v` | read the OS clipboard — a clipboard **image** stages as an `[Image #N]` attachment (when supported), else paste clipboard **text** (see below) |
 | `esc` (while a run streams) | clear staged input → else clear the queue → else cancel the in-flight run (sends `Cancel`; waits for the terminal result) |
-| `enter` (idle, **paused queue**, empty input) | resume — send the next staged follow-up |
+| `enter` (idle, **paused queue**, empty input) | resume — send the merged staged follow-ups |
 | `esc` (idle, **paused queue**) | clear staged input → else clear the queue |
 | `ctrl+c` | graceful quit (double-press): with a non-empty prompt the first press **clears the input**; on an empty prompt it **arms** the guard and shows a footer hint — press `ctrl+c` again within 3s to exit. Any other key disarms. The fatal (dead-connection) screen exits on a single press. |
 | in the permission modal: `a`/`y` | allow once |
@@ -887,26 +888,32 @@ The input stays **focused while a run streams**, so you can compose the next
 request without waiting. Pressing `enter` mid-run **enqueues** the (trimmed,
 non-empty) line rather than starting a second concurrent run — the queue is capped
 at 16; an over-cap `enter` is rejected with a muted `queue full (16)` status and the
-input is kept. A muted card above the input shows `⏳ N queued` with up to three
-previews (`+K more` over that).
+input is kept. A muted card above the input shows `⏳ N queued · ↑ edit` with up to
+three previews (`+K more` over that).
 
-When the run ends on a **healthy** stop, the queue drains **one at a time, FIFO**: the
-oldest staged line is submitted through the ordinary prompt path (so it reopens the
-session server-side exactly like a manual follow-up), and that run's completion drives
-the next. A healthy stop is one where the model was *done* or merely hit a *size
-bound* — `end_turn` (and the empty reason), **plus** the per-run limits `max_turns`,
-`max_tool_calls`, and `budget` (the run just ran out of turn/tool/token budget;
-firing the next staged prompt reopens it with a fresh budget, which is what a lined-up
-"continue" wants).
+When the run ends on a **healthy** stop, the whole queue is **merged into one prompt**
+(the staged lines joined by a blank line) and submitted through the ordinary prompt
+path (so it reopens the session server-side exactly like a manual follow-up); the
+queue empties in a single step. A healthy stop is one where the model was *done* or
+merely hit a *size bound* — `end_turn` (and the empty reason), **plus** the per-run
+limits `max_turns`, `max_tool_calls`, and `budget` (the run just ran out of
+turn/tool/token budget; firing the merged prompt reopens it with a fresh budget, which
+is what a lined-up "continue" wants).
 
-On a **non-healthy** stop the drain **pauses and keeps** the queue — an error, a user
-cancel, `max_consecutive_failures`, or a stream close — so a broken, failing, or
-deliberately-cancelled run never silently fires the backlog. The card switches from
-the muted `⏳ N queued` to a louder `⏸ N queued · paused: <reason>` with the resume/
-clear keys, so a held queue is never mistaken for a hang. From there (idle), `enter`
-on an empty line **resumes** (sends the next staged line) and `esc` **clears** the
-queue; sending a fresh prompt also clears the pause and lets the queue drain at that
-run's clean end.
+A **transient** failure — an idle/stalled stream, an overloaded/unavailable backend, a
+rate limit, or a transient upstream 5xx — is treated like a healthy stop and
+**auto-resumes** the merged queue, since a plain retry is likely to succeed. This
+auto-resume fires **only** when follow-ups are staged: a transient death of a run with
+an **empty** queue does not auto-retry the original prompt — the user must resend it
+manually. A **hard**
+error, a **user cancel**, `max_consecutive_failures`, or a stream close instead
+**pauses and keeps** the queue, so a genuinely-broken run or a deliberate cancel never
+silently fires the backlog. The card switches from the muted `⏳ N queued · ↑ edit` to a
+louder `⏸ N queued · paused: <reason>` with the resume/edit/clear keys, so a held queue
+is never mistaken for a hang. From there (idle), `enter` on an empty line **resumes**
+(sends the merged queue), `↑` on an empty line pulls the merged queue back into the
+input for **editing** (non-destructive), and `esc` **clears** the queue; sending a
+fresh prompt also clears the pause and lets the queue drain at that run's clean end.
 
 A built-in (`/clear`, `/help`) typed mid-run is enqueued like any other line and
 dispatched **at drain time**, when the phase is idle and the built-in's idle-guard is

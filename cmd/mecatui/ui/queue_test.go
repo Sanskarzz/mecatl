@@ -180,33 +180,63 @@ func TestDrainOneOnCompletion(t *testing.T) {
 	}
 }
 
-// TestDrainMultipleSequential: two staged follow-ups drain ONE AT A TIME in FIFO
-// order, each clean ResultMsg{end_turn} firing the next.
-func TestDrainMultipleSequential(t *testing.T) {
+// TestDrainMergesMultiple: multiple staged follow-ups MERGE into ONE prompt (joined
+// by queueMergeSep) on the next clean ResultMsg{end_turn}, and the queue empties in a
+// SINGLE step — not one-at-a-time. This pins the merge-always decision (issue #228): a
+// regression to a per-item FIFO drain would send three frames instead of two, and
+// would leave the queue non-empty after the first completion.
+func TestDrainMergesMultiple(t *testing.T) {
 	m, conv := newQueueModel(t)
 	m = startRunning(t, m, "first")
 	m = enqueue(t, m, "second")
 	m = enqueue(t, m, "third")
 
-	// First completion drains "second".
 	mm, cmd := m.Update(client.ResultMsg{Stop: "end_turn"})
 	m = mm.(Model)
 	runBatchLeaves(cmd)
-	if len(m.queued) != 1 || m.queued[0] != "third" {
-		t.Fatalf("after first drain queued = %v, want [third]", m.queued)
-	}
 
-	// Second completion drains "third".
-	mm, cmd = m.Update(client.ResultMsg{Stop: "end_turn"})
-	m = mm.(Model)
-	runBatchLeaves(cmd)
+	// The whole queue drained in one step.
 	if len(m.queued) != 0 {
-		t.Fatalf("after second drain queued = %v, want empty", m.queued)
+		t.Fatalf("merge-drain should empty the queue in one step, got %v", m.queued)
+	}
+	if m.phase != phaseRunning {
+		t.Errorf("merge-drain should reopen a run (phaseRunning), got %d", m.phase)
 	}
 
 	got := promptTexts(conv.send)
-	if len(got) != 3 || got[0] != "first" || got[1] != "second" || got[2] != "third" {
-		t.Fatalf("prompt frames = %v, want [first second third] FIFO", got)
+	want := []string{"first", "second" + queueMergeSep + "third"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("prompt frames = %v, want %v (staged items merged into one prompt)", got, want)
+	}
+}
+
+// TestDrainMergePausesOnPendingMode: when a mode switch is pending, the merged queue
+// is placed in the textarea and NOT submitted (queuePaused=="mode") so the mode
+// applies before the user sends it. Pins that popAndSubmit preserves the pendingMode
+// guard under merge-always.
+func TestDrainMergePausesOnPendingMode(t *testing.T) {
+	m, conv := newQueueModel(t)
+	m = startRunning(t, m, "first")
+	m = enqueue(t, m, "second")
+	m = enqueue(t, m, "third")
+	m.pendingMode = "plan" // a mode switch is in flight
+
+	mm, cmd := m.Update(client.ResultMsg{Stop: "end_turn"})
+	m = mm.(Model)
+	runBatchLeaves(cmd)
+
+	if m.queuePaused != "mode" {
+		t.Fatalf("pending mode must pause the merged drain, queuePaused=%q", m.queuePaused)
+	}
+	if got := m.ta.Value(); got != "second"+queueMergeSep+"third" {
+		t.Fatalf("merged text must sit in the textarea, got %q", got)
+	}
+	if len(m.queued) != 0 {
+		t.Fatalf("merge clears the queue even when it pauses on mode, got %v", m.queued)
+	}
+	// No second Prompt frame — the merged text was NOT submitted.
+	if got := promptTexts(conv.send); len(got) != 1 {
+		t.Fatalf("pending-mode merge must not submit, frames = %v", got)
 	}
 }
 
@@ -373,8 +403,9 @@ func TestPausedQueueRendersLoud(t *testing.T) {
 	runBatchLeaves(cmd)
 
 	card := m.renderQueue()
-	if !strings.Contains(card, "paused") || !strings.Contains(card, "enter sends next") {
-		t.Fatalf("paused queue card must say paused + show resume/clear keys, got:\n%s", card)
+	if !strings.Contains(card, "paused") || !strings.Contains(card, "enter sends") ||
+		!strings.Contains(card, "↑ edit") || !strings.Contains(card, "esc clears") {
+		t.Fatalf("paused queue card must say paused + show resume/edit/clear keys, got:\n%s", card)
 	}
 }
 

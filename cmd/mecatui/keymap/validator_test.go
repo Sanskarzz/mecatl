@@ -16,6 +16,28 @@ func TestParseEmptyChord(t *testing.T) {
 	}
 }
 
+func TestParseAcceptsEditBack(t *testing.T) {
+	res, err := Parse(map[string][]string{"EditBack": {"up"}})
+	if err != nil {
+		t.Fatalf("EditBack must be a valid action: %v", err)
+	}
+	if err := Validate(res); err != nil {
+		t.Fatalf("EditBack=up must validate: %v", err)
+	}
+}
+
+func TestValidateEditBackGlobalCollision(t *testing.T) {
+	// EditBack is a globalOpen action: binding its chord to another global action is a
+	// collision that must be rejected.
+	res, err := Parse(map[string][]string{"EditBack": {"ctrl+q"}, "Submit": {"ctrl+q"}})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if err := Validate(res); err == nil {
+		t.Fatalf("expected a global-scope collision for EditBack vs Submit")
+	}
+}
+
 func TestValidateBareRuneOnGlobal(t *testing.T) {
 	res, err := Parse(map[string][]string{"Agents": {"a"}})
 	if err != nil {

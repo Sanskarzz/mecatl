@@ -360,13 +360,15 @@ func (m Model) updateLifecycle(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		m.refreshView()
 		return m, nil, true
 	case client.StreamErrMsg:
-		// An error PAUSES the queue (shouldDrain(stopError) is false): the staged
-		// follow-ups are kept intact and marked paused (m.queuePaused) so the queue
-		// card says why, not auto-sent into a broken run. drainQueue records the pause
-		// here, but the policy lives in one place.
+		// A HARD stream error PAUSES the queue: the staged follow-ups are kept intact
+		// and marked paused (m.queuePaused) so the queue card says why, not auto-sent
+		// into a broken run. A TRANSIENT stream error (msg.Transient — an idle/stalled
+		// stream, an overloaded/unavailable backend, a rate limit) instead AUTO-RESUMES
+		// the merged queue, since a plain retry is likely to succeed. drainQueue owns
+		// the policy in one place.
 		m.conv.addError("stream error: " + msg.Err.Error())
 		m = m.endRun(stopError)
-		mm, drainCmd := m.drainQueue(stopError)
+		mm, drainCmd := m.drainQueue(stopError, msg.Transient)
 		return mm, tea.Batch(m.refreshCmd(), drainCmd), true
 	case clipboardResultMsg:
 		mm, cmd := m.onClipboardResult(msg)
@@ -387,7 +389,7 @@ func (m Model) updateLifecycle(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		if m.phase == phaseRunning || m.phase == phaseAwaitingApproval {
 			m = m.endRun("closed")
 			modeCmd := m.retryPendingModeCmd()
-			mm, drainCmd := m.drainQueue("closed")
+			mm, drainCmd := m.drainQueue("closed", false)
 			return mm, tea.Batch(m.refreshCmd(), modeCmd, drainCmd), true
 		}
 		return m, nil, true
@@ -667,7 +669,7 @@ func (m Model) applyResult(msg client.ResultMsg) (tea.Model, tea.Cmd) {
 	}
 	m = m.endRun(msg.Stop)
 	modeCmd := m.retryPendingModeCmd()
-	mm, drainCmd := m.drainQueue(msg.Stop)
+	mm, drainCmd := m.drainQueue(msg.Stop, msg.Transient)
 	return mm, tea.Batch(m.refreshCmd(), modeCmd, drainCmd)
 }
 
@@ -1415,6 +1417,11 @@ func (m Model) onRunningKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	switch {
+	case m.wantsEditBack(msg):
+		// ↑ on an EMPTY input line with staged follow-ups pulls the merged queue back
+		// into the textarea for editing (non-destructive; esc clears outright). Placed
+		// before Submit/the textarea default so it wins the empty-input case.
+		return m.editBackQueue()
 	case key.Matches(msg, m.keys.Agents):
 		// ctrl+a opens the unified agents overlay MID-RUN (Gap B): the deep view is
 		// most useful while agents stream. openAgents permits phaseRunning, reads the
@@ -1508,6 +1515,33 @@ func (m Model) enqueuePrompt() (tea.Model, tea.Cmd) {
 	return m.afterInputEdit(nil)
 }
 
+// wantsEditBack reports whether msg is the EditBack key (↑) pressed on an EMPTY
+// input line with a non-empty queue — the precondition for pulling the merged queue
+// back into the textarea (see editBackQueue). Gating on empty input keeps ↑ a plain
+// textarea/scroll key over a draft. Shared by onRunningKey and onIdleKey so the
+// guard reads as one predicate in each switch (and keeps their cyclomatic complexity
+// under the cap).
+func (m Model) wantsEditBack(msg tea.KeyPressMsg) bool {
+	return key.Matches(msg, m.keys.EditBack) &&
+		strings.TrimSpace(m.ta.Value()) == "" && len(m.queued) > 0
+}
+
+// editBackQueue is the inverse of enqueuePrompt: it pulls the whole staged queue
+// back into the textarea (merged by queueMergeSep) so the user can revise it, and
+// CLEARS the queue + any pause. It is non-destructive — bound to ↑ on an EMPTY input
+// line with a non-empty queue (see onRunningKey / onIdleKey), distinct from esc,
+// which clears the queue outright. It sends nothing: the merged text is now an
+// ordinary draft the user edits and (re)submits or (re)enqueues. Callers gate on the
+// empty-input / non-empty-queue precondition, so this assumes m.queued is non-empty.
+func (m Model) editBackQueue() (tea.Model, tea.Cmd) {
+	m.ta.SetValue(strings.Join(m.queued, queueMergeSep))
+	m.queued = nil
+	m.queuePaused = ""
+	m.statusMsg = m.deps.Theme.Style("muted").Render("queue pulled back for editing")
+	m.refreshView()
+	return m.afterInputEdit(nil)
+}
+
 // onIdleKey handles keys while idle: enter submits the prompt, shift+enter (and
 // ctrl+j) inserts a newline, everything else feeds the textarea (or scrolls).
 //
@@ -1532,6 +1566,13 @@ func (m Model) onIdleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	switch {
+	case m.wantsEditBack(msg):
+		// ↑ on an EMPTY input line with staged follow-ups (a PAUSED queue held after a
+		// non-clean stop, or a queue lingering at idle) pulls the merged queue back into
+		// the textarea for editing (non-destructive; esc clears outright). Placed before
+		// Submit/the textarea default so it wins the empty-input case in both paused and
+		// idle states.
+		return m.editBackQueue()
 	case key.Matches(msg, m.keys.Help) && strings.TrimSpace(m.ta.Value()) == "":
 		// "?" is printable: open help only on an empty prompt so "?" in prose still
 		// inserts literally. The overlay claims the keyboard via the m.showHelp gate
@@ -2570,36 +2611,37 @@ func (m *Model) refreshView() {
 	}
 }
 
-// drainQueue pops the oldest staged follow-up and submits it, one at a time. It is
+// drainQueue MERGES the staged follow-ups into ONE prompt and submits it. It is
 // called on every run-completion path (ResultMsg / StreamErrMsg / StreamClosedMsg)
 // AFTER endRun has settled the model back to idle.
 //
 // It fires on a HEALTHY stop (shouldDrain): end_turn, the empty reason, or a size
-// limit (max_turns / max_tool_calls / budget). On a non-healthy stop — error, a user-cancel
-// ("cancelled"), max_consecutive_failures, or a stream close — it does NOT fire:
-// instead it records the stop reason in m.queuePaused and KEEPS the queue, so the
-// run that died never silently fires the next staged prompt. The user then resumes
-// with enter on an empty line (resumeQueue) or clears with esc — renderQueue shows
-// that affordance. The phase==phaseIdle guard is belt-and-braces (endRun always
-// lands idle on these paths) so a future caller can't drain into a still-running
-// model.
+// limit (max_turns / max_tool_calls / budget) — OR on a TRANSIENT error (transient
+// true with stop==stopError), where the failure is likely to survive a plain retry
+// (an idle/stalled stream, an overloaded/unavailable backend, a rate limit) so
+// auto-resuming the merged queue continues the work the user lined up. On any other
+// non-healthy stop — a HARD error (transient false), a user-cancel ("cancelled"),
+// max_consecutive_failures, or a stream close — it does NOT fire: instead it records
+// the stop reason in m.queuePaused and KEEPS the queue, so the run that died never
+// silently fires the staged prompts. The user then resumes with enter on an empty
+// line (resumeQueue) or clears with esc — renderQueue shows that affordance. The
+// phase==phaseIdle guard is belt-and-braces (endRun always lands idle on these
+// paths) so a future caller can't drain into a still-running model.
 //
 // The submit goes through the EXISTING submitPrompt path — the same one a typed
 // prompt uses — so the queued prompt reopens the completed session server-side
-// (StartRunContent) exactly like a manual follow-up; there is no separate send
-// path. submitPrompt sets phaseRunning and opens a fresh stream whose own ResultMsg
-// re-enters drainQueue, giving a one-at-a-time FIFO drain.
-func (m Model) drainQueue(stop string) (tea.Model, tea.Cmd) {
+// (StartRunContent) exactly like a manual follow-up; there is no separate send path.
+func (m Model) drainQueue(stop string, transient bool) (tea.Model, tea.Cmd) {
 	if len(m.queued) == 0 {
 		m.queuePaused = ""
 		return m, nil
 	}
-	if !shouldDrain(stop) {
-		// A non-clean stop (error / user-cancel / repeated failures / stream close)
-		// with staged follow-ups: PAUSE and KEEP the queue, but record the reason so
-		// renderQueue can say so loudly (and the idle keys can resume/clear it) — a
-		// silent "N queued" after the run died reads as a hang. The user resumes with
-		// enter on an empty line (resumeQueue) or clears with esc.
+	if !shouldDrain(stop) && (stop != stopError || !transient) {
+		// A non-clean, non-transient stop (a hard error / user-cancel / repeated
+		// failures / stream close) with staged follow-ups: PAUSE and KEEP the queue,
+		// but record the reason so renderQueue can say so loudly (and the idle keys can
+		// resume/clear it) — a silent "N queued" after the run died reads as a hang. The
+		// user resumes with enter on an empty line (resumeQueue) or clears with esc.
 		m.queuePaused = stop
 		return m, nil
 	}
@@ -2609,16 +2651,22 @@ func (m Model) drainQueue(stop string) (tea.Model, tea.Cmd) {
 	return m.popAndSubmit()
 }
 
-// popAndSubmit pops the oldest staged follow-up, clears any pause, and submits it
+// popAndSubmit MERGES all staged follow-ups into ONE prompt (joined by
+// queueMergeSep), clears the queue and any pause, and submits the merged text
 // through the EXISTING submitPrompt path (server-side StartRunContent reopen) — the
 // single shared body behind both the auto-drain (drainQueue) and the manual resume
-// (resumeQueue). submitPrompt sets phaseRunning and opens a fresh stream whose own
-// ResultMsg re-enters drainQueue, giving a one-at-a-time FIFO drain.
+// (resumeQueue). submitPrompt sets phaseRunning and opens a fresh stream. The whole
+// queue drains in ONE step, so there is no re-entrant drain — the merged run's own
+// ResultMsg finds an empty queue.
+//
+// The pendingMode guard is preserved exactly: with a mode switch still pending the
+// merged text is placed in the textarea and NOT submitted (queuePaused="mode"), so
+// the mode applies before the user presses enter to send it.
 func (m Model) popAndSubmit() (tea.Model, tea.Cmd) {
 	m.queuePaused = ""
-	next := m.queued[0]
-	m.queued = m.queued[1:]
-	m.ta.SetValue(next)
+	merged := strings.Join(m.queued, queueMergeSep)
+	m.queued = nil
+	m.ta.SetValue(merged)
 	if m.pendingMode != "" {
 		m.statusMsg = m.deps.Theme.Style("warning").Render("mode " + m.pendingMode + " will apply before the queued prompt — press enter to continue")
 		m.queuePaused = "mode"
@@ -2627,12 +2675,13 @@ func (m Model) popAndSubmit() (tea.Model, tea.Cmd) {
 	return m.submitPrompt()
 }
 
-// resumeQueue is the MANUAL counterpart to the auto-drain: it fires the next staged
-// follow-up when the user presses enter on an empty line while the queue is paused
-// (a run ended on a non-clean stop; see onIdleKey). It shares popAndSubmit with
-// drainQueue so the two triggers — automatic on a healthy completion, manual on
-// resume — go through one body and one send path. Callers gate on a non-empty,
-// paused queue; this assumes m.queued is non-empty.
+// resumeQueue is the MANUAL counterpart to the auto-drain: it fires the merged
+// staged follow-ups when the user presses enter on an empty line while the queue is
+// paused (a run ended on a non-clean stop; see onIdleKey). It shares popAndSubmit
+// with drainQueue so the two triggers — automatic on a healthy/transient completion,
+// manual on resume — go through one body and one send path (the whole queue merges
+// into one prompt). Callers gate on a non-empty, paused queue; this assumes
+// m.queued is non-empty.
 func (m Model) resumeQueue() (tea.Model, tea.Cmd) {
 	return m.popAndSubmit()
 }

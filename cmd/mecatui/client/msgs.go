@@ -417,6 +417,11 @@ type ResultMsg struct {
 	Text  string
 	Error string
 	Usage Usage
+	// Transient marks a stop=error whose Error text classifies as a transient
+	// (retryable) failure — see TransientResultError. The ui auto-resumes a paused
+	// queue on a transient error; a hard error still pauses. Always false for a
+	// non-error stop.
+	Transient bool
 }
 
 // Usage is the token accounting carried by ResultMsg (and usage-bearing events).
@@ -450,7 +455,13 @@ type SessionReadyMsg struct {
 type ConnectErrMsg struct{ Err error }
 
 // StreamErrMsg reports a non-EOF Recv error on the Converse stream.
-type StreamErrMsg struct{ Err error }
+type StreamErrMsg struct {
+	Err error
+	// Transient marks a stream error that classifies as a transient (retryable)
+	// transport/backend failure — see TransientStreamErr. The ui auto-resumes a
+	// paused queue on a transient stream error; a hard error still pauses.
+	Transient bool
+}
 
 // StreamClosedMsg reports a clean stream close (io.EOF) without a result event
 // (e.g. server closed early). Normal completion arrives as ResultMsg first.
@@ -680,10 +691,11 @@ func EventToMsg(ev *mecatlv1.Event) tea.Msg {
 	case "result":
 		r := ev.GetResult()
 		return ResultMsg{
-			Stop:  r.GetStop(),
-			Text:  r.GetText(),
-			Error: r.GetError(),
-			Usage: usageFrom(r.GetUsage()),
+			Stop:      r.GetStop(),
+			Text:      r.GetText(),
+			Error:     r.GetError(),
+			Usage:     usageFrom(r.GetUsage()),
+			Transient: TransientResultError(r.GetError()),
 		}
 	default:
 		// The subagent.* / team.* delegation projections are mapped by
