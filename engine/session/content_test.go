@@ -1,6 +1,8 @@
 package session
 
 import (
+	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -135,6 +137,14 @@ func TestValidateMediaURL(t *testing.T) {
 		// A canonical PUBLIC IPv6 must still be allowed (numeric-form rejection
 		// must not over-block legitimate public literal IPs).
 		{"public ipv6 allowed", "https://[2606:2800:220:1::]/a.png", true},
+		// RFC 6052 NAT64 well-known prefix 64:ff9b::/96 embeds an IPv4 address in
+		// its low 32 bits; on a NAT64/DNS64 egress path this literal is
+		// translated back to the embedded IPv4 and dialed, so an embedded
+		// internal address must be rejected exactly as the bare IPv4 would be.
+		{"nat64 embedded metadata rejected", "https://[64:ff9b::a9fe:a9fe]/a.png", false},
+		{"nat64 embedded rfc1918 rejected", "https://[64:ff9b::a00:1]/a.png", false},
+		// An embedded PUBLIC v4 is not an SSRF target and must be allowed.
+		{"nat64 embedded public allowed", "https://[64:ff9b::808:808]/a.png", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -144,6 +154,52 @@ func TestValidateMediaURL(t *testing.T) {
 			}
 			if !tc.ok && err == nil {
 				t.Fatalf("ValidateMediaURL(%q) = nil, want error", tc.url)
+			}
+		})
+	}
+}
+
+func TestValidateResolvedIP(t *testing.T) {
+	// The dial-layer predicate must reject every internal/non-routable IP shape
+	// ValidateMediaURL screens for literal IPs, so a DNS-rebinding fetch (hostname
+	// resolves to an internal IP after the URL-string check passed) is caught at
+	// the dial layer. Public routable IPs pass.
+	cases := []struct {
+		name string
+		ip   string
+		ok   bool
+	}{
+		{"public ipv4", "93.184.216.34", true},
+		{"public ipv6", "2606:2800:220:1::", true},
+		{"loopback rejected", "127.0.0.1", false},
+		{"ipv6 loopback rejected", "::1", false},
+		{"metadata rejected", "169.254.169.254", false},
+		{"link-local rejected", "169.254.0.5", false},
+		{"rfc1918 10 rejected", "10.0.0.5", false},
+		{"rfc1918 192.168 rejected", "192.168.1.10", false},
+		{"rfc1918 172.16 rejected", "172.16.0.9", false},
+		{"unspecified rejected", "0.0.0.0", false},
+		{"cgnat rejected", "100.64.0.1", false},
+		{"multicast rejected", "224.0.0.1", false},
+		// RFC 6052 NAT64 well-known-prefix literals embedding an internal IPv4
+		// in the low 32 bits must be rejected exactly as the bare IPv4 would be
+		// (see isGlobalUnicast); an embedded public IPv4 is not an SSRF target.
+		{"nat64 embedded metadata rejected", "64:ff9b::a9fe:a9fe", false},
+		{"nat64 embedded rfc1918 rejected", "64:ff9b::a00:1", false},
+		{"nat64 embedded public allowed", "64:ff9b::808:808", true},
+		// net.ParseIP("") == nil (an unresolved/failed-resolve IP). isGlobalUnicast
+		// short-circuits on the len(ip) == IPv4len || IPv6len guard, so a nil IP
+		// falls through every predicate without panicking and is rejected.
+		{"nil ip rejected", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateResolvedIP(net.ParseIP(tc.ip))
+			if tc.ok && err != nil {
+				t.Fatalf("ValidateResolvedIP(%s) = %v, want nil", tc.ip, err)
+			}
+			if !tc.ok && err == nil {
+				t.Fatalf("ValidateResolvedIP(%s) = nil, want error", tc.ip)
 			}
 		})
 	}
@@ -184,6 +240,209 @@ func TestNewContentEnforcesInvariants(t *testing.T) {
 				t.Fatalf("%s: expected error, got nil", tc.name)
 			}
 		})
+	}
+}
+
+func TestNewTextBlock(t *testing.T) {
+	c := NewTextBlock("hello")
+	if c.BlockKind != BlockText {
+		t.Fatalf("kind = %q, want %q", c.BlockKind, BlockText)
+	}
+	if c.Text != "hello" {
+		t.Fatalf("text = %q", c.Text)
+	}
+	if c.Data != nil {
+		t.Fatalf("data = %v, want nil", c.Data)
+	}
+}
+
+func TestNewResourceLinkBlock(t *testing.T) {
+	aud := []string{"user"}
+	c := NewResourceLinkBlock("https://example.com/r.json", "r", "Title", "desc", "application/json", 42, aud)
+	if c.BlockKind != BlockResourceLink {
+		t.Fatalf("kind = %q", c.BlockKind)
+	}
+	if c.URL != "https://example.com/r.json" {
+		t.Fatalf("url = %q", c.URL)
+	}
+	if c.Name != "r" || c.Title != "Title" || c.Description != "desc" {
+		t.Fatalf("metadata = name=%q title=%q desc=%q", c.Name, c.Title, c.Description)
+	}
+	if c.MIMEType != "application/json" {
+		t.Fatalf("mime = %q", c.MIMEType)
+	}
+	if c.Size != 42 {
+		t.Fatalf("size = %d", c.Size)
+	}
+	if len(c.Audience) != 1 || c.Audience[0] != "user" {
+		t.Fatalf("audience = %v", c.Audience)
+	}
+	// A resource link is a reference; it must NOT carry inline bytes.
+	if c.Data != nil {
+		t.Fatalf("data = %v, want nil (resource link is a reference)", c.Data)
+	}
+}
+
+func TestNewEmbeddedResourceBlock(t *testing.T) {
+	aud := []string{"admin"}
+	t.Run("text form", func(t *testing.T) {
+		c, err := NewEmbeddedResourceBlock("https://example.com/r.txt", "text/plain", "body", nil, aud)
+		if err != nil {
+			t.Fatalf("text form: %v", err)
+		}
+		if c.BlockKind != BlockEmbeddedResource {
+			t.Fatalf("kind = %q", c.BlockKind)
+		}
+		if c.Text != "body" {
+			t.Fatalf("text = %q", c.Text)
+		}
+		if c.Data != nil {
+			t.Fatalf("data = %v, want nil (text form)", c.Data)
+		}
+		if len(c.Audience) != 1 || c.Audience[0] != "admin" {
+			t.Fatalf("audience = %v", c.Audience)
+		}
+	})
+	t.Run("blob form", func(t *testing.T) {
+		c, err := NewEmbeddedResourceBlock("https://example.com/r.bin", "application/octet-stream", "", []byte{1, 2, 3}, nil)
+		if err != nil {
+			t.Fatalf("blob form: %v", err)
+		}
+		if c.Text != "" {
+			t.Fatalf("text = %q, want empty (blob form)", c.Text)
+		}
+		if len(c.Data) != 3 {
+			t.Fatalf("data len = %d", len(c.Data))
+		}
+	})
+	t.Run("both rejected", func(t *testing.T) {
+		if _, err := NewEmbeddedResourceBlock("u", "m", "t", []byte{1}, nil); err == nil {
+			t.Fatal("expected error when both text and blob set")
+		}
+	})
+	t.Run("neither rejected", func(t *testing.T) {
+		if _, err := NewEmbeddedResourceBlock("u", "m", "", nil, nil); err == nil {
+			t.Fatal("expected error when neither text nor blob set")
+		}
+	})
+}
+
+func TestNewStructuredContentBlock(t *testing.T) {
+	c := NewStructuredContentBlock(`{"k":"v"}`)
+	if c.BlockKind != BlockStructuredContent {
+		t.Fatalf("kind = %q", c.BlockKind)
+	}
+	if c.Text != `{"k":"v"}` {
+		t.Fatalf("text = %q", c.Text)
+	}
+}
+
+func TestToolBlockText(t *testing.T) {
+	tests := []struct {
+		name string
+		c    Content
+		want string
+	}{
+		{
+			name: "text block",
+			c:    NewTextBlock("hello"),
+			want: "hello",
+		},
+		{
+			name: "structured content block",
+			c:    NewStructuredContentBlock(`{"k":"v"}`),
+			want: `{"k":"v"}`,
+		},
+		{
+			name: "resource link with title",
+			c:    NewResourceLinkBlock("https://example.com/r.json", "r", "Title", "desc", "application/json", 42, nil),
+			want: "Title (https://example.com/r.json)",
+		},
+		{
+			name: "resource link with name only",
+			c:    NewResourceLinkBlock("https://example.com/r.json", "r", "", "desc", "application/json", 42, nil),
+			want: "r (https://example.com/r.json)",
+		},
+		{
+			name: "resource link with neither title nor name",
+			c:    NewResourceLinkBlock("https://example.com/r.json", "", "", "desc", "application/json", 42, nil),
+			want: "https://example.com/r.json",
+		},
+		{
+			name: "embedded resource text form",
+			c:    mustEmbeddedResourceBlock(t, "https://example.com/r.txt", "text/plain", "body", nil),
+			want: "body",
+		},
+		{
+			name: "embedded resource blob form renders a pointer",
+			c:    mustEmbeddedResourceBlock(t, "https://example.com/r.bin", "application/octet-stream", "", []byte{1, 2, 3}),
+			want: "https://example.com/r.bin (application/octet-stream)",
+		},
+		{
+			name: "legacy media part with no block kind falls to the default text arm",
+			c:    Content{Text: "legacy"},
+			want: "legacy",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ToolBlockText(tt.c); got != tt.want {
+				t.Fatalf("ToolBlockText() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func mustEmbeddedResourceBlock(t *testing.T, uri, mimeType, text string, blob []byte) Content {
+	t.Helper()
+	c, err := NewEmbeddedResourceBlock(uri, mimeType, text, blob, nil)
+	if err != nil {
+		t.Fatalf("NewEmbeddedResourceBlock: %v", err)
+	}
+	return c
+}
+
+func TestValidateToolResultParts(t *testing.T) {
+	// Empty passes.
+	if err := ValidateToolResultParts(nil); err != nil {
+		t.Fatalf("nil parts: %v", err)
+	}
+	// A valid text block passes.
+	if err := ValidateToolResultParts([]Content{NewTextBlock("ok")}); err != nil {
+		t.Fatalf("valid text block: %v", err)
+	}
+	// Text block over the cap rejected.
+	big := strings.Repeat("x", MaxToolResultTextBytes+1)
+	if err := ValidateToolResultParts([]Content{NewTextBlock(big)}); err == nil {
+		t.Fatal("expected reject for oversized text block")
+	}
+	// Blob over MaxMediaBytes rejected.
+	hugeBlob := make([]byte, MaxMediaBytes+1)
+	er, err := NewEmbeddedResourceBlock("u", "application/octet-stream", "", hugeBlob, nil)
+	if err != nil {
+		t.Fatalf("build oversized embedded: %v", err)
+	}
+	if err := ValidateToolResultParts([]Content{er}); err == nil {
+		t.Fatal("expected reject for oversized blob block")
+	}
+	// Total over cap rejected: many text blocks each under the per-block cap but
+	// summing over MaxToolResultBytes.
+	per := MaxToolResultTextBytes
+	n := (MaxToolResultBytes / per) + 1
+	parts := make([]Content, n)
+	for i := range parts {
+		parts[i] = NewTextBlock(strings.Repeat("x", per))
+	}
+	if err := ValidateToolResultParts(parts); err == nil {
+		t.Fatal("expected reject for total tool-result bytes over the cap")
+	}
+	// A resource link contributes no bytes — many pass.
+	links := make([]Content, 100)
+	for i := range links {
+		links[i] = NewResourceLinkBlock("https://example.com/r", "n", "t", "d", "text/plain", 1, nil)
+	}
+	if err := ValidateToolResultParts(links); err != nil {
+		t.Fatalf("resource links: %v", err)
 	}
 }
 

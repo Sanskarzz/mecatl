@@ -2728,6 +2728,148 @@ Exa-anonymous is the default while it lasts — and why graceful degradation is 
   backend-switching secrets are read from `SEARXNG_URL`/`BRAVE_API_KEY`/`EXA_API_KEY`
   (and `WEBSEARCH_API_KEY` for `--websearch-url`) — env only, never flag values.
 
+### MCP typed tool results (issue #223, ADR 0059)
+
+The MCP adapter's `flattenContent` choke point collapsed an MCP
+`CallToolResult` — a typed, audience-aware content array (`text`/`image`/
+`audio`/`resource`/`EmbeddedResource`/`resource_link`) plus an optional
+`structuredContent` JSON object and `outputSchema` — to a single model-facing
+string, discarding every non-text block. The architectural root cause was that
+the domain value object `session.ToolResult` was `{Content string, IsError
+bool}` (string-only, no structured channel), mirrored by the gRPC `ToolResult`
+proto. By the time a result reached the loop, the relay, or any client,
+everything was already a flat string — so a user-audience `resource_link` the
+mcpperf server deliberately emitted for a human-facing client lost its metadata
+and handed the model a bare URI it could not resolve.
+
+The fix (ADR 0059) carries MCP typed content as **the domain's own neutral
+type**, with every untrusted-server defense in composition and the adapter:
+
+- **`session.ToolResult.Parts []Content`** (`engine/session/toolcall.go`)
+  (`ToolResult`) — additive; a zero-value `Parts` (string-only) is byte-identical
+  to the pre-#223 shape, so legacy snapshots/events load unchanged. The 2-arg
+  `NewToolResult`/`NewToolError` constructors are preserved (~200 call sites); the
+  new path uses `NewToolResultWithParts`.
+- **`session.Content` generalization** (`engine/session/content.go`) — the
+  existing `Content` gains a `BlockKind` discriminator plus block variants:
+  `BlockText`/`BlockImage`/`BlockAudio`/`BlockResourceLink`/
+  `BlockEmbeddedResource`/`BlockStructuredContent`, built by the validating
+  constructors (`NewContent`/`ValidateMediaParts`, the SINGLE choke point the ACP
+  adapter already uses for prompt media — no second validation path). A legacy
+  media part (`BlockKind == ""`, the user-message media shape) is distinct from a
+  tool-result block.
+- **MCP adapter mapping layer** (`internal/adapter/mcp/tool.go`) (`mapContent`)
+  replaces `flattenContent`: a per-type switch over `mcpsdk.Content` producing
+  `session.Content` parts (image/audio/resource) and string references (for
+  `resource_link`), plus a default model-facing string. The per-part validation is
+  shared; the size bound (issue #178, `toolkit.Truncate` at `MaxOutputBytes`) is
+  applied FIRST, before the typed-block widening, so the durable log's implicit
+  size ceiling is not punched through.
+- **`port.RouteToolResultParts`** (`engine/port/toolresult_route.go`) — the
+  composition-driven, **capability-gated READ-ONLY projection** the provider
+  adapters (openai/anthropic) call from their `RoleTool` case. It returns the
+  subset of `tr.Parts` the (provider, model) — described by `caps`, the SINGLE
+  composition-computed capability intersection (`modelCapability` = catalog ∩
+  adapter) — may receive as typed blocks: image iff `caps.Image`, audio iff
+  `caps.Audio`, text/resource-link/embedded-resource/structured-content always
+  survive. It builds a FRESH slice and never mutates the recorded
+  `*session.ToolResult` (recorded-history == client-stream == model-view). It lives
+  in `engine/port` (not `internal/app`) so the provider adapters may call it
+  without importing composition. Nil/empty `Parts` (or a projection that drops
+  every block) returns nil so the caller degrades to the recorded model-facing
+  `Content` string.
+- **`audience` is advisory display routing ONLY — it NEVER suppresses
+  model-facing content** (CWE-345). The MCP server is an untrusted supply-chain
+  surface; trusting `audience:["user"]` to *suppress* the model copy inverts the
+  trust model (a server hides an injection payload, or routes a secret into model
+  context). `RouteToolResultParts` does not read `Content.Audience` at all — a
+  `["user"]`-audience block passes to the model exactly as a `[]` block does. A
+  `["user"]` block may render an *additional* human-facing copy; the model copy is
+  always present (TextContent parity). Untrusted-fencing/redaction runs regardless
+  of audience.
+- **NEVER auto-dereference server-returned `resource_link` URIs** (SSRF,
+  CWE-918). A server pointing at an internal/metadata host is the threat actor.
+  v1 surfaces a `resource_link` as a typed block the model can SEE (URI + name +
+  description + MIME), not as auto-fetched bytes. Only `https://` may ever be
+  client-fetched, and only through `session.ValidateMediaURL` (absolute https,
+  IP-deny, redirect re-validation, no cross-origin credential attachment).
+- **`FetchMcpResource` tool** (`internal/adapter/tools/fetchmcpresource.go`)
+  (Phase 2) is the model-facing affordance to ACT on an `https://` `resource_link`:
+  it fetches the URI via `ValidateMediaURL`, re-validates on every redirect, caps
+  the body at `toolkit.MaxOutputBytes`, and summarizes binary content. Non-`https`
+  schemes (`perf://`, `file://`, custom) stay SERVER-readonly via
+  `ReadMcpResource` (the model knows the owning server from the `resource_link`
+  metadata or a `ListMcpResources` listing). Binary `EmbeddedResource` blocks are
+  summarized (the model sees a reference, never the raw blob bytes).
+
+**Content-vs-Parts precedence:** both `Content` and `Parts` may be present.
+`Content` is the default model-facing string (always set by the legacy
+constructors); `Parts` carries typed blocks. Consumers prefer `Parts` when
+non-empty, falling back to `Content` — a legacy/empty-`Parts` result is
+byte-identical to the pre-#223 shape. This is the SAME precedence the providers
+apply via `RouteToolResultParts` (nil projection → degrade to `Content`).
+
+Typed content rides `EvToolResult.ToolResult`, not a relay sidecar, so
+`engine/adapter/eventsource` (`Fold`) reconstructs it from the durable log with
+no re-coupling (the loop stays storage-agnostic). `StructuredContent` is NOT
+validated with `session.ValidateJSON` (a deliberate fail-open *subset* validator
+for model-authored structured output; MCP `outputSchema` is arbitrary
+server-provided full JSON Schema and `ValidateJSON` would silently under-enforce
+— a second, weaker path).
+
+### MCP structured results: fail-closed + CallMcpWithQuery (ADR 0063)
+
+The size bound above is honest for **unstructured text** (a truncated string with a
+marker is still a string) but dishonest for a **structured (JSON)** result: truncating
+a JSON blob mid-token leaves the model with an unparseable fragment it cannot reason
+over. ADR 0063 closes that gap with two environment-agnostic tiers (no local-disk
+dependency — `mecak8s` is storage-free, ADR 0048; the no-FS profile, issue #55, has no
+filesystem to spill to):
+
+- **Fail-closed on a structured result that exceeds `MaxOutputBytes`.**
+  `internal/adapter/mcp/tool.go` (`remoteTool.Execute`) returns an actionable tool
+  ERROR (not a truncated blob) when a structured result is over-cap, naming the two
+  escape hatches (narrow/paginate the remote call; or `CallMcpWithQuery` with a jq
+  filter). A result is "structured" if **any** of three signals fire (OR'd):
+  (1) the remote tool advertised an `outputSchema`; (2) the result carried
+  `StructuredContent`; (3) a content block is JSON by MIME (`application/json`,
+  `text/json`, any `+json`) or by text-parse (trimmed text starts with `{`/`[` and
+  `json.Unmarshal`s). Signal 3's text-parse only runs when the result is already
+  over-cap, so the cost is paid only when needed. **Unstructured text still truncates
+  with a marker** (the existing behaviour is unchanged), and **error results
+  (`res.IsError`) are NOT fail-closed** — an error payload stays string-only and
+  truncates so the model still reads the error text and self-corrects.
+- **`CallMcpWithQuery` meta-tool** (`internal/adapter/mcp/callmcpwithquery.go`): calls
+  a remote MCP tool and filters its JSON result through a **jq expression in memory
+  (no disk)** before it enters context. Read-only (slots into read-parallel dispatch,
+  survives the plan-mode catalog filter), registered in BOTH profiles
+  (`internal/app/catalog.go` `mountGlobalMCP`, gated on the manager exposing ≥1 tool),
+  floor-`Allow` (`ScopeBuiltinDefault`, config-overridable) in `internal/app/build.go`,
+  and in the guardrail default block set (pre+post, mirroring `mcp__*`) in
+  `internal/app/guardrails.go`. jq is a sandboxed `github.com/itchyny/gojq` (pure Go,
+  MIT) wrapper at `internal/adapter/mcp/jq/jq.go`: `gojq.Parse` + `gojq.RunWithContext`
+  WITHOUT `WithModuleLoader`/`WithInputIter`/`WithEnvironLoader` (no file/stdin/env
+  access), ctx-deadline-bounded (default 5s), input ≤ 20 MiB (`MaxInputBytes`), output
+  ≤ ~100 KiB (`MaxOutputBytes`) so a too-broad filter doesn't move the context-budget
+  problem from input to output. The JSON input fed to jq is chosen by **precedence**:
+  `StructuredContent` (the typed, schema-validated view) → the first JSON-parseable
+  `Text` content block → a **loud error** (a non-JSON result is never silently
+  filtered). A remote tool-level error (`IsError`) is surfaced verbatim (truncated)
+  **pre-filter** — the model asked to filter a failed call; it is told the call failed.
+  The filtered output still runs through `toolkit.Truncate`, so the size bound holds.
+
+`Provider.CallTool` + `CallResult` (`internal/adapter/mcp/calltool.go`) widen the MCP
+adapter so `CallMcpWithQuery` can fetch the **untruncated** raw result (a jq filter
+needs the full JSON to narrow). `CallResult` carries no `mcpsdk` types (so
+`internal/app` consumes it without the SDK), and it is an **internal adapter** widening
+— no `engine/` API, no `port.LLMRequest` field, no proto change. `gojq` is a new
+root-module dep (the engine module's dep closure, ADR 0036, is untouched — the `jq`
+package is host-repo only). The model should prefer narrowing the remote call with its
+own pagination/filter params when possible; `CallMcpWithQuery` is the escape hatch when
+the remote tool offers none (it saves the context budget, not the remote-hop
+bandwidth). See ADR 0063 for the rejected alternatives (persist-to-scratch + `jq(1)`,
+hand-rolled JSON-path, shell-out to `jq(1)`, a general `QueryJson` tool).
+
 ## Composition — `internal/app/` (multi-provider — see `MULTI-PROVIDER.md`)
 
 The single shared assembly of provider + catalog + policy + engine into a `server.Service`
