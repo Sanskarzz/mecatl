@@ -25,6 +25,58 @@ The covered surface is the seven core packages (`session`, `governance`, `tool`,
 
 ## [Unreleased]
 
+### Added
+
+- **`port.ScheduleStore` + value objects** (`Schedule`, `ScheduleSpec`, `TriggerSpec`,
+  `ScheduleState`, `ScheduleFire`, `ScheduleProviderSelector`, `ErrScheduleNotFound`,
+  `ErrScheduleUnsupported`, `SchedulerLeaderLeaseID`, `TriggerKind`/`TriggerCron`/
+  `TriggerOneShot`/`TriggerNone`, `MisfirePolicy`/`MisfireFireOnceNow`/`MisfireSkip`,
+  `PendingFireSessionID`).
+  A new OPTIONAL durable schedule registry port — a peer of `port.SessionLease` /
+  `port.EventLog` — defining the durable registry for the scheduled-tasks feature
+  (issue #189, Phase 1a: contract + value objects, no implementation yet). The port
+  carries the FULL at-most-once claim-before-fire contract in its doc-comments:
+  `Claim` is the atomic advance (NextFireAt + LastFireAt + FireCount + a
+  sentinel-pending LastFireSessionID) that gives exactly-once firing across
+  replicas; the store is parser-free (the caller computes the next cron fire);
+  `engine/agent` NEVER imports this port — the tick loop, cron parsing, misfire
+  policy, and leader-lease acquisition all live in composition. `TriggerSpec`
+  carries an XOR (Cron | OneShot) with a `Validate()` + `Kind()`; `MisfirePolicy`
+  is the fire-once-now (default) / skip enum; `SchedulerLeaderLeaseID` is the
+  well-known leader-lease id; `PendingFireSessionID` is the single-source sentinel
+  string a `Claim` stamps onto `LastFireSessionID` and the scheduler reads back.
+  No implementation ships yet — adapters are a later
+  phase. Classified Added per COMPATIBILITY.md (new exported identifiers in
+  `engine/port`). (#189)
+- **`port.ScheduleSpec.Trigger` field added** (`port.TriggerSpec`). Phase 1a
+  landed `TriggerSpec` (the Cron XOR OneShot sum type) but did not wire it onto
+  `ScheduleSpec`; Phase 1b's conformance suite + reference adapter need the
+  field to save/load schedules with a trigger. The field is the sole carrier of
+  the firing trigger on a spec (there is no top-level Cron/OneShot). Classified
+  Added per COMPATIBILITY.md (a new struct field in a pre-v1 port value object
+  is a minor addition; the zero `TriggerSpec` is `TriggerNone`, which the
+  create-seam's `Validate` rejects fail-closed — no schedule can be saved with
+  an unset trigger). (#189)
+
+### Notes
+
+- **`robfig/cron/v3` added to the engine dep closure (parser-only).** The
+  scheduled-tasks feature (issue #189, Phase 1c) needs a cron → next-fire
+  helper at the composition layer: `TriggerSpec.Cron` (Phase 1a) is the raw
+  expression the durable `ScheduleStore` stores verbatim and never interprets,
+  and the caller computes the next fire to hand to `Claim`. Per decision #6 the
+  durable store is ground truth and the in-memory timer is a derived lookahead,
+  so mecatl uses `robfig/cron/v3`'s PARSER only (`cron.ParseStandard` +
+  `Schedule.Next`) — NOT the `cron.New()` daemon. The dependency is a single
+  module with a zero-dependency `go.mod`, mirroring how `doublestar` and
+  `x/sync` already travel with the importable core (ADR 0036); the
+  `task test:engine-standalone` hygiene proof confirms the standalone closure
+  stays self-contained. The helper itself (`engine/adapter/cronparse.NextFire`)
+  lives under `engine/adapter/*`, which COMPATIBILITY.md EXCLUDES from the
+  stability surface (like `memlease.New` / `eventsource.Fold`), so it is NOT in
+  `engine/api/*.txt` and is NOT an api-compat-gated addition. No new exported
+  core symbol; no public-API change. (#189)
+
 ## [0.3.0] - 2026-06-30
 
 ### Added
