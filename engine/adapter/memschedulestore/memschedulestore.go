@@ -206,6 +206,62 @@ func (s *Store) Claim(_ context.Context, name string, now, nextFire time.Time) (
 	return port.Schedule{Spec: cloneSpec(rec.spec), State: rec.state}, nil
 }
 
+// ClaimNow is the manual-trigger variant of Claim (the FireNow primitive). It
+// performs the SAME atomic advance as Claim but does NOT enforce the
+// NextFireAt <= now due-check — it claims the slot regardless of whether it is
+// due (a manual fire bypasses the cadence but still claims atomically for
+// at-most-once). The Enabled + MaxFires checks STILL apply. The at-most-once
+// fence is LastFireAt == now: a second ClaimNow at the same now (or a ClaimNow
+// racing a tick-loop Claim at the same now) is rejected — the advance already
+// happened. See port.ScheduleStore.ClaimNow for the crash-recoverability rationale.
+func (s *Store) ClaimNow(_ context.Context, name string, now, nextFire time.Time) (port.Schedule, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.scheds[name]
+	if !ok {
+		return port.Schedule{}, ErrNotFound
+	}
+	if !rec.state.Enabled {
+		return port.Schedule{}, ErrNotFound
+	}
+	if rec.spec.MaxFires > 0 && rec.state.FireCount >= rec.spec.MaxFires {
+		return port.Schedule{}, ErrNotFound
+	}
+	// At-most-once fence WITHOUT the due-check: a prior ClaimNow (or a Claim) at
+	// this same `now` already advanced LastFireAt to `now`. Reject so the advance
+	// is not repeated (Claim's fence is "NextFireAt is past now", which a future
+	// slot fails — ClaimNow cannot use it).
+	if rec.state.LastFireAt.Equal(now) {
+		return port.Schedule{}, ErrNotFound
+	}
+	// Atomically advance (claim-before-fire).
+	rec.state.LastFireAt = now
+	rec.state.NextFireAt = nextFire
+	rec.state.FireCount++
+	rec.state.LastFireSessionID = port.PendingFireSessionID
+	if nextFire.IsZero() {
+		rec.state.Enabled = false
+	}
+	s.scheds[name] = rec
+	return port.Schedule{Spec: cloneSpec(rec.spec), State: rec.state}, nil
+}
+
+// SetEnabled atomically sets the schedule's Enabled flag WITHOUT touching any
+// other State field (unlike Save, which preserves the State half on a Spec
+// overwrite and so cannot mutate Enabled). It is the pause/resume primitive.
+// The not-found case wraps ErrScheduleNotFound.
+func (s *Store) SetEnabled(_ context.Context, name string, enabled bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.scheds[name]
+	if !ok {
+		return ErrNotFound
+	}
+	rec.state.Enabled = enabled
+	s.scheds[name] = rec
+	return nil
+}
+
 // RecordFire records the outcome of a fire (f) and updates the schedule's
 // LastFireSessionID to f.SessionID (overwriting the port.PendingFireSessionID value
 // Claim set). It is IDEMPOTENT per fire id: recording the same f.ID twice is a
@@ -239,6 +295,25 @@ func (s *Store) LoadFire(_ context.Context, fireID string) (port.ScheduleFire, e
 		return port.ScheduleFire{}, ErrNotFound
 	}
 	return cloneFire(f), nil
+}
+
+// ListFires returns the fire records for a schedule, in no guaranteed order. The
+// not-found case for the SCHEDULE wraps ErrScheduleNotFound; an empty fire list
+// for an existing schedule is a successful empty slice (not an error).
+func (s *Store) ListFires(_ context.Context, scheduleName string) ([]port.ScheduleFire, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.scheds[scheduleName]; !ok {
+		return nil, ErrNotFound
+	}
+	out := make([]port.ScheduleFire, 0)
+	for _, f := range s.fires {
+		if f.ScheduleName != scheduleName {
+			continue
+		}
+		out = append(out, cloneFire(f))
+	}
+	return out, nil
 }
 
 // cloneSpec returns a copy of spec whose Parts slice is independent of the

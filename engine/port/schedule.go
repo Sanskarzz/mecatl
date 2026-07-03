@@ -428,6 +428,39 @@ type ScheduleStore interface {
 	// deleted schedule is an error, not a silent no-op).
 	Claim(ctx context.Context, name string, now, nextFire time.Time) (Schedule, error)
 
+	// ClaimNow is the manual-trigger variant of Claim: it performs the SAME atomic
+	// advance (LastFireAt=now, NextFireAt=nextFire, FireCount++,
+	// LastFireSessionID=PendingFireSessionID, disable on zero nextFire) but does
+	// NOT enforce the NextFireAt <= now due-check — it claims the slot regardless of
+	// whether it is due. It is the FireNow primitive (an explicit manual trigger
+	// bypasses the cadence but still claims atomically for at-most-once). The
+	// Enabled + MaxFires checks STILL apply (a disabled or exhausted schedule
+	// cannot be force-fired). The not-found case wraps ErrScheduleNotFound.
+	//
+	// At-most-once WITHOUT the due-check: Claim's fence is "NextFireAt is past now
+	// (a peer's Claim advanced it)", which a not-yet-due slot fails. ClaimNow cannot
+	// use that fence (a future slot would pass), so it fences on LastFireAt: a
+	// ClaimNow at the SAME now as a prior ClaimNow is rejected (LastFireAt == now
+	// ⇒ the advance already happened). This mirrors Claim's discipline — the durable
+	// advance IS the fence, there is no owner/claim-holder field. It is
+	// crash-recoverable by design (unlike a pending-sentinel fence, which would
+	// wedge a schedule forever after a hard crash between ClaimNow and RecordFire —
+	// the exact wedge the singleton check's doc warns against): a crash leaves
+	// LastFireAt == now, but a later ClaimNow at a new now sees a stale LastFireAt
+	// != now and proceeds, so the schedule self-heals instead of wedging. The
+	// tick-loop Claim is UNAFFECTED — it keeps its due-check (a due slot is the only
+	// thing the tick loop should fire).
+	ClaimNow(ctx context.Context, name string, now, nextFire time.Time) (Schedule, error)
+
+	// SetEnabled atomically sets the schedule's Enabled flag WITHOUT touching
+	// any other State field (unlike Save, which preserves State on a Spec
+	// overwrite — Save CANNOT mutate Enabled because it preserves the existing
+	// State half). It is the pause/resume primitive: PauseSchedule sets
+	// Enabled=false; ResumeSchedule sets Enabled=true. The not-found case wraps
+	// ErrScheduleNotFound. An implementation that cannot store schedules returns
+	// ErrScheduleUnsupported (wrapped).
+	SetEnabled(ctx context.Context, name string, enabled bool) error
+
 	// RecordFire records the outcome of a fire (f) and updates the schedule's
 	// LastFireSessionID to f.SessionID (overwriting the port.PendingFireSessionID
 	// value Claim set). It is IDEMPOTENT per fire id: recording the same f.ID twice is
@@ -441,4 +474,11 @@ type ScheduleStore interface {
 	// wraps ErrScheduleNotFound; any other error is an infrastructure failure. It
 	// is the pull-only result-delivery read path for v1.
 	LoadFire(ctx context.Context, fireID string) (ScheduleFire, error)
+
+	// ListFires returns the fire records for a schedule, in no guaranteed order.
+	// It is the list companion to LoadFire. The not-found case for the SCHEDULE
+	// wraps ErrScheduleNotFound; an empty fire list for an existing schedule is a
+	// successful empty slice (not an error). An implementation that cannot store
+	// schedules returns ErrScheduleUnsupported (wrapped).
+	ListFires(ctx context.Context, scheduleName string) ([]ScheduleFire, error)
 }

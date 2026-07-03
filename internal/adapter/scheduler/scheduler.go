@@ -48,6 +48,26 @@ import (
 // #1).
 type FireFunc func(ctx context.Context, sched port.Schedule, now time.Time) (port.ScheduleFire, error)
 
+// ErrFireNowOverlap is returned by FireNow when the schedule's singleton
+// overlap check found a prior fire still running (its session lease is held by
+// any replica). The fire was SKIPPED, not claimed — the caller (composition's
+// Service.FireNow) maps it to FailedPrecondition / 409 so a client distinguishes
+// "overlapping fire rejected" from a genuine error. It mirrors the tick loop's
+// silent singleton skip, surfaced as an explicit error on the manual path (a
+// manual fire is a client-initiated request that deserves an explicit rejection,
+// unlike the tick loop's best-effort skip).
+var ErrFireNowOverlap = errors.New("scheduler: fire-now skipped (prior fire still running)")
+
+// ErrFireNowDisabled is returned by FireNow when the schedule is not Enabled
+// (paused or done). A paused/done schedule cannot be manually fired. The caller
+// maps it to FailedPrecondition.
+var ErrFireNowDisabled = errors.New("scheduler: fire-now rejected (schedule disabled)")
+
+// ErrFireNowExhausted is returned by FireNow when a one-shot schedule has
+// already fired (FireCount > 0). A one-shot fires once; a manual re-fire of a
+// completed one-shot is rejected. The caller maps it to FailedPrecondition.
+var ErrFireNowExhausted = errors.New("scheduler: fire-now rejected (one-shot already fired)")
+
 // Config wires the scheduler. All fields are set by composition (Phase 1f);
 // the unit tests construct one directly with a stub Fire.
 type Config struct {
@@ -94,6 +114,16 @@ type Config struct {
 	// abandoning them. A non-positive value defaults to stopFireGrace. It is a
 	// Config field (not a flag) so a test can shrink it.
 	StopFireGrace time.Duration
+	// EmitScheduleEvent is the OPTIONAL composition-injected callback the
+	// scheduler invokes to emit an EvScheduleFired/Skipped/Failed event. It is
+	// nil-safe (nil = no event emitted — the byte-identical no-emit path).
+	// Composition wires it to emit into the fire session's event log / the
+	// Service's event sink. The scheduler pkg stays EventSink-free (testable, no
+	// engine/agent import): the payload is a plain session.SchedulePayload value
+	// object, not an EventSink/port import. The scheduler invokes it from
+	// fireClaimed (fired/failed) and fireOne/FireNow (skipped) — the caller
+	// decides the kind; the callback decides where it lands.
+	EmitScheduleEvent func(payload session.SchedulePayload)
 }
 
 // Defaults. The leader-lease defaults mirror the run-entry lease defaults
@@ -156,6 +186,29 @@ type Scheduler struct {
 	// started prevents double-Start / double-Stop.
 	started atomic.Bool
 	stopped atomic.Bool
+
+	// fireMu is the per-schedule-name serialization gate for FireNow (the
+	// TOCTOU close: Load → singleton trial-lease → ClaimNow had no per-name
+	// serialization, so two concurrent FireNow RPCs with different `now` values
+	// could both pass the singleton fence and both fire — the very overlap the
+	// singleton guard prevents). It is shared with the tick loop's fireOne so a
+	// tick-driven fire and a manual FireNow on the SAME schedule serialize per
+	// name (different schedules stay parallel — the errgroup's SetLimit still
+	// bounds fan-out). A sync.Map holds one *sync.Mutex per name, created lazily.
+	fireMu sync.Map
+}
+
+// lockFireName acquires the per-schedule-name mutex that serializes concurrent
+// FireNow calls AND a tick-loop fireOne on the SAME schedule (the TOCTOU close
+// for the Load→singleton→Claim fence). Different schedule names stay parallel.
+// The caller MUST defer the returned release func. It is safe to call from the
+// tick loop (fireOne runs under the errgroup) and from the caller-driven
+// FireNow path.
+func (s *Scheduler) lockFireName(name string) func() {
+	v, _ := s.fireMu.LoadOrStore(name, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }
 
 // SetFire sets the composition-supplied FireFunc. It MUST be called before
@@ -173,6 +226,21 @@ func (s *Scheduler) SetFire(f FireFunc) {
 		panic("scheduler: SetFire after Start")
 	}
 	s.cfg.Fire = f
+}
+
+// SetEmitScheduleEvent sets the OPTIONAL composition-injected emit callback. It
+// MUST be called before Start (the late-bind seam, parallel to SetFire). A nil
+// callback is the byte-identical no-emit path (no EvSchedule* events emitted —
+// the scheduler is fully functional, just silent on the schedule lifecycle).
+// Composition calls it after SetFire (so the FireFunc is bound) and before
+// Start (so the callback is in place when the first tick fires).
+func (s *Scheduler) SetEmitScheduleEvent(cb func(payload session.SchedulePayload)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.started.Load() {
+		panic("scheduler: SetEmitScheduleEvent after Start")
+	}
+	s.cfg.EmitScheduleEvent = cb
 }
 
 // New constructs a Scheduler. It applies Config defaults (TTLs, intervals,
@@ -250,14 +318,15 @@ func (s *Scheduler) Start(ctx context.Context) error {
 			// holds within this process. No leader-lease state to record.
 		} else {
 			// Acquired: store the lease and start the renewer.
+			renewCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+			renewerDone := make(chan struct{})
 			s.mu.Lock()
 			s.leaderLease = &lease
-			s.mu.Unlock()
-			renewCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 			s.renewerCancel = cancel
-			s.renewerDone = make(chan struct{})
+			s.renewerDone = renewerDone
+			s.mu.Unlock()
 			go func() {
-				defer close(s.renewerDone)
+				defer close(renewerDone)
 				s.renewLeader(renewCtx)
 			}()
 		}
@@ -265,12 +334,19 @@ func (s *Scheduler) Start(ctx context.Context) error {
 
 	// Launch the tick loop regardless (standalone or leader). The tick ctx is
 	// detached from the caller's ctx so a request-scope cancel does not stop
-	// the loop — only Stop or a lost leader does.
-	s.tickCtx, s.tickCancel = context.WithCancel(context.WithoutCancel(ctx))
-	s.tickDone = make(chan struct{})
+	// the loop — only Stop or a lost leader does. tickCtx/tickCancel/tickDone
+	// are written under s.mu (mirroring RunOnceForTest's existing locked read)
+	// because the renewer goroutine started above may already be running and
+	// can read tickCancel via declareLeaderLost concurrently with this write
+	// (a definitive lease loss racing the tick loop's own startup).
+	tickCtx, tickCancel := context.WithCancel(context.WithoutCancel(ctx))
+	tickDone := make(chan struct{})
+	s.mu.Lock()
+	s.tickCtx, s.tickCancel, s.tickDone = tickCtx, tickCancel, tickDone
+	s.mu.Unlock()
 	go func() {
-		defer close(s.tickDone)
-		s.tick(s.tickCtx)
+		defer close(tickDone)
+		s.tick(tickCtx)
 	}()
 	return nil
 }
@@ -358,9 +434,15 @@ func (s *Scheduler) declareLeaderLost(ctx context.Context, cause error) {
 	s.diag.Log(ctx, port.LevelWarn, "lost scheduler leader lease; stopping tick loop",
 		"owner", s.cfg.LeaseOwner, "err", cause.Error())
 	// The tick-ctx cancel is the actual loss mechanism; no leader-state flag
-	// needs bookkeeping (leaderLease is cleared on Stop's release path).
-	if s.tickCancel != nil {
-		s.tickCancel()
+	// needs bookkeeping (leaderLease is cleared on Stop's release path). Read
+	// tickCancel under s.mu: Start's own launch of the tick loop writes it
+	// concurrently with this renewer goroutine on a fast definitive loss (a
+	// lease lost moments after Start), so an unguarded read here would race.
+	s.mu.Lock()
+	cancel := s.tickCancel
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
 }
 
@@ -438,6 +520,11 @@ func (s *Scheduler) tickOnce(ctx context.Context) {
 // slot, Fires (unless skip), and RecordFires the outcome. It is the per-schedule
 // claim-before-fire cycle.
 func (s *Scheduler) fireOne(ctx context.Context, sched port.Schedule, now time.Time) {
+	// Per-schedule-name serialization: a concurrent FireNow (or a peer tick on
+	// the same schedule) must not race the Load→singleton→Claim fence (the
+	// TOCTOU the singleton guard closes). Different schedule names stay
+	// parallel — the errgroup's SetLimit still bounds fan-out.
+	defer s.lockFireName(sched.Spec.Name)()
 	// Compute the next fire instant. A cron trigger computes it via cronparse
 	// (the store is parser-free); a one-shot fires once (zero nextFire → Claim
 	// disables the schedule). A MaxFires-exhausted cron also yields zero (the
@@ -479,6 +566,10 @@ func (s *Scheduler) fireOne(ctx context.Context, sched port.Schedule, now time.T
 			defer rel() // release the trial lease when fireOne returns
 		}
 		if overlap {
+			s.emitSchedule(session.SchedulePayload{
+				ScheduleName: sched.Spec.Name,
+				Kind:         "skipped",
+			})
 			s.diag.Log(ctx, port.LevelInfo, "scheduler: skipping fire (prior fire still running)",
 				"schedule", sched.Spec.Name, "prior_session", sched.State.LastFireSessionID)
 			// Do NOT Claim here. A Claim would advance NextFireAt (so the slot
@@ -516,17 +607,35 @@ func (s *Scheduler) fireOne(ctx context.Context, sched port.Schedule, now time.T
 	}
 
 	if skipFire {
+		s.emitSchedule(session.SchedulePayload{
+			ScheduleName: sched.Spec.Name,
+			Kind:         "skipped",
+		})
 		s.diag.Log(ctx, port.LevelInfo, "skipped misfire (MisfireSkip)",
 			"schedule", sched.Spec.Name)
 		return
 	}
 
-	// Fire. Track the goroutine for Stop-join only on the standalone path; the
-	// errgroup already bounds concurrency, but Stop may run between ticks, so we
-	// also count the in-flight fire so Stop's grace drain sees it.
+	// fireClaimed runs the Fire→RecordFire tail (the shared path with FireNow)
+	// and emits the fired/failed event via the callback. It does NOT do the
+	// singleton check or misfire policy — those are this caller's prelude.
+	// firesWG is tracked here so Stop's grace drain sees the in-flight fire.
 	s.firesWG.Add(1)
 	defer s.firesWG.Done()
+	_, _ = s.fireClaimed(ctx, claimed, now)
+}
 
+// fireClaimed runs the Fire→RecordFire tail of a fire after the slot is Claimed.
+// It is shared by the tick loop (fireOne) and the manual FireNow path. It does
+// NOT do the singleton check or misfire policy — those are the caller's prelude.
+// It emits the EvScheduleFired/Failed event via the configured emit callback (if
+// any): EvScheduleFailed when the FireFunc errored OR the run ended with
+// StopError (a run that drained to a terminal EvResult carrying StopError but
+// no Go error — makeFireFunc returns (fire, nil) in that case, so keying the
+// failed emit off fireErr alone would misclassify it as "fired"); EvScheduleFired
+// on a completed fire (any non-Error stop). By the time fireClaimed returns,
+// fire.Stop is populated (the FireFunc drives the run to terminal).
+func (s *Scheduler) fireClaimed(ctx context.Context, claimed port.Schedule, now time.Time) (port.ScheduleFire, error) {
 	fire, fireErr := s.cfg.Fire(ctx, claimed, now)
 	if fireErr != nil {
 		// A failed fire is recorded as StopError; the at-most-once Claim
@@ -543,6 +652,29 @@ func (s *Scheduler) fireOne(ctx context.Context, sched port.Schedule, now time.T
 		s.diag.Log(ctx, port.LevelWarn, "scheduler: fire failed",
 			"schedule", claimed.Spec.Name, "err", fireErr.Error())
 	}
+	// Emit the lifecycle event: "failed" when the FireFunc errored OR the run
+	// ended with StopError (even when fireErr is nil — makeFireFunc returns
+	// (fire, nil) for a run that drained to terminal EvResult{stop=StopError});
+	// "fired" otherwise (a completed fire, any non-Error stop).
+	if fireErr != nil || fire.Stop == session.StopError {
+		s.emitSchedule(session.SchedulePayload{
+			ScheduleName: claimed.Spec.Name,
+			FireID:       fire.ID,
+			SessionID:    fire.SessionID,
+			Kind:         "failed",
+			Stop:         fire.Stop,
+			Err:          fire.Err,
+		})
+	} else {
+		s.emitSchedule(session.SchedulePayload{
+			ScheduleName: claimed.Spec.Name,
+			FireID:       fire.ID,
+			SessionID:    fire.SessionID,
+			Kind:         "fired",
+			Stop:         fire.Stop,
+			Err:          fire.Err,
+		})
+	}
 	// RecordFire is idempotent per fire id; a transient failure is best-effort
 	// (the fire already ran — we lose the outcome record, not the at-most-once
 	// guarantee).
@@ -550,6 +682,91 @@ func (s *Scheduler) fireOne(ctx context.Context, sched port.Schedule, now time.T
 		s.diag.Log(ctx, port.LevelWarn, "scheduler: RecordFire failed",
 			"schedule", claimed.Spec.Name, "fire", fire.ID, "err", err.Error())
 	}
+	return fire, fireErr
+}
+
+// emitSchedule invokes the optional EmitScheduleEvent callback (nil-safe). It is
+// the single chokepoint for emitting an EvSchedule* payload — fireClaimed calls
+// it for fired/failed, fireOne/FireNow call it for skipped. A nil callback is the
+// byte-identical no-emit path.
+func (s *Scheduler) emitSchedule(payload session.SchedulePayload) {
+	if s.cfg.EmitScheduleEvent != nil {
+		s.cfg.EmitScheduleEvent(payload)
+	}
+}
+
+// FireNow manually fires a schedule by name: it Loads the schedule, applies the
+// singleton overlap check (the same trial-lease path fireOne uses), Claims the
+// slot, and runs fireClaimed. It is the manual/ad-hoc fire path (a client or
+// operator triggers a fire out-of-band from the tick loop). It returns the fire
+// record (stop reason + any error) and emits the EvSchedule* event via the
+// callback (fired/failed/skipped) exactly as the tick loop does.
+//
+// FAIL-CLOSED prelude (the caller's job, NOT the at-most-once Claim):
+//   - a not-enabled (paused/done) schedule → ErrFireNowDisabled;
+//   - an already-fired one-shot (FireCount > 0) → ErrFireNowExhausted;
+//   - a singleton schedule whose prior fire is still running →
+//     ErrFireNowOverlap (the slot is NOT claimed — the skip path, mirroring the
+//     tick loop's singleton skip).
+//
+// A cron schedule that is due now or in the future is Claimed and fired. A cron
+// whose NextFireAt is in the past is ALSO fired (the manual path is an explicit
+// request — it does not apply the misfire policy, which is a tick-loop concern
+// for polling cadence). The nextFire handed to ClaimNow is computed via
+// computeNextFire (the same helper the tick loop uses).
+func (s *Scheduler) FireNow(ctx context.Context, name string, now time.Time) (port.ScheduleFire, error) {
+	// Per-schedule-name serialization: a concurrent FireNow (or a tick-loop
+	// fireOne) on the SAME schedule must not race the Load→singleton→ClaimNow
+	// fence (the TOCTOU the singleton guard closes — two concurrent FireNow RPCs
+	// with different `now` values would both pass the singleton trial-lease and
+	// both fire). Different schedule names stay parallel.
+	defer s.lockFireName(name)()
+	sched, err := s.cfg.Store.Load(ctx, name)
+	if err != nil {
+		return port.ScheduleFire{}, err
+	}
+	if !sched.State.Enabled {
+		return port.ScheduleFire{}, ErrFireNowDisabled
+	}
+	// A one-shot that has already fired is exhausted (a one-shot fires once).
+	if sched.Spec.Trigger.Kind() == port.TriggerOneShot && sched.State.FireCount > 0 {
+		return port.ScheduleFire{}, ErrFireNowExhausted
+	}
+	// Singleton overlap check — the same trial-lease path fireOne uses. A held
+	// prior-fire lease → skip (ErrFireNowOverlap), NOT claim (a claim would
+	// clobber the live pointer, exactly the review-#189 finding the tick loop's
+	// skip path avoids). The trial lease is released immediately.
+	if sched.Spec.Singleton && s.cfg.Lease != nil && sched.State.LastFireSessionID != "" && sched.State.LastFireSessionID != port.PendingFireSessionID {
+		overlap, rel := s.isPriorFireLive(ctx, sched.State.LastFireSessionID)
+		if rel != nil {
+			defer rel()
+		}
+		if overlap {
+			s.emitSchedule(session.SchedulePayload{
+				ScheduleName: sched.Spec.Name,
+				Kind:         "skipped",
+			})
+			return port.ScheduleFire{}, ErrFireNowOverlap
+		}
+	}
+	nextFire, err := s.computeNextFire(sched, now)
+	if err != nil {
+		return port.ScheduleFire{}, fmt.Errorf("scheduler: fire-now %q: compute next fire: %w", name, err)
+	}
+	// ClaimNow is Claim WITHOUT the NextFireAt <= now due-check — a manual fire
+	// bypasses the cadence but still claims atomically for at-most-once. The tick
+	// loop's fireOne KEEPS using Claim (the due-check is correct for the poll
+	// loop). ErrScheduleNotFound here means the slot was disabled/exhausted or a
+	// concurrent Claim/ClaimNow at the same now already advanced it (the
+	// at-most-once fence held).
+	claimed, err := s.cfg.Store.ClaimNow(ctx, name, now, nextFire)
+	if err != nil {
+		return port.ScheduleFire{}, err
+	}
+	// fireClaimed runs Fire→RecordFire + emits the fired/failed event. It is
+	// NOT tracked on firesWG (FireNow is a caller-driven synchronous fire, not
+	// a tick-loop fan-out goroutine; Stop does not need to join it).
+	return s.fireClaimed(ctx, claimed, now)
 }
 
 // computeNextFire returns the next fire instant strictly after `now` for the
@@ -603,23 +820,31 @@ func (s *Scheduler) Stop() error {
 	if !s.stopped.CompareAndSwap(false, true) {
 		return nil
 	}
+	// Read the cancel funcs + done channels under s.mu (Start writes them under
+	// the same lock, and declareLeaderLost may concurrently read tickCancel on
+	// the renewer goroutine) — copy locally, then act on them OUTSIDE the lock
+	// so a channel receive below never blocks while holding s.mu.
+	s.mu.Lock()
+	tickCancel, renewerCancel := s.tickCancel, s.renewerCancel
+	tickDone, renewerDone := s.tickDone, s.renewerDone
+	s.mu.Unlock()
 	// Cancel the tick loop first so no new fires start.
-	if s.tickCancel != nil {
-		s.tickCancel()
+	if tickCancel != nil {
+		tickCancel()
 	}
 	// Stop the renewer so it does not race the release.
-	if s.renewerCancel != nil {
-		s.renewerCancel()
+	if renewerCancel != nil {
+		renewerCancel()
 	}
 	// Wait for the tick + renewer goroutines to fully exit so goleak / a
 	// NumGoroutine check sees a clean shutdown. Both unwind on their ctx cancel
 	// (the tick loop's select returns on ctx.Done(); the renewer likewise). A
 	// nil channel (Start not called, or no renewer) skips the wait.
-	if s.tickDone != nil {
-		<-s.tickDone
+	if tickDone != nil {
+		<-tickDone
 	}
-	if s.renewerDone != nil {
-		<-s.renewerDone
+	if renewerDone != nil {
+		<-renewerDone
 	}
 	// Join in-flight fires with a grace. After the grace, the tickCtx cancel
 	// has already propagated to any fire whose ctx derives from it; the
@@ -697,7 +922,19 @@ func (s *Scheduler) misfireGraceWindow() time.Duration {
 // empty or invalid timezone falls back to UTC (fail-safe — UTC is the
 // recommended default for infra schedules, avoiding the 1–3am DST danger zone).
 // An invalid name is logged once (INFO) and the schedule fires in UTC.
+//
+// Exported as LoadLocation so composition's create-seam (internal/adapter/server)
+// can compute the first NextFireAt for a cron schedule via the SAME tz helper the
+// tick loop uses (DRY — one tz loader, not a composition-local mirror).
 func scheduleLocation(tz string) *time.Location {
+	return LoadLocation(tz)
+}
+
+// LoadLocation loads the IANA timezone for a schedule's cron expression. An empty
+// or invalid timezone falls back to UTC (fail-safe). It is the exported seam for
+// composition's create-seam (the first NextFireAt computation) so it shares the
+// tick loop's tz loader rather than duplicating it.
+func LoadLocation(tz string) *time.Location {
 	if tz == "" {
 		return time.UTC
 	}

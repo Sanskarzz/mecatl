@@ -27,6 +27,55 @@ The covered surface is the seven core packages (`session`, `governance`, `tool`,
 
 ### Added
 
+- **scheduled-tasks Phase 2a: `port.ScheduleStore.ClaimNow`.** A new
+  `ClaimNow(ctx, name, now, nextFire) (Schedule, error)` method — the FireNow
+  primitive. It performs the SAME atomic advance as `Claim` (LastFireAt=now,
+  NextFireAt=nextFire, FireCount++, LastFireSessionID=PendingFireSessionID,
+  disable on zero nextFire) but does NOT enforce the `NextFireAt <= now`
+  due-check — it claims the slot regardless of whether it is due (a manual
+  trigger bypasses the cadence but still claims atomically for at-most-once).
+  The `Enabled` + `MaxFires` checks STILL apply (a disabled or exhausted
+  schedule cannot be force-fired). The at-most-once fence (no due-check) is
+  `LastFireAt == now`: a second `ClaimNow` at the same `now` is rejected (the
+  advance already happened), and a later `ClaimNow` at a new `now` succeeds
+  (crash-recoverable — a hard crash between ClaimNow and RecordFire does not
+  wedge the schedule, unlike a pending-sentinel fence). The tick loop's
+  `fireOne` KEEPS using `Claim` (the due-check is correct for the poll loop);
+  only `FireNow` uses `ClaimNow`. Classified Added per COMPATIBILITY.md (a new
+  interface method is a minor bump). (#189)
+
+- **scheduled-tasks Phase 2a: `port.ScheduleStore.SetEnabled`.** A new
+  `SetEnabled(ctx, name, enabled) error` method — the pause/resume primitive.
+  It atomically sets the schedule's `Enabled` flag WITHOUT touching any other
+  State field, which `Save` CANNOT do: `Save` preserves the existing State half
+  on a Spec overwrite (so a Load→set Enabled→Save is inert, the Enabled flip
+  does not persist). `PauseSchedule` sets `Enabled=false`; `ResumeSchedule`
+  sets `Enabled=true`. The not-found case wraps `ErrScheduleNotFound`.
+  Classified Added per COMPATIBILITY.md (a new interface method is a minor
+  bump). (#232)
+
+- **scheduled-tasks Phase 2a: `port.ScheduleStore.ListFires`.** A new
+  `ListFires(ctx, scheduleName) ([]ScheduleFire, error)` method — the list
+  companion to `LoadFire`. It returns the fire records for a schedule, in no
+  guaranteed order; the not-found case for the SCHEDULE wraps
+  `ErrScheduleNotFound`, and an empty fire list for an existing schedule is a
+  successful empty slice (not an error). Classified Added per COMPATIBILITY.md
+  (a new interface method is a minor bump). (#232)
+
+- **scheduled-tasks Phase 2a: `session.EvScheduleFired` / `EvScheduleSkipped` /
+  `EvScheduleFailed` events + `session.SchedulePayload`.** Three new
+  `EventType` string consts (`schedule.fired` / `schedule.skipped` /
+  `schedule.failed`) and a new `SchedulePayload` value object
+  (`ScheduleName`/`FireID`/`SessionID`/`Kind`/`Stop`/`Err`), plus a new
+  `Event.Schedule *SchedulePayload` field. They are the CLIENT-VISIBLE
+  scheduler-lifecycle projection (unlike the log-only `EvApproval` /
+  `EvCompactionArchive` / `EvUserPrompt`), emitted from COMPOSITION (the
+  scheduler) at fire time — NOT the agent loop (`engine/agent` never imports
+  `port.ScheduleStore`). `Kind`/`Stop`/`Err` are STRING passthroughs (the
+  `EvNoProgress`/`StopBudget` discipline — no proto enum). Classified Added per
+  COMPATIBILITY.md (new exported consts + a new struct field are minor bumps).
+  (#232)
+
 - **`port.ScheduleStore` + value objects** (`Schedule`, `ScheduleSpec`, `TriggerSpec`,
   `ScheduleState`, `ScheduleFire`, `ScheduleProviderSelector`, `ErrScheduleNotFound`,
   `ErrScheduleUnsupported`, `SchedulerLeaderLeaseID`, `TriggerKind`/`TriggerCron`/
