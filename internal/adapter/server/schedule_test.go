@@ -55,10 +55,11 @@ func TestCreateScheduleCron(t *testing.T) {
 	ctx := context.Background()
 
 	sched, err := svc.CreateSchedule(ctx, port.ScheduleSpec{
-		Name:     "cron-1",
-		Prompt:   "rotate keys",
-		Trigger:  port.TriggerSpec{Cron: "* * * * *"},
-		Mutating: true,
+		Name:      "cron-1",
+		Prompt:    "rotate keys",
+		Trigger:   port.TriggerSpec{Cron: "* * * * *"},
+		Mutating:  true,
+		Workspace: "/tmp",
 	})
 	if err != nil {
 		t.Fatalf("CreateSchedule: %v", err)
@@ -92,10 +93,11 @@ func TestCreateScheduleOneShotFuture(t *testing.T) {
 
 	future := now.Add(time.Hour)
 	sched, err := svc.CreateSchedule(ctx, port.ScheduleSpec{
-		Name:     "once-future",
-		Prompt:   "x",
-		Trigger:  port.TriggerSpec{OneShot: future},
-		Mutating: true,
+		Name:      "once-future",
+		Prompt:    "x",
+		Trigger:   port.TriggerSpec{OneShot: future},
+		Mutating:  true,
+		Workspace: "/tmp",
 	})
 	if err != nil {
 		t.Fatalf("CreateSchedule future: %v", err)
@@ -107,10 +109,11 @@ func TestCreateScheduleOneShotFuture(t *testing.T) {
 	// Past one-shot rejected (Mutating=true so the mode check passes; the
 	// future-invariant is what rejects).
 	if _, err := svc.CreateSchedule(ctx, port.ScheduleSpec{
-		Name:     "once-past",
-		Prompt:   "x",
-		Trigger:  port.TriggerSpec{OneShot: now.Add(-time.Hour)},
-		Mutating: true,
+		Name:      "once-past",
+		Prompt:    "x",
+		Trigger:   port.TriggerSpec{OneShot: now.Add(-time.Hour)},
+		Mutating:  true,
+		Workspace: "/tmp",
 	}); !errors.Is(err, server.ErrInvalidArgument) {
 		t.Fatalf("CreateSchedule past one-shot = %v, want ErrInvalidArgument", err)
 	}
@@ -123,25 +126,63 @@ func TestCreateScheduleRejectsReadleaningWithWriteMode(t *testing.T) {
 	svc, _ := newScheduleService(t, now)
 	ctx := context.Background()
 
-	// Mutating=false + ModeDefault (write-capable) → rejected.
+	// Mutating=false + ModeDefault (write-capable) → rejected. A workspace is
+	// set so the spec clears the profile-invariant check first and the
+	// rejection asserted below is genuinely the mode check, not a masked
+	// workspace error.
 	if _, err := svc.CreateSchedule(ctx, port.ScheduleSpec{
-		Name:     "bad",
-		Prompt:   "x",
-		Trigger:  port.TriggerSpec{Cron: "* * * * *"},
-		Mutating: false,
-		Mode:     session.ModeDefault,
+		Name:      "bad",
+		Prompt:    "x",
+		Trigger:   port.TriggerSpec{Cron: "* * * * *"},
+		Mutating:  false,
+		Mode:      session.ModeDefault,
+		Workspace: "/tmp",
 	}); !errors.Is(err, server.ErrInvalidArgument) {
 		t.Fatalf("CreateSchedule Mutating=false Mode=default = %v, want ErrInvalidArgument", err)
 	}
 	// Mutating=false + ModePlan (read-only) → accepted.
 	if _, err := svc.CreateSchedule(ctx, port.ScheduleSpec{
-		Name:     "good",
-		Prompt:   "x",
-		Trigger:  port.TriggerSpec{Cron: "* * * * *"},
-		Mutating: false,
-		Mode:     session.ModePlan,
+		Name:      "good",
+		Prompt:    "x",
+		Trigger:   port.TriggerSpec{Cron: "* * * * *"},
+		Mutating:  false,
+		Mode:      session.ModePlan,
+		Workspace: "/tmp",
 	}); err != nil {
 		t.Fatalf("CreateSchedule Mutating=false Mode=plan: %v", err)
+	}
+}
+
+// TestCreateScheduleWorkspaceProfileInvariant: the workspace/profile check is
+// PROFILE-AWARE, mirroring the session create-seam. A default-profile schedule
+// with no workspace is rejected (a fire would mint a filesystem session with
+// nothing to root — an unfireable schedule); a no-fs-profile schedule WITH a
+// workspace is also rejected (a no-FS fire has no filesystem to root).
+func TestCreateScheduleWorkspaceProfileInvariant(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	svc, _ := newScheduleService(t, now)
+	ctx := context.Background()
+
+	// Default profile, empty workspace → rejected.
+	if _, err := svc.CreateSchedule(ctx, port.ScheduleSpec{
+		Name:     "no-workspace",
+		Prompt:   "x",
+		Trigger:  port.TriggerSpec{Cron: "* * * * *"},
+		Mutating: true,
+	}); !errors.Is(err, server.ErrInvalidArgument) {
+		t.Fatalf("CreateSchedule default-profile no workspace = %v, want ErrInvalidArgument", err)
+	}
+
+	// no-fs profile, non-empty workspace → rejected.
+	if _, err := svc.CreateSchedule(ctx, port.ScheduleSpec{
+		Name:      "no-fs-with-workspace",
+		Prompt:    "x",
+		Trigger:   port.TriggerSpec{Cron: "* * * * *"},
+		Mutating:  true,
+		Profile:   string(server.ProfileNoFS),
+		Workspace: "/tmp",
+	}); !errors.Is(err, server.ErrInvalidArgument) {
+		t.Fatalf("CreateSchedule no-fs profile with workspace = %v, want ErrInvalidArgument", err)
 	}
 }
 
@@ -204,10 +245,11 @@ func TestPauseResumeSchedule(t *testing.T) {
 	ctx := context.Background()
 
 	spec := port.ScheduleSpec{
-		Name:     "pause-resume",
-		Prompt:   "x",
-		Trigger:  port.TriggerSpec{Cron: "* * * * *"},
-		Mutating: true,
+		Name:      "pause-resume",
+		Prompt:    "x",
+		Trigger:   port.TriggerSpec{Cron: "* * * * *"},
+		Mutating:  true,
+		Workspace: "/tmp",
 	}
 	if _, err := svc.CreateSchedule(ctx, spec); err != nil {
 		t.Fatalf("CreateSchedule: %v", err)
@@ -239,5 +281,56 @@ func TestPauseResumeSchedule(t *testing.T) {
 	// SetEnabled not-found case), surfaced by the Service unchanged.
 	if err := svc.PauseSchedule(ctx, "no-such-schedule"); !errors.Is(err, port.ErrScheduleNotFound) {
 		t.Fatalf("PauseSchedule(unknown) = %v, want ErrScheduleNotFound", err)
+	}
+}
+
+// TestUpdateSchedulePreservesCreatedAt: UpdateSchedule overwrites the Spec half
+// while preserving the State half (firing progress) AND the creation timestamp.
+// CreatedAt is a store-side timestamp, never operator-authored, so an Update must
+// not clobber it to the zero value — the reconcile update path (reconcileSchedules)
+// would otherwise destroy the audit trail on every restart.
+func TestUpdateSchedulePreservesCreatedAt(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	svc, schedStore := newScheduleService(t, now)
+	ctx := context.Background()
+
+	spec := port.ScheduleSpec{
+		Name:      "updatable",
+		Prompt:    "v1",
+		Trigger:   port.TriggerSpec{Cron: "0 9 * * *"},
+		Mutating:  true,
+		Workspace: "/tmp",
+	}
+	created, err := svc.CreateSchedule(ctx, spec)
+	if err != nil {
+		t.Fatalf("CreateSchedule: %v", err)
+	}
+	if created.Spec.CreatedAt.IsZero() {
+		t.Fatalf("CreatedAt is zero after create")
+	}
+
+	// Update with a changed prompt — everything else identical.
+	spec.Prompt = "v2"
+	updated, err := svc.UpdateSchedule(ctx, spec)
+	if err != nil {
+		t.Fatalf("UpdateSchedule: %v", err)
+	}
+	if updated.Spec.Prompt != "v2" {
+		t.Fatalf("Update did not apply new Prompt; got %q", updated.Spec.Prompt)
+	}
+	if !updated.Spec.CreatedAt.Equal(created.Spec.CreatedAt) {
+		t.Fatalf("CreatedAt not preserved: create=%v update=%v",
+			created.Spec.CreatedAt, updated.Spec.CreatedAt)
+	}
+
+	// Persisted form must also keep the original CreatedAt (the bug was in the
+	// Save path, not just the returned value).
+	loaded, err := schedStore.Load(ctx, "updatable")
+	if err != nil {
+		t.Fatalf("Load after Update: %v", err)
+	}
+	if !loaded.Spec.CreatedAt.Equal(created.Spec.CreatedAt) {
+		t.Fatalf("persisted CreatedAt not preserved: create=%v loaded=%v",
+			created.Spec.CreatedAt, loaded.Spec.CreatedAt)
 	}
 }

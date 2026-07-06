@@ -693,6 +693,18 @@ type Config struct {
 	// Diagnostics and the conversation event stream are unchanged.
 	MetricsRoleScoper func(familyRole string) (port.EventSink, port.ToolCallRecorder)
 
+	// ScheduleMetricsEmitter, when non-nil, is the composition-injected metrics
+	// callback the scheduler invokes (via Config.ScheduleMetrics) for every
+	// fired/skipped/failed schedule fire (issue #233, Phase 2b). The caller
+	// (cmd/mecated, the embedded TUI server) builds the closure over the
+	// telemetry adapter's Metrics.EmitSchedule — keeping internal/app free of the
+	// telemetry import — exactly as MetricsRoleScoper closes over Metrics.WithRole.
+	// Schedule metrics are NOT a role-family (a fire mints a fresh session whose
+	// OWN run already carries role="main"); this callback is a separate
+	// schedule-lifecycle dimension. Nil (the default, and the no-perf path) keeps
+	// the scheduler metrics-silent: byte-identical to the pre-feature shape.
+	ScheduleMetricsEmitter func(payload session.SchedulePayload, duration time.Duration)
+
 	// Diagnostics is the general-purpose operational logging seam, injected by the
 	// caller (mecated wires a slogdiag sink to stderr; the embedded TUI passes its
 	// own). It is the sink the build-once composition facts (token counter /
@@ -819,6 +831,13 @@ type Config struct {
 	SchedulerTickInterval       time.Duration // 0 → default 30s (the scheduler's own default)
 	SchedulerMinInterval        time.Duration // 0 → no floor enforced at the create-seam
 	SchedulerMaxConcurrentFires int           // 0 → default 4
+	// DeclaredSchedules are the operator-tier schedule declarations parsed from the
+	// `schedules:` YAML subtree (issue #233, Phase 2b), folded onto cfg by
+	// foldOperatorSchedules. They are reconciled into the durable ScheduleStore by
+	// reconcileSchedules after the scheduler starts (idempotent: missing → Create,
+	// differing → Update, unchanged → no-op). Empty when no operator-tier schedules:
+	// block was configured — the byte-identical default.
+	DeclaredSchedules []port.ScheduleSpec
 }
 
 // GuardrailRule is one operator-tier guardrail rule (issue #27): a tool-NAME matcher,
@@ -984,6 +1003,13 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	// list comes from YAML (flags cannot express it). This runs after the resolver is
 	// built and before the provider/model fail-fast normalization below.
 	cfg = foldOperatorGuardrails(cfg)
+
+	// Schedules operator-tier config (issue #233, Phase 2b): fold the user-global +
+	// CLI `schedules:` YAML subtree (the resolver collected it from the OPERATOR
+	// tiers ONLY — a project file's block is ignored with a WARN) onto cfg as parsed
+	// []port.ScheduleSpec. The reconcile into the durable store runs AFTER the
+	// scheduler starts (reconcileSchedules, below). Runs after the resolver is built.
+	cfg = foldOperatorSchedules(cfg)
 
 	// Per-slot models (ADR 0030, Phase 1+2): fold the operator-tier `models:` YAML
 	// subtree (user-global + CLI only — a project file's models: block is handled by
@@ -1375,6 +1401,16 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		storeClose()
 		commandConnClose()
 		return nil, err
+	}
+
+	// Declared schedules reconcile (issue #233, Phase 2b): make the durable
+	// ScheduleStore match the operator's `schedules:` YAML — missing → Create,
+	// differing → Update, unchanged → no-op (idempotent). Runs ONLY when the
+	// scheduler is enabled AND there are declared schedules, so the default
+	// byte-identical path never reaches here. Errors are logged per schedule, never
+	// fatal (a broken store at reconcile time does not block startup).
+	if cfg.SchedulerEnabled && len(cfg.DeclaredSchedules) > 0 {
+		reconcileSchedules(ctx, cfg, svc)
 	}
 
 	// Child-session retention GC (issue #38): wired AFTER the Service exists
@@ -1990,6 +2026,15 @@ func startScheduler(ctx context.Context, cfg Config, store port.SessionStore, se
 	// Service — the scheduler pkg stays EventSink-free. A nil EventLog makes the
 	// callback a no-op (byte-identical no-emit path).
 	sched.SetEmitScheduleEvent(svc.EmitScheduleEvent)
+	// Wire the OPTIONAL metrics callback (issue #233, Phase 2b): the scheduler
+	// invokes it from fireClaimed (fired/failed, with the Claim→terminal
+	// duration) and fireOne/FireNow (skipped, duration 0) with a
+	// session.SchedulePayload; composition closes over the telemetry adapter's
+	// Metrics.EmitSchedule — the scheduler pkg stays telemetry-import-free. Nil
+	// (the no-perf path) is the byte-identical metrics-silent path.
+	if cfg.ScheduleMetricsEmitter != nil {
+		sched.SetScheduleMetrics(cfg.ScheduleMetricsEmitter)
+	}
 	if err := sched.Start(ctx); err != nil {
 		schedClose()
 		return noop, fmt.Errorf("start scheduler: %w", err)
