@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"iter"
 	"sort"
 	"strings"
 	"sync"
@@ -2792,4 +2793,207 @@ func (s *Service) ListWorktrees(ctx context.Context, workspace string) ([]Worktr
 		return nil, fmt.Errorf("%w: list worktrees: %v", ErrInternal, err)
 	}
 	return wts, nil
+}
+
+// --- Stored-session inventory (issue #245 Phase 1) --------------------------
+
+// SessionSummary is one stored session's picker metadata — id, timestamps,
+// state, turn count, and the resolved model id. It carries NO conversation
+// content: it is the cheap row a client renders in an "open existing session"
+// picker. The Service exposes its own proto-free type so the wire adapters
+// (toProtoSessionSummaries) and any in-process consumer need not import the
+// proto package. `model_id` is a bare opaque string (NOT a full ResolvedModel)
+// to keep the picker row cheap and provider-neutral.
+type SessionSummary struct {
+	// SessionID is the stored session's id.
+	SessionID string
+	// ModifiedAtUnix is the last-write timestamp in Unix seconds (the
+	// PrunableStore row mtime; the sort key for the picker).
+	ModifiedAtUnix int64
+	// State is the persisted lifecycle state (idle/running/awaiting/completed/...).
+	// Empty when the snapshot could not be loaded (a corrupt store row still
+	// surfaces its id/mtime).
+	State string
+	// Turns is the persisted model-call count. Zero when the snapshot could not
+	// be loaded.
+	Turns int
+	// ModelID is the resolved model id this session ran on (bare string, no
+	// provider context). Empty when the session never resolved a model or the
+	// snapshot could not be loaded.
+	ModelID string
+	// CreatedAtUnix is the creation timestamp in Unix seconds. Zero when the
+	// snapshot could not be loaded.
+	CreatedAtUnix int64
+	// Title is the human-readable session label (seeded once from the first
+	// genuine user prompt, clamped to 120 runes). Populated from the snapshot
+	// Title, or — when that is empty — from the lazy deriveTitle fallback
+	// (walks the conversation for the first genuine user prompt). Empty for a
+	// session with no genuine prompt.
+	Title string
+}
+
+// StreamSessionEvents replays a session's durable event log as a lazy iterator
+// over the recorded events (cloud-native Phase 3a read-back). It is the
+// service-layer surface over port.EventLog.Read that the gRPC/HTTP handlers
+// stream to a client opening an existing session (issue #245 Phase 1).
+//
+// A nil EventLog (no durable log configured) returns ErrNoEventLog so the wire
+// adapters map to UNIMPLEMENTED (HTTP 501) — honestly reporting the surface is
+// absent rather than pretending an unknown id. An unknown/pruned session id
+// yields an EMPTY iterator (absence is data): port.EventLog.Read is defined to
+// return an empty stream for an unknown id, so the service surfaces that
+// verbatim. The loop stays storage-agnostic — this method never starts a run or
+// makes a model call. Read-only.
+//
+// The returned iterator yields the events the relay PERSISTED — including the
+// three log-only kinds (EvApproval/EvCompactionArchive/EvUserPrompt) a LIVE
+// Converse relay skips on the client wire. The caller (the gRPC/HTTP handler)
+// relays ALL of them: a client opening a PAST session wants the verdicts and
+// user prompts, as they ARE the transcript. They are already metadata-only /
+// redacted by construction (gauntlet #7: no raw args/deny-reason bodies/child
+// content ever cross), so no extra filter applies at this layer.
+func (s *Service) StreamSessionEvents(ctx context.Context, id session.SessionID) (iter.Seq2[session.Event, error], error) {
+	if s.cfg.EventLog == nil {
+		return nil, ErrNoEventLog
+	}
+	return s.cfg.EventLog.Read(ctx, id), nil
+}
+
+// ListSessions returns the stored-session inventory — the picker metadata a
+// client renders to let an operator open an EXISTING session by id (issue #245
+// Phase 1). It is backed by port.PrunableStore.List (type-asserted on the
+// configured store); a store that does not implement PrunableStore, or one that
+// returns ErrPruneUnsupported, degrades to an EMPTY slice — never an error — so
+// a no-persistence/cloud server honestly reports "no sessions".
+//
+// Each row carries only picker metadata (id, timestamps, state, turn count,
+// model id); NO conversation content is loaded. For each PrunableStore row the
+// service best-effort loads the snapshot to populate State/Turns/CreatedAtUnix
+// and ModelID from the session's own PERSISTED sess.ModelID (NOT
+// Service.ResolvedModel, which falls back to the shared default engine's model
+// for a non-live session — that would misreport every session that was ever run
+// on a non-default model); a Load failure leaves those fields zeroed but still
+// returns the row (a corrupt snapshot file is surfaced in the picker with its
+// id/mtime, so the operator can see it exists even if it can't be opened). Rows
+// are sorted most-recently-active first (modified_at descending). Read-only.
+//
+// Cost: each row does a Store.Load (jsonlstore: reads the last snapshot line).
+// Acceptable for a picker; no pagination in Phase 1.
+//
+// FAST PATH: when the store implements port.MetaLister (jsonlstore does),
+// ListSessions uses MetaList — a CHEAP last-line read that skips the full
+// conversation — instead of a full Load per row. This keeps listing N sessions
+// O(N × last-line-read) rather than O(N × filesize) for large histories. The
+// MetaLister path is the same latest-line-wins source Load trusts; a store that
+// does NOT implement MetaLister falls back to the Load-per-row path (correct,
+// just slower; memstore/redisstore/grpcdriver use it until they implement
+// MetaList). The Title from MetaList is the snapshot Title ONLY — the lazy
+// deriveTitle fallback (walking the conversation) is NOT available on the fast
+// path; a session whose Title was never seeded shows "" on the fast path. That
+// is acceptable for a picker (the snapshot Title is seeded by the loop on the
+// first genuine prompt, so the common case is populated).
+func (s *Service) ListSessions(ctx context.Context) ([]SessionSummary, error) {
+	// FAST PATH: a store that implements MetaLister enumerates picker metadata
+	// cheaply (last-line read, no conversation unmarshal).
+	if ml, ok := s.cfg.Store.(port.MetaLister); ok {
+		return listSessionsMeta(ctx, ml)
+	}
+	ps, ok := s.cfg.Store.(port.PrunableStore)
+	if !ok {
+		return nil, nil
+	}
+	rows, err := ps.List(ctx)
+	if err != nil {
+		if errors.Is(err, port.ErrPruneUnsupported) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("%w: list sessions: %v", ErrInternal, err)
+	}
+	out := make([]SessionSummary, 0, len(rows))
+	for _, r := range rows {
+		summary := SessionSummary{
+			SessionID:      string(r.ID),
+			ModifiedAtUnix: r.ModifiedAt.Unix(),
+		}
+		if sess, lerr := s.cfg.Store.Load(ctx, r.ID); lerr == nil && sess != nil {
+			summary.State = string(sess.State)
+			summary.Turns = sess.Counters.Turns
+			summary.CreatedAtUnix = sess.CreatedAt.Unix()
+			if sess.ModelID != "" {
+				summary.ModelID = sess.ModelID
+			}
+			summary.Title = DeriveTitle(sess)
+		}
+		out = append(out, summary)
+	}
+	// Most-recently-active first (modified_at descending). Stable on ties so the
+	// store's own ordering is preserved within an equal-mtime batch.
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].ModifiedAtUnix > out[j].ModifiedAtUnix
+	})
+	return out, nil
+}
+
+// listSessionsMeta builds the SessionSummary slice from a MetaLister's cheap
+// metadata projection (no conversation unmarshal). It is the fast-path
+// implementation of ListSessions for stores that implement port.MetaLister.
+func listSessionsMeta(ctx context.Context, ml port.MetaLister) ([]SessionSummary, error) {
+	rows, err := ml.MetaList(ctx)
+	if err != nil {
+		if errors.Is(err, port.ErrPruneUnsupported) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("%w: list sessions: %v", ErrInternal, err)
+	}
+	out := make([]SessionSummary, 0, len(rows))
+	for _, r := range rows {
+		summary := SessionSummary{
+			SessionID:      string(r.ID),
+			ModifiedAtUnix: r.ModifiedAt.Unix(),
+			State:          string(r.State),
+			Turns:          r.Turns,
+			CreatedAtUnix:  r.CreatedAt.Unix(),
+			ModelID:        r.ModelID,
+			Title:          r.Title,
+		}
+		// A zero CreatedAt (a snapshot with no created_at, or a corrupt row that
+		// left CreatedAt at the zero time) maps to 0, NOT the zero time's Unix
+		// value (-62135596800) — matching the Load-fails zeroed-fields behaviour.
+		if r.CreatedAt.IsZero() {
+			summary.CreatedAtUnix = 0
+		}
+		out = append(out, summary)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].ModifiedAtUnix > out[j].ModifiedAtUnix
+	})
+	return out, nil
+}
+
+// DeriveTitle returns the session's human-readable label: the snapshot Title if
+// set, else the clamped text of the FIRST genuine user prompt found by walking
+// sess.Conversation.Messages (via session.IsGenuineUserPrompt, which skips
+// synthesised compaction summaries), else "" (no genuine prompt). It is the lazy
+// display-time fallback for a session whose Title was never seeded (e.g. a
+// session created before the Title field existed, or one whose first prompt
+// was multimodal-only). It does NOT mutate sess.Title — NO write-on-read: the
+// snapshot stays the authoritative set-once label, and the derived value is a
+// pure read projection the caller places on the wire. Used by ListSessions
+// (picker) and the GetSession handlers.
+func DeriveTitle(sess *session.Session) string {
+	if sess == nil {
+		return ""
+	}
+	if sess.Title != "" {
+		return sess.Title
+	}
+	if sess.Conversation == nil {
+		return ""
+	}
+	for _, m := range sess.Conversation.Messages {
+		if session.IsGenuineUserPrompt(m) && strings.TrimSpace(m.Text) != "" {
+			return session.ClampTitle(m.Text)
+		}
+	}
+	return ""
 }

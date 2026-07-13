@@ -36,6 +36,22 @@ type wiredCollaborators struct {
 	Models     bool // mirrors client.Capabilities.ModelSelection
 	Worktrees  bool
 	Scheduling bool
+	Sessions   bool // /sessions picker — gated on the lister + replayer being wired (NO caps bit)
+}
+
+// wiredCollaborators builds the struct from m.deps — the SINGLE construction
+// site for it, called by every builtinCommands/builtinByName call site
+// (palette.go's builtinRows, update.go's runSelectedBuiltin and submitPrompt) so
+// the three can never drift out of sync again (issue: the palette's hand-rolled
+// copy once omitted Sessions, so /sessions never appeared in autocomplete even
+// though the actual dispatch path built it correctly).
+func (m Model) wiredCollaborators() wiredCollaborators {
+	return wiredCollaborators{
+		MCP: m.deps.MCP != nil, Agents: m.deps.Agents != nil, Skills: m.deps.Skills != nil,
+		Soul: m.deps.Soul != nil, UserModel: m.deps.UserModel != nil, Models: m.deps.Models != nil,
+		Worktrees: m.deps.Worktrees != nil, Scheduling: m.deps.Sched != nil,
+		Sessions: m.deps.Sessions != nil && m.deps.Replayer != nil,
+	}
 }
 
 // builtinCommands returns the caps-filtered built-in set for the connected
@@ -140,6 +156,18 @@ func builtinCommands(caps client.Capabilities, w wiredCollaborators) []builtin {
 			name: "schedule",
 			desc: "browse & manage scheduled tasks",
 			run:  Model.runSchedule,
+		})
+	}
+	// /sessions opens the stored-session picker (issue #245 Phase 3a). Gated on the
+	// lister + replayer being wired (w.Sessions) — NO caps bit: a no-FS/cloud server
+	// with a durable SessionStore still has stored sessions to list, so the picker is
+	// available whenever the lister + replayer are wired. The Enter handoff opens a
+	// READ-ONLY transcript replay; continue-interactive is out of scope.
+	if w.Sessions {
+		out = append(out, builtin{
+			name: "sessions",
+			desc: "open a stored session (read-only transcript)",
+			run:  Model.runSessions,
 		})
 	}
 	// /posture prints the server-wide operator posture tier + a line per defense.
@@ -259,6 +287,13 @@ func (m Model) runWorktrees() (tea.Model, tea.Cmd) {
 // nil/idle guards are belt-and-braces here.
 func (m Model) runSchedule() (tea.Model, tea.Cmd) {
 	return m.openSchedule()
+}
+
+// runSessions opens the /sessions overlay (issue #245 Phase 3a). Only registered
+// when the session lister + replayer are wired, so openSessions's own nil/idle
+// guards are belt-and-braces here.
+func (m Model) runSessions() (tea.Model, tea.Cmd) {
+	return m.openSessions()
 }
 
 // runPosture shows the server-wide operator posture tier and a compact per-defense

@@ -17,7 +17,9 @@ import (
 // SessionSnapshot is the proto-free subset of a server session snapshot mecatui needs.
 type SessionSnapshot struct {
 	Mode          string
+	State         string
 	ResolvedModel ResolvedModel
+	Title         string
 }
 
 func snapshotFrom(s *mecatlv1.Session) SessionSnapshot {
@@ -26,7 +28,9 @@ func snapshotFrom(s *mecatlv1.Session) SessionSnapshot {
 	}
 	return SessionSnapshot{
 		Mode:          ModeString(s.GetMode()),
+		State:         s.GetState(),
 		ResolvedModel: resolvedModelFrom(s.GetResolvedModel()),
+		Title:         s.GetTitle(),
 	}
 }
 

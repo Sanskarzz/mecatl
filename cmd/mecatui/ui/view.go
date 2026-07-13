@@ -87,7 +87,9 @@ func (m Model) View() tea.View {
 	case m.worktrees.view != worktreesNone:
 		body = renderWorktreesOverlay(m.deps.Theme, m.worktrees, m.caps, m.width, m.vp.Height())
 	case m.schedule.view != scheduleNone:
-		body = renderScheduleOverlay(m.deps.Theme, m.schedule, m.caps, m.width, m.vp.Height())
+		body = renderScheduleOverlay(m.deps.Theme, m.schedule, m.caps, m.deps.Replayer != nil, m.width, m.vp.Height())
+	case m.sessions.view != sessionsNone:
+		body = renderSessionsOverlay(m.deps.Theme, m.sessions, m.caps, m.sessionID, m.rend.vpView(m.vp), m.width, m.vp.Height())
 	case m.phase == phaseIdle && m.conv.isEmpty() && !m.restartedThisRun:
 		// First-run zero-state: a welcome card in the empty viewport. Not an overlay
 		// (claims no keyboard); typing flows over it and it vanishes on the first block.
