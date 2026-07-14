@@ -758,3 +758,181 @@ func TestBuildEnabledChildGCNarratesAndStops(t *testing.T) {
 		t.Errorf("Build narrated 'session GC ENABLED' %d times, want exactly 1", got)
 	}
 }
+
+// --- Schedule-fire retention (ADR 0059 decision #7 Phase-2) -----------------
+
+// TestScheduleFireGCAgePass pins the schedule-fire age pass: "sched--"-prefixed
+// sessions older than ScheduleFireRetention are deleted by the schedule-fire
+// pass, younger ones survive, and an UNPREFIXED main session is NOT touched by
+// the schedule-fire pass.
+func TestScheduleFireGCAgePass(t *testing.T) {
+	f := newGCFixture(t, childGCPolicy{scheduleFireRetention: 24 * time.Hour})
+	f.save(t, "sched--nightly-old")
+	f.save(t, "sched--hourly-old")
+	f.save(t, "main-old")             // a main, not sched--: the fire pass must not touch it
+	f.now = f.now.Add(48 * time.Hour) // the old ones are now 48h old
+	f.save(t, "sched--nightly-young")
+
+	deleted, retained := f.gc.sweep(context.Background())
+	if deleted != 2 || retained != 2 {
+		t.Errorf("sweep = (deleted %d, retained %d), want (2, 2)", deleted, retained)
+	}
+	got := f.ids(t)
+	for _, old := range []session.SessionID{"sched--nightly-old", "sched--hourly-old"} {
+		if got[old] {
+			t.Errorf("aged-out sched-- fire %q survived the schedule-fire age pass", old)
+		}
+	}
+	if !got["sched--nightly-young"] {
+		t.Error("young sched-- fire was deleted by the schedule-fire age pass")
+	}
+	if !got["main-old"] {
+		t.Error("an UNPREFIXED main was deleted by the schedule-fire pass — it must be invisible to this pass")
+	}
+}
+
+// TestScheduleFireGCSkipsLive pins the liveness exclusion on the schedule-fire
+// age pass: a LIVE sched-- session (one mid-run) older than the horizon keeps
+// its slot — the in-flight run protects it, mirroring the main/child age passes.
+func TestScheduleFireGCSkipsLive(t *testing.T) {
+	f := newGCFixture(t, childGCPolicy{scheduleFireRetention: 24 * time.Hour})
+	live := map[session.SessionID]bool{"sched--live-old": true}
+	f.gc.isLive = func(id session.SessionID) bool { return live[id] }
+
+	f.save(t, "sched--live-old") // ancient but live: must survive
+	f.save(t, "sched--dead-old") // ancient and dead: age pass takes it
+	f.now = f.now.Add(48 * time.Hour)
+
+	deleted, retained := f.gc.sweep(context.Background())
+	if deleted != 1 || retained != 1 {
+		t.Errorf("sweep = (deleted %d, retained %d), want (1, 1)", deleted, retained)
+	}
+	got := f.ids(t)
+	if !got["sched--live-old"] {
+		t.Error("LIVE sched-- fire was deleted by the age pass — the liveness exclusion is broken for the schedule-fire pass")
+	}
+	if got["sched--dead-old"] {
+		t.Error("dead aged-out sched-- fire survived the age pass")
+	}
+}
+
+// TestScheduleFireGCCountCap pins the schedule-fire GLOBAL count cap (ADR 0059
+// Phase-2, the symmetric peer of the main cap): with more sched-- fire sessions than
+// scheduleFireMaxTotal, the OLDEST fire snapshots go first, the cap is store-wide,
+// and a LIVE fire keeps its slot (the next-oldest non-live is deleted in its
+// stead). Mirrors TestChildGCMainSessionCountCap.
+func TestScheduleFireGCCountCap(t *testing.T) {
+	f := newGCFixture(t, childGCPolicy{scheduleFireMaxTotal: 2})
+	live := map[session.SessionID]bool{"sched--a": true}
+	f.gc.isLive = func(id session.SessionID) bool { return live[id] }
+	for i, id := range []session.SessionID{"sched--a", "sched--b", "sched--c", "sched--d"} {
+		f.save(t, id)
+		f.now = f.now.Add(time.Duration(i+1) * time.Minute)
+	}
+
+	// 4 fires > cap 2, oldest-first with the live sched--a skipped => sched--b and
+	// sched--c deleted (sched--a kept though oldest; sched--d newest).
+	deleted, retained := f.gc.sweep(context.Background())
+	if deleted != 2 || retained != 2 {
+		t.Errorf("sweep = (deleted %d, retained %d), want (2, 2)", deleted, retained)
+	}
+	got := f.ids(t)
+	if !got["sched--a"] {
+		t.Error("LIVE fire was deleted — the liveness exclusion is broken for the schedule-fire cap")
+	}
+	if got["sched--b"] || got["sched--c"] {
+		t.Errorf("cap pass kept the oldest non-live fires (b=%v c=%v), want them deleted", got["sched--b"], got["sched--c"])
+	}
+	if !got["sched--d"] {
+		t.Error("newest fire was deleted under the schedule-fire cap pass")
+	}
+}
+
+// TestScheduleFireGCAgeThenCap pins that the age pass runs BEFORE the cap and the
+// cap trims the SURVIVORS down to scheduleFireMaxTotal — the same age→cap
+// plumbing sweepMain exercises, now shared by the schedule-fire pass.
+func TestScheduleFireGCAgeThenCap(t *testing.T) {
+	f := newGCFixture(t, childGCPolicy{scheduleFireRetention: 24 * time.Hour, scheduleFireMaxTotal: 2})
+	// Two ancient fires (age pass deletes both) + three recent (cap trims to 2).
+	f.save(t, "sched--ancient-1")
+	f.save(t, "sched--ancient-2")
+	f.now = f.now.Add(48 * time.Hour)
+	for i, id := range []session.SessionID{"sched--recent-1", "sched--recent-2", "sched--recent-3"} {
+		f.save(t, id)
+		f.now = f.now.Add(time.Duration(i+1) * time.Minute)
+	}
+
+	deleted, retained := f.gc.sweep(context.Background())
+	// 2 aged out + 1 over the cap of 2 => 3 deleted, 2 retained.
+	if deleted != 3 || retained != 2 {
+		t.Errorf("sweep = (deleted %d, retained %d), want (3, 2)", deleted, retained)
+	}
+	got := f.ids(t)
+	if got["sched--ancient-1"] || got["sched--ancient-2"] {
+		t.Error("an aged-out fire survived the age pass")
+	}
+	if got["sched--recent-1"] {
+		t.Error("the oldest survivor was kept over the cap — cap should evict oldest-first")
+	}
+	if !got["sched--recent-2"] || !got["sched--recent-3"] {
+		t.Error("the two newest survivors were not kept under the cap")
+	}
+}
+
+// TestScheduleFireSessionNeverEntersMainOrChildPass is the partition guard: a
+// "sched--" session is swept ONLY by the schedule-fire pass. With the child and
+// main passes ENABLED (which would otherwise delete ancient sessions) and the
+// schedule-fire pass DISABLED, a sched-- session is NEVER touched — it is
+// invisible to both the main and child passes. (Mutation-verified: if the
+// partition regressed so sched-- fell into mains, the main age pass would delete
+// it here.)
+func TestScheduleFireSessionNeverEntersMainOrChildPass(t *testing.T) {
+	f := newGCFixture(t, childGCPolicy{
+		retention:     time.Hour, // child age pass ON
+		maxPerFamily:  1,         // child cap ON
+		mainRetention: time.Hour, // main age pass ON
+		mainMaxTotal:  1,         // main cap ON
+		// scheduleFireRetention deliberately 0 — the fire pass is OFF
+	})
+	f.save(t, "sched--ancient-fire")
+	f.save(t, "subagent-old")           // a child, swept by the child pass
+	f.save(t, "main-old")               // a main, swept by the main pass
+	f.now = f.now.Add(1000 * time.Hour) // all ancient
+
+	deleted, _ := f.gc.sweep(context.Background())
+	// The child (subagent-old) and main (main-old) are deleted; the sched-- fire
+	// is NOT (its pass is off, and it never enters the other passes).
+	if deleted != 2 {
+		t.Errorf("sweep deleted %d, want 2 (the child + the main, NOT the sched-- fire)", deleted)
+	}
+	got := f.ids(t)
+	if !got["sched--ancient-fire"] {
+		t.Error("a sched-- fire was deleted by the main or child pass with the schedule-fire pass OFF — the partition is broken")
+	}
+}
+
+// TestScheduleFirePartitionExcludesPrefixSubstrings pins that the "sched--"
+// prefix match is a true prefix, not a substring: a main session whose id merely
+// CONTAINS "sched--" (but does not start with it) stays a main, and a child
+// whose id contains it stays a child. This is the substring-safety twin of
+// TestChildGCMainSessionsNeverDeleted.
+func TestScheduleFirePartitionExcludesPrefixSubstrings(t *testing.T) {
+	// isMainSession must be false for a genuine sched-- prefix...
+	if isMainSession("sched--real-fire") {
+		t.Error(`isMainSession("sched--real-fire") = true, want false`)
+	}
+	// ...and true for an id that merely contains the substring.
+	if !isMainSession("my-sched--notes") {
+		t.Error(`isMainSession("my-sched--notes") = false, want true (substring, not a prefix)`)
+	}
+	if !isMainSession("pre-sched---post") {
+		t.Error(`isMainSession("pre-sched---post") = false, want true`)
+	}
+	// A child-prefixed id stays a child (the sched-- check does not steal it).
+	if _, ok := isChildSession("subagent-x"); !ok {
+		t.Error(`isChildSession("subagent-x") = false, want true (child prefix must win)`)
+	}
+	if isScheduleFireSession("subagent-x") {
+		t.Error(`isScheduleFireSession("subagent-x") = true, want false (child prefix, not a fire)`)
+	}
+}

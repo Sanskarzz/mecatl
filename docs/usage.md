@@ -59,6 +59,8 @@ Flags:
 | `--scheduler-tick-interval` | 30s | How often the tick loop polls `ScheduleStore.Due`. |
 | `--scheduler-min-interval` | 0 (off) | The frequency floor enforced at schedule-save time (a schedule tighter than this is rejected). |
 | `--scheduler-max-concurrent-fires` | 4 | Bounds the per-tick fire fan-out. |
+| `--schedule-fire-retention` | 7d (when `--scheduler` on) | How long persisted `sched--`-prefixed fire-session snapshots are retained before the GC sweep deletes them (a distinct family from `--child-retention`/`--main-retention`); a LIVE fire (one mid-run) is never deleted. 0 disables the pass — fire sessions are never swept. Only meaningful when `--scheduler` is enabled and a durable store is configured. |
+| `--schedule-fire-retention-max-total` | 0 (off) | Max persisted `sched--`-prefixed fire-session snapshots kept store-wide; the oldest beyond the cap are deleted, skipping in-flight fires. The symmetric peer of `--main-retention-max-total`: the age horizon (`--schedule-fire-retention`) bounds the tail, this cap bounds the head (a per-minute cron accumulates ~10k sessions/week the horizon never trims). Durable-store-only. |
 
 Schedules are managed via the **`ScheduleService`** gRPC + REST API (Phase 2a,
 issue #232), the operator-tier **`settings.yaml` `schedules:` block** (Phase 2b,
@@ -116,7 +118,10 @@ without the accessor) honestly reports the schedule RPCs as `Unimplemented`
 
 A scheduled fire mints a fresh `sched--` top-level session per fire with
 subagent-grade defaults (bounded turn/token budgets, read-leaning posture unless
-`mutating: true` is set on the schedule, headless ask model). The at-most-once
+`mutating: true` is set on the schedule, headless ask model). The fire id IS the
+session id (a `sched--<name>-<ts>-<rand>` id, passed as a `WithSessionID`
+override on session create), so a fire's persisted session carries the `sched--`
+GC-retention family prefix swept by `--schedule-fire-retention`. The at-most-once
 firing semantics mean a crash mid-fire skips the slot — a recurring schedule
 self-heals via the fire-once-now misfire policy; a one-shot can be lost.
 
@@ -143,6 +148,7 @@ schedules:
     maxFires: 0                 # total fires for a cron (0 = forever); ignored for one-shot
     singleton: true             # skip the next fire if a prior one is still running (currently always effectively true — see notes)
     # misfire: skip             # "" (default = fire-once-now) or "skip"
+    carryContext: true           # Phase 2c: render the prior fire's conversation as a fenced untrusted preamble (see notes)
 
   - name: one-shot-patch
     oneShot: "2026-07-04T10:00:00Z"  # RFC3339 instant; must be in the future
@@ -150,6 +156,8 @@ schedules:
     mutating: true
     provider: anthropic
     model: claude-sonnet-4-5
+    oneShotRetry: true          # Phase 2c: re-arm on a mid-fire crash (cron triggers reject this)
+    oneShotMaxRetries: 3        # Phase 2c: re-arm budget (default 3 when oneShotRetry=true and this is 0)
 ```
 
 Notes:
@@ -176,6 +184,33 @@ Notes:
   accepted but silently overridden, so a fold-time WARN names the schedule. Full
   opt-out support (allowing overlapping fires) needs an engine-port/proto change and
   is deferred.
+- **Phase 2c fields (issue #236)** — two opt-in schedule-spec fields, both
+  defaulting OFF (the pre-Phase-2 path is byte-identical when neither is set):
+  - **`oneShotRetry`** (bool, default `false`) — re-arm a one-shot that crashed
+    mid-fire (prior fire ended in `StopError`, or `LastFireSessionID` is still the
+    `pending` sentinel — Claim happened but RecordFire did not) up to
+    `oneShotMaxRetries` times, via the optional `ScheduleOneShotReArmer` store
+    interface. A store that does not implement it degrades to at-most-once (the
+    one-shot stays lost). **One-shot-ONLY:** the create-seam rejects
+    `oneShotRetry: true` on a cron trigger fail-closed (a cron self-heals via the
+    misfire policy already). A re-armed one-shot starts FRESH — it does NOT carry
+    context on the retry (the crashed fire's context is untrusted AND incomplete).
+  - **`oneShotMaxRetries`** (int, default `0` = off; the create-seam applies a
+    default of `3` when `oneShotRetry: true` and this is `0`) — bounds the re-arm
+    budget. The durable `oneShotRetryCount` on the schedule state is incremented
+    on each re-arm; once it reaches `oneShotMaxRetries` the one-shot stays
+    disabled (permanently done — no crash-loop). Must be `>= 0`.
+  - **`carryContext`** (bool, default `false`) — render the prior fire's
+    conversation as a FENCED UNTRUSTED preamble prepended to the prompt (NOT as
+    seeded history). Carried context is UNTRUSTED (model-authored +
+    tool-result-laden; a prior fire may have been prompt-injected), so it must not
+    become live instructions; the fence (`agent.FenceUntrusted` +
+    `NeutraliseFraming`) quarantines it so a forged `<<<UNTRUSTED` marker or
+    harness section header in the prior content cannot break out of its block.
+    Allowed on either trigger. On prior-session-load failure (not found, decode
+    error) the fire degrades to fresh-context (WARN, never fails the fire). A
+    re-armed one-shot does NOT carry context on the retry (the gate short-circuits
+    on the `pending` sentinel).
 
 ### `mecated schedules` CLI (Phase 2b)
 

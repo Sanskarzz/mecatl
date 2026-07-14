@@ -197,12 +197,53 @@ misfire".
   (via the memory store or a file) and re-load it in its prompt. Carried-context
   is a v2 concern, deferred.
 
+- **Phase-2 amendment (one-shot retry):** an opt-in `OneShotRetry` field mitigates
+  the one-shot crash-loss trade-off above for one-shots that cannot tolerate loss.
+  The tick loop re-arms a crashed one-shot (prior fire ended in `StopError` or
+  `LastFireSessionID == PendingFireSessionID`) up to `OneShotMaxRetries`, via the
+  optional `ScheduleOneShotReArmer` interface (type-asserted on the store, exactly
+  like `PrunableStore`/`SessionLease`; a store that does not implement it degrades
+  to the byte-identical at-most-once path). A re-arm re-enables the schedule,
+  advances `NextFireAt` with a small backoff, and increments the durable
+  `OneShotRetryCount`; once the budget is exhausted the one-shot stays disabled
+  (permanently done, not a crash-loop). It is one-shot-ONLY — a cron self-heals
+  via misfire already, so the create-seam rejects `OneShotRetry` on a cron trigger.
+
+- **Phase-2 amendment (carried context):** an opt-in `CarryContext` field renders
+  the prior fire's conversation as a fenced untrusted preamble (via
+  `agent.FenceUntrusted` + `NeutraliseFraming`), NOT as seeded history — carried
+  context is untrusted (a prior fire may have been prompt-injected) and must not
+  become live instructions. The fence quarantines it so a forged closing marker or
+  harness section header in the prior content cannot break out of its block. On
+  prior-session-load failure (not found, decode error) the fire degrades to
+  fresh-context (WARN, never fails the fire). A re-armed one-shot does NOT carry
+  context on the retry — the crashed fire's context is untrusted AND incomplete.
+
 - **The composition wiring (`buildScheduler`) lands in Phase 1f.** This ADR
   records the decision; the `internal/adapter/scheduler` package (Phase 1e)
   ships the storage-agnostic tick loop + the `FireFunc` seam. Phase 1f wires
   the seam to `Service.CreateSessionWithProfile` + `Service.StartRunContent`
   and adds the `--schedule-*` flags. Until then the scheduler is inert (no
   composition wire, byte-identical default).
+
+- **Phase-2 update (fire id + GC retention family).** Decision #7's Phase-1
+  caveat is resolved: the fire path now mints a `sched--`-prefixed session id
+  via a `WithSessionID` override on `CreateSessionWithProfile` (a variadic
+  options pattern, NOT a positional-signature widening), so the fire id IS the
+  session id AND the persisted session carries the `sched--` family prefix. A
+  distinct `ScheduleFireRetention` GC family sweeps per-fire sessions on their
+  OWN schedule (a peer age pass of `MainRetention`/`ChildRetention`, partitioned
+  by the `sched--` prefix — never the main or child pass). The
+  `--schedule-fire-retention` flag (operator-tier, peer of `--child-retention`)
+  defaults to 7d when `--scheduler` is enabled; 0 disables (fire sessions are
+  never swept, byte-identical to pre-Phase-2). The fire pass is now SYMMETRIC
+  with the main pass: alongside the age horizon it has a GLOBAL count cap,
+  `--schedule-fire-retention-max-total` (peer of `--main-retention-max-total`;
+  0 disables) — the age horizon bounds the tail, the cap bounds the head (a
+  per-minute cron accumulates ~10k sessions/week the horizon never trims from the
+  head). The override validates a non-empty id that does not collide with a live
+  per-session engine, an in-flight create holding the same id, OR a session
+  already persisted under that id.
 
 ## See also
 

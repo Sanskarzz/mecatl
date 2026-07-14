@@ -76,6 +76,18 @@ func (s *Service) CreateSchedule(ctx context.Context, spec port.ScheduleSpec) (p
 	if err != nil {
 		return port.Schedule{}, err
 	}
+	// Collision guard: ScheduleStore.Save is an UPSERT-by-name, so a Create whose
+	// name already exists would SILENTLY CLOBBER the existing schedule's spec. A
+	// "Create" must never destroy an existing task — reject a duplicate name here
+	// (the edit path is UpdateSchedule, a distinct method). There is a tiny
+	// check-then-Save TOCTOU window (the store has no atomic create-if-absent),
+	// but Create is a low-frequency human action, so the racing-duplicate risk is
+	// acceptable and not worth store-level locking.
+	if _, lerr := store.Load(ctx, spec.Name); lerr == nil {
+		return port.Schedule{}, fmt.Errorf("%w: a schedule named %q already exists", ErrInvalidArgument, spec.Name)
+	} else if !errors.Is(lerr, port.ErrScheduleNotFound) {
+		return port.Schedule{}, lerr
+	}
 	applyScheduleDefaults(&spec)
 	// Compute the first NextFireAt. A cron trigger's next fire was ALREADY
 	// computed by validateScheduleSpec (it must parse the expression to
@@ -125,7 +137,19 @@ func applyScheduleDefaults(spec *port.ScheduleSpec) {
 		// semantics. Documented honestly here.
 		spec.Singleton = true
 	}
+	// OneShotRetry default: when OneShotRetry is true and OneShotMaxRetries is 0
+	// (off), apply a default of 3 (the documented create-seam default). A caller
+	// that wants a different budget sets it explicitly. One-shot-only (the
+	// validateScheduleSpec gate above already rejected a cron with OneShotRetry).
+	if spec.OneShotRetry && spec.OneShotMaxRetries == 0 {
+		spec.OneShotMaxRetries = defaultOneShotMaxRetries
+	}
 }
+
+// defaultOneShotMaxRetries is the create-seam default applied when OneShotRetry
+// is true and OneShotMaxRetries is 0 (the "set a sensible default" convention — a
+// bare int has no "set" marker, so 0 is treated as "unset" on the opt-in path).
+const defaultOneShotMaxRetries = 3
 
 // scheduleSingletonExplicit reports whether the caller explicitly set the
 // Singleton field. A bare bool has no "set" marker, so v1 treats false as
@@ -154,6 +178,16 @@ func validateScheduleSpec(spec port.ScheduleSpec, now time.Time) (time.Time, err
 	}
 	if err := spec.Trigger.Validate(); err != nil {
 		return time.Time{}, fmt.Errorf("%w: %v", ErrInvalidArgument, err)
+	}
+	// OneShotRetry is one-shot-ONLY: a cron self-heals via misfire already
+	// (decision #1), so a retry budget on a cron is a misconfiguration the
+	// create-seam rejects fail-closed. CarryContext is allowed on either trigger
+	// (a cron carrying its prior fire's context is a valid use case).
+	if spec.OneShotRetry && spec.Trigger.Kind() != port.TriggerOneShot {
+		return time.Time{}, fmt.Errorf("%w: one_shot_retry is one-shot-only (a cron self-heals via misfire — no retry budget)", ErrInvalidArgument)
+	}
+	if spec.OneShotMaxRetries < 0 {
+		return time.Time{}, fmt.Errorf("%w: one_shot_max_retries must be >= 0 (got %d)", ErrInvalidArgument, spec.OneShotMaxRetries)
 	}
 	// Reject a read-leaning schedule (Mutating=false) with a write-capable Mode
 	// (the scheduler_fire.go:54-55 TODO — a read-leaning schedule must not carry

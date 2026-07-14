@@ -154,11 +154,14 @@ type config struct {
 
 	// Child-session retention/GC over the Redis store (PrunableStore). Defaults
 	// mirror mecated so a durable store does not grow without bound.
-	childRetention             time.Duration
-	childRetentionMaxPerFamily int
-	childGCInterval            time.Duration
-	mainRetention              time.Duration
-	mainRetentionMaxTotal      int
+	childRetention                time.Duration
+	childRetentionMaxPerFamily    int
+	childGCInterval               time.Duration
+	mainRetention                 time.Duration
+	mainRetentionMaxTotal         int
+	scheduleFireRetention         time.Duration
+	scheduleFireRetentionSet      bool
+	scheduleFireRetentionMaxTotal int
 
 	// Skills/agents/soul/user-model: the discovery knobs. mecak8s is a daemon
 	// over a workspace mount; these default OFF / conventional like mecated.
@@ -291,6 +294,8 @@ func parseFlags(argv []string) (config, error) {
 	fs.DurationVar(&cfg.childGCInterval, "child-gc-interval", time.Hour, "how often the session retention GC re-sweeps after the startup sweep; 0 = startup only")
 	fs.DurationVar(&cfg.mainRetention, "main-retention", 0, "how long persisted MAIN session snapshots are retained; 0 (default) disables the main age pass")
 	fs.IntVar(&cfg.mainRetentionMaxTotal, "main-retention-max-total", 0, "max persisted MAIN session snapshots kept store-wide; 0 (default) disables the cap")
+	fs.DurationVar(&cfg.scheduleFireRetention, "schedule-fire-retention", 0, "SCHEDULED TASKS: how long persisted \"sched--\"-prefixed fire-session snapshots are retained before the GC sweep deletes them (a distinct family from --main-retention/--child-retention); a LIVE fire (one mid-run) is never deleted. 0 (default) disables the pass — fire sessions are never swept. Only meaningful when --scheduler is enabled (defaults to 7d/168h when scheduler is on and this flag is unset)")
+	fs.IntVar(&cfg.scheduleFireRetentionMaxTotal, "schedule-fire-retention-max-total", 0, "max persisted \"sched--\"-prefixed fire-session snapshots kept store-wide; the oldest beyond the cap are deleted, skipping in-flight fires. The symmetric peer of --main-retention-max-total: the age horizon bounds the tail, this cap bounds the head. 0 (default) disables the cap")
 
 	// Skills / agents / soul / user-model (default OFF / conventional, like mecated).
 	fs.Var(&cfg.skillsDirs, "skills-dir", "directory to discover progressive-disclosure skills from (repeatable; highest precedence). TRUST BOUNDARY: a SKILL.md steers the model — point this only at directories you trust")
@@ -327,7 +332,20 @@ func parseFlags(argv []string) (config, error) {
 		case "subagent-model-router":
 			cfg.subagentModelRouterSet = true
 		}
+		if fl.Name == "schedule-fire-retention" {
+			cfg.scheduleFireRetentionSet = true
+		}
 	})
+
+	// Default the schedule-fire retention to 7d when scheduling is ON and the
+	// operator did not set it explicitly (ADR 0059 decision #7 Phase-2): a durable
+	// store accumulates a "sched--" session per fire, so a sane default keeps it
+	// bounded. mecak8s is the multi-replica scheduling home, so the default is
+	// especially relevant here. 0 (explicit --schedule-fire-retention=0) leaves
+	// fire sessions untouched.
+	if cfg.schedulerEnabled && !cfg.scheduleFireRetentionSet && cfg.scheduleFireRetention == 0 {
+		cfg.scheduleFireRetention = 7 * 24 * time.Hour
+	}
 
 	// Read the trusted ask-reviewer policy rubric, if any (an unreadable file
 	// fails startup, mirroring mecated).
@@ -358,59 +376,61 @@ func parseFlags(argv []string) (config, error) {
 // nil — mecak8s ships no Prometheus/OTel pipeline (stripped from mecated).
 func appConfig(cfg config, diag port.Diagnostics) app.Config {
 	out := app.Config{
-		Workspace:                    cfg.workspace,
-		Model:                        cfg.model,
-		DefaultProvider:              cfg.defaultProvider,
-		DefaultModel:                 cfg.defaultModel,
-		UseOpenAI:                    cfg.useOpenAI,
-		UseMock:                      cfg.useMock,
-		Shell:                        cfg.shell,
-		NoBash:                       cfg.noBash,
-		RedisURL:                     cfg.redisURL,
-		SessionLeaseK8sNamespace:     cfg.sessionLeaseK8sNamespace,
-		SessionLeaseTTL:              cfg.sessionLeaseTTL,
-		SessionLeaseRenewInterval:    cfg.sessionLeaseRenewInterval,
-		SchedulerEnabled:             cfg.schedulerEnabled,
-		SchedulerTickInterval:        cfg.schedulerTickInterval,
-		SchedulerMinInterval:         cfg.schedulerMinInterval,
-		SchedulerMaxConcurrentFires:  cfg.schedulerMaxConcurrentFires,
-		LLMMaxAttempts:               cfg.llmMaxAttempts,
-		LLMPerAttemptTimeout:         cfg.llmPerAttemptTimeout,
-		LLMStreamIdleTimeout:         cfg.llmStreamIdleTimeout,
-		LLMBreakerThreshold:          cfg.llmBreakerThreshold,
-		LLMBreakerCooldown:           cfg.llmBreakerCooldown,
-		MaxRunTokens:                 cfg.maxRunTokens,
-		MaxTeamTokens:                cfg.maxTeamTokens,
-		ChildRetention:               cfg.childRetention,
-		ChildRetentionMaxPerFamily:   cfg.childRetentionMaxPerFamily,
-		ChildGCInterval:              cfg.childGCInterval,
-		MainRetention:                cfg.mainRetention,
-		MainRetentionMaxTotal:        cfg.mainRetentionMaxTotal,
-		SkillsDirs:                   cfg.skillsDirs,
-		SkillsConventional:           cfg.skillsConventional,
-		AgentsDirs:                   cfg.agentsDirs,
-		AgentsConventional:           cfg.agentsConventional,
-		SubagentModel:                cfg.subagentModel,
-		SubagentAskReviewerModel:     cfg.subagentAskReviewer,
-		SubagentAskReviewerMaxDenies: cfg.subagentAskReviewerMaxDenies,
-		SubagentAskReviewerPolicy:    cfg.subagentAskReviewerPolicy,
-		RouterDisabled:               cfg.subagentModelRouterSet && !cfg.subagentModelRouter,
-		GuardrailsModel:              cfg.guardrailsModel,
-		GuardrailsDisabled:           cfg.guardrailsOff,
-		ModelAliases:                 cfg.modelAliases.AsMap(),
-		ModelSlots:                   cfg.modelSlots.AsMap(),
-		EnableParallel:               cfg.enableParallel,
-		EnableTeams:                  cfg.enableTeams,
-		SoulPath:                     cfg.soulFile,
-		NoSoul:                       cfg.noSoul,
-		UserModelDir:                 cfg.userModelDir,
-		NoUserModel:                  cfg.noUserModel,
-		PermissionsConventional:      cfg.permissionsConventional,
-		ImportClaudePermissions:      cfg.importClaudePermissions,
-		TrustProject:                 cfg.trustProject,
-		PermissionConfigs:            cfg.permissionConfigs,
-		Posture:                      app.ParsePosture(cfg.posture),
-		PostureFlagSet:               cfg.postureFlagSet,
+		Workspace:                     cfg.workspace,
+		Model:                         cfg.model,
+		DefaultProvider:               cfg.defaultProvider,
+		DefaultModel:                  cfg.defaultModel,
+		UseOpenAI:                     cfg.useOpenAI,
+		UseMock:                       cfg.useMock,
+		Shell:                         cfg.shell,
+		NoBash:                        cfg.noBash,
+		RedisURL:                      cfg.redisURL,
+		SessionLeaseK8sNamespace:      cfg.sessionLeaseK8sNamespace,
+		SessionLeaseTTL:               cfg.sessionLeaseTTL,
+		SessionLeaseRenewInterval:     cfg.sessionLeaseRenewInterval,
+		SchedulerEnabled:              cfg.schedulerEnabled,
+		SchedulerTickInterval:         cfg.schedulerTickInterval,
+		SchedulerMinInterval:          cfg.schedulerMinInterval,
+		SchedulerMaxConcurrentFires:   cfg.schedulerMaxConcurrentFires,
+		LLMMaxAttempts:                cfg.llmMaxAttempts,
+		LLMPerAttemptTimeout:          cfg.llmPerAttemptTimeout,
+		LLMStreamIdleTimeout:          cfg.llmStreamIdleTimeout,
+		LLMBreakerThreshold:           cfg.llmBreakerThreshold,
+		LLMBreakerCooldown:            cfg.llmBreakerCooldown,
+		MaxRunTokens:                  cfg.maxRunTokens,
+		MaxTeamTokens:                 cfg.maxTeamTokens,
+		ChildRetention:                cfg.childRetention,
+		ChildRetentionMaxPerFamily:    cfg.childRetentionMaxPerFamily,
+		ChildGCInterval:               cfg.childGCInterval,
+		MainRetention:                 cfg.mainRetention,
+		MainRetentionMaxTotal:         cfg.mainRetentionMaxTotal,
+		ScheduleFireRetention:         cfg.scheduleFireRetention,
+		ScheduleFireRetentionMaxTotal: cfg.scheduleFireRetentionMaxTotal,
+		SkillsDirs:                    cfg.skillsDirs,
+		SkillsConventional:            cfg.skillsConventional,
+		AgentsDirs:                    cfg.agentsDirs,
+		AgentsConventional:            cfg.agentsConventional,
+		SubagentModel:                 cfg.subagentModel,
+		SubagentAskReviewerModel:      cfg.subagentAskReviewer,
+		SubagentAskReviewerMaxDenies:  cfg.subagentAskReviewerMaxDenies,
+		SubagentAskReviewerPolicy:     cfg.subagentAskReviewerPolicy,
+		RouterDisabled:                cfg.subagentModelRouterSet && !cfg.subagentModelRouter,
+		GuardrailsModel:               cfg.guardrailsModel,
+		GuardrailsDisabled:            cfg.guardrailsOff,
+		ModelAliases:                  cfg.modelAliases.AsMap(),
+		ModelSlots:                    cfg.modelSlots.AsMap(),
+		EnableParallel:                cfg.enableParallel,
+		EnableTeams:                   cfg.enableTeams,
+		SoulPath:                      cfg.soulFile,
+		NoSoul:                        cfg.noSoul,
+		UserModelDir:                  cfg.userModelDir,
+		NoUserModel:                   cfg.noUserModel,
+		PermissionsConventional:       cfg.permissionsConventional,
+		ImportClaudePermissions:       cfg.importClaudePermissions,
+		TrustProject:                  cfg.trustProject,
+		PermissionConfigs:             cfg.permissionConfigs,
+		Posture:                       app.ParsePosture(cfg.posture),
+		PostureFlagSet:                cfg.postureFlagSet,
 		// Reasoning-effort tier (ADR 0055): operator-tier only; reasoningEffortFlagSet
 		// lets CLI out-rank the operator-global settings.yaml reasoning-effort: key
 		// (folded by foldOperatorReasoningEffort in app.Build, like posture).
