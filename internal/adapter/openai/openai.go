@@ -1,5 +1,11 @@
 // Package openai implements port.LLMProvider over the OpenAI Responses API
-// (POST /v1/responses) using github.com/openai/openai-go/v3.
+// (POST /v1/responses) using github.com/openai/openai-go/v3. It names the
+// PROTOCOL, not a single vendor: this one adapter serves the composition
+// registry's "openai", "openrouter", AND (issue #262) the intent-driven
+// ToolHive LLM gateway registry entries — each is the same Responses-API
+// wire protocol with a different base URL + credential, so registering one
+// more OpenAI-compatible endpoint here never touches the OpenAI/Anthropic SDK
+// boundary.
 //
 // The harness owns its own conversation state (the brief's "strategy B"): every
 // request is stateless (Store:false, no previous_response_id) and resends the
@@ -16,6 +22,7 @@ package openai
 import (
 	"context"
 	"iter"
+	"net/http"
 
 	oai "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
@@ -100,6 +107,19 @@ func WithProviderCapabilities(caps port.ProviderCapabilities) Option {
 	return func(c *config) {
 		cc := caps
 		c.caps = &cc
+	}
+}
+
+// WithHTTPClient sets the *http.Client the SDK issues requests through (e.g. a
+// redirect-refusing client for a loopback gateway endpoint, CWE-918). nil is
+// ignored (SDK default). NOTE for callers: do NOT set Client.Timeout here — a
+// streaming turn runs for minutes; establishment/idle bounds live in
+// llmresilience, not the transport's blanket deadline.
+func WithHTTPClient(c *http.Client) Option {
+	return func(cfg *config) {
+		if c != nil {
+			cfg.extra = append(cfg.extra, option.WithHTTPClient(c))
+		}
 	}
 }
 

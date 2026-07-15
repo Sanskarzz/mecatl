@@ -3,16 +3,23 @@ package app
 import (
 	"context"
 	"errors"
+	"net/http"
+	"path/filepath"
 	"slices"
 	"sort"
+	"sync"
+	"time"
 
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/internal/adapter/anthropic"
 	"github.com/stacklok/mecatl/internal/adapter/llmresilience"
 	"github.com/stacklok/mecatl/internal/adapter/openai"
+	"github.com/stacklok/mecatl/internal/adapter/openaicompat"
 	"github.com/stacklok/mecatl/internal/adapter/openrouter"
 	"github.com/stacklok/mecatl/internal/adapter/providercatalog"
+	"github.com/stacklok/mecatl/internal/adapter/toolhivellm"
+	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
 )
 
 // Provider id strings. These are WIRE-STABLE once they reach the wire (S3's
@@ -22,6 +29,10 @@ const (
 	providerOpenAI     = "openai"
 	providerOpenRouter = "openrouter"
 	providerAnthropic  = "anthropic"
+	// providerToolhive (issue #262) is the intent-driven ToolHive LLM gateway
+	// proxy entry: unlike the three above, it is registered by CONFIG-DETECTED
+	// INTENT (or an explicit base-url override), never a credential.
+	providerToolhive = "toolhive"
 	// providerMock is the synthetic offline provider id used only when UseMock is
 	// set. It never reaches the wire as a selectable provider; it exists so the
 	// registry has exactly one entry in offline/smoke-test runs.
@@ -138,6 +149,31 @@ type providerEntry struct {
 	// treats zero as "match anything" (no caps-driven re-mint) so a test registry
 	// without defaultCaps behaves as before.
 	defaultCaps port.ProviderCapabilities
+	// intentDriven marks a registry entry that exists by CONFIG-DETECTED INTENT
+	// (issue #262: the ToolHive LLM gateway) rather than a resolved credential.
+	// It tiers preferredDefaultProvider (below every key-driven provider) and
+	// filters the v1 provider_status projection to intent-driven entries only.
+	intentDriven bool
+	// intentGatewayURL is the UPSTREAM the proxy forwards to, captured for
+	// DIAGNOSTIC DISPLAY ONLY (R5.1/R5.2 — never used to build a request) when
+	// intentDriven came from config-file auto-detection. Empty when
+	// intentDriven came from an EXPLICIT base-url override (there is no
+	// config-file gateway_url to show).
+	intentGatewayURL string
+	// intentExplicit is true when the intent-driven entry came from an
+	// EXPLICIT operator override (--toolhive-llm-base-url) rather than
+	// config-file auto-detection: the Build-time probe upgrades an
+	// unreachable diagnostic from INFO to WARN on this path (the operator
+	// asked for this endpoint directly).
+	intentExplicit bool
+	// defaultEffort is the OPERATOR-DEFAULT reasoning-effort token (ADR 0055,
+	// already normalised + per-provider clamped by operatorDefaultEffortFor) this
+	// entry was built with. Stamped by buildProviderRegistry's fixup loop
+	// BEFORE the T7 re-mint so remintEntry (the shared re-mint helper, issue
+	// #262 review finding 4) can re-derive an entry's caps WITHOUT threading
+	// cfg through to the runtime heal path (healDefaultModel runs long after
+	// Build, off the request path, and has no cfg in scope).
+	defaultEffort string
 }
 
 // providerRegistry holds the N configured providers. It is built once in Build
@@ -159,18 +195,76 @@ type providerRegistry struct {
 	// floor. Never nil for a registry built by buildProviderRegistry; nil-tolerant
 	// reads (liveMetaStore.lookup) keep a hand-built test registry safe.
 	meta *liveMetaStore
+	// outcomes is the composition-owned live-LISTING outcome store (issue #262,
+	// D3 + surfacing): last-known-good snapshots (process-lifetime) plus the
+	// per-provider status (ok/unreachable/unauthorized/empty) the v1
+	// provider_status wire message projects. Seeded by the Build-time
+	// probeToolhive call and kept current by every subsequent
+	// resolveProviderModels call (the background refresh + the on-demand
+	// /models-open refresh). nil-tolerant like meta (a hand-built test
+	// registry that never sets it behaves as a permanently-empty store).
+	outcomes *liveOutcomeStore
+	// defaultModelAutoSelected is true when defaultModel was AUTO-SELECTED (a
+	// first-listed heal/probe pick, issue #262 review finding 7/R2.4) rather
+	// than operator-configured (--model/--default-model). Set ONLY at the two
+	// sites that fill an EMPTY defaultModel from a live listing —
+	// probeToolhive's Build-time auto-pick and healDefaultModel's runtime
+	// heal — both already gated on `defaultModel == ""`, which a configured
+	// model precludes (resolveDefaultModel would have taken tier (1) or (2)
+	// instead), so this can never be true alongside an operator choice. Guarded
+	// by defaultModelMu like defaultModel itself; read via the locked
+	// DefaultModelAutoSelected accessor.
+	defaultModelAutoSelected bool
+	// defaultModelMu guards EVERY post-construction access to defaultModel:
+	// healDefaultModel's check-and-set (the async live-refresh goroutine and
+	// the on-demand refreshStaleModels — reached off the ListModels request
+	// path — can both run concurrently after Build returns) AND
+	// ResolvedDefaultModel's read (any request-handling goroutine may call it
+	// at any time post-Build). Construction-time reads/writes
+	// (resolveDefaultModel, the T7 caps-fixup loop, probeToolhive, all inside
+	// buildProviderRegistry) run BEFORE any goroutine or request handler holds
+	// a reference to the registry, so they stay unlocked — this mutex exists
+	// only for the concurrent post-Build window.
+	defaultModelMu sync.Mutex
+	// publishMu serializes every post-Build snapshot publish (publishSnapshot,
+	// issue #262 review finding 2): the merge-then-swap-then-heal-then-project
+	// sequence must not interleave between the one-shot background refresh and
+	// the on-demand refreshStaleModels, or two concurrent merges could each read
+	// the same pre-merge snapshot and one publish's result would be lost. Fetches
+	// (the network calls) stay OUTSIDE this mutex — only the cheap, no-network
+	// publish tail is serialized. Lock order: publishMu may acquire
+	// defaultModelMu/entriesMu (inside healDefaultModel/remintEntry); NEVER the
+	// reverse — nothing holding defaultModelMu or entriesMu may acquire publishMu.
+	publishMu sync.Mutex
+	// entriesMu guards EVERY post-construction access to entries (issue #262
+	// review finding 4): healDefaultModel's re-mint (remintEntry) mutates a
+	// SINGLE entry's .provider/.defaultCaps post-Build, concurrently with
+	// Lookup/Available reads from any request-handling goroutine. Lookup and
+	// Available take an RLock (cheap, concurrent-reader-friendly); remintEntry's
+	// write takes the write lock ONLY around the map mutation itself (the
+	// re-mint construction runs BEFORE the lock — see remintEntry). Construction-
+	// time reads/writes (buildProviderRegistry, probeToolhive) run BEFORE any
+	// goroutine or request handler holds a reference to the registry, so they
+	// stay unlocked — mirroring defaultModelMu's discipline. Lock order: this
+	// mutex is a LEAF (never acquires publishMu/defaultModelMu while held).
+	entriesMu sync.RWMutex
 }
 
 // Lookup returns the entry for id and whether it exists (and is therefore
-// available — the registry only holds available entries).
+// available — the registry only holds available entries). RLock-guarded
+// (entriesMu): a concurrent remintEntry write must never race a reader.
 func (r *providerRegistry) Lookup(id string) (providerEntry, bool) {
+	r.entriesMu.RLock()
+	defer r.entriesMu.RUnlock()
 	e, ok := r.entries[id]
 	return e, ok
 }
 
 // Available returns the available provider ids, sorted, for ListModels (S3) and
-// the zero-keys diagnostic.
+// the zero-keys diagnostic. RLock-guarded (entriesMu), matching Lookup.
 func (r *providerRegistry) Available() []string {
+	r.entriesMu.RLock()
+	defer r.entriesMu.RUnlock()
 	ids := make([]string, 0, len(r.entries))
 	for id := range r.entries {
 		ids = append(ids, id)
@@ -180,7 +274,14 @@ func (r *providerRegistry) Available() []string {
 }
 
 // Default returns the default provider id, or "" when zero providers are
-// available (the zero-keys case).
+// available (the zero-keys case). Deliberately LOCK-FREE, unlike its siblings
+// (ResolvedDefaultModel/DefaultModelAutoSelected use defaultModelMu, Lookup/
+// Available use entriesMu): defaultID is set ONCE in buildProviderRegistry and
+// is IMMUTABLE for the life of the registry — nothing post-Build ever
+// reassigns it (the healed/auto-selected MODEL can change; the default
+// PROVIDER identity never does). If a future change ever makes defaultID
+// mutable after Build, it MUST add locking here too — this comment is the
+// trip-wire.
 func (r *providerRegistry) Default() string { return r.defaultID }
 
 // ResolvedDefaultModel returns the resolved EFFECTIVE default model for the
@@ -189,8 +290,24 @@ func (r *providerRegistry) Default() string { return r.defaultID }
 // cfg.DefaultModel, else the per-provider builtin table value (see
 // resolveDefaultModel). Deliberately NOT named after Config.DefaultModel —
 // that field is one TIER of this resolution (and under --model a value it
-// lost to), not the same concept.
-func (r *providerRegistry) ResolvedDefaultModel() string { return r.defaultModel }
+// lost to), not the same concept. Lock-guarded (defaultModelMu): a
+// zero-selector session or diagnostic can call this from any request-handling
+// goroutine while healDefaultModel is concurrently healing it post-Build.
+func (r *providerRegistry) ResolvedDefaultModel() string {
+	r.defaultModelMu.Lock()
+	defer r.defaultModelMu.Unlock()
+	return r.defaultModel
+}
+
+// DefaultModelAutoSelected reports whether the default provider's resolved
+// model was AUTO-SELECTED (issue #262 review finding 7) rather than
+// operator-configured. Lock-guarded (defaultModelMu), matching
+// ResolvedDefaultModel.
+func (r *providerRegistry) DefaultModelAutoSelected() bool {
+	r.defaultModelMu.Lock()
+	defer r.defaultModelMu.Unlock()
+	return r.defaultModelAutoSelected
+}
 
 // DefaultModelFor returns the builtin default model for a given provider id (the
 // id the model string is VALID for), or "" when the provider has no table entry
@@ -200,6 +317,93 @@ func (r *providerRegistry) ResolvedDefaultModel() string { return r.defaultModel
 // the child rebases off this provider-appropriate default rather than inheriting
 // the parent model. Composition-only, like the rest of the registry.
 func (*providerRegistry) DefaultModelFor(id string) string { return builtinDefaultModel[id] }
+
+// healDefaultModel fills a still-empty defaultModel for an INTENT-DRIVEN
+// default provider (issue #262 §1 accepted deviation: toolhive registered
+// sole+probe-down boots with defaultModel="" so Build never bricks) from a
+// freshly-swapped live snapshot. It is called after EVERY live-model swap —
+// startLiveModelRefresh's sync AND async paths, and refreshStaleModels'
+// on-demand /models-open path — so the model heals the instant the proxy
+// comes up, with NO restart (R1.4).
+//
+// It is a no-op when defaultModel is already non-empty (NEVER overwrites an
+// operator/session choice), when the default provider isn't intentDriven, or
+// when byProvider has nothing for it. The check-and-set itself runs under
+// defaultModelMu (issue found by review: an unlocked fast-path read raced
+// against a concurrent writer once this could be reached from BOTH the async
+// live-refresh goroutine AND refreshStaleModels, itself reachable off the
+// ListModels request path) — no unlocked pre-check. The re-mint (issue #262
+// review finding 4: the runtime auto-select was skipping the caps/effort
+// re-mint the Build-time auto-select performs, leaving the per-session
+// factory comparing against a stale defaultCaps baseline) runs via the
+// SHARED remintEntry helper AFTER defaultModelMu is released — remintEntry
+// takes its own entriesMu write lock for the map mutation, and nesting that
+// under defaultModelMu would add a lock-ordering constraint nothing else
+// needs (only the ONE winning filler ever reaches this branch, since a
+// subsequent call sees defaultModel already set and returns above). Logs ONE
+// "(auto-selected)" INFO the first time it fills.
+func (r *providerRegistry) healDefaultModel(d port.Diagnostics, byProvider map[string][]modelEntry) {
+	if r == nil {
+		return
+	}
+	entry, ok := r.Lookup(r.defaultID)
+	if !ok || !entry.intentDriven {
+		return
+	}
+	live := byProvider[r.defaultID]
+	if len(live) == 0 {
+		return
+	}
+	r.defaultModelMu.Lock()
+	if r.defaultModel != "" {
+		r.defaultModelMu.Unlock()
+		return // already set (a prior heal, or an operator/session pin)
+	}
+	model := live[0].ID
+	r.defaultModel = model
+	r.defaultModelAutoSelected = true // issue #262 review finding 7
+	r.defaultModelMu.Unlock()
+
+	r.remintEntry(r.defaultID, model)
+	d.Log(context.Background(), port.LevelInfo,
+		"provider default model (auto-selected) after live refresh",
+		// R2.6: name the proxy base URL + upstream gateway_url on the SAME
+		// event that makes toolhive the default model, not only via the
+		// separate "registered and reachable" line (which may have logged an
+		// unreachable/empty outcome at Build time, before this heal fires).
+		"provider", r.defaultID, "model", model,
+		"base_url", entry.baseURL, "gateway_url", entry.intentGatewayURL)
+}
+
+// remintEntry RE-MINTS pid's shared .provider/.defaultCaps for model — the ONE
+// re-mint path shared by the build-time T7 fixup, probeToolhive's auto-pick,
+// and healDefaultModel (issue #262 review finding 4: the third re-mint site,
+// extracted so the three cannot drift on the caps/effort computation). It
+// reads entry.defaultEffort (stamped by buildProviderRegistry BEFORE the
+// registry is handed out) rather than taking a cfg parameter, so a caller
+// reached long after Build (healDefaultModel, off the request path, with no
+// cfg in scope) can share it byte-for-byte with the two build-time sites. A
+// missing entry or one with no remint closure (mock / a providerConstructor
+// test seam) is a silent no-op. The write is entriesMu-guarded (a concurrent
+// Lookup/Available must never observe a torn entry); the (Lookup + caps
+// compute) that PRECEDE the write happen WITHOUT the write lock held, so a
+// concurrent reader is never blocked behind a live-listing round-trip — there
+// is none here, but the discipline matters because modelCapability may itself
+// Lookup.
+func (r *providerRegistry) remintEntry(pid, model string) {
+	entry, ok := r.Lookup(pid) // RLock — never nested under the write lock below
+	if !ok || entry.remint == nil {
+		return
+	}
+	defCaps := modelCapability(r, pid, model) // may Lookup internally — compute BEFORE the write lock
+	p := entry.remint(entry.defaultEffort, defCaps)
+	r.entriesMu.Lock()
+	e := r.entries[pid]
+	e.provider = p
+	e.defaultCaps = defCaps
+	r.entries[pid] = e
+	r.entriesMu.Unlock()
+}
 
 // errNoProvider is the named, actionable zero-keys error: when no provider's
 // credentials resolved AND the mock is not selected, Build cannot serve a useful
@@ -248,6 +452,9 @@ func buildProviderRegistry(cfg Config, detect envDetector) (*providerRegistry, e
 			// invariant uniform (every production registry carries one) and future-proofs
 			// a mock-with-metadata path. The helpers are nil-tolerant regardless.
 			meta: newLiveMetaStore(),
+			// An empty outcomes store mirrors meta: the mock has no lister, so it
+			// never records anything, but every production registry carries one.
+			outcomes: newLiveOutcomeStore(),
 		}, nil
 	}
 
@@ -267,7 +474,7 @@ func buildProviderRegistry(cfg Config, detect envDetector) (*providerRegistry, e
 	// back-compat selector the cmd layer still sets when a key is present, but it does
 	// NOT gate the registry (a key alone suffices — env auto-detection is the S1 model).
 	if key := providerKey(cfg.OpenAIKey, providerOpenAI, detect); key != "" {
-		entries[providerOpenAI] = newOpenAIEntry(cfg, providerOpenAI, key, cfg.OpenAIBaseURL)
+		entries[providerOpenAI] = newOpenAICompatEntry(cfg, providerOpenAI, key, cfg.OpenAIBaseURL)
 	}
 
 	// openrouter: same stateless openai adapter, OpenRouter base URL, keyed by
@@ -277,7 +484,7 @@ func buildProviderRegistry(cfg Config, detect envDetector) (*providerRegistry, e
 		if baseURL == "" {
 			baseURL = openRouterDefaultBaseURL
 		}
-		entry := newOpenAIEntry(cfg, providerOpenRouter, key, baseURL)
+		entry := newOpenAICompatEntry(cfg, providerOpenRouter, key, baseURL)
 		// OpenRouter opts into LIVE model listing: its public /models endpoint
 		// enumerates the real catalog (336 models) vs the curated embedded subset.
 		// The lister rides on the entry (NOT the shared openai.Provider) so openai —
@@ -296,11 +503,32 @@ func buildProviderRegistry(cfg Config, detect envDetector) (*providerRegistry, e
 		entries[providerAnthropic] = newAnthropicEntry(cfg, key, meta)
 	}
 
+	// toolhive (issue #262, D1): registered by CONFIG-DETECTED INTENT alone —
+	// resolveToolhiveIntent NEVER runs a network probe, so registration never
+	// blocks on (or is gated by) reachability (R1.1). With toolhive registered,
+	// len(entries)>0 even with ZERO provider keys, so errNoProvider no longer
+	// fires for a ToolHive-only operator — intended (zero-API-key onboarding).
+	if baseURL, gatewayURL, explicit, ok := resolveToolhiveIntent(cfg); ok {
+		lister := gatewayLister{inner: openaicompat.NewLister(baseURL, toolhivellm.PlaceholderToken, cfg.liveModelHTTPClient)}
+		entries[providerToolhive] = newGatewayEntry(cfg, providerToolhive, baseURL, gatewayURL, explicit, lister)
+	}
+
 	if len(entries) == 0 {
 		return nil, errNoProvider
 	}
 
-	reg := &providerRegistry{entries: entries, meta: meta}
+	// Stamp each entry's OPERATOR-DEFAULT effort BEFORE the registry is handed
+	// out (issue #262 review finding 4): remintEntry (below) reads
+	// entry.defaultEffort rather than re-deriving it from cfg, so the runtime
+	// heal path (healDefaultModel, reached long after Build with no cfg in
+	// scope) can share the exact same re-mint helper as the two build-time
+	// call sites.
+	for id, entry := range entries {
+		entry.defaultEffort = operatorDefaultEffortFor(cfg, id)
+		entries[id] = entry
+	}
+
+	reg := &providerRegistry{entries: entries, meta: meta, outcomes: newLiveOutcomeStore()}
 	reg.defaultID, reg.defaultModel = resolveDefaultModel(cfg, reg)
 	// Seed the live-metadata store from the embedded catalog for every available
 	// provider — the t=0 floor every resolver reads before the background live swap.
@@ -313,11 +541,9 @@ func buildProviderRegistry(cfg Config, detect envDetector) (*providerRegistry, e
 	// (the registry wasn't assembled yet, so modelCapability couldn't run); this
 	// re-mint replaces that placeholder with the honest default-model intersection.
 	// Mock / providerConstructor-seam entries have no remint closure and are
-	// skipped (they ignore caps; defaultCaps stays zero = "match anything").
-	for id, entry := range entries {
-		if entry.remint == nil {
-			continue
-		}
+	// skipped by remintEntry itself (they ignore caps; defaultCaps stays zero =
+	// "match anything").
+	for id := range entries {
 		// The shared .provider serves the operator-default model for the DEFAULT
 		// provider (reg.defaultModel — the resolved cfg.Model), and the provider's
 		// builtin default for a non-default provider (its .provider is only ever a
@@ -327,10 +553,14 @@ func buildProviderRegistry(cfg Config, detect envDetector) (*providerRegistry, e
 		if id == reg.defaultID {
 			model = reg.defaultModel
 		}
-		defCaps := modelCapability(reg, id, model)
-		entry.provider = entry.remint(operatorDefaultEffortFor(cfg, id), defCaps)
-		entry.defaultCaps = defCaps
-		entries[id] = entry
+		reg.remintEntry(id, model)
+	}
+	// Build-time probe (issue #262, R1.2): only runs when a toolhive entry
+	// exists (a single map lookup otherwise). It NEVER gates registration
+	// (already done above) — it drives the startup diagnostic, the initial
+	// provider_status + last-known-good seed, and default-model eligibility.
+	if err := probeToolhive(reg, cfg); err != nil {
+		return nil, err
 	}
 	return reg, nil
 }
@@ -352,11 +582,16 @@ func providerKey(cfgKey, providerID string, detect envDetector) string {
 	return ""
 }
 
-// newOpenAIEntry constructs a resilience-wrapped openai-adapter provider entry. It
-// is shared by the openai and openrouter ids (OpenRouter is the SAME adapter with a
-// different base URL + key), so the two cannot drift on resilience wrapping. It logs
-// the provider id and base URL ONLY — never the key.
-func newOpenAIEntry(cfg Config, id, key, baseURL string) providerEntry {
+// newOpenAICompatEntry constructs a resilience-wrapped openai-adapter provider
+// entry. It is shared by the openai, openrouter, and (issue #262) toolhive-gateway
+// ids (each is the SAME adapter with a different base URL + key/token), so they
+// cannot drift on resilience wrapping. It logs the provider id and base URL ONLY —
+// never the key. extra carries additional openai.Options appended to EVERY
+// construct() call (default AND per-session/heal re-mints), so a caller-supplied
+// option (e.g. the gateway entry's redirect-refusing HTTP client, F3) rides every
+// re-mint too, never just the initial build. openai/openrouter call sites pass
+// none — byte-identical.
+func newOpenAICompatEntry(cfg Config, id, key, baseURL string, extra ...openai.Option) providerEntry {
 	cfg.diag().Log(context.Background(), port.LevelInfo, "LLM provider available", "provider", id, "model", cfg.Model, "base_url", baseURL)
 	// Composition-only test seam (S3 e2e): when a providerConstructor is injected,
 	// it builds the provider (e.g. a distinct mock per id) instead of the real
@@ -370,7 +605,11 @@ func newOpenAIEntry(cfg Config, id, key, baseURL string) providerEntry {
 	// (T7). It is the SINGLE construction path: the default .provider is
 	// construct(defaultEffort, defaultCaps) and the per-session re-mint is
 	// construct(sessionEffort, sessionCaps), so the two cannot drift on resilience
-	// wrapping.
+	// wrapping. It also closes over `extra` (this func's variadic parameter, F3) —
+	// so EVERY mint (the default build AND every per-session/heal re-mint via
+	// remintEntry) carries whatever options the caller passed newOpenAICompatEntry
+	// (e.g. the gateway entry's redirect-refusing WithHTTPClient), never just the
+	// initial one.
 	construct := func(effort string, caps port.ProviderCapabilities) port.LLMProvider {
 		opts := []openai.Option{openai.WithAPIKey(key)}
 		if baseURL != "" {
@@ -380,6 +619,7 @@ func newOpenAIEntry(cfg Config, id, key, baseURL string) providerEntry {
 			opts = append(opts, openai.WithReasoningEffort(effort))
 		}
 		opts = append(opts, openai.WithProviderCapabilities(caps))
+		opts = append(opts, extra...)
 		var llm port.LLMProvider = openai.New(opts...)
 		return llmresilience.Wrap(llm, llmresilience.Config{
 			MaxAttempts:       cfg.LLMMaxAttempts,
@@ -577,15 +817,223 @@ func resolveDefaultModel(cfg Config, reg *providerRegistry) (providerID, modelID
 }
 
 // preferredDefaultProvider picks the default provider id from the available
-// entries: openai when present (preserving the single-provider default), else the
-// first id in sorted order, else "" (zero available).
+// entries: openai when present (preserving the single-provider default); else
+// the first KEY-DRIVEN provider in sorted order (issue #262, D2 R2.1 — an
+// intent-driven entry like toolhive sits at an explicit LOWEST-preference
+// tier: any keyed provider present means toolhive is never the default); else
+// the first INTENT-DRIVEN provider in sorted order (so a ToolHive-only,
+// zero-API-key operator still gets a usable default); else "" (zero
+// available).
 func preferredDefaultProvider(reg *providerRegistry) string {
-	if _, ok := reg.entries[providerOpenAI]; ok {
+	if _, ok := reg.Lookup(providerOpenAI); ok {
 		return providerOpenAI
 	}
-	avail := reg.Available()
-	if len(avail) == 0 {
+	var firstIntentDriven string
+	for _, id := range reg.Available() { // sorted
+		entry, ok := reg.Lookup(id)
+		if !ok {
+			continue
+		}
+		if !entry.intentDriven {
+			return id // first key-driven provider, sorted order
+		}
+		if firstIntentDriven == "" {
+			firstIntentDriven = id
+		}
+	}
+	return firstIntentDriven // "" when reg.Available() is empty too
+}
+
+// resolveToolhiveIntent decides whether a "toolhive" registry entry should be
+// registered (issue #262, D1) and, if so, what loopback base URL to serve it
+// on. It NEVER runs a network probe — registration is intent-only, and the
+// (baseURL, gatewayURL, explicit) it returns feed newGatewayEntry, which the
+// LATER Build-time probe (probeToolhive) reads off the constructed entry.
+//
+// Precedence: an EXPLICIT cfg.ToolhiveLLMBaseURL (already loopback-validated
+// by validateToolhiveBaseURL at Build) wins outright and SKIPS the config-file
+// read entirely (gatewayURL="" — there is no upstream to show; explicit=true
+// so the probe upgrades an unreachable diagnostic to WARN, since the operator
+// asked for this exact endpoint). Otherwise, when cfg.ToolhiveLLM is set (the
+// default), toolhivellm.DetectConfig reads ToolHive's own config file; a miss
+// logs ONE DEBUG diagnostic and returns ok=false — never a WARN/ERROR (most
+// operators simply do not run ToolHive, and detection failure is always
+// fail-soft, R1.1). cfg.ToolhiveLLM=false skips detection entirely (zero file
+// stats), the explicit shared-host opt-out (R4.1).
+func resolveToolhiveIntent(cfg Config) (baseURL, gatewayURL string, explicit, ok bool) {
+	if cfg.ToolhiveLLMBaseURL != "" {
+		return cfg.ToolhiveLLMBaseURL, "", true, true
+	}
+	if !cfg.ToolhiveLLM {
+		return "", "", false, false
+	}
+	path := cfg.toolhiveConfigPath
+	if path == "" {
+		path = filepath.Join(xdgconfig.UserConfigDir(xdgconfig.OSEnv), toolhivellm.DefaultConfigRelPath)
+	}
+	detected, found := toolhivellm.DetectConfig(path)
+	if !found {
+		cfg.diag().Log(context.Background(), port.LevelDebug,
+			"toolhive LLM gateway: no config detected, skipping auto-registration", "path", path)
+		return "", "", false, false
+	}
+	return detected.BaseURL(), detected.GatewayURL, false, true
+}
+
+// newGatewayEntry mints the toolhive registry entry: it delegates to
+// newOpenAICompatEntry (the SAME construction/resilience path as openai and
+// openrouter — the two cannot drift) using toolhivellm.PlaceholderToken as
+// the credential (the ToolHive LLM gateway proxy's documented inbound-auth
+// convention), then stamps the intent-driven metadata (R2.1/R2.6/R6.2) and
+// the live lister. It ALSO wires a redirect-refusing HTTP client onto the
+// INFERENCE request path (F3/CWE-918): the listing probe already refuses
+// redirects via openaicompat.RefuseRedirects, but the request that carries
+// the actual conversation body + Authorization header rides the openai
+// adapter's own client, which by SDK default follows up to 10 redirects — a
+// hostile/misconfigured listener squatting the loopback port could otherwise
+// bounce that body off-loopback. Only the gateway entry gets this: openai
+// and openrouter talk to a real, TLS-terminated, non-loopback endpoint where
+// following a redirect is ordinary and expected.
+func newGatewayEntry(cfg Config, id, baseURL, gatewayURL string, explicit bool, lister modelLister) providerEntry {
+	entry := newOpenAICompatEntry(cfg, id, toolhivellm.PlaceholderToken, baseURL,
+		openai.WithHTTPClient(&http.Client{CheckRedirect: openaicompat.RefuseRedirects}))
+	entry.lister = lister
+	entry.intentDriven = true
+	entry.intentGatewayURL = gatewayURL
+	entry.intentExplicit = explicit
+	return entry
+}
+
+// toolhiveProbeTimeout bounds the Build-time probe (R1.2): a down/hanging
+// proxy must never slow down Build's own startup beyond a bounded window.
+const toolhiveProbeTimeout = 1500 * time.Millisecond
+
+// The v1 provider_status states (STRING passthroughs on the wire, no proto
+// enum — the EvNoProgress/StopBudget discipline).
+const (
+	statusOK           = "ok"
+	statusUnreachable  = "unreachable"
+	statusUnauthorized = "unauthorized"
+	statusEmpty        = "empty"
+)
+
+// toolhiveStatusHints is the ONE place the remediation-hint copy lives,
+// shared by the Build-time probe diagnostics, the v1 provider_status
+// projection (providerStatusProto), and (verbatim) docs/usage.md's
+// troubleshooting table — so the three surfaces cannot drift on wording.
+var toolhiveStatusHints = map[string]string{
+	statusUnreachable:  "start it with `thv llm proxy start`",
+	statusUnauthorized: "re-auth with `thv llm setup`",
+	statusEmpty:        "your ToolHive gateway credential lists no models — ask your platform admin or re-run `thv llm setup`",
+}
+
+// statusHintFor returns the ToolHive remediation hint for state, scoped to
+// pid == providerToolhive ONLY — every other provider (e.g. an openrouter
+// outage) gets "" (cleanup: toolhiveStatusHints had become the generic
+// remediation map for ALL providers via the pre-cleanup classifyListError,
+// so an openrouter outage recorded the "start it with `thv llm proxy start`"
+// hint — latent-wrong-vendor, currently masked only because the v1 wire
+// projection (providerStatusProto) filters to intentDriven entries). TRIP-
+// WIRE: a SECOND gateway-shaped intent-driven provider needs a per-vendor
+// hint table here, not a second `pid ==` branch bolted on.
+func statusHintFor(pid, state string) string {
+	if pid != providerToolhive {
 		return ""
 	}
-	return avail[0]
+	return toolhiveStatusHints[state]
+}
+
+// errToolhiveNoModels is the actionable Build-fail error (D2 R2.3): toolhive
+// is the registry's SOLE/DEFAULT provider, the probe succeeded, but the
+// credential lists ZERO models — there is nothing sensible to default to, and
+// staying silent would leave the operator stuck with an empty picker and no
+// explanation. Kept lowercase with no trailing punctuation (ST1005), mirroring
+// errNoProvider.
+var errToolhiveNoModels = errors.New(
+	"your ToolHive gateway credential lists no models — ask your platform admin or re-run `thv llm setup`")
+
+// classifyLiveListError maps ANY provider's live-listing failure to a v1
+// provider_status state (it classifies every resolveProviderModels failure,
+// not just toolhive's — the name used to say "Toolhive" back when it was
+// probeToolhive-only, but it is now the SHARED classifier resolveProviderModels
+// calls for every provider with a lister): a 401/403 *openaicompat.StatusError
+// is "unauthorized" (a stale/rejected credential); everything else (connection
+// refused, timeout, malformed response, a 5xx) is "unreachable" (the endpoint
+// is not up / not listening yet) — the common case for a ToolHive user who
+// simply hasn't started the proxy.
+func classifyLiveListError(err error) string {
+	var statusErr *openaicompat.StatusError
+	if errors.As(err, &statusErr) && (statusErr.Code == http.StatusUnauthorized || statusErr.Code == http.StatusForbidden) {
+		return statusUnauthorized
+	}
+	return statusUnreachable
+}
+
+// probeToolhive runs the BOUNDED (issue #262 R1.2, ≤1.5s) Build-time probe
+// against a registered toolhive entry. Registration itself NEVER depends on
+// this (resolveToolhiveIntent already ran unconditionally) — the probe drives
+// ONLY: the startup diagnostic, the initial provider_status + last-known-good
+// seed (via reg.outcomes), and default-model eligibility (D2). A nil/missing
+// toolhive entry is a no-op (every non-ToolHive Build pays one map lookup).
+//
+// Returns errToolhiveNoModels ONLY when the probe succeeded, returned zero
+// models, AND toolhive is the registry's resolved DEFAULT provider (R2.3) —
+// every other outcome is diagnosed, never fatal (the §1 accepted deviation: a
+// down/unauthorized proxy must never brick Build when toolhive is sole).
+func probeToolhive(reg *providerRegistry, cfg Config) error {
+	entry, ok := reg.Lookup(providerToolhive)
+	if !ok || entry.lister == nil {
+		return nil
+	}
+	diag := cfg.diag()
+	ctx, cancel := context.WithTimeout(context.Background(), toolhiveProbeTimeout)
+	defer cancel()
+
+	models, err := entry.lister.ListModels(ctx)
+	switch {
+	case err != nil:
+		state := classifyLiveListError(err)
+		hint := toolhiveStatusHints[state]
+		reg.outcomes.recordFailure(providerToolhive, state, hint)
+		// An explicit --toolhive-llm-base-url is the operator asking directly for
+		// THIS endpoint, so an unreachable probe is upgraded to WARN (never
+		// silent on a deliberate ask); an unauthorized credential is always a
+		// WARN (a stale/rejected credential is actionable right now) regardless
+		// of source.
+		level := port.LevelInfo
+		if entry.intentExplicit || state == statusUnauthorized {
+			level = port.LevelWarn
+		}
+		diag.Log(ctx, level, "toolhive LLM gateway: probe failed — "+hint,
+			"provider", providerToolhive, "base_url", entry.baseURL, "state", state)
+	case len(models) == 0:
+		reg.outcomes.recordSuccess(providerToolhive, nil)
+		diag.Log(ctx, port.LevelWarn, "toolhive LLM gateway: "+toolhiveStatusHints[statusEmpty],
+			"provider", providerToolhive, "base_url", entry.baseURL)
+		if reg.defaultID == providerToolhive {
+			return errToolhiveNoModels
+		}
+	default:
+		// models is ALREADY []modelEntry (entry.lister is the composition
+		// modelLister interface; the concrete gatewayLister already stamped
+		// ToolCall:true per entry) — use it directly, never re-map it (that
+		// would duplicate the ToolCall business rule in a second place).
+		reg.outcomes.recordSuccess(providerToolhive, models)
+		diag.Log(ctx, port.LevelInfo, "toolhive LLM gateway: registered and reachable",
+			"provider", providerToolhive, "base_url", entry.baseURL, "gateway_url", entry.intentGatewayURL, "models", len(models))
+		if reg.defaultID == providerToolhive && reg.defaultModel == "" {
+			reg.defaultModel = models[0].ID
+			reg.defaultModelAutoSelected = true // issue #262 review finding 7
+			// Re-run the T7 caps fixup for the toolhive entry now that a real
+			// default model is known — via the SAME shared remintEntry helper
+			// buildProviderRegistry's post-assembly fixup loop and
+			// healDefaultModel use (issue #262 review finding 4: the three
+			// re-mint sites cannot drift on the caps/effort computation).
+			reg.remintEntry(providerToolhive, reg.defaultModel)
+			diag.Log(ctx, port.LevelInfo, "toolhive LLM gateway: default model (auto-selected)",
+				"provider", providerToolhive, "model", reg.defaultModel,
+				"base_url", entry.baseURL, "gateway_url", entry.intentGatewayURL)
+		}
+	}
+	return nil
 }

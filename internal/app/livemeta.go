@@ -159,6 +159,59 @@ func (s *liveMetaStore) lookup(providerID, modelID string) (modelEntry, bool) {
 	return m, ok
 }
 
+// mergeSwap merges fresh (the just-refetched providers — the FULL available
+// set from the background refresh, or a PARTIAL stale-only set from
+// refreshStaleModels) into the store's CURRENT per-provider snapshot,
+// atomically swaps the merged result in, and returns it as a []modelEntry
+// view (order UNSPECIFIED — every caller re-sorts via sortModelInfos or only
+// cares about "first-listed" from a FRESH lister result). Every provider
+// ABSENT from fresh is CARRIED OVER unchanged from the current snapshot
+// (inner maps are immutable per-entry, so reusing the reference is safe);
+// every provider PRESENT in fresh REPLACES its row wholesale via put — a
+// present-but-EMPTY list therefore REMOVES the provider (put is a no-op on an
+// empty list), preserving D3's "honest empty REPLACES" semantics exactly.
+//
+// This is the fix for the lost-update race (issue #262 review finding 2): the
+// prior whole-map Swap-based publish let a PARTIAL re-fetch (refreshStaleModels,
+// scoped to stale intent-driven providers only) permanently clobber every
+// OTHER provider's just-fetched live catalog when it interleaved with the
+// one-shot background refresh. A merge can only ever touch the providers it
+// actually fetched. nil-safe: a hand-built test registry with no meta store has
+// no persisted "current" snapshot to carry over, so the merge degrades to
+// projecting fresh alone (it still stores nothing — there is no store — but the
+// RETURNED view is never silently empty just because the store is absent).
+func (s *liveMetaStore) mergeSwap(fresh map[string][]modelEntry) map[string][]modelEntry {
+	next := make(map[string]map[string]modelEntry)
+	if s != nil {
+		if cur := s.models.Load(); cur != nil {
+			for pid, byID := range *cur {
+				if _, ok := fresh[pid]; ok {
+					continue // present in fresh: replaced below, never carried over stale
+				}
+				next[pid] = byID
+			}
+		}
+	}
+	for pid, list := range fresh {
+		if pid == providerMock {
+			continue
+		}
+		put(next, pid, list)
+	}
+	if s != nil {
+		s.models.Store(&next)
+	}
+	out := make(map[string][]modelEntry, len(next))
+	for pid, byID := range next {
+		list := make([]modelEntry, 0, len(byID))
+		for _, m := range byID {
+			list = append(list, m)
+		}
+		out[pid] = list
+	}
+	return out
+}
+
 // Upper bounds on LIVE-sourced metadata before it drives the request hot path. The
 // >0 check is the lower floor; these are the symmetric UPPER clamp (Security LOW):
 // a hostile / MITM'd / buggy live endpoint must not flow a huge value verbatim into

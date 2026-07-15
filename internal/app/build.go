@@ -21,7 +21,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -165,6 +167,26 @@ type Config struct {
 	// endpoint. These are ADDITIVE — the OpenAI/OpenRouter fields are unchanged.
 	AnthropicKey     string
 	AnthropicBaseURL string
+
+	// ToolhiveLLM (issue #262) opts INTO auto-detecting a locally-running
+	// ToolHive LLM gateway proxy: reading ToolHive's own config file (via the
+	// toolhivellm adapter) and, if an `llm:` block is found, registering an
+	// intent-driven "toolhive" provider entry — no API key needed. The ZERO
+	// VALUE is false so every existing hand-built Config / test is
+	// byte-identical with no edits; the `--toolhive-llm` FLAG DEFAULTS TRUE
+	// (the cmd layer supplies the default-ON posture, mirroring `--toolhive`
+	// for MCP workload discovery — an unrelated feature despite the similar
+	// name). Registration is probe-independent (R1.1): the proxy need not be
+	// running yet for the entry to exist.
+	ToolhiveLLM bool
+	// ToolhiveLLMBaseURL, when non-empty, is an EXPLICIT ToolHive LLM proxy
+	// base URL override: it skips the config-file auto-detect entirely (the
+	// operator is telling us exactly where the proxy is) but keeps the
+	// startup probe (WARN, not silent, on failure). Validated at Build to
+	// resolve to loopback ONLY (validateToolhiveBaseURL) — v1 has no
+	// off-host path. No environment-variable twin (R4.2): a base URL this
+	// security-sensitive is a deliberate, visible flag, never an ambient var.
+	ToolhiveLLMBaseURL string
 
 	// Context management: the compaction strategy ("heuristic"|"cascade") and the
 	// token counter ("heuristic"|"tiktoken"). Empty means "heuristic".
@@ -748,6 +770,17 @@ type Config struct {
 	// internal composition detail, not an operator knob.
 	gitStatus string
 
+	// defaultModelPending is true when the shared engine booted with an
+	// UNRESOLVED default model — the sole intent-driven (ToolHive gateway)
+	// provider probed down at Build, so cfg.Model stayed "" (issue #262 §1
+	// deviation, review finding 1). It is computed once, right after the
+	// model-fold chain settles cfg.Model, and threaded verbatim onto
+	// server.Config.DefaultModelPending so every zero-selector session routes
+	// through the per-session engine factory, which resolves the (possibly
+	// later-healed) default model at session-build time instead of freezing
+	// "". Unexported: an internal composition detail, not an operator knob.
+	defaultModelPending bool
+
 	// envDetector is the injectable environment-lookup seam the provider registry
 	// uses for credential-availability detection (multi-provider S1). It defaults
 	// to os.Getenv (set in Build); tests inject a fake map-backed lookup so registry
@@ -774,6 +807,17 @@ type Config struct {
 	// OFFLINE and never contacts the real provider endpoint. Unexported: an internal
 	// composition detail, not an operator knob.
 	liveModelHTTPClient *http.Client
+
+	// toolhiveConfigPath is the composition-only test seam for the ToolHive
+	// config-file path (mirroring envDetector/liveModelHTTPClient): ""
+	// resolves to the real path (xdgconfig.UserConfigDir + the adapter's
+	// DefaultConfigRelPath); tests always set it to a t.TempDir() fixture path
+	// so registry construction never touches the real home directory. It is
+	// ALSO the seam an explicit --toolhive-llm-base-url bypasses (the config
+	// read is skipped entirely on that path, so a poisoned path here would
+	// fail a test that asserts it — see resolveToolhiveIntent). Unexported:
+	// an internal composition detail, not an operator knob.
+	toolhiveConfigPath string
 
 	// liveModelRefreshSync makes the live-model refresh run SYNCHRONOUSLY inside
 	// Build (before it returns) instead of in a background goroutine. It is a
@@ -897,7 +941,7 @@ type GuardrailRule struct {
 
 // providerConstructor builds the port.LLMProvider for an available provider id,
 // given its resolved key and base URL. The production implementation
-// (newOpenAIEntry's body) constructs the resilience-wrapped openai adapter; the
+// (newOpenAICompatEntry's body) constructs the resilience-wrapped openai adapter; the
 // S3 e2e injects a mock-returning fake. It NEVER receives the key on any wire — it
 // is a pure in-process construction seam.
 type providerConstructor func(cfg Config, id, key, baseURL string) port.LLMProvider
@@ -1067,6 +1111,13 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	// trust (declared/remembered/flag all collapse onto cfg.TrustProject above).
 	cfg.gitStatus = gitSnapshot(cfg.Workspace, cfg.Shell, cfg.TrustProject)
 
+	// ToolHive LLM gateway (issue #262): an explicit --toolhive-llm-base-url
+	// must resolve to loopback BEFORE any registry entry is constructed
+	// (validateToolhiveBaseURL is v1's loopback-only security gate, R5.1/R5.2).
+	if err := validateToolhiveBaseURL(cfg); err != nil {
+		return nil, err
+	}
+
 	reg, provider, err := buildProvider(cfg)
 	if err != nil {
 		return nil, err
@@ -1111,6 +1162,18 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	// narration all see the final merged maps). No-op (byte-identical) when there is no
 	// operator allowlist, an untrusted workspace, or no project models block.
 	cfg = foldProjectModelBindings(cfg, cliModelKeys)
+	// issue #262 §1 deviation, review finding 1: the shared engine booted with
+	// an UNRESOLVED default model (sole intent-driven provider, probe down —
+	// none of the folds above filled cfg.Model either). Route every
+	// zero-selector session through the per-session factory so the possibly
+	// later-healed default model is resolved at session-build time. Gated on
+	// the SAME condition healDefaultModel itself guards on (an intent-driven
+	// default provider with no resolved model) so this can never fire for a
+	// keyed default or an operator-configured --model/--default-model.
+	cfg.defaultModelPending = cfg.Model == ""
+	if e, ok := reg.Lookup(reg.Default()); !ok || !e.intentDriven {
+		cfg.defaultModelPending = false
+	}
 	// Subagent model router taxonomy (ADR 0031, Phase 5; enable model per ADR 0042): fold
 	// the OPERATOR-TIER `models.router:` categories/default/classifier-slot onto cfg, plus
 	// the YAML `disabled:` kill-switch (OR'd into cfg.RouterDisabled). OPERATOR-TIER ONLY
@@ -1303,6 +1366,11 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 			// honest post-swap.
 			ContextWindow: int64(reg.echoWindowResolver(cfg, reg.Default(), cfg.Model)()),
 		},
+		// DefaultModelPending (issue #262 review finding 1): routes every
+		// zero-selector session through the per-session factory / rehydration
+		// path so a post-boot heal of the sole intent-driven default reaches
+		// it. See Config.defaultModelPending above for the exact gate.
+		DefaultModelPending: cfg.defaultModelPending,
 		// ListSkills snapshot: the skills resolved once at build time (the skills
 		// seam — FS or driver), projected into the proto form (metadata only).
 		// Skills are immutable for the process lifetime, so this is a startup
@@ -1411,6 +1479,18 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	// cancelled by Close so a shutdown mid-fetch does not leak the goroutine (the
 	// goleak suite catches a leak). startLiveModelRefresh is a no-op when no provider
 	// has a lister (e.g. mock/openai-only), so the goroutine + ctx are skipped.
+	// ToolHive LLM gateway (issue #262): the initial provider_status came from
+	// the Build-time probe (probeToolhive, run inside buildProviderRegistry);
+	// project it onto the service now. SetModelsRefresher wires the on-demand
+	// /models-open refresh (R1.4) — refreshStaleModels is scoped to
+	// intent-driven providers and self-cooldown-gated, so wiring it
+	// unconditionally costs nothing for a deployment with no toolhive entry.
+	svc.SetProviderStatus(providerStatusProto(reg))
+	modelsRefreshState := &refreshStaleModelsState{}
+	svc.SetModelsRefresher(func(refreshCtx context.Context) {
+		refreshStaleModels(refreshCtx, cfg.diag(), reg, svc, modelsRefreshState)
+	})
+
 	refreshClose := startLiveModelRefresh(cfg.diag(), reg, svc, cfg.liveModelRefreshSync, liveRefreshDelay(cfg))
 
 	// Scheduled tasks (issue #189, Phase 1f): build + wire + start the in-process
@@ -1569,6 +1649,36 @@ func resolveAgentSeam(ctx context.Context, cfg Config) (*agents.Registry, func()
 // (client specs + per-def inline managers) — the shared assets.globalMgr is NEVER
 // in that Close. Wired into server.Config.SessionEngine in Build, so neither the
 // registry nor mcp/agent wiring leaks into the server or acp layers.
+// adoptHealedDefault resolves the ZERO-selector, still-unresolved-at-Build
+// default model at SESSION-BUILD TIME (issue #262 review finding 1): the
+// shared engine booted with cfg.Model=="" (the sole intent-driven — ToolHive
+// gateway — provider probed down at Build), which is the reason a
+// zero-selector session is routed through the per-session factory at all
+// (Config.defaultModelPending). It resolves the registry's CURRENT default —
+// a no-op (fallbackProvider, "") when the proxy is still down, so the
+// session fails at request time exactly as before (the ADR-documented
+// residual for a session built before the heal lands). Extracted out of
+// sessionEngineFactory to keep its cyclomatic complexity under the lint cap;
+// it has no other caller.
+func adoptHealedDefault(reg *providerRegistry, providerID string, fallbackProvider port.LLMProvider) (port.LLMProvider, string) {
+	healed := reg.ResolvedDefaultModel()
+	if healed == "" {
+		return fallbackProvider, ""
+	}
+	resolvedProvider := fallbackProvider
+	if entry, ok := reg.Lookup(providerID); ok {
+		// The fresh Lookup is LOAD-BEARING given F4 (registry review finding
+		// 4): healDefaultModel's remintEntry re-mints the entry's shared
+		// .provider/.defaultCaps for the healed model, so entry.provider
+		// carries the honest healed-model caps — reusing the Build-captured
+		// provider param (minted for model "") would silently skip that
+		// re-mint's benefit and the caller's capsDiff re-mint check would
+		// never fire (since entry.defaultCaps now equals sessionCaps).
+		resolvedProvider = entry.provider
+	}
+	return resolvedProvider, healed
+}
+
 func sessionEngineFactory(
 	cfg Config,
 	reg *providerRegistry,
@@ -1606,6 +1716,9 @@ func sessionEngineFactory(
 		// on the right provider — the zero selector uses the registry default.
 		resolvedProvider, resolvedModel := provider, cfg.Model
 		resolvedProviderID := reg.Default()
+		if sel.ProviderID == "" && resolvedModel == "" {
+			resolvedProvider, resolvedModel = adoptHealedDefault(reg, resolvedProviderID, resolvedProvider)
+		}
 		if sel.ProviderID != "" {
 			entry, ok := reg.Lookup(sel.ProviderID)
 			if !ok {
@@ -3023,6 +3136,43 @@ func highestSeverityGuardrailMode(specs []modelhook.RuleSpec) string {
 		}
 	}
 	return bestMode
+}
+
+// validateToolhiveBaseURL enforces the v1-mandatory loopback-only invariant
+// (issue #262, R5.1/R5.2) for an EXPLICIT --toolhive-llm-base-url override: the
+// URL must be http/https and its Hostname() must be a LITERAL loopback IP
+// (127.0.0.0/8 or [::1]) or exactly "localhost" — checked via net.ParseIP,
+// NEVER a DNS lookup (a resolver-based check is a TOCTOU: the name could
+// resolve differently by request time). A no-op when the flag is unset (the
+// config-file auto-detect path is ALWAYS loopback by construction —
+// toolhivellm.Config.BaseURL hardcodes 127.0.0.1 — so it never needs this
+// gate). Called in Build before buildProviderRegistry so a bad override fails
+// fast, before any registry entry is constructed.
+func validateToolhiveBaseURL(cfg Config) error {
+	if cfg.ToolhiveLLMBaseURL == "" {
+		return nil
+	}
+	u, err := url.Parse(cfg.ToolhiveLLMBaseURL)
+	if err != nil {
+		return fmt.Errorf("--toolhive-llm-base-url %q: %w", cfg.ToolhiveLLMBaseURL, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("--toolhive-llm-base-url %q: scheme must be http or https", cfg.ToolhiveLLMBaseURL)
+	}
+	host := u.Hostname()
+	loopback := host == "localhost"
+	if !loopback {
+		if ip := net.ParseIP(host); ip != nil {
+			loopback = ip.IsLoopback()
+		}
+	}
+	if !loopback {
+		return fmt.Errorf(
+			"--toolhive-llm-base-url %q: must resolve to loopback (127.0.0.0/8, [::1], or \"localhost\") in v1 — "+
+				"off-host ToolHive LLM gateway access is not yet supported (a future --toolhive-llm-allow-remote "+
+				"flag is the sanctioned path)", cfg.ToolhiveLLMBaseURL)
+	}
+	return nil
 }
 
 // (Config.DefaultProvider/DefaultModel — --default-provider/--default-model,

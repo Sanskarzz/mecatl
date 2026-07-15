@@ -293,6 +293,26 @@ type Config struct {
 	// no provider; a client maps it to a no-model-segment header.
 	DefaultResolvedModel ResolvedModel
 
+	// DefaultModelPending is true when the DEFAULT/shared engine booted with an
+	// UNRESOLVED default model (issue #262 review finding 1: the sole
+	// intent-driven — ToolHive gateway — provider probed down at Build, so
+	// cfg.Model stayed ""). It routes EVERY zero-selector session through the
+	// per-session engine factory (sessionNeedsPerFactory) and, for a session
+	// persisted before a restart into a still-down proxy, through rehydration
+	// (needsRehydration) too — so the model is resolved AT SESSION-BUILD TIME
+	// (resolve-at-use, mirroring the Deps.ContextWindow precedent, but at
+	// session granularity) instead of being frozen at the shared engine's
+	// Build-time construction. Without this, a post-boot heal
+	// (registry.healDefaultModel) updates the registry's resolved default but
+	// never reaches a zero-selector session, which keeps sending an empty
+	// model id to the provider (the R1.4 "no-restart" promise silently broken
+	// for the flagship sole-provider case). Static for the process lifetime
+	// (set once in composition from the SAME condition healDefaultModel guards
+	// on: an intent-driven default provider with no resolved model at Build);
+	// false everywhere else (a keyed default, or an operator-configured
+	// --model/--default-model) — byte-identical to today.
+	DefaultModelPending bool
+
 	// Skills is the resolved skills-inventory snapshot taken at startup. It backs
 	// ListSkills and is a pure read of this snapshot (no live discovery — skills
 	// are discovered once at build time and immutable for the process lifetime).
@@ -563,6 +583,26 @@ type Service struct {
 	// projected []*mecatlv1.ModelInfo crosses this seam.
 	models atomic.Pointer[[]*mecatlv1.ModelInfo]
 
+	// providerStatus carries the LIVE-LISTING outcome per intent-driven provider
+	// (issue #262: the ToolHive LLM gateway) — ok/unreachable/unauthorized/empty
+	// plus a short remediation hint. SEEDED empty at construction, atomically
+	// SWAPPED by SetProviderStatus (the composition-layer twin of SetModels: the
+	// Build-time probe sets the initial value, and every subsequent live-model
+	// refresh — background or on-demand — re-projects it). Never nil after
+	// NewService.
+	providerStatus atomic.Pointer[[]*mecatlv1.ProviderStatus]
+
+	// modelsRefresher is the OPTIONAL composition-supplied closure ListModels
+	// calls before returning its snapshot (issue #262, R1.4: a proxy started
+	// after boot must appear on the NEXT /models open, no restart). nil (the
+	// default — no intent-driven provider registered) makes ListModels a pure
+	// snapshot read, byte-identical to before this feature. The refresher owns
+	// its own self-guarding (which providers are stale, cooldown); this seam
+	// only decides WHETHER to call it. Set at most once, in Build, before the
+	// service starts serving — the atomic.Pointer is defensive-safe, not
+	// load-bearing for a race that cannot occur in practice.
+	modelsRefresher atomic.Pointer[func(context.Context)]
+
 	mu    sync.Mutex
 	runs  map[session.SessionID]*runState
 	teams map[string]*teamState
@@ -828,6 +868,11 @@ func NewService(cfg Config) (*Service, error) {
 	// never nil.
 	seed := cfg.Models
 	svc.models.Store(&seed)
+	// providerStatus starts empty — no intent-driven provider has been probed
+	// yet at construction time; Build's post-construction SetProviderStatus
+	// call (from the Build-time probe) supplies the initial value.
+	var statusSeed []*mecatlv1.ProviderStatus
+	svc.providerStatus.Store(&statusSeed)
 	return svc, nil
 }
 
@@ -854,6 +899,39 @@ func (s *Service) currentModels() []*mecatlv1.ModelInfo {
 		return *p
 	}
 	return nil
+}
+
+// SetProviderStatus atomically swaps the per-provider live-listing status
+// (issue #262). It is the composition layer's seam: the Build-time probe
+// supplies the initial value, and the background + on-demand live-model
+// refreshes re-project it on every re-fetch. Mirrors SetModels exactly (a nil
+// argument stores an empty, non-nil slice so the pointer is never nil).
+func (s *Service) SetProviderStatus(status []*mecatlv1.ProviderStatus) {
+	if status == nil {
+		status = []*mecatlv1.ProviderStatus{}
+	}
+	s.providerStatus.Store(&status)
+}
+
+// ProviderStatuses returns the current per-provider live-listing status
+// snapshot (never nil after NewService). ListModels' gRPC/HTTP callers thread
+// it onto ListModelsResponse.provider_status alongside the model list.
+func (s *Service) ProviderStatuses() []*mecatlv1.ProviderStatus {
+	if p := s.providerStatus.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// SetModelsRefresher installs the OPTIONAL on-demand model-list refresher
+// (issue #262, R1.4: "proxy started after boot ⇒ models appear on next
+// /models open, no restart"). ListModels calls it (bounded — the refresher
+// owns its own timeout/cooldown/which-providers-are-stale logic) before
+// returning its snapshot. nil (the default — set once in Build, only when at
+// least one intent-driven provider exists) makes ListModels a pure snapshot
+// read, byte-identical to every deployment without this feature.
+func (s *Service) SetModelsRefresher(fn func(context.Context)) {
+	s.modelsRefresher.Store(&fn)
 }
 
 // ErrNoActiveRun is returned by Approve/Cancel when the session exists (possibly
@@ -1855,9 +1933,14 @@ func (s *Service) engineAndWorkspaceFor(ctx context.Context, sess *session.Sessi
 // worktree arm (issue #102): a session whose workspace DIFFERS from the server's
 // launch root routes through the factory so children pin their resolver to the
 // session root. When DefaultWorkspace == "" (a child/member/cloud service) the
-// arm never fires (a non-empty workspace can't differ from "").
+// arm never fires (a non-empty workspace can't differ from ""). The
+// DefaultModelPending arm (issue #262 review finding 1) routes EVERY
+// zero-selector session through the factory when the shared engine booted
+// with an unresolved intent-driven default model, so the per-session build
+// resolves it at session-build time instead of freezing "".
 func (s *Service) sessionNeedsPerFactory(sel ProviderSelector, specs []mcp.ServerConfig, profile SessionProfile, workspace string) bool {
 	return sel != (ProviderSelector{}) || len(specs) > 0 || profile == ProfileNoFS ||
+		s.cfg.DefaultModelPending ||
 		(workspace != "" && s.cfg.DefaultWorkspace != "" && workspace != s.cfg.DefaultWorkspace)
 }
 
@@ -1881,11 +1964,20 @@ func (s *Service) sessionNeedsPerFactory(sel ProviderSelector, specs []mcp.Serve
 // cloud deployment) this arm never fires (a non-empty workspace can't differ
 // from ""), so the cloud/no-root posture is byte-identical. A default FS session
 // (Workspace == DefaultWorkspace) does NOT rehydrate, exactly as before.
+//
+// The DefaultModelPending arm (issue #262 review finding 1) rehydrates a
+// PERSISTED zero-selector session too: setSessionLabels persists the
+// SELECTOR (ProviderID/ModelID/ReasoningEffort), which stays empty for a
+// zero-selector session, so none of the arms above would otherwise fire for
+// it — a session created before a restart into a still-down proxy would
+// keep riding whatever engine gets (re)built for it without ever picking up
+// a heal that lands after the restart.
 func (s *Service) needsRehydration(sess *session.Session) bool {
 	return sess.Profile == string(ProfileNoFS) ||
 		sess.ProviderID != "" || sess.ModelID != "" ||
 		sess.ReasoningEffort != "" ||
 		sess.Workspace == "" ||
+		s.cfg.DefaultModelPending ||
 		(sess.Workspace != "" && s.cfg.DefaultWorkspace != "" && sess.Workspace != s.cfg.DefaultWorkspace)
 }
 
@@ -2754,9 +2846,16 @@ func (s *Service) ListSkills(_ context.Context) []*mecatlv1.SkillInfo {
 }
 
 // ListModels returns the resolved selectable-model inventory snapshot (possibly
-// empty) — every available provider's catalog models, secret-free. It is a pure
-// read of the injected snapshot; no live discovery (multi-provider Phase 0, S3).
-func (s *Service) ListModels(_ context.Context) []*mecatlv1.ModelInfo {
+// empty) — every available provider's catalog models, secret-free. When an
+// on-demand refresher is installed (issue #262, R1.4) it is invoked FIRST
+// (self-guarded: it decides which providers are stale and enforces its own
+// cooldown) so a provider that just came back up is reflected on THIS call,
+// with no restart; with no refresher installed (the byte-identical default)
+// this is a pure read of the injected snapshot, exactly as before.
+func (s *Service) ListModels(ctx context.Context) []*mecatlv1.ModelInfo {
+	if p := s.modelsRefresher.Load(); p != nil && *p != nil {
+		(*p)(ctx)
+	}
 	return s.currentModels()
 }
 
