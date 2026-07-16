@@ -192,3 +192,72 @@ models:
 		t.Fatalf("error should name the models subtree; got %v", err)
 	}
 }
+
+// TestModelsDefaultProviderParsed pins that models.default_provider (Wave 2b) parses
+// faithfully from the operator tier and rides the SAME ModelsSection as models.default,
+// exposed via OperatorModelPolicy().DefaultProvider. An unknown key inside models:
+// (e.g. default_providr) is a strict-parse error, so a typo cannot silently disable
+// the operator's default-provider override.
+func TestModelsDefaultProviderParsed(t *testing.T) {
+	const yamlCfg = `
+models:
+  default_provider: toolhive
+`
+	env := envWithExplicit("/etc/mecatl/dp.yaml", yamlCfg)
+	r := newWithEnv(Options{ExplicitFiles: []string{"/etc/mecatl/dp.yaml"}}, env)
+	if r == nil {
+		t.Fatal("resolver should be non-nil with an explicit file")
+	}
+	m := r.OperatorModelPolicy()
+	if m == nil {
+		t.Fatal("operator-tier models must be honoured from the CLI/explicit tier")
+	}
+	if m.DefaultProvider != "toolhive" {
+		t.Fatalf("models.default_provider not parsed faithfully: got %q, want %q", m.DefaultProvider, "toolhive")
+	}
+
+	// A typo'd key inside models: is a strict-parse error (the strictFields guard).
+	const bad = `
+models:
+  default_providr: toolhive
+`
+	if _, err := parseYAML([]byte(bad)); err == nil {
+		t.Fatal("an unknown key (default_providr) inside models: must be a strict parse error")
+	}
+}
+
+// TestProjectDefaultProviderStrippedWithWarn pins that a project-tier
+// models.default_provider: is OPERATOR-TIER ONLY — stripped with a WARN, never honoured
+// (the same operator-only captureModels discipline as the allowlist/router). The operator
+// allowlist is present (so the project block is otherwise opt-in eligible and trusted),
+// proving the default_provider strip is its OWN gate, not a side effect of the opt-in.
+// The captured project bindings must NOT carry DefaultProvider (it is dropped by omission).
+func TestProjectDefaultProviderStrippedWithWarn(t *testing.T) {
+	var buf bytes.Buffer
+	diag := slogdiag.New(&buf, false, port.LevelDebug)
+
+	const operatorAllowlist = `
+models:
+  allowlist:
+    - gpt-4o-mini
+`
+	const projectDefaultProvider = `
+models:
+  default_provider: toolhive
+  default: gpt-4o-mini
+`
+	ws := &countingWS{Workspace: memfs.NewWorkspace("/repo")}
+	ws.seed(t, projectFileMecatl, projectDefaultProvider)
+
+	env := envWithExplicit("/etc/mecatl/op.yaml", operatorAllowlist)
+	r := newWithEnv(Options{Conventional: true, TrustProject: true, ExplicitFiles: []string{"/etc/mecatl/op.yaml"}, Diagnostics: diag}, env)
+	_ = r.Resolve(context.Background(), ws)
+
+	proj := r.ProjectModelBindings(ws)
+	if proj != nil && proj.DefaultProvider != "" {
+		t.Fatalf("a project-tier models.default_provider must NEVER be honoured (operator-tier only); got %q", proj.DefaultProvider)
+	}
+	if log := buf.String(); !strings.Contains(log, "IGNORING project-tier models.default_provider") {
+		t.Fatalf("expected a default_provider-strip WARN; got:\n%s", log)
+	}
+}

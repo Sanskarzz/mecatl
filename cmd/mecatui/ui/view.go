@@ -292,6 +292,15 @@ func (m Model) headerIdentityParts(sid, withNext string) []string {
 	// unchanged (it sheds like any other low-priority segment under pressure).
 	if m.effectiveModel.ProviderID == "toolhive" {
 		parts = append(parts, m.deps.Theme.Style("muted").Render("via ToolHive gateway"))
+	} else if row, ok := availableNotDefaultStatus(m.models.statuses); ok {
+		// Sibling (N1): when an intent-driven provider is detected-and-reachable
+		// but NOT the active default, show a muted "<provider-id> gateway
+		// available" segment. Mutually exclusive with the active-case branch
+		// above by construction: availableNotDefaultStatus is false when the
+		// gateway IS the default, so the two never both render. Vendor-neutral —
+		// the provider id comes from the status row, not a hardcoded "toolhive".
+		parts = append(parts, m.deps.Theme.Style("muted").
+			Render(sanitizeTerminal(row.ProviderID)+" gateway available"))
 	}
 	if withNext != "" {
 		parts = append(parts, withNext)
@@ -509,11 +518,15 @@ func (m Model) renderFooter() string {
 		// shows a live "N chars · M lines" count (→ "copied · …" after a copy). This
 		// arm is the ONLY phase the count can appear in — the running/approval/
 		// connecting arms above own the footer-left in those phases — so the count is
-		// never shown mid-run by construction (Req 5). With no selection the existing
-		// statusMsg / "ready" is shown unchanged.
+		// never shown mid-run by construction (Req 5). With no selection the gateway
+		// notice (Proposal 1, once-per-process) takes precedence over the bare
+		// statusMsg / "ready" — but ONLY here, at idle/default phase (the arms above
+		// own the slot in their phases).
 		switch {
 		case m.sel.active && !m.sel.empty():
 			left = m.selectionStatus()
+		case m.gatewayNotice != "":
+			left = m.deps.Theme.Style("muted").Render(m.gatewayNotice)
 		default:
 			left = m.statusMsg
 			if left == "" {

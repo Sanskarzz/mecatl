@@ -549,6 +549,21 @@ func (s *liveOutcomeStore) getLastGood(pid string) ([]modelEntry, bool) {
 	return v, ok
 }
 
+// getModelCount returns the count of models in pid's last-known-good live
+// snapshot. 0 for an unreachable/unrecorded provider (a hand-built test store
+// with a nil outcomes behaves as permanently-empty via the nil guard). It is
+// the source of the ProviderStatus.model_count wire field — derived from the
+// SAME lastGood map recordSuccess writes, so the count and the last-known-good
+// fallback never drift.
+func (s *liveOutcomeStore) getModelCount(pid string) int {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.lastGood[pid])
+}
+
 // getStatus returns the current recorded status for pid, if any (a provider
 // never probed/listed has no recorded status).
 func (s *liveOutcomeStore) getStatus(pid string) (providerStatus, bool) {
@@ -588,11 +603,21 @@ func providerStatusProto(reg *providerRegistry) []*mecatlv1.ProviderStatus {
 		// non-default intent-driven provider, and never an operator-configured
 		// default.
 		autoSelected := pid == reg.Default() && reg.DefaultModelAutoSelected()
+		// available_not_default (this wave) is true ONLY when this intent-driven
+		// provider is reachable (state == "ok") AND is NOT the active default.
+		// reg.Default() is lock-free and immutable post-Build (see Default()).
+		availableNotDefault := entry.intentDriven && status.State == statusOK && pid != reg.Default()
+		// model_count is the live listing length (a slice len); a provider
+		// never lists >2B models, so this reuses server.ClampInt32 (the same
+		// overflow-safe int32 narrowing already used 15+ times in that
+		// package) rather than hand-rolling the clamp again here.
 		out = append(out, &mecatlv1.ProviderStatus{
 			ProviderId:               pid,
 			State:                    status.State,
 			Hint:                     status.Hint,
 			DefaultModelAutoSelected: autoSelected,
+			ModelCount:               server.ClampInt32(reg.outcomes.getModelCount(pid)),
+			AvailableNotDefault:      availableNotDefault,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].GetProviderId() < out[j].GetProviderId() })
