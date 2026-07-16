@@ -46,6 +46,7 @@ const (
 	HarnessService_GetSession_FullMethodName          = "/mecatl.v1.HarnessService/GetSession"
 	HarnessService_SetMode_FullMethodName             = "/mecatl.v1.HarnessService/SetMode"
 	HarnessService_CloseSession_FullMethodName        = "/mecatl.v1.HarnessService/CloseSession"
+	HarnessService_ForkSession_FullMethodName         = "/mecatl.v1.HarnessService/ForkSession"
 	HarnessService_Converse_FullMethodName            = "/mecatl.v1.HarnessService/Converse"
 	HarnessService_ListMcpResources_FullMethodName    = "/mecatl.v1.HarnessService/ListMcpResources"
 	HarnessService_ReadMcpResource_FullMethodName     = "/mecatl.v1.HarnessService/ReadMcpResource"
@@ -91,6 +92,12 @@ type HarnessServiceClient interface {
 	// unknown or already-closed session via the wire returns NotFound only for a
 	// never-created id; an already-released session succeeds.
 	CloseSession(ctx context.Context, in *CloseSessionRequest, opts ...grpc.CallOption) (*CloseSessionResponse, error)
+	// ForkSession creates a new peer session whose conversation history is a
+	// snapshot of an existing session's, inheriting the source's mode, workspace,
+	// limits, and provider/model/profile labels. Same provider and model only.
+	// The source must be at a turn boundary (idle/terminal); a running/awaiting
+	// source is rejected. No streaming.
+	ForkSession(ctx context.Context, in *ForkSessionRequest, opts ...grpc.CallOption) (*ForkSessionResponse, error)
 	// Converse drives one run. The first frame MUST be `prompt`; subsequent
 	// frames are zero or more `resume_approval` / `cancel` control frames. The
 	// server streams `Event` envelopes until the terminal `result` event, then
@@ -272,6 +279,16 @@ func (c *harnessServiceClient) CloseSession(ctx context.Context, in *CloseSessio
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CloseSessionResponse)
 	err := c.cc.Invoke(ctx, HarnessService_CloseSession_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *harnessServiceClient) ForkSession(ctx context.Context, in *ForkSessionRequest, opts ...grpc.CallOption) (*ForkSessionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ForkSessionResponse)
+	err := c.cc.Invoke(ctx, HarnessService_ForkSession_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -549,6 +566,12 @@ type HarnessServiceServer interface {
 	// unknown or already-closed session via the wire returns NotFound only for a
 	// never-created id; an already-released session succeeds.
 	CloseSession(context.Context, *CloseSessionRequest) (*CloseSessionResponse, error)
+	// ForkSession creates a new peer session whose conversation history is a
+	// snapshot of an existing session's, inheriting the source's mode, workspace,
+	// limits, and provider/model/profile labels. Same provider and model only.
+	// The source must be at a turn boundary (idle/terminal); a running/awaiting
+	// source is rejected. No streaming.
+	ForkSession(context.Context, *ForkSessionRequest) (*ForkSessionResponse, error)
 	// Converse drives one run. The first frame MUST be `prompt`; subsequent
 	// frames are zero or more `resume_approval` / `cancel` control frames. The
 	// server streams `Event` envelopes until the terminal `result` event, then
@@ -708,6 +731,9 @@ func (UnimplementedHarnessServiceServer) SetMode(context.Context, *SetModeReques
 func (UnimplementedHarnessServiceServer) CloseSession(context.Context, *CloseSessionRequest) (*CloseSessionResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CloseSession not implemented")
 }
+func (UnimplementedHarnessServiceServer) ForkSession(context.Context, *ForkSessionRequest) (*ForkSessionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ForkSession not implemented")
+}
 func (UnimplementedHarnessServiceServer) Converse(grpc.BidiStreamingServer[ConverseRequest, ConverseResponse]) error {
 	return status.Errorf(codes.Unimplemented, "method Converse not implemented")
 }
@@ -866,6 +892,24 @@ func _HarnessService_CloseSession_Handler(srv interface{}, ctx context.Context, 
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(HarnessServiceServer).CloseSession(ctx, req.(*CloseSessionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HarnessService_ForkSession_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ForkSessionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HarnessServiceServer).ForkSession(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HarnessService_ForkSession_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HarnessServiceServer).ForkSession(ctx, req.(*ForkSessionRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1281,6 +1325,10 @@ var HarnessService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CloseSession",
 			Handler:    _HarnessService_CloseSession_Handler,
+		},
+		{
+			MethodName: "ForkSession",
+			Handler:    _HarnessService_ForkSession_Handler,
 		},
 		{
 			MethodName: "ListMcpResources",

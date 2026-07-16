@@ -268,6 +268,24 @@ server's `audience:["user"]` is not a suppression control). Server-returned
 fetched by the `FetchMcpResource` tool through `ValidateMediaURL` (SSRF
 backstop, CWE-918). See `docs/adr/0059-mcp-typed-tool-results.md`.
 
+**Conversation fork.** `Service.ForkSession` (`internal/adapter/server/service.go`)
+creates a new peer session whose conversation history is a snapshot of an existing
+session's, inheriting the source's mode, workspace, limits, and
+provider/model/profile labels (ADR 0065). It reuses the domain primitives the
+subagent `fork:true` path already exercises — `session.ForkSnapshot`
+(`engine/session/conversation.go`) clones the conversation with a fresh backing
+array and strips trailing unanswered tool calls (tool-pairing-valid), and
+`session.SeedHistory` (`engine/session/session.go`) loads it into a fresh
+`session.New` aggregate that starts idle with zeroed `Counters`/`Usage`. The
+source is loaded via the run-entry funnel (`loadAndReopen`), so a terminal source
+is recovered to idle first; a running/awaiting source is rejected with
+`ErrFailedPrecondition` (fork requires a turn boundary). The forked engine is
+rehydrated ONLY when the source needed a per-session engine (non-default selector
+/ no-fs profile / worktree workspace), mirroring `createSession`'s branching; a
+default-FS fork rides the shared engine. Same provider and model only — the
+snapshot carries provider-private replay blobs a different provider cannot
+consume. Wire surface: the `ForkSession` gRPC RPC and `POST /v1/sessions/{id}/fork`.
+
 ## See also
 
 - [Usage & operator guide](usage.md) — building, running `mecated`, every flag, and the gRPC + HTTP/SSE APIs that drive this design.

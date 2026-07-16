@@ -27,6 +27,7 @@ import (
 //	POST   /v1/sessions/{id}/approve  -> resolve the paused ask on the run
 //	POST   /v1/sessions/{id}/cancel   -> cancel the in-flight run
 //	POST   /v1/sessions/{id}/cancel-child -> cancel ONE child (subagent) of the run
+//	POST   /v1/sessions/{id}/fork     -> ForkSession (peer session from a history snapshot; 201)
 //
 // Every Event is emitted as one SSE `data:` line carrying the proto Event
 // marshalled to JSON, so the HTTP and gRPC surfaces share one event shape.
@@ -47,6 +48,7 @@ func NewHTTPHandler(svc *Service) *HTTPHandler {
 	h.mux.HandleFunc("POST /v1/sessions/{id}/approve", h.approve)
 	h.mux.HandleFunc("POST /v1/sessions/{id}/cancel", h.cancel)
 	h.mux.HandleFunc("POST /v1/sessions/{id}/cancel-child", h.cancelChild)
+	h.mux.HandleFunc("POST /v1/sessions/{id}/fork", h.forkSession)
 	h.mux.HandleFunc("GET /v1/mcp/resources", h.listMcpResources)
 	h.mux.HandleFunc("GET /v1/mcp/resources/read", h.readMcpResource)
 	h.mux.HandleFunc("GET /v1/mcp/prompts", h.listMcpPrompts)
@@ -346,6 +348,36 @@ func (h *HTTPHandler) setMode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.writeSession(w, http.StatusOK, sess)
+}
+
+// forkSession handles POST /v1/sessions/{id}/fork, creating a peer session whose
+// conversation history is a snapshot of {id}'s (ADR 0065). The new session
+// inherits the source's mode, workspace, limits, and provider/model/profile
+// labels; same provider and model only. The source must be at a turn boundary
+// (idle/terminal); a running/awaiting source is rejected with 412. An OPTIONAL
+// JSON body `{"title": "..."}` overrides the forked session's title (empty/absent
+// inherits the source's). Returns 201 + the new session id.
+func (h *HTTPHandler) forkSession(w http.ResponseWriter, r *http.Request) {
+	id := session.SessionID(r.PathValue("id"))
+	var body struct {
+		Title string `json:"title"`
+	}
+	// An empty body is valid (title inherits the source's); only a malformed
+	// non-empty body is an error.
+	if r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+	}
+	newID, err := h.svc.ForkSession(r.Context(), id, body.Title)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, struct {
+		SessionID string `json:"session_id"`
+	}{SessionID: string(newID)})
 }
 
 func (h *HTTPHandler) writeSession(w http.ResponseWriter, status int, sess *session.Session) {

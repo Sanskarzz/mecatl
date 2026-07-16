@@ -116,6 +116,22 @@ func (h *HarnessServer) CloseSession(ctx context.Context, req *mecatlv1.CloseSes
 	return &mecatlv1.CloseSessionResponse{}, nil
 }
 
+// ForkSession creates a peer session from an existing session's history snapshot
+// (ADR 0065). The new session inherits the source's mode, workspace, limits, and
+// provider/model/profile labels; same provider and model only. The source must be
+// at a turn boundary (idle/terminal); a running/awaiting source is rejected with
+// FailedPrecondition. No streaming — the fork is synchronous.
+func (h *HarnessServer) ForkSession(ctx context.Context, req *mecatlv1.ForkSessionRequest) (*mecatlv1.ForkSessionResponse, error) {
+	if req.GetSourceSessionId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "source_session_id is required")
+	}
+	id, err := h.svc.ForkSession(ctx, session.SessionID(req.GetSourceSessionId()), req.GetTitle())
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	return &mecatlv1.ForkSessionResponse{SessionId: string(id)}, nil
+}
+
 // Converse drives one run over a bidi stream. The first frame MUST be a Prompt;
 // the server then relays the run's Events while concurrently reading
 // ResumeApproval / Cancel control frames, until the events channel closes (the

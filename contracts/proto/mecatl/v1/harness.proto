@@ -47,6 +47,13 @@ service HarnessService {
   // never-created id; an already-released session succeeds.
   rpc CloseSession(CloseSessionRequest) returns (CloseSessionResponse);
 
+  // ForkSession creates a new peer session whose conversation history is a
+  // snapshot of an existing session's, inheriting the source's mode, workspace,
+  // limits, and provider/model/profile labels. Same provider and model only.
+  // The source must be at a turn boundary (idle/terminal); a running/awaiting
+  // source is rejected. No streaming.
+  rpc ForkSession(ForkSessionRequest) returns (ForkSessionResponse);
+
   // Converse drives one run. The first frame MUST be `prompt`; subsequent
   // frames are zero or more `resume_approval` / `cancel` control frames. The
   // server streams `Event` envelopes until the terminal `result` event, then
@@ -539,6 +546,24 @@ message CloseSessionRequest {
 
 // CloseSessionResponse is the empty acknowledgement.
 message CloseSessionResponse {}
+
+// ForkSessionRequest names the source session to fork from.
+message ForkSessionRequest {
+  // source_session_id is the session whose conversation history is snapshotted
+  // into the new peer session.
+  string source_session_id = 1 [(buf.validate.field).string.min_len = 1];
+  // title is an OPTIONAL override for the forked session's title. Empty (the
+  // default) inherits the source's title verbatim; a non-empty value overrides
+  // it so the operator can distinguish "implement feature X" from "fix the bug
+  // first" in ListSessions without a separate rename RPC.
+  string title = 2;
+}
+
+// ForkSessionResponse carries the new forked session's id.
+message ForkSessionResponse {
+  // session_id is the id of the newly-created forked session.
+  string session_id = 1;
+}
 
 // Session is a snapshot of server-side session state.
 message Session {

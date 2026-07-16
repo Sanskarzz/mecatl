@@ -1585,6 +1585,66 @@ func (s *Service) LoadSession(ctx context.Context, id session.SessionID) (*sessi
 	return s.loadAndReopen(ctx, id)
 }
 
+// ForkSession creates a new peer session whose conversation history is a snapshot
+// of an existing session's, inheriting the source's mode, workspace, limits, and
+// provider/model/profile labels (ADR 0065). Same provider and model only.
+//
+// The source is loaded via the run-entry funnel (loadAndReopen), so a terminal
+// source is recovered to idle first (completed→Reopen / cancelled→Interrupt /
+// failed→Recover) and approval replay runs. A running/awaiting source is rejected
+// with ErrFailedPrecondition (fork requires a turn boundary) — loadAndReopen's
+// switch only handles terminal states, so the running/awaiting check runs AFTER
+// it returns. The snapshot is session.ForkSnapshot (fresh backing array, trailing
+// orphans stripped, tool-pairing-valid), seeded via session.SeedHistory into a
+// fresh session.New aggregate. The new session starts idle with zeroed
+// Counters/Usage but inherits the source's history verbatim (not re-fenced —
+// peer-trust parity, same as the subagent fork).
+//
+// title overrides the forked session's title when non-empty; empty inherits the
+// source's title verbatim.
+//
+// The engine is rehydrated ONLY when the source needed a per-session engine
+// (non-default selector / no-fs profile / worktree workspace), mirroring
+// createSession's branching on sessionNeedsPerFactory; a default-FS fork rides the
+// shared engine (zero overhead, no registry entry). The MaxSessionEngines cap is
+// enforced by the rehydrate path. No runEntryMu is taken (the new session has no
+// run; the source is loaded, not driven). Returns the new id.
+func (s *Service) ForkSession(ctx context.Context, srcID session.SessionID, title string) (session.SessionID, error) {
+	src, err := s.loadAndReopen(ctx, srcID)
+	if err != nil {
+		return "", err
+	}
+	if src.State == session.StateRunning || src.State == session.StateAwaiting {
+		return "", fmt.Errorf("%w: fork requires a session at a turn boundary; source %q is %s", ErrFailedPrecondition, srcID, src.State)
+	}
+	snap := session.ForkSnapshot(src.Conversation)
+	forked := session.New(s.cfg.NewID(), src.Mode, src.Workspace, src.Limits, s.cfg.Now())
+	if err := forked.SeedHistory(snap); err != nil {
+		return "", fmt.Errorf("server: seed fork history: %w", err)
+	}
+	sel := ProviderSelector{ProviderID: src.ProviderID, ModelID: src.ModelID, ReasoningEffort: src.ReasoningEffort}
+	profile := profileForSession(src)
+	setSessionLabels(forked, sel, profile)
+	if title != "" {
+		forked.Title = title
+	} else {
+		forked.Title = src.Title
+	}
+	// Save first, then rehydrate: a rehydrate failure (e.g. ErrTooManySessionEngines)
+	// leaves a valid persisted session that self-heals at the next StartRunContent
+	// (needsRehydration re-runs rehydrateSession). Do NOT Store.Delete on failure —
+	// it would race a concurrent rehydrating StartRunContent on the same id.
+	if err := s.cfg.Store.Save(ctx, forked); err != nil {
+		return "", fmt.Errorf("server: persist forked session: %w", err)
+	}
+	if s.sessionNeedsPerFactory(sel, nil, profile, forked.Workspace) {
+		if _, err := s.rehydrateSession(ctx, forked); err != nil {
+			return "", err
+		}
+	}
+	return forked.ID, nil
+}
+
 // maybeReplayApprovals repopulates the learned-rule store from the durable
 // EventLog's allow-always verdicts for a loaded session (cloud-native Phase 3b),
 // at most once per id per process. It is a no-op when no replay closure is wired
