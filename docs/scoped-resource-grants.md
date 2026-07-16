@@ -3,9 +3,10 @@
 *Status: strawman / working draft. Speculative scoping, not a design record under
 [ADR 0002](adr/0002-documentation-lifecycle.md) (no frozen decision here). Same
 tier as [`docs/cloud-native-harness-kit.md`](cloud-native-harness-kit.md). It
-picks up the shared-handle problem (§1) from the companion "Cloud-Native Harness
-Systems" scoping doc, which is in flight on a separate branch. If this direction
-is ever committed, it becomes one or more ADRs and this doc gets superseded.*
+picks up the shared-handle problem (§1) from the companion
+["Cloud-Native Harness Systems"](cloud-native-harness-systems.md) scoping doc.
+If this direction is ever committed, it becomes one or more ADRs and this doc
+gets superseded.*
 
 This doc describes a possible future for how mecatl's tools talk to filesystems
 and to each other. It is written to be concrete enough to argue with. Nothing
@@ -739,8 +740,8 @@ reversals. The spike is throwaway proof, not phase one.
 
 ## Relationship to other docs
 
-- The **Cloud-Native Harness Systems** scoping doc (in flight on a separate
-  branch): names the shared-handle problem this doc takes up (§1), the
+- [**Cloud-Native Harness Systems**](cloud-native-harness-systems.md) — the
+  scoping doc that names the shared-handle problem this doc takes up (§1), the
   execution-environment split this doc defers (§3), and the
   `IsolationApprovable` gap this doc absorbs (§4).
 - [`docs/cloud-native-harness-kit.md`](cloud-native-harness-kit.md): the kit
