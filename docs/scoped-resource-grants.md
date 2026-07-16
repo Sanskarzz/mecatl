@@ -46,6 +46,12 @@ shell pipeline to be cloud-native: instead of "everything shares one mutable
 directory tree and an environment," every step gets exactly the views it needs,
 for exactly as long as it needs them.
 
+At the same time, this fundamentally opens mecatl up to work over the network,
+so the harness, potentially, becomes a distributed system that works well with
+a cloud/k8s environment. Sandboxing technologies can still be used as a
+security boundary where necessary, without needing long-lived processes or
+co-locating too much into the same sandbox.
+
 In the immediate term this is aimed at remote tools, where today there is no
 good story at all. A remote MCP server that needs a PDF today gets it base64'd
 through a tool result: the bytes cross the harness *and* the model's context.
@@ -81,6 +87,12 @@ An agent needs to download several PDFs and extract their text.
    harness declines further renewal on the fetch grants it already retired.
    The agent reads the results through its own workspace view.
 
+(A further scenario, at some point, might layer on multi-tool scripting. Right
+now there is a split in the universe where it is easy for agents to script CLI
+tools but very difficult to script MCP/remote tools. There are hard tradeoffs
+and some features are mutually exclusive. We would look to build the best of
+both worlds.)
+
 A sketch of the grant the decoder receives (shapes illustrative, not a wire
 format):
 
@@ -105,11 +117,14 @@ grant:
   token: "<signed, audience-bound>"
 ```
 
-Three properties to notice. The scope block is meaningful only to the
-filesystem service; the generic layer treats it as opaque claims. The audience
-binding means possession of the token is not enough: the caller must prove it
-holds the named SPIFFE identity. And the lease is the whole revocation story
-for the common case, described next.
+Three properties to notice. The `scope` block is meaningful only to the
+filesystem service; the generic layer treats it as opaque claims. The
+`audience` binding means possession of the token is not enough: the caller
+must prove it holds the named SPIFFE identity — a bit different from how
+`audience` is used in JWT grants, and perhaps not the right term for it
+long-term; whether proof-of-possession should be mandatory or optional here
+is still open. And the lease is the whole revocation story for the common
+case, described next.
 
 ## Design principles
 
@@ -117,9 +132,9 @@ for the common case, described next.
   callee share a host. No fd-passing fast path, no handle table, no
   handle-to-address broker. We give up "the reference is unforgeable by
   construction" and take on token engineering instead, deliberately.
-- **The data path never transits the harness.** The harness is a control
-  plane: it composes views, mints and renews grants, and audits. Bytes flow
-  between the granted service and the grantee.
+- **The data path does not need to transit the harness.** The harness is a
+  control plane: it composes views, mints and renews grants, and audits.
+  Bytes flow between the granted service and the grantee.
 - **Capability times identity.** A grant is capability-shaped (it names what
   you may do) and identity-bound (only the named workload can exercise it).
   This is a deliberate hybrid, not object-capabilities in the strict sense.
@@ -187,6 +202,17 @@ the renewal loop covers what TTLs alone don't.
 
 One real operational parameter: sub-minute usage TTLs make verifier clock skew
 matter. It needs a stated tolerance, not an assumption.
+
+A related worry is session resumption: a user pauses a conversation for a
+while, or schedules a task, well past any short lease's renew window. In the
+common case this is benign — the TTL clock only needs to run while a tool
+call is actually in flight, and it should not need to be held open across a
+human-in-the-loop confirmation pause, so a resumed session simply re-mints
+whatever grants it needs. The real risk window is a tool process that errors
+out or is killed mid-call: the lease is left to expire on its own rather than
+needing active cleanup, which is the renew-or-die model working as intended,
+not a special case. Whether the renew TTL's order-of-ten-minutes figure is
+right is still a guess.
 
 ### Attenuation, delegation, and audience
 
@@ -352,6 +378,12 @@ per-session state becomes an explicit, stateless part of the interface, which
 is what lets the filesystem service be distributed at all. The *model* still
 experiences "read, then edit"; the harness carries the tokens.
 
+This mode should make it possible for a client to mount this into some sort
+of traditional environment via FUSE or a sandbox's host-interface mechanisms.
+It would essentially be write caching, since there is no assumption that
+changes will be reflected to other clients immediately. We are explicitly
+*not* reinventing NFS here.
+
 ## The byte-sink service (second instance)
 
 The fetch tool's grant is not a filesystem. It is a write-only stream with a
@@ -410,6 +442,12 @@ Enforcement can then hang off metadata: a mount composed for an
 externally-facing tool can exclude files tagged above a classification, or a
 guardrail can gate on provenance ("this config was written by a file fetched
 from the internet this session").
+
+The likely mechanism is taint propagation through tools: if a tool reads file
+A carrying taint T and writes file B, B inherits T. A tool that is explicitly
+taint-aware could carry extra verbs to remove a taint, but that should be
+rare — removing a taint is an action worth tracing back to a human rather
+than something a tool does unremarked.
 
 ### Synthetic namespaces
 
@@ -620,6 +658,18 @@ status namespace.
   view materialize locally for shell consumption (the ADR 0005
   materialize-for-exec split), and how does `IsolationApprovable` classify
   commands against a grant posture?
+- **Talking to OAuth'd remote services (MCP).** The MCP world is heavily
+  OAuth-based; a grant token can't be presented to an MCP server as-is. The
+  likely shape is a gateway that translates a grant (plus the human user's
+  own credentials) into OAuth/bearer credentials for the far side —
+  candidate machinery: [draft-ietf-oauth-spiffe-client-auth](https://datatracker.ietf.org/doc/draft-ietf-oauth-spiffe-client-auth/),
+  which lets a SPIFFE SVID stand in for an OAuth client credential. That
+  gateway would itself just be a tool from mecatl's point of view — likely a
+  concrete application of the byte-sink instance rather than a third
+  resource type (the rule of two, above). Where MCP's dynamically-typed
+  tool-call shape (closer to COM's `IDispatch` than to a strongly-typed
+  interface) meets this design's concrete, typed grants is exactly the
+  boundary this doc doesn't resolve.
 - **Merge strategies on forks-as-grants.** Does the descent spec carry a
   merge-back strategy (promote-on-success, hand-back-as-diff, discard), or
   does merging stay a separate seam consuming the fork's mount?
@@ -649,9 +699,21 @@ status namespace.
   branch-and-merge. Whether that convergence means the filesystem service is
   git underneath, or git is one backend with extended verbs, is exactly what
   this bullet refuses to decide today.
+- **Key distribution for signing and verifying grants.** How do all the
+  different identities actually get their keys? In the simplest shape there
+  is one trust domain per deployment, the harness is the issuer, and
+  subagents get SPIFFE sub-path identities — SPIFFE is the natural mechanism
+  for distributing that key material. One simplification worth keeping: the
+  signing key never has to leave the issuer if the same service that issues
+  a grant also evaluates it, since then nothing else needs the key at all.
+  The residual problem shrinks to key consistency across a horizontally
+  replicated issuer, which is an easier problem than general key
+  distribution.
 - **Where the issuer lives.** In-process with the harness in v1, but the
   renewal endpoint is load-bearing for every live grant; its availability
-  story needs a sentence more than "it's the harness."
+  story needs a sentence more than "it's the harness." If it is the service
+  itself that issues, does the harness itself delegate access to tools and
+  view itself as a peer actor?
 
 ## The de-risking spike
 
