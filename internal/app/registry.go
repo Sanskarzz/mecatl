@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -19,7 +20,6 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/openrouter"
 	"github.com/stacklok/mecatl/internal/adapter/providercatalog"
 	"github.com/stacklok/mecatl/internal/adapter/toolhivellm"
-	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
 )
 
 // Provider id strings. These are WIRE-STABLE once they reach the wire (S3's
@@ -869,7 +869,17 @@ func resolveToolhiveIntent(cfg Config) (baseURL, gatewayURL string, explicit, ok
 	}
 	path := cfg.toolhiveConfigPath
 	if path == "" {
-		path = filepath.Join(xdgconfig.UserConfigDir(xdgconfig.OSEnv), toolhivellm.DefaultConfigRelPath)
+		// os.UserConfigDir(), not xdgconfig.UserConfigDir(): ToolHive's own
+		// config.go resolves its path via github.com/adrg/xdg, which (like
+		// stdlib os.UserConfigDir) maps XDG concepts to native per-OS
+		// locations (~/Library/Application Support on macOS, %AppData% on
+		// Windows, $XDG_CONFIG_HOME/~/.config on Unix) rather than the
+		// literal Linux XDG spec every other mecatl adapter wants via
+		// xdgconfig. Using xdgconfig here silently misses ToolHive's real
+		// config file on macOS/Windows.
+		if dir, err := os.UserConfigDir(); err == nil && dir != "" {
+			path = filepath.Join(dir, toolhivellm.DefaultConfigRelPath)
+		}
 	}
 	detected, found := toolhivellm.DetectConfig(path)
 	if !found {

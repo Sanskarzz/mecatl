@@ -9,8 +9,11 @@
 //
 // # What this reads
 //
-// ToolHive's config file (default $XDG_CONFIG_HOME/toolhive/config.yaml, or
-// ~/.config/toolhive/config.yaml) carries an `llm:` block:
+// ToolHive's config file (default: platform user-config dir + toolhive/config.yaml
+// — e.g. $XDG_CONFIG_HOME or ~/.config on Linux, ~/Library/Application Support on
+// macOS, %AppData% on Windows, mirroring ToolHive's own github.com/adrg/xdg-based
+// resolution — composition resolves this via stdlib os.UserConfigDir(), not this
+// package) carries an `llm:` block:
 //
 //	llm:
 //	  gateway_url: https://my-org.example.com/toolhive-gateway
@@ -53,7 +56,7 @@ import (
 
 const (
 	// DefaultConfigRelPath is ToolHive's config file location, relative to the
-	// XDG config home (composition joins it with xdgconfig.UserConfigDir).
+	// platform user-config dir (composition joins it with os.UserConfigDir()).
 	DefaultConfigRelPath = "toolhive/config.yaml"
 
 	// PlaceholderToken is the public inbound-auth convention the ToolHive LLM
