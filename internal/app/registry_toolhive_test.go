@@ -14,6 +14,7 @@ import (
 
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/port"
+	"github.com/stacklok/mecatl/internal/adapter/toolhivellm"
 )
 
 // toolhiveLevelDiag captures Log calls WITH their level, so a test can assert
@@ -744,6 +745,38 @@ func TestResolveToolhiveIntent_Disabled(t *testing.T) {
 	_, _, _, ok := resolveToolhiveIntent(Config{ToolhiveLLM: false, toolhiveConfigPath: cfgPath})
 	if ok {
 		t.Fatal("expected no intent when ToolhiveLLM is false")
+	}
+}
+
+// TestResolveToolhiveIntent_DefaultPathUsesPlatformUserConfigDir pins the
+// macOS-config-path bug fix: with no toolhiveConfigPath test seam set, the
+// default resolution MUST go through os.UserConfigDir() (platform-native —
+// ~/Library/Application Support on macOS, matching where ToolHive's own
+// github.com/adrg/xdg-based config.go actually writes), not the literal-XDG
+// xdgconfig package every other adapter uses. Without this, mecatl silently
+// never finds a real ToolHive config on macOS/Windows.
+func TestResolveToolhiveIntent_DefaultPathUsesPlatformUserConfigDir(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "") // unset: Unix os.UserConfigDir() falls back to $HOME/.config
+
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatalf("os.UserConfigDir: %v", err)
+	}
+	cfgPath := filepath.Join(dir, toolhivellm.DefaultConfigRelPath)
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFileT(t, cfgPath, "llm:\n  gateway_url: https://upstream.example/gw\n  proxy:\n    listen_port: 14000\n"); err != nil {
+		t.Fatalf("write config fixture: %v", err)
+	}
+
+	_, gatewayURL, _, ok := resolveToolhiveIntent(Config{ToolhiveLLM: true})
+	if !ok {
+		t.Fatal("expected the default (empty toolhiveConfigPath) resolution to find the config via os.UserConfigDir()")
+	}
+	if gatewayURL != "https://upstream.example/gw" {
+		t.Errorf("gatewayURL = %q, want https://upstream.example/gw", gatewayURL)
 	}
 }
 
