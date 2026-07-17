@@ -755,6 +755,20 @@ func TestValidateEmbeddedProviderRequired(t *testing.T) {
 	}
 }
 
+// TestValidateToolhiveGatewaySatisfiesProvider asserts a ToolHive LLM gateway
+// (here via an explicit --toolhive-llm-base-url) satisfies the embedded-provider
+// check with no key/mock — the #263 auto-detect path that validate() must not
+// reject before app.Build can register it.
+func TestValidateToolhiveGatewaySatisfiesProvider(t *testing.T) {
+	cfg, err := parseFlags([]string{"--workspace", "/abs", "--toolhive-llm-base-url", "http://127.0.0.1:14000/v1"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if err := cfg.validate(); err != nil {
+		t.Errorf("a ToolHive gateway should satisfy the provider check: %v", err)
+	}
+}
+
 func TestParseFlagsAllowAll(t *testing.T) {
 	def, err := parseFlags(nil)
 	if err != nil {
