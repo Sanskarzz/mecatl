@@ -1102,13 +1102,13 @@ func TestRenewLeaderDefinitiveLossStopsTicking(t *testing.T) {
 	// DEFINITIVE loss (ErrLeaseHeld) — mirrors a peer having taken over.
 	lease := &renewFailLease{}
 	s := scheduler.New(scheduler.Config{
-		Store:              store,
-		Lease:              lease,
-		LeaseOwner:         "owner-this",
-		Fire:               fire.fire,
-		Clock:              clk,
-		Diagnostics:        diag,
-		TickInterval:       25 * time.Millisecond,
+		Store:        store,
+		Lease:        lease,
+		LeaseOwner:   "owner-this",
+		Fire:         fire.fire,
+		Clock:        clk,
+		Diagnostics:  diag,
+		TickInterval: 25 * time.Millisecond,
 		// LeaseRenewInterval is deliberately an order of magnitude larger than
 		// TickInterval: the test relies on the first tick firing the due
 		// "before-loss" schedule BEFORE the renewer's first (definitively-lost)
