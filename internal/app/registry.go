@@ -890,6 +890,16 @@ func resolveToolhiveIntent(cfg Config) (baseURL, gatewayURL string, explicit, ok
 	return detected.BaseURL(), detected.GatewayURL, false, true
 }
 
+// ToolhiveAvailable reports whether a ToolHive LLM gateway would be registered
+// for this Config — an explicit --toolhive-llm-base-url, or a detected
+// locally-running proxy. It runs the SAME resolveToolhiveIntent detection Build
+// uses (one source of truth), so a client-side provider pre-check (mecatui's
+// config.validate) agrees with what Build will actually resolve.
+func ToolhiveAvailable(cfg Config) bool {
+	_, _, _, ok := resolveToolhiveIntent(cfg)
+	return ok
+}
+
 // newGatewayEntry mints the toolhive registry entry: it delegates to
 // newOpenAICompatEntry (the SAME construction/resilience path as openai and
 // openrouter — the two cannot drift) using toolhivellm.PlaceholderToken as

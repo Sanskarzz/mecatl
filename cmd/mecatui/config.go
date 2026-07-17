@@ -469,15 +469,22 @@ func (c config) validate() error {
 		return fmt.Errorf("invalid --mode %q (want default|plan|accept-edits)", c.mode)
 	}
 	// When hosting an embedded server (no external --server) the provider must be
-	// resolvable: an OpenAI, Anthropic, or OpenRouter key in the environment, or the
-	// offline mock.
+	// resolvable: an OpenAI, Anthropic, or OpenRouter key in the environment, the
+	// offline mock, or an auto-detected/explicit ToolHive LLM gateway proxy
+	// (--toolhive-llm, default on) — the same detection app.Build runs, so this
+	// pre-check agrees with what the embedded server will actually resolve.
 	if c.server == "" && c.openAIKey == "" && c.openRouterKey == "" && c.anthropicKey == "" && !c.mock {
-		return errors.New("no LLM provider configured and no external --server given — mecatui has nothing to talk to: " +
-			"to host an embedded server set one of ANTHROPIC_API_KEY (Claude), OPENAI_API_KEY, or " +
-			"OPENROUTER_API_KEY (one key, many models — a good first choice); for a compatible/proxy endpoint add " +
-			"--openai-base-url / --anthropic-base-url / --openrouter-base-url with the matching key; " +
-			"to try it offline with no key pass --mock; or point --server at an already-running mecated; " +
-			"see docs/usage.md for provider setup")
+		var probe app.Config
+		c.toolhiveLLMFlags.Apply(&probe)
+		if !app.ToolhiveAvailable(probe) {
+			return errors.New("no LLM provider configured and no external --server given — mecatui has nothing to talk to: " +
+				"to host an embedded server set one of ANTHROPIC_API_KEY (Claude), OPENAI_API_KEY, or " +
+				"OPENROUTER_API_KEY (one key, many models — a good first choice); for a compatible/proxy endpoint add " +
+				"--openai-base-url / --anthropic-base-url / --openrouter-base-url with the matching key; " +
+				"for a ToolHive LLM gateway proxy make sure it is running (or pass --toolhive-llm-base-url); " +
+				"to try it offline with no key pass --mock; or point --server at an already-running mecated; " +
+				"see docs/usage.md for provider setup")
+		}
 	}
 	// Operator posture: only meaningful for the embedded server; refuse an allow-all
 	// tier (auto or yolo) when running privileged outside a declared sandbox. Dialling
