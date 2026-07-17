@@ -1109,7 +1109,13 @@ func TestRenewLeaderDefinitiveLossStopsTicking(t *testing.T) {
 		Clock:              clk,
 		Diagnostics:        diag,
 		TickInterval:       25 * time.Millisecond,
-		LeaseRenewInterval: 25 * time.Millisecond,
+		// LeaseRenewInterval is deliberately an order of magnitude larger than
+		// TickInterval: the test relies on the first tick firing the due
+		// "before-loss" schedule BEFORE the renewer's first (definitively-lost)
+		// Renew cancels the tick ctx. With equal intervals the two tickers race
+		// and under CI load the renewer can win, cancelling ticking before the
+		// initial schedule ever fires (the racy scheduler_test.go:1131 failure).
+		LeaseRenewInterval: 250 * time.Millisecond,
 		MaxConcurrentFires: 4,
 	})
 
@@ -1134,11 +1140,22 @@ func TestRenewLeaderDefinitiveLossStopsTicking(t *testing.T) {
 		t.Fatal("renewLeader never declared the leader lease lost on a definitive ErrLeaseHeld")
 	}
 
-	// A second schedule made due STRICTLY AFTER the declared loss. If the tick
-	// loop had NOT actually stopped (declareLeaderLost's tickCancel a no-op),
-	// this would fire on one of the next several real ticks.
+	// sawLostLease only proves the WARN was logged; declareLeaderLost cancels the
+	// tick ctx immediately AFTER that log, and the tick loop may run one more
+	// in-flight tickOnce before it observes the cancel. Give both a few tick
+	// intervals to drain so the loop is provably stopped before we probe it —
+	// otherwise a residual post-cancel tick could fire the after-loss schedule
+	// and race the assertion. (We deliberately do NOT advance the clock: the
+	// already-fired "before-loss" cron has advanced its own NextFireAt to the
+	// next minute, so it stays quiescent on the fixed fake clock — advancing
+	// would re-arm it and pollute the count.)
+	time.Sleep(150 * time.Millisecond)
+
+	// A second schedule made due AFTER the declared loss (its NextFireAt is the
+	// fixed clock's now, so Due returns it immediately). If the tick loop had NOT
+	// actually stopped (declareLeaderLost's tickCancel a no-op), this would fire
+	// on one of the next several real ticks.
 	countAtLoss := fire.count()
-	clk.advance(time.Minute)
 	if err := store.Save(context.Background(), port.Schedule{
 		Spec:  port.ScheduleSpec{Name: "after-loss", Prompt: "x", Trigger: port.TriggerSpec{Cron: "* * * * *"}},
 		State: port.ScheduleState{NextFireAt: clk.Now(), Enabled: true},
