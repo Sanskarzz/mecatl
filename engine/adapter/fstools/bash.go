@@ -1,4 +1,4 @@
-package tools
+package fstools
 
 import (
 	"context"
@@ -9,7 +9,6 @@ import (
 
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/tool"
-	"github.com/stacklok/mecatl/internal/adapter/toolkit"
 )
 
 // BashToolName is the catalog name of the Bash tool. It is the single authority
@@ -200,7 +199,7 @@ func bashCombinedOutput(res tool.CommandResult, includeExit bool) string {
 // private to it and is never fabricated here.
 //
 // The trailer ALWAYS survives the output cap: a timed-out/runaway command commonly
-// produces output far larger than toolkit.MaxOutputBytes, so this truncates the
+// produces output far larger than MaxOutputBytes, so this truncates the
 // BODY first (reserving room for the trailer) and then appends the trailer, rather
 // than truncating the joined string — which would land the cut inside the body and
 // drop the "timed out"/"canceled" signal entirely, leaving the model to read a
@@ -212,14 +211,14 @@ func bashErrorMessage(body string, err error, timeoutMS int) string {
 		return truncateBytes(noBodyMsg)
 	}
 	// Reserve room for the trailer (plus its leading newline) AND for the
-	// truncation marker toolkit.Truncate appends when it trims the body — so the
-	// final string fits the cap with the timeout/cancel reason intact.
+	// truncation marker truncate appends when it trims the body — so the final
+	// string fits the cap with the timeout/cancel reason intact.
 	suffix := "\n" + trailer
-	budget := toolkit.MaxOutputBytes - len(suffix) - len(toolkit.TruncationMarker)
+	budget := MaxOutputBytes - len(suffix) - len(TruncationMarker)
 	if budget < 0 {
 		budget = 0
 	}
-	return toolkit.Truncate(body, budget) + suffix
+	return truncate(body, budget) + suffix
 }
 
 // bashErrorTrailer returns the model-facing wording for a runner error: noBodyMsg

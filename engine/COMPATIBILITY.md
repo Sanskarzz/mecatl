@@ -46,10 +46,13 @@ ignores internal churn:
 
 - **`engine/adapter/*`** — the in-tree REFERENCE adapters (`mockllm`, `memfs`,
   `memstore`, `sessnap`, `permpolicy`, `permstore`, `wallclock`, `nofs`,
-  `search`, `memlease`, and the `*conformance` suites). These ship as offline
-  test doubles and sane defaults, not as a stable API. **Note:** the conformance
-  suites' real CONTRACT is the port interfaces in `engine/port` / `engine/tool`,
-  which ARE guarded — the suites merely exercise it.
+  `search`, `memlease`, `fstools`, and the `*conformance` suites). These ship as
+  offline test doubles and sane defaults, not as a stable API. `fstools` (the
+  Read/Edit/Write/Grep/Glob/Bash tool bodies) is a reference tool bundle: a
+  consumer composes its own catalog and may take, subset, swap-by-name, or ignore
+  it (see the package doc), so its surface may change without a CHANGELOG note.
+  **Note:** the conformance suites' real CONTRACT is the port interfaces in
+  `engine/port` / `engine/tool`, which ARE guarded — the suites merely exercise it.
 - **`engine/arch`** — test-support (the layering/architecture proofs).
 - **The entire root module** — `internal/`, `cmd/`, `contracts/`, `perf/`. These
   are outside the engine module boundary (ADR 0036) and carry no external

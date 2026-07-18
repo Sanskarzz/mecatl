@@ -37,11 +37,16 @@ const (
 )
 
 // MaxToolResultTextBytes caps the byte length of a single TEXT tool-result block.
-// It mirrors internal/adapter/toolkit.MaxOutputBytes (25 KiB) — the single
-// adapter-layer output cap — so a tool-result text block carries no more than a
-// textual tool's own result would. Defined locally (not imported) because
-// engine/ is its own module and toolkit lives under internal/adapter.
-const MaxToolResultTextBytes = 25 << 10 // 25 KiB
+// It is the domain-level upper bound on ANY tool's text result — not only the
+// filesystem tools, but MCP results, memory tools, and any consumer-supplied tool
+// — at 25 KiB (25,600 bytes). The adapter-layer output caps
+// (engine/adapter/fstools.MaxOutputBytes and internal/adapter/toolkit.MaxOutputBytes,
+// both 25,000 bytes) are STRICTER and sit under this bound, so a truncated tool
+// result always validates here; the ~600-byte headroom is deliberate, not a drift
+// to reconcile. Defined locally (not imported) because engine/session is the
+// domain leaf: it may not import an adapter (even fstools, which lives in this
+// module), and toolkit lives under the host repo's internal/adapter tree.
+const MaxToolResultTextBytes = 25 << 10 // 25 KiB (25,600 bytes)
 
 // MaxToolResultBytes is the cap on the SUM of all block bytes in one tool
 // result, mirroring MaxPromptMediaBytes so a tool result cannot collectively

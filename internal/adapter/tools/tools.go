@@ -1,11 +1,19 @@
-// Package tools implements the core model-facing tools of the mecatl kit —
-// Read, Edit, Write, Grep, Glob, a WebFetch stub, and an OPTIONAL Bash tool — as
-// tool.Tool values executing against an injected tool.Workspace.
+// Package tools composes the model-facing tool catalog of the mecatl kit. The
+// correctness- and security-critical filesystem tool bodies — Read, Edit, Write,
+// Grep, Glob, and the optional Bash — now live in the importable engine module
+// (engine/adapter/fstools) so external consumers of engine/agent get them, and
+// their enforced invariants, by import; this package re-exports them via alias.go
+// and adds the host-repo-coupled tools that CANNOT live in the engine module:
+// the WebFetch stub, WebSearch (needs a search provider), and FetchMcpResource
+// (MCP-coupled).
 //
-// All() and Register() cover the six always-available tools that need only a
-// Workspace. Bash is special: it needs a tool.CommandRunner and is therefore not
-// part of All(); construct it explicitly with NewBashTool(runner) and register it
-// only when a runner is configured. A deployment with no shell simply omits it.
+// All() and Register() cover the always-available tools that need only a
+// Workspace — the fstools filesystem tools plus WebFetch and FetchMcpResource,
+// which need no extra dependency. Two tools are NOT in All() because they need an
+// injected dependency and are constructed/registered separately by the
+// composition root: Bash needs a tool.CommandRunner (NewBashTool(runner), an
+// alias for fstools.NewBashTool; a deployment with no shell simply omits it), and
+// WebSearch needs a search provider (NewWebSearchTool(provider)).
 //
 // Each tool parses its session.ToolCall.Args (JSON), runs against the Workspace
 // seam, and returns a session.ToolResult. Recoverable, model-addressable
@@ -24,41 +32,26 @@ package tools
 import (
 	"encoding/json"
 
+	"github.com/stacklok/mecatl/engine/adapter/fstools"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/toolkit"
 )
 
-// Output-shaping limits shared across the tools. These keep a single tool
-// result from blowing the model's context window; each tool appends a clear
-// truncation marker when it trims output. The byte cap lives in toolkit as
-// toolkit.MaxOutputBytes (the single shared definition).
-const (
-	// maxReadLines caps how many lines the Read tool returns in one call.
-	maxReadLines = 2000
-	// maxGrepMatches caps how many Grep hits are returned in one call.
-	maxGrepMatches = 200
-	// maxGlobResults caps how many paths Glob returns in one call.
-	maxGlobResults = 1000
-)
-
 // All returns the always-available core tools as a fresh slice, ready for
 // registration in the composition root. The order is the canonical catalog
-// order. Bash is NOT included: it requires a tool.CommandRunner and is optional
-// — add it separately via NewBashTool when a runner is configured.
+// order: the filesystem tools from engine/adapter/fstools (Read, Edit, Write,
+// Grep, Glob) followed by the host-repo web/MCP reads. Bash is NOT included: it
+// requires a tool.CommandRunner and is optional — add it separately via
+// NewBashTool when a runner is configured.
 //
 // FetchMcpResource (issue #223 Phase 2) is an outbound read like WebFetch, so
 // it rides in BOTH profiles via All() and NoFS().
 func All() []tool.Tool {
-	return []tool.Tool{
-		ReadTool{},
-		EditTool{},
-		WriteTool{},
-		GrepTool{},
-		GlobTool{},
+	return append(fstools.All(),
 		WebFetchTool{},
 		FetchMcpResourceTool{},
-	}
+	)
 }
 
 // NoFS returns the core tools available in a NO-filesystem session (the "no-fs"
@@ -93,7 +86,8 @@ func Register(cat *tool.Catalog) error {
 
 // parseArgs unmarshals a tool call's JSON arguments into dst, delegating to the
 // shared toolkit helper. It returns a model-facing error string (not a Go
-// error) describing a malformed payload.
+// error) describing a malformed payload. Used by the host-repo web/MCP tools;
+// the filesystem tools carry their own copy in engine/adapter/fstools.
 func parseArgs(in session.ToolCall, dst any) (string, bool) {
 	return toolkit.ParseArgs(in, dst)
 }

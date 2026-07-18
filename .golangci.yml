@@ -166,6 +166,18 @@ linters:
           deny:
             - pkg: os
               desc: 'memfs is the in-memory FileSystem fake; it must not touch the real OS'
+        engine-adapter-fstools:
+          list-mode: strict
+          files:
+            - '**/engine/adapter/fstools/**.go'
+            - '!$test'
+          allow:
+            - $gostd
+            - github.com/stacklok/mecatl/engine/session
+            - github.com/stacklok/mecatl/engine/tool
+          deny:
+            - pkg: os
+              desc: 'fstools are the core FS tool bodies over the injected tool.Workspace/CommandRunner; they must not touch the real OS'
         engine-adapter-nofs:
           list-mode: strict
           files:

@@ -1,4 +1,4 @@
-package tools
+package fstools
 
 import (
 	"encoding/json"
