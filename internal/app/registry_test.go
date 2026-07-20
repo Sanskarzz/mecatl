@@ -138,8 +138,8 @@ func TestRegistryZeroKeys(t *testing.T) {
 	// the offline --mock escape hatch, and the docs pointer — so first-run is
 	// self-explanatory without leaving the terminal.
 	for _, want := range []string{
-		"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY",
-		"--openai-base-url", "--anthropic-base-url", "--openrouter-base-url",
+		"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "OPENCODE_API_KEY",
+		"--openai-base-url", "--anthropic-base-url", "--openrouter-base-url", "--opencode-base-url",
 		"--mock", "docs/usage.md",
 	} {
 		if !strings.Contains(msg, want) {
@@ -434,6 +434,44 @@ func TestProviderEnvVarsFromCatalog(t *testing.T) {
 	// An unknown provider id is an honest empty (unavailable), never a panic.
 	if got := providerEnvVars("nonesuch"); got != nil {
 		t.Errorf("providerEnvVars(nonesuch) = %v, want nil", got)
+	}
+	// opencode (OpenCode Go) is NOT in the vendored catalog, so its env var comes
+	// from the explicit composition arm, not the catalog.
+	if got := providerEnvVars("opencode"); !reflect.DeepEqual(got, []string{"OPENCODE_API_KEY"}) {
+		t.Errorf("providerEnvVars(opencode) = %v, want [OPENCODE_API_KEY]", got)
+	}
+}
+
+// TestRegistryOpenCode: with OPENCODE_API_KEY set, OpenCode Go registers as an
+// AVAILABLE provider over the Chat Completions adapter, resolves its built-in
+// default model, and carries a live lister + a remint closure. It also pins the
+// no-clamp effort contract — unlike openai, xhigh/max are NOT clamped to high.
+func TestRegistryOpenCode(t *testing.T) {
+	reg, err := buildProviderRegistry(Config{}, fakeEnv(map[string]string{
+		"OPENCODE_API_KEY": "sk-opencode",
+	}))
+	if err != nil {
+		t.Fatalf("buildProviderRegistry: %v", err)
+	}
+	e, ok := reg.Lookup("opencode")
+	if !ok {
+		t.Fatal("opencode UNAVAILABLE with OPENCODE_API_KEY set")
+	}
+	if e.provider == nil {
+		t.Error("opencode provider is nil")
+	}
+	if e.lister == nil {
+		t.Error("opencode has no live lister (the OpenAI-shaped /models opt-in)")
+	}
+	if e.remint == nil {
+		t.Error("opencode has no remint closure (per-session effort re-mint would break)")
+	}
+	if reg.defaultModel != "glm-5.2" {
+		t.Errorf("default model = %q, want glm-5.2", reg.defaultModel)
+	}
+	// No xhigh/max clamp for opencode (the endpoint accepts them; verified live).
+	if got, clamped := clampEffortForProvider(providerOpenCode, "xhigh"); got != "xhigh" || clamped {
+		t.Errorf("clampEffortForProvider(opencode, xhigh) = %q,%v; want xhigh,false (no clamp)", got, clamped)
 	}
 }
 

@@ -15,8 +15,37 @@ import (
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/port"
+	"github.com/stacklok/mecatl/internal/adapter/openaicompat"
 	"github.com/stacklok/mecatl/internal/adapter/openrouter"
 )
+
+// TestOpenCodeListerStampsImageModality is the F1 regression: OpenCode Go's
+// /models envelope carries no modality metadata, so openCodeLister must stamp the
+// adapter-static modalities (text+image). Otherwise a successful live refresh
+// would flip an uncatalogued model's Image capability from the adapter-static
+// default (true) to false via modelCapability's authoritative live-first rule.
+func TestOpenCodeListerStampsImageModality(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"object":"list","data":[{"id":"glm-5.2","object":"model"}]}`)),
+			Header:     make(http.Header),
+		}, nil
+	})}
+	rows, err := openCodeLister{inner: openaicompat.NewLister("https://opencode.example/v1", "k", client)}.ListModels(context.Background())
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	if !hasImageModality(rows[0].InputModalities) {
+		t.Errorf("InputModalities = %v, want to include image (a live refresh must not flip Image to false)", rows[0].InputModalities)
+	}
+	if !rows[0].ToolCall {
+		t.Error("ToolCall = false, want true")
+	}
+}
 
 // fixtureClient serves the trimmed openrouter fixture for the whole-Build e2e.
 func fixtureClient(t *testing.T) *http.Client {

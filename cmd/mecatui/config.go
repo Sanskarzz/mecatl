@@ -110,6 +110,7 @@ type config struct {
 	openAIKey        string
 	openRouterKey    string
 	anthropicKey     string
+	openCodeKey      string
 	mock             bool
 	noBash           bool
 
@@ -306,6 +307,7 @@ func parseFlags(args []string) (config, error) {
 		OpenAIBaseURL:     "override the OpenAI API base URL for the embedded server (compatible endpoints)",
 		OpenRouterBaseURL: "embedded server only: override the OpenRouter API base URL (default https://openrouter.ai/api/v1; key from OPENROUTER_API_KEY)",
 		AnthropicBaseURL:  "embedded server only: override the native Anthropic API base URL (compatible/proxy endpoints; key from ANTHROPIC_API_KEY)",
+		OpenCodeBaseURL:   "embedded server only: override the OpenCode Go API base URL (default https://opencode.ai/zen/go/v1; key from OPENCODE_API_KEY)",
 	})
 	// ToolHive LLM gateway (issue #262): embedded-server-only, like every other
 	// provider knob on this main.
@@ -399,6 +401,7 @@ func parseFlags(args []string) (config, error) {
 	cfg.openAIKey = keys.OpenAI
 	cfg.openRouterKey = keys.OpenRouter
 	cfg.anthropicKey = keys.Anthropic
+	cfg.openCodeKey = keys.OpenCode
 
 	if !cfg.listThemes {
 		ws, err := resolveWorkspace(cfg.workspace)
@@ -473,14 +476,15 @@ func (c config) validate() error {
 	// offline mock, or an auto-detected/explicit ToolHive LLM gateway proxy
 	// (--toolhive-llm, default on) — the same detection app.Build runs, so this
 	// pre-check agrees with what the embedded server will actually resolve.
-	if c.server == "" && c.openAIKey == "" && c.openRouterKey == "" && c.anthropicKey == "" && !c.mock {
+	if c.server == "" && c.openAIKey == "" && c.openRouterKey == "" && c.anthropicKey == "" && c.openCodeKey == "" && !c.mock {
 		var probe app.Config
 		c.toolhiveLLMFlags.Apply(&probe)
 		if !app.ToolhiveAvailable(probe) {
 			return errors.New("no LLM provider configured and no external --server given — mecatui has nothing to talk to: " +
-				"to host an embedded server set one of ANTHROPIC_API_KEY (Claude), OPENAI_API_KEY, or " +
-				"OPENROUTER_API_KEY (one key, many models — a good first choice); for a compatible/proxy endpoint add " +
-				"--openai-base-url / --anthropic-base-url / --openrouter-base-url with the matching key; " +
+				"to host an embedded server set one of ANTHROPIC_API_KEY (Claude), OPENAI_API_KEY, " +
+				"OPENROUTER_API_KEY (one key, many models — a good first choice), or OPENCODE_API_KEY (OpenCode Go); " +
+				"for a compatible/proxy endpoint add " +
+				"--openai-base-url / --anthropic-base-url / --openrouter-base-url / --opencode-base-url with the matching key; " +
 				"for a ToolHive LLM gateway proxy make sure it is running (or pass --toolhive-llm-base-url); " +
 				"to try it offline with no key pass --mock; or point --server at an already-running mecated; " +
 				"see docs/usage.md for provider setup")

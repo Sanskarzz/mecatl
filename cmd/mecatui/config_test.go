@@ -732,8 +732,8 @@ func TestValidateEmbeddedProviderRequired(t *testing.T) {
 	} else {
 		msg := err.Error()
 		for _, want := range []string{
-			"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY",
-			"--openai-base-url", "--anthropic-base-url", "--openrouter-base-url",
+			"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "OPENCODE_API_KEY",
+			"--openai-base-url", "--anthropic-base-url", "--openrouter-base-url", "--opencode-base-url",
 			"--mock", "--server", "docs/usage.md",
 		} {
 			if !strings.Contains(msg, want) {

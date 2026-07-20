@@ -29,6 +29,7 @@ const (
 	envOpenAIKey     = "OPENAI_API_KEY"
 	envOpenRouterKey = "OPENROUTER_API_KEY"
 	envAnthropicKey  = "ANTHROPIC_API_KEY"
+	envOpenCodeKey   = "OPENCODE_API_KEY"
 )
 
 // ProviderFlagHelp carries the per-main help text for the three provider base-URL
@@ -41,6 +42,7 @@ type ProviderFlagHelp struct {
 	OpenAIBaseURL     string
 	OpenRouterBaseURL string
 	AnthropicBaseURL  string
+	OpenCodeBaseURL   string
 }
 
 // DefaultProviderFlagHelp is the mecated-style wording, used when a field of the passed
@@ -49,6 +51,7 @@ var DefaultProviderFlagHelp = ProviderFlagHelp{
 	OpenAIBaseURL:     "override the OpenAI API base URL (compatible endpoints)",
 	OpenRouterBaseURL: "override the OpenRouter API base URL (default https://openrouter.ai/api/v1; key from OPENROUTER_API_KEY)",
 	AnthropicBaseURL:  "override the native Anthropic API base URL (compatible/proxy endpoints; key from ANTHROPIC_API_KEY)",
+	OpenCodeBaseURL:   "override the OpenCode Go API base URL (default https://opencode.ai/zen/go/v1; key from OPENCODE_API_KEY)",
 }
 
 // ProviderFlags holds the values bound by RegisterProviderFlags. The base-URL fields
@@ -61,6 +64,7 @@ type ProviderFlags struct {
 	openAIBaseURL     *string
 	openRouterBaseURL *string
 	anthropicBaseURL  *string
+	openCodeBaseURL   *string
 }
 
 // RegisterProviderFlags registers --openai-base-url / --openrouter-base-url /
@@ -73,10 +77,12 @@ func RegisterProviderFlags(fs *flag.FlagSet, help ProviderFlagHelp) *ProviderFla
 		openAIBaseURL:     new(string),
 		openRouterBaseURL: new(string),
 		anthropicBaseURL:  new(string),
+		openCodeBaseURL:   new(string),
 	}
 	fs.StringVar(pf.openAIBaseURL, "openai-base-url", "", help.OpenAIBaseURL)
 	fs.StringVar(pf.openRouterBaseURL, "openrouter-base-url", "", help.OpenRouterBaseURL)
 	fs.StringVar(pf.anthropicBaseURL, "anthropic-base-url", "", help.AnthropicBaseURL)
+	fs.StringVar(pf.openCodeBaseURL, "opencode-base-url", "", help.OpenCodeBaseURL)
 	return pf
 }
 
@@ -90,6 +96,7 @@ func (pf *ProviderFlags) Apply(cfg *app.Config) ResolvedKeys {
 	cfg.OpenAIKey = keys.OpenAI
 	cfg.OpenRouterKey = keys.OpenRouter
 	cfg.AnthropicKey = keys.Anthropic
+	cfg.OpenCodeKey = keys.OpenCode
 	// A nil receiver (a config built WITHOUT RegisterProviderFlags — e.g. a test that
 	// constructs the cmd config struct directly) applies the env keys but leaves the
 	// base URLs at their zero value, exactly as the pre-extraction inline code did when
@@ -99,6 +106,7 @@ func (pf *ProviderFlags) Apply(cfg *app.Config) ResolvedKeys {
 		cfg.OpenAIBaseURL = *pf.openAIBaseURL
 		cfg.OpenRouterBaseURL = *pf.openRouterBaseURL
 		cfg.AnthropicBaseURL = *pf.anthropicBaseURL
+		cfg.OpenCodeBaseURL = *pf.openCodeBaseURL
 	}
 	return keys
 }
@@ -114,6 +122,7 @@ func ReadProviderKeys() ResolvedKeys {
 		OpenAI:     os.Getenv(envOpenAIKey),
 		OpenRouter: os.Getenv(envOpenRouterKey),
 		Anthropic:  os.Getenv(envAnthropicKey),
+		OpenCode:   os.Getenv(envOpenCodeKey),
 	}
 }
 
@@ -125,12 +134,13 @@ type ResolvedKeys struct {
 	OpenAI     string
 	OpenRouter string
 	Anthropic  string
+	OpenCode   string
 }
 
 // Any reports whether at least one provider credential is present. It is the shared
 // "is any real provider configured?" predicate (mecatui uses it for its startup guard).
 func (k ResolvedKeys) Any() bool {
-	return k.OpenAI != "" || k.OpenRouter != "" || k.Anthropic != ""
+	return k.OpenAI != "" || k.OpenRouter != "" || k.Anthropic != "" || k.OpenCode != ""
 }
 
 func (h ProviderFlagHelp) withDefaults() ProviderFlagHelp {
@@ -142,6 +152,9 @@ func (h ProviderFlagHelp) withDefaults() ProviderFlagHelp {
 	}
 	if h.AnthropicBaseURL == "" {
 		h.AnthropicBaseURL = DefaultProviderFlagHelp.AnthropicBaseURL
+	}
+	if h.OpenCodeBaseURL == "" {
+		h.OpenCodeBaseURL = DefaultProviderFlagHelp.OpenCodeBaseURL
 	}
 	return h
 }
