@@ -140,6 +140,7 @@ func WithTeamToolTokenBudget(n int) TeamOption
 func WithUntrustedGoal(untrusted bool) SupervisorOption
 func WithWinnerReaper(s PreservedForkStore) ParallelOption
 func WithWritableChildEngine(e *Engine) SubagentOption
+func WithWritableEngineFactory(f func(model string) (*Engine, bool)) SubagentOption
 func WriteUntrustedBlock(b *strings.Builder, body string)
 type AgentMeta struct{Name string; Description string; Limits session.Limits}
 type BranchJudge interface{Judge(ctx context.Context, candidates []BranchSummary, criteria string) (winner int, rationale string, err error)}

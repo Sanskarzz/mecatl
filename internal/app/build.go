@@ -4607,16 +4607,58 @@ func parallelChildDeps(cfg Config, provReg *providerRegistry, provider port.LLMP
 // explorer and Parallel branches.
 func buildWritableSubagentChildEngine(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, runner tool.CommandRunner) *agent.Engine {
 	model, windowFn := resolveDefaultChildModel(cfg, provReg, parentProviderID, parentModel)
-	// Read-only explorer surface (Read/Grep/Glob + Bash) LAYERED with Edit/Write — a
-	// writable child MAY mutate the parent tree DIRECTLY. Subagent/Parallel/ToolSearch
-	// stay excluded (readOnlyExplorerCatalog never adds them), so a writable child
-	// can't recurse or fan out.
+	return agent.NewEngine(writableExplorerDeps(cfg, provider, model, "task:read-write", windowFn, runner))
+}
+
+// writableExplorerDeps builds the agent.Deps for a WRITABLE explorer child engine on a
+// given model + role. It is the SHARED body of buildWritableSubagentChildEngine (the
+// default-model writable explorer, role "task:read-write") and
+// buildWritableSubagentEngineFactory (the per-call/routed-model writable explorer, role
+// "task:read-write:model=<model>") — extracted so the two never drift (issue #285). The
+// catalog is the read-only explorer surface (Read/Grep/Glob + Bash) LAYERED with
+// Edit/Write — a writable child MAY mutate the parent tree DIRECTLY; Subagent/Parallel/
+// ToolSearch stay excluded (readOnlyExplorerCatalog never adds them), so a writable child
+// can't recurse or fan out. The runner is the MAIN session's command runner (direct-write
+// parity, ADR 0041 — no fork, no copy, no merge-back). Both roles begin "task:" so
+// roleFamily buckets them as "subagent" (a writable subagent IS a subagent) while staying
+// distinguishable in raw role-tagged diagnostics. The caller owns model + windowFn
+// resolution (resolveDefaultChildModel for the default engine; the override id VERBATIM
+// with childWindowFor for the factory — the buildParallelEngineFactory discipline).
+func writableExplorerDeps(cfg Config, provider port.LLMProvider, model, role string, windowFn func() int, runner tool.CommandRunner) agent.Deps {
 	childCat := readOnlyExplorerCatalog(runner)
 	childCat.MustRegister(tools.EditTool{})
 	childCat.MustRegister(tools.WriteTool{})
-	deps := childEngineDepsForProvider(cfg, "task:read-write", provider, model, windowFn,
+	return childEngineDepsForProvider(cfg, role, provider, model, windowFn,
 		childCat, promptConfig(modelCfgFor(cfg, model), cfg.gitStatus), nil)
-	return agent.NewEngine(deps)
+}
+
+// buildWritableSubagentEngineFactory returns the per-call model-override factory the
+// Subagent tool invokes for a mode:"read-write" call with a per-call `model` (or the OPT-IN
+// router pick) and NO `agent` (issue #285). It mirrors buildParallelEngineFactory's SHAPE:
+// given an opaque model id it mints a fresh WRITABLE explorer engine pinned to that model on
+// the parent's provider, re-deriving the provider-closing Deps (Compactor/TokenCounter/
+// Env.Model/ContextWindow) via the contamination-safe per-provider path, NEVER a
+// clone-and-swap. It shares writableExplorerDeps with buildWritableSubagentChildEngine so the
+// catalog/runner/prompt recipe cannot drift. The routed/override id is used VERBATIM — NOT
+// through resolveDefaultChildModel (which would re-run the def-less `SubagentModel > parent`
+// chain and discard the pick when a cheap child default is configured) — the same discipline
+// buildParallelEngineFactory/buildSubagentEngineFactory use. The MAIN session's command
+// runner is captured ONCE outside the closure (the buildAgentWritableEngineFactory pattern),
+// so every minted writable engine shares the one runner. A blank model → (nil, false); any
+// non-blank model routes on the parent provider with its window re-derived through
+// childWindowFor. Cross-provider routing by a bare model id is out of scope (the registry is
+// keyed by provider) — same posture as the read-only Subagent + Parallel factories.
+func buildWritableSubagentEngineFactory(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, _ string) func(model string) (*agent.Engine, bool) {
+	mainRunner := buildCommandRunner(cfg)
+	return func(model string) (*agent.Engine, bool) {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			return nil, false
+		}
+		windowFn := childWindowFor(cfg, provReg, parentProviderID, model)
+		deps := writableExplorerDeps(cfg, provider, model, "task:read-write:model="+model, windowFn, mainRunner)
+		return agent.NewEngine(deps), true
+	}
 }
 
 // buildParallelEngineFactory returns the per-branch model-override factory the Parallel
@@ -4981,6 +5023,14 @@ func buildSubagentTool(ctx context.Context, cfg Config, provReg *providerRegistr
 	// Skipped under no-FS (buildNoFSSubagentTool, above, wires no writable path).
 	writableEngine := buildWritableSubagentChildEngine(cfg, provReg, provider, parentProviderID, parentModel, buildCommandRunner(cfg))
 	opts = append(opts, agent.WithWritableChildEngine(writableEngine))
+	// WRITABLE EXPLORER per-call/routed model (mode:"read-write"+`model`, no `agent`;
+	// issue #285): a factory that rebuilds the WRITABLE explorer on the requested model via
+	// the SAME writableExplorerDeps recipe (MAIN runner, direct-write parity). It also backs
+	// the OPT-IN router's writable pick. The closure hands engine/agent only
+	// func(string)(*Engine,bool). Skipped under no-FS (buildNoFSSubagentTool wires no
+	// writable path).
+	opts = append(opts, agent.WithWritableEngineFactory(
+		buildWritableSubagentEngineFactory(cfg, provReg, provider, parentProviderID, parentModel)))
 	return agent.NewSubagentTool(
 		buildChildEngine(cfg, provReg, provider, parentProviderID, parentModel, sandboxedRunner),
 		opts...,

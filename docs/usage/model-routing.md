@@ -160,6 +160,9 @@ models:
   > inherited default.
 - **Per-category `model`** is an alias / slot / concrete id, resolved through the same
   alias map (operator targets are **uncapped** — the operator is authoritative).
+- **Writable delegations route too** (issue #285): a `mode:"read-write"` explorer picks its
+  model from the same taxonomy, running the WRITABLE engine on the routed model (direct-write
+  against your workspace). A writable specialist (`agent`) or a `resume` keeps its own model.
 - **Fail-soft + breaker**: any classifier failure, an unknown/hallucinated category, or
   an unresolvable target → the inherited default model; a per-run breaker (3 consecutive
   misses) skips the classifier for the rest of the run. **OFF (no taxonomy, or the

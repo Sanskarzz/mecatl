@@ -2,10 +2,12 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/stacklok/mecatl/engine/adapter/memfs"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/tool"
@@ -74,6 +76,56 @@ func TestRouteTaskMissLogsReason(t *testing.T) {
 				t.Fatalf("log attr %q leaked the untrusted task prompt: %v", k, v)
 			}
 		}
+	}
+}
+
+// TestWritableRouterMissLogsReasonAndFallsBack (issue #285 × #287): a PLAIN writable
+// delegation whose classification MISSES logs the WP2 per-miss INFO (reason attr) AND
+// falls back CLEANLY to the default writable explorer — the router is never load-bearing,
+// even for a writable call.
+func TestWritableRouterMissLogsReasonAndFallsBack(t *testing.T) {
+	diag := newInternalCapturingDiag()
+	// The router closure misses with a specific reason (the WP2 dispatch INFO surfaces it).
+	mainEngine := NewEngine(Deps{
+		LLM:     mockllm.New(),
+		Catalog: tool.NewCatalog(),
+		Policy:  allowAllInt(),
+		Model:   "main",
+		SubagentModelRouter: func(context.Context, string) (string, string, session.Usage, string, bool) {
+			return "", "", session.Usage{}, RouterMissBadVerdict, false
+		},
+	})
+	run := &Run{
+		router:   &modelRouterBreaker{max: defaultModelRouterMaxMisses},
+		children: newChildRunRegistry(),
+		diag:     diag,
+	}
+	caps := mainEngine.parentCaps(run, nil, 0)
+
+	tl := writableRouterTool(true) // writable factory wired ⇒ a writable delegation DOES route
+	res, err := tl.ExecuteWithParent(context.Background(),
+		session.NewToolCall("p1", "Subagent", json.RawMessage(`{"prompt":"implement it","mode":"read-write"}`)),
+		memfs.NewWorkspace("/ws"), nil, caps)
+	if err != nil {
+		t.Fatalf("transport error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("a writable router miss must complete on the default writable engine, got error: %q", res.Content)
+	}
+	if !strings.Contains(res.Content, "WRITABLE-DEFAULT") {
+		t.Fatalf("a writable router miss must fall back to the default writable explorer; got %q", res.Content)
+	}
+	var found bool
+	for _, r := range diag.snapshot() {
+		if strings.Contains(r.msg, "classification MISSED") {
+			found = true
+			if got := r.attrs["reason"]; got != RouterMissBadVerdict {
+				t.Fatalf("writable miss INFO reason = %v, want %q", got, RouterMissBadVerdict)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("a writable router miss must log the WP2 per-miss INFO")
 	}
 }
 

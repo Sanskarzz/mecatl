@@ -600,14 +600,27 @@ design (no classifier call was made — nothing to attribute). All three delegat
 share the closure, so team/parallel misses get the line for free. The wire cue
 (`SubagentPayload.RoutedMiss`) is a deferred follow-up; the INFO closes the observability gap.
 
-The RUN() HOOK (`maybeRouteModel`, `engine/agent/subagent.go`): for a PLAIN default delegation
-(gated — returns empty unless `!resuming && !args.Fork && args.Model=="" && args.Agent=="" &&
-caps.routeTask != nil`), it calls `caps.routeTask(args.Prompt)` BETWEEN `validateFork` and
-`resolveEngineAndLimits`, threading the routed model into `selectChildEngine` via the EXISTING
-per-call `model` factory path (`t.engineFactory(routedModel)` — decide-once, contamination-safe,
-same-provider). PRECEDENCE by gating: per-call `model` > agent-def `Model` > fork/resume > router >
-inherited default. Both foreground and background route (the decision is threaded into
-`backgroundChild`). `EvSubagentStart` carries `RoutedCategory`/`RoutedModel` (bare
+The RUN() HOOK (`(*SubagentTool).maybeRouteModel`, `engine/agent/subagent.go`): for a PLAIN
+default delegation (gated — returns empty unless `!resuming && !args.Fork && args.Model=="" &&
+args.Agent=="" && caps.routeTask != nil`), it calls `caps.routeTask(args.Prompt)` BETWEEN
+`validateFork` and `resolveEngineAndLimits`, threading the routed model into `selectChildEngine`
+via the EXISTING per-call `model` factory path (`t.engineFactory(routedModel)` — decide-once,
+contamination-safe, same-provider). PRECEDENCE by gating: per-call `model` > agent-def `Model` >
+fork/resume > router > inherited default. Both foreground and background route (the decision is
+threaded into `backgroundChild`).
+
+WRITABLE parity (issue #285): a `mode:"read-write"` explorer (no `agent`) honours the per-call
+`model` and the router pick the SAME way — through `writableEngineFactory`
+(`WithWritableEngineFactory`, minted by `buildWritableSubagentEngineFactory` sharing the
+`writableExplorerDeps` recipe with `buildWritableSubagentChildEngine`). `selectChildEngine`'s
+writable arm returns BEFORE the read-only `model`/router arms (the pre-#285 bug: the
+unconditional writable clobber in `resolveEngineAndLimits` discarded a read-only per-model
+engine and ran the DEFAULT writable model), so `resolveEngineAndLimits` now only swaps for a
+writable RESUME. `validateMode` rejects `read-write`+`model` with no writable factory (a LOUD
+error, never a silent inherit), and `maybeRouteModel` is now a METHOD gated on `!writable ||
+writableEngineFactory != nil` so a writable delegation whose routed pick would be discarded
+(factory unwired) never spends the classifier. `read-write`+`agent` (a writable specialist) and
+`read-write`+`resume` keep their own engines, unchanged. `EvSubagentStart` carries `RoutedCategory`/`RoutedModel` (bare
 metadata: a category label + a model id, gauntlet-#7 safe), surfaced end-to-end —
 the session struct + a per-classification INFO + the proto/client wire
 (`routed_category`/`routed_model` on the `Subagent` event payload, relayed through

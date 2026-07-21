@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/stacklok/mecatl/engine/adapter/memfs"
+	"github.com/stacklok/mecatl/engine/adapter/memstore"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/tool"
@@ -147,7 +148,8 @@ func TestRunResumeDoesNotRoute(t *testing.T) {
 	route := func(context.Context, string) (string, string, bool) { calls++; return "large", "router-model", true }
 	caps := parentCaps{children: newChildRunRegistry(), routeTask: route}
 	args := subagentArgs{Prompt: "x", Resume: "subagent-abc"}
-	cat, model := maybeRouteModel(context.Background(), args, true /*resuming*/, caps)
+	tl := routerTool()
+	cat, model := tl.maybeRouteModel(context.Background(), args, true /*resuming*/, false /*writable*/, caps)
 	if calls != 0 {
 		t.Fatalf("routeTask must NOT be consulted on a resume; called %d times", calls)
 	}
@@ -189,6 +191,117 @@ func TestRunNilRouteTaskNoRouting(t *testing.T) {
 	}
 	if !strings.Contains(res.Content, "DEFAULT") {
 		t.Fatalf("a nil routeTask must run the default engine; got %q", res.Content)
+	}
+}
+
+// writableRouterTool builds a Subagent whose DEFAULT writable explorer emits
+// "WRITABLE-DEFAULT" and whose writable engine factory mints "WRITABLE-ROUTED:<model>"
+// (found=true) — so a test can tell whether a routed writable pick took effect or the call
+// fell back to the default writable explorer. found=false makes every factory call a miss.
+func writableRouterTool(found bool) *SubagentTool {
+	wf := func(model string) (*Engine, bool) {
+		if !found {
+			return nil, false
+		}
+		return markerEngine("WRITABLE-ROUTED:" + model), true
+	}
+	return NewSubagentTool(markerEngine("READ-ONLY"),
+		WithWritableChildEngine(markerEngine("WRITABLE-DEFAULT")),
+		WithWritableEngineFactory(wf)).(*SubagentTool)
+}
+
+// TestRunWritableRoutesWhenFactoryWired (issue #285): a PLAIN writable delegation
+// (mode:"read-write", no model/agent) with the writable engine factory wired consults the
+// router (calls==1) and mints the child on the routed pick via the WRITABLE factory.
+func TestRunWritableRoutesWhenFactoryWired(t *testing.T) {
+	tl := writableRouterTool(true)
+	var calls int
+	caps := parentCaps{children: newChildRunRegistry(), routeTask: func(context.Context, string) (string, string, bool) {
+		calls++
+		return "large", "big-model", true
+	}}
+	res, err := tl.ExecuteWithParent(context.Background(),
+		session.NewToolCall("p1", "Subagent", json.RawMessage(`{"prompt":"implement it","mode":"read-write"}`)),
+		memfs.NewWorkspace("/ws"), nil, caps)
+	if err != nil {
+		t.Fatalf("transport error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("a routed writable delegation must complete, got error: %q", res.Content)
+	}
+	if calls != 1 {
+		t.Fatalf("the router must be consulted exactly once for a plain writable delegation with a wired factory; calls=%d", calls)
+	}
+	if !strings.Contains(res.Content, "WRITABLE-ROUTED:big-model") {
+		t.Fatalf("a routed writable pick must mint the WRITABLE factory engine on the routed model; got %q", res.Content)
+	}
+}
+
+// TestRunWritableRoutedFactoryMissFailSoft: when the router returns a pick but the writable
+// factory misses it (nil,false), the call FAILS SOFT to the default writable explorer —
+// never an error (the router is never load-bearing).
+func TestRunWritableRoutedFactoryMissFailSoft(t *testing.T) {
+	tl := writableRouterTool(false) // factory always misses
+	caps := parentCaps{children: newChildRunRegistry(), routeTask: func(context.Context, string) (string, string, bool) {
+		return "large", "big-model", true
+	}}
+	res, err := tl.ExecuteWithParent(context.Background(),
+		session.NewToolCall("p1", "Subagent", json.RawMessage(`{"prompt":"implement it","mode":"read-write"}`)),
+		memfs.NewWorkspace("/ws"), nil, caps)
+	if err != nil {
+		t.Fatalf("transport error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("a routed writable factory miss must fall back cleanly, got error: %q", res.Content)
+	}
+	if !strings.Contains(res.Content, "WRITABLE-DEFAULT") {
+		t.Fatalf("a routed writable factory miss must fall back to the DEFAULT writable explorer; got %q", res.Content)
+	}
+}
+
+// TestRunWritableDoesNotSpendClassifierWhenFactoryUnwired (issue #285): a writable
+// delegation whose routed pick would be DISCARDED (writable engine factory UNWIRED) must
+// NOT spend the classifier at all — calls==0 — and runs the default writable explorer.
+func TestRunWritableDoesNotSpendClassifierWhenFactoryUnwired(t *testing.T) {
+	// Writable explorer wired, but NO WithWritableEngineFactory.
+	tl := NewSubagentTool(markerEngine("READ-ONLY"),
+		WithWritableChildEngine(markerEngine("WRITABLE-DEFAULT"))).(*SubagentTool)
+	var calls int
+	caps := parentCaps{children: newChildRunRegistry(), routeTask: func(context.Context, string) (string, string, bool) {
+		calls++
+		return "large", "big-model", true
+	}}
+	res, err := tl.ExecuteWithParent(context.Background(),
+		session.NewToolCall("p1", "Subagent", json.RawMessage(`{"prompt":"implement it","mode":"read-write"}`)),
+		memfs.NewWorkspace("/ws"), nil, caps)
+	if err != nil {
+		t.Fatalf("transport error: %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("a writable delegation with no writable factory must NOT spend the classifier; calls=%d", calls)
+	}
+	if res.IsError || !strings.Contains(res.Content, "WRITABLE-DEFAULT") {
+		t.Fatalf("it must run the default writable explorer; got error=%v content=%q", res.IsError, res.Content)
+	}
+}
+
+// TestWritableResumeUsesWritableChildEngine (issue #285): a writable RESUME continues on
+// the WRITABLE explorer engine (not the read-only default explorer validateResume returns),
+// so its Edit/Write survive. Asserted at resolveEngineAndLimits — the single seam that
+// forces the swap — with a store wired so validateResume passes.
+func TestWritableResumeUsesWritableChildEngine(t *testing.T) {
+	writable := markerEngine("WRITABLE-DEFAULT")
+	tl := NewSubagentTool(markerEngine("READ-ONLY"),
+		WithWritableChildEngine(writable),
+		WithSubagentStore(memstore.New())).(*SubagentTool)
+
+	args := subagentArgs{Prompt: "continue", Resume: "subagent-abc"}
+	engine, _, _, ok := tl.resolveEngineAndLimits("p1", args, true /*resuming*/, true /*writable*/, "")
+	if !ok {
+		t.Fatal("a writable resume with a wired store must resolve")
+	}
+	if engine != writable {
+		t.Fatal("a writable resume must run on the WRITABLE explorer engine, not the read-only default explorer")
 	}
 }
 

@@ -28,6 +28,16 @@ The covered surface is the seven core packages (`session`, `governance`, `tool`,
 
 ### Added
 
+- **`agent.WithWritableEngineFactory(f func(model string) (*Engine, bool))
+  SubagentOption`** — injects the composition factory that mints a WRITABLE explorer
+  child engine on a per-call OVERRIDE model for a mode:"read-write" Subagent call with
+  no `agent` (issue #285), so a writable subagent honours the per-call `model` and the
+  OPT-IN router pick instead of always running on its default model. nil (the default,
+  and always on the no-FS path) leaves the writable-explorer-per-model path unwired (a
+  read-write+`model` call then errors from validateMode — never a silent inherit).
+  Classified Added per COMPATIBILITY.md (a new exported option constructor is a minor
+  bump; the `SubagentTool` struct is unexported). (#285)
+
 - **`agent.RouterMiss*` constants** — `RouterMissDegenerateInput`,
   `RouterMissClassifierError`, `RouterMissCancelled`, `RouterMissBadVerdict`, and
   `RouterMissUnknownCategory`: the string reason a model-router classification did

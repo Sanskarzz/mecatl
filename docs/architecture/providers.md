@@ -331,6 +331,14 @@ same-provider** (the engine layer stays model-string-only; the chosen model is n
 **Precedence** (by gating): explicit per-call `model` > agent-def `Model` > fork/resume >
 **router** > inherited default. The router fills the gap; it never overrides pinned intent.
 
+**Writable delegations too (issue #285).** A `mode:"read-write"` delegation honours the
+same axes: a per-call `model` (or the router pick) rebuilds the WRITABLE explorer on that
+model via the writable engine factory (direct-write against the parent tree — no fork). A
+writable call with an explicit `model` but no writable factory wired is a LOUD error (never
+a silent inherit); a plain writable delegation whose routed pick would be discarded (factory
+unwired) does not spend the classifier at all. A writable `resume`/specialist (`agent`) keeps
+its own engine, unchanged.
+
 **Fail-soft + breaker.** The router is **never load-bearing**. Any classifier failure,
 cancellation, unparseable verdict, unknown category, or unresolvable target → the
 delegation inherits the default explorer model. A per-run circuit breaker (default 3
