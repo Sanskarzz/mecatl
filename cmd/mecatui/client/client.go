@@ -125,7 +125,7 @@ func (c *Client) CreateSession(ctx context.Context, workspace string, mode mecat
 
 // ForkSession creates a peer session from the conversation-history snapshot of the
 // session srcID (ADR 0065) and returns the bare new session id. reasoningEffort is
-// the OPTIONAL effort override (ADR 0066): empty inherits the source's effort
+// the OPTIONAL effort override (ADR 0068): empty inherits the source's effort
 // verbatim; provider and model ALWAYS inherit. This is the SINGLE proto-build point
 // for the fork — the ui passes plain strings and never sees the proto request. The
 // caller owns the follow-up GetSession refetch for the forked session's resolved

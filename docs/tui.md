@@ -323,7 +323,7 @@ unset sentinel (operator/provider default) and is sent as the empty effort. The
 cursor opens on the current (server-resolved) tier, marked with a `●`; when the
 current model is known to lack reasoning support a warning notes a tier will be
 ignored. `enter` on a tier applies **directly** via a **conversation fork** (ADR
-0066): the server forks the session's history onto a peer session at the new effort,
+0068): the server forks the session's history onto a peer session at the new effort,
 so the **transcript is kept** — no restart, no wipe, no confirm step. There's a
 brief "switching effort — forking conversation…" transition while the fork rebinds;
 the source session is then closed. `esc` closes the picker. The only RPC is the fork

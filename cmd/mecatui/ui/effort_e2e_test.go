@@ -12,7 +12,7 @@ import (
 	"github.com/stacklok/mecatl/cmd/mecatui/theme"
 )
 
-// The user-reachable E2E for the /effort fork-resume slice (ADR 0066), at the
+// The user-reachable E2E for the /effort fork-resume slice (ADR 0068), at the
 // teatest level (the real program loop). It proves the headline behaviour
 // end-to-end: driving /effort → enter forks the session at the new effort, the
 // TRANSCRIPT SURVIVES (no resetSession wipe), the session id rebinds to the fork,
@@ -163,7 +163,7 @@ func TestEffortE2EForkFailureLeavesSourceOpen(t *testing.T) {
 	}
 }
 
-// TestEffortE2EQueuedMidRunForksOnRunEnd pins the in-flight-run ordering ADR 0066
+// TestEffortE2EQueuedMidRunForksOnRunEnd pins the in-flight-run ordering ADR 0068
 // promises ("switchEffort ends any in-flight run before forking"), at the teatest
 // level. /effort is idle-only (openEffort self-gates on phaseIdle), so typed
 // mid-run the command ENQUEUES — it does NOT open the picker or fork over a live
@@ -215,7 +215,7 @@ func TestEffortE2EQueuedMidRunForksOnRunEnd(t *testing.T) {
 
 	// Release the gate: the in-flight run terminates, the queue drains the staged
 	// "/effort" line (now idle), and the built-in intercept opens the picker — the fork
-	// fires only AFTER the run ended (the ADR 0066 ordering, reached via the queue
+	// fires only AFTER the run ended (the ADR 0068 ordering, reached via the queue
 	// drain). The drained "/effort" opens the picker WITHOUT starting a run, so the
 	// reducer settles back to idle once the picker is open; wait for that before
 	// pressing keys (a Down/Enter sent before the picker opened would be misrouted).

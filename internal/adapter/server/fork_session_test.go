@@ -163,7 +163,7 @@ func TestForkSessionInheritsHistoryAndLabels(t *testing.T) {
 	}
 }
 
-// TestForkSessionEffortOverride verifies the ADR 0066 effort override: a source
+// TestForkSessionEffortOverride verifies the ADR 0068 effort override: a source
 // with provider+model+effort "low", forked with override "high", yields a peer
 // whose ReasoningEffort label is "high" while ProviderID/ModelID inherit verbatim,
 // with a per-session engine rehydrated on the override selector, and
@@ -242,7 +242,7 @@ func TestForkSessionEffortOverride(t *testing.T) {
 }
 
 // TestForkSessionEmptyEffortInherits verifies an empty effort override inherits the
-// source's effort verbatim (ADR 0066 default), provider/model included. A non-empty
+// source's effort verbatim (ADR 0068 default), provider/model included. A non-empty
 // effort needs a per-session engine, so the source is built on a factory-backed
 // service (the effort label only sticks when the engine factory runs).
 func TestForkSessionEmptyEffortInherits(t *testing.T) {
@@ -587,7 +587,7 @@ func TestHTTPForkSessionRoundTrip(t *testing.T) {
 }
 
 // effortFactory is a SessionEngine factory that stamps the selector's effort onto
-// the result so the fork's ResolvedModel echo + label carry it (ADR 0066).
+// the result so the fork's ResolvedModel echo + label carry it (ADR 0068).
 func effortFactory(_ context.Context, sel server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile, _ string, _ session.PermissionMode) (server.SessionEngineResult, error) {
 	eng := agent.NewEngine(agent.Deps{
 		LLM:     mockllm.New(mockllm.TextTurn("r"), mockllm.TextTurn("r")),
@@ -598,7 +598,7 @@ func effortFactory(_ context.Context, sel server.ProviderSelector, _ []mcp.Serve
 	return server.SessionEngineResult{Engine: eng, Close: func() error { return nil }, ReasoningEffort: sel.ReasoningEffort}, nil
 }
 
-// TestGRPCForkSessionEffortOverride is the gRPC ADR 0066 arm: an effort-override
+// TestGRPCForkSessionEffortOverride is the gRPC ADR 0068 arm: an effort-override
 // fork threads reasoning_effort over the wire to the forked session's label.
 func TestGRPCForkSessionEffortOverride(t *testing.T) {
 	svc, _ := newMCPServiceStore(t, "gRPC reply", effortFactory)
@@ -638,7 +638,7 @@ func TestGRPCForkSessionEffortOverride(t *testing.T) {
 	}
 }
 
-// TestHTTPForkSessionEffortOverride is the HTTP ADR 0066 arm: a fork body carrying
+// TestHTTPForkSessionEffortOverride is the HTTP ADR 0068 arm: a fork body carrying
 // reasoning_effort threads the field to the forked session's label.
 func TestHTTPForkSessionEffortOverride(t *testing.T) {
 	svc, _ := newMCPServiceStore(t, "HTTP reply", effortFactory)

@@ -368,7 +368,7 @@ func (m Model) restartOnModelCmd(oldID string, sel client.ModelSelection) tea.Cm
 	}
 }
 
-// switchEffort performs the /effort fork-resume handoff (ADR 0066): like
+// switchEffort performs the /effort fork-resume handoff (ADR 0068): like
 // restartOnModel it persists the pick, records provenance, ends any in-flight run,
 // and drives phaseConnecting — but it deliberately does NOT resetSession(): the
 // server forks the session's conversation onto the peer session, so the transcript

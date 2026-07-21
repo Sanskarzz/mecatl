@@ -119,7 +119,7 @@ func (h *HarnessServer) CloseSession(ctx context.Context, req *mecatlv1.CloseSes
 // ForkSession creates a peer session from an existing session's history snapshot
 // (ADR 0065). The new session inherits the source's mode, workspace, limits, and
 // provider/model/profile labels; same provider and model only, with the ONE
-// optional selector delta being a reasoning-effort override (ADR 0066, empty
+// optional selector delta being a reasoning-effort override (ADR 0068, empty
 // inherits). The source must be at a turn boundary (idle/terminal); a
 // running/awaiting source is rejected with FailedPrecondition. No streaming — the
 // fork is synchronous.

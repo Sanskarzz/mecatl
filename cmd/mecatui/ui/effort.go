@@ -12,7 +12,7 @@ import (
 
 // effort.go is the /effort picker — a tiny SELECTING overlay (cursor + enter) for
 // the reasoning-effort tier (ADR 0055). Enter on a tier applies DIRECTLY via a
-// FORK-RESUME (ADR 0066): the server forks the session's conversation onto a peer
+// FORK-RESUME (ADR 0068): the server forks the session's conversation onto a peer
 // session at the new effort, so the transcript SURVIVES — no confirm step (the
 // switch is non-destructive, so it is never a teardown warning), no wipe. It is
 // much simpler than /models: a FIXED enum, no filter; the only RPC is the fork
@@ -174,7 +174,7 @@ func (m Model) onEffortKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 // chooseEffort handles enter on the cursor row: it builds a selection carrying the
 // CURRENT provider/model (so the model is PRESERVED — only the effort changes) plus
 // the picked effort, then fires the switchEffort FORK-RESUME handoff DIRECTLY (ADR
-// 0066) — no confirm step: the fork is non-destructive (the transcript survives on
+// 0068) — no confirm step: the fork is non-destructive (the transcript survives on
 // the peer session), so there is nothing to warn about. A cursor past the enum end
 // is a no-op (defensive).
 func (m Model) chooseEffort() (tea.Model, tea.Cmd, bool) {

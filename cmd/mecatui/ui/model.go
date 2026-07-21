@@ -56,7 +56,7 @@ type SessionCreator interface {
 	// defers and retries at the next prompt boundary.
 	SetMode(ctx context.Context, id, mode string) (string, error)
 	// ForkSession creates a peer session from srcID's conversation-history snapshot
-	// (ADR 0065) with an OPTIONAL reasoning-effort override (ADR 0066; empty
+	// (ADR 0065) with an OPTIONAL reasoning-effort override (ADR 0068; empty
 	// inherits the source's) and returns the new session id. The /effort fork-resume
 	// handoff uses it: the transcript SURVIVES the effort switch because the fork
 	// carries it (title is omitted — the fork inherits the source's title; provider

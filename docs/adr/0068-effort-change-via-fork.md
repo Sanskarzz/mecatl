@@ -1,4 +1,4 @@
-# ADR 0066 — Change reasoning effort via conversation fork (keep the transcript)
+# ADR 0068 — Change reasoning effort via conversation fork (keep the transcript)
 
 - Status: Accepted
 - Date: 2026-07-21

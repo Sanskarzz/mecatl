@@ -272,7 +272,7 @@ backstop, CWE-918). See `docs/adr/0059-mcp-typed-tool-results.md`.
 creates a new peer session whose conversation history is a snapshot of an existing
 session's, inheriting the source's mode, workspace, limits, and
 provider/model/profile labels (ADR 0065). The ONE permitted selector delta is an
-optional `reasoning_effort` override (ADR 0066): empty inherits the source's effort
+optional `reasoning_effort` override (ADR 0068): empty inherits the source's effort
 verbatim, while a non-empty value replaces only the effort label/engine — provider
 and model always inherit. This is how a mid-conversation effort switch works
 non-destructively (the mecatui `/effort` fork-resume): the transcript survives on
