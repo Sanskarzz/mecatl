@@ -165,3 +165,45 @@ func TestRouteTaskMissEmptyReasonFallsBackToEmptyModel(t *testing.T) {
 		t.Fatal("a blank routed model must still log a miss INFO")
 	}
 }
+
+// TestRouterBreakerOpenSkipStaysSilent pins that the per-miss INFO fires ONLY for a real
+// classification attempt — the breaker-OPEN skip path emits NO per-miss line. Driving
+// misses PAST the breaker max, the "classification MISSED" INFO count must equal exactly
+// `max` (the calls that actually consulted the classifier), never max+skips: once the
+// breaker opens, the closure returns early (silent) before logRouterMissReason. A
+// regression that logged on the skip path would over-count here.
+func TestRouterBreakerOpenSkipStaysSilent(t *testing.T) {
+	diag := newInternalCapturingDiag()
+	mainEngine := NewEngine(Deps{
+		LLM:     mockllm.New(),
+		Catalog: tool.NewCatalog(),
+		Policy:  allowAllInt(),
+		Model:   "main",
+		SubagentModelRouter: func(context.Context, string) (string, string, session.Usage, string, bool) {
+			return "", "", session.Usage{}, RouterMissBadVerdict, false // always miss
+		},
+	})
+	run := &Run{
+		router:   &modelRouterBreaker{max: defaultModelRouterMaxMisses},
+		children: newChildRunRegistry(),
+		diag:     diag,
+	}
+	caps := mainEngine.parentCaps(run, nil, 0)
+
+	// Call well PAST the breaker max: the first `max` calls consult the classifier (each
+	// logs one per-miss INFO), the breaker opens, and the remaining calls SKIP it silently.
+	for i := 0; i < defaultModelRouterMaxMisses+4; i++ {
+		caps.routeTask(context.Background(), "task")
+	}
+
+	var missLines int
+	for _, r := range diag.snapshot() {
+		if strings.Contains(r.msg, "classification MISSED") {
+			missLines++
+		}
+	}
+	if missLines != defaultModelRouterMaxMisses {
+		t.Fatalf("per-miss INFO count = %d, want exactly %d (the breaker-open skip path must stay silent, never max+skips)",
+			missLines, defaultModelRouterMaxMisses)
+	}
+}

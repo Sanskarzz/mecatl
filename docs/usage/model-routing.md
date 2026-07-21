@@ -24,9 +24,10 @@ models:
     coder: deepseek/deepseek-v4-flash
     quick: google/gemini-3.5-flash
   default: z-ai/glm-5.2    # the session model (the orchestrator)
-  subagent: coder          # the def-less child default — every plain Subagent / Parallel-branch /
-                           # team-member child runs on it (a def `model:` or per-call override still wins;
-                           # the CLI --subagent-model wins over this). Operator-tier only.
+  subagent: coder          # the def-less child default — the fail-soft FLOOR when the router below
+                           # is present (router pick > this > session model), and the child default
+                           # when no router taxonomy is configured. A def `model:` / per-call override /
+                           # CLI --subagent-model still wins. Operator-tier only.
   slots:                   # route housekeeping + plan-mode to a cheaper/stronger model
     compaction: quick
     guardrail: quick

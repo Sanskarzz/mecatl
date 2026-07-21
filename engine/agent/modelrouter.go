@@ -25,12 +25,19 @@ import (
 // returns ok=false and the caller (the Subagent run() hook) falls through to the
 // inherited default explorer model — byte-identically to a deployment with no router.
 
-// Router miss-reason constants (issue #287): the SPECIFIC reason a classification did
-// NOT yield a routed model, surfaced by RunModelRouter (engine-side reasons) and by the
-// composition closure (category-mapping reasons) so the dispatch-path chokepoint can log
-// WHY a plain delegation fell through to the inherited default model. They are metadata
-// ONLY — never the task prompt or the classifier's output (gauntlet #7). Empty ("") is
-// the success sentinel: a classification that routed a model returns no reason.
+// Router miss-reason constants (issue #287): the SPECIFIC reason a classification did NOT
+// yield a routed model. They enumerate the CLOSED set RunModelRouter itself returns (its
+// `missReason` output); the dispatch-path chokepoint logs WHY a delegation fell through to
+// the inherited default model. Empty ("") is the success sentinel.
+//
+// NOTE: the Deps.SubagentModelRouter closure (the COMPOSITION half) may return ADDITIONAL,
+// OPEN-SET free-form reasons for its own category-mapping misses (e.g.
+// "category-selector-empty (category=…)", "category-target-unresolvable (category=… selector=…)",
+// and the dispatch closure's "empty-model" fallback). Those are NOT in this enum — the
+// reason string is INFORMATIONAL (for the operator log), never a value callers branch on.
+//
+// All reasons are metadata ONLY — never the task prompt or the classifier's output
+// (gauntlet #7).
 const (
 	// RouterMissDegenerateInput: a fast fail-soft miss on a leaf-guard input — a nil
 	// classifier engine, an empty category list, or a blank task prompt. No classifier

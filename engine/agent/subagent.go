@@ -1420,6 +1420,14 @@ func (t *SubagentTool) selectReadOnlyAgentEngine(callID session.ToolCallID, want
 // through to the inherited default explorer `fallback` (never an error; the router is never
 // load-bearing). routedModel is the ALREADY-RESOLVED concrete id. fallback is the engine
 // selectChildEngine already chose (the default explorer, or a read-only named specialist).
+//
+// SIBLING of selectWritableExplorerEngine — DELIBERATELY NOT MERGED. The two share a
+// three-case shape (per-call model → routed pick → fallback) but diverge in the factory they
+// mint through (engineFactory vs writableEngineFactory), the fallback (a passed-in `fallback`
+// vs the writable child engine), and the user-facing error wording ("inherit the parent's
+// model" vs "run the writable subagent on its default model"). Merging them onto a shared
+// helper would couple the read-only and writable posture and force one of those seams to
+// leak into the other — the wrong abstraction. Keep them parallel.
 func (t *SubagentTool) selectReadOnlyModelEngine(callID session.ToolCallID, wantModel, routedModel string, fallback *Engine, limits session.Limits) (*Engine, session.Limits, session.ToolResult, bool) {
 	if wantModel != "" {
 		if t.engineFactory == nil {
@@ -1454,6 +1462,12 @@ func (t *SubagentTool) selectReadOnlyModelEngine(callID session.ToolCallID, want
 //
 // limits is threaded through unchanged (the writable explorer uses the default explorer
 // bound, the same as the read-only default path).
+//
+// SIBLING of selectReadOnlyModelEngine — DELIBERATELY NOT MERGED. They share the
+// three-case shape (per-call model → routed pick → fallback) but diverge in the factory
+// (writableEngineFactory vs engineFactory), the fallback (writableChildEngine vs a passed-in
+// `fallback`), and the error wording — merging would couple the writable and read-only
+// posture, the wrong abstraction. See selectReadOnlyModelEngine's note.
 func (t *SubagentTool) selectWritableExplorerEngine(callID session.ToolCallID, wantModel, routedModel string, limits session.Limits) (*Engine, session.Limits, session.ToolResult, bool) {
 	if wantModel != "" {
 		if t.writableEngineFactory == nil {

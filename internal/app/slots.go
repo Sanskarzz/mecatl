@@ -711,7 +711,7 @@ func logModelRouterFacts(cfg Config) {
 	// shared-engine narration, like logSlotConfigFacts).
 	classifier := resolveRouterClassifierModel(cfg, cfg.Model)
 	cfg.diag().Log(context.Background(), port.LevelInfo,
-		"subagent model router ACTIVE: a tiny classifier picks the child model per delegation from the operator taxonomy — this adds one extra classifier LLM call per plain delegation (bounded by --max-run-tokens; set models.router.disabled or --subagent-model-router=false to turn it off)",
+		"subagent model router ACTIVE: a tiny classifier picks the child model per routable delegation from the operator taxonomy — plain, writable-explorer, and unpinned agent-def calls (issues #285/#286), adding one extra classifier LLM call each (bounded by --max-run-tokens; set models.router.disabled or --subagent-model-router=false to turn it off)",
 		"categories", len(cfg.RouterCategories), "classifier", classifier, "default_category", cfg.RouterDefaultCategory)
 }
 
