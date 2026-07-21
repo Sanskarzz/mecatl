@@ -354,3 +354,7 @@ func (errSession) GetSession(_ context.Context, _ string) (client.SessionSnapsho
 }
 
 func (errSession) SetMode(_ context.Context, _, mode string) (string, error) { return mode, nil }
+
+func (errSession) ForkSession(_ context.Context, _, _ string) (string, error) {
+	return "", context.DeadlineExceeded
+}

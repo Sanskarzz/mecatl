@@ -197,6 +197,44 @@ type fakeConv struct {
 	getSessionResults []client.ResolvedModel
 	getSessionErr     error
 	getSessionCount   int
+
+	// ForkSession recorders (ADR 0066 effort fork-resume). forkedFrom/forkedEffort
+	// record the LAST fork's source id + effort override; forkCount counts calls.
+	// forkedID, when non-empty, is the id the fork returns (default "sess-fork-N");
+	// forkErr forces the recoverable-failure path (the source is NOT closed).
+	// forked is closed on the first fork so a teatest can sequence on it
+	// (goroutine signal, output-independent).
+	forkedFrom   string
+	forkedEffort string
+	forkCount    int
+	forkedID     string
+	forkErr      error
+	forked       chan struct{}
+	forkedOnce   sync.Once
+}
+
+// ForkSession implements the ui SessionCreator's fork seam (ADR 0066): it records
+// the source id + effort override and returns a DISTINCT fork id so the /effort
+// fork-resume handoff can assert the rebind. forkErr drives the recoverable-failure
+// path. The fake carries NO history (the transcript-preservation guard asserts the
+// UI's own m.conv, which the fork path must not touch).
+func (c *fakeConv) ForkSession(_ context.Context, srcID, reasoningEffort string) (string, error) {
+	c.mu.Lock()
+	c.forkedFrom = srcID
+	c.forkedEffort = reasoningEffort
+	c.forkCount++
+	n := c.forkCount
+	c.mu.Unlock()
+	if c.forked != nil {
+		c.forkedOnce.Do(func() { close(c.forked) })
+	}
+	if c.forkErr != nil {
+		return "", c.forkErr
+	}
+	if c.forkedID != "" {
+		return c.forkedID, nil
+	}
+	return "sess-fork-" + strconv.Itoa(n), nil
 }
 
 // GetSession scripts the footer-heal refetch. Successive calls walk
