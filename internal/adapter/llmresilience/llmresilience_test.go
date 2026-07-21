@@ -2,8 +2,10 @@ package llmresilience
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"iter"
 	"net"
 	"net/http"
@@ -215,10 +217,36 @@ func TestFailsThenSucceedsWithinMaxAttempts(t *testing.T) {
 	}
 }
 
+// TestRetriesTruncatedFirstChunk proves a truncated first SSE frame — surfaced
+// as a *json.SyntaxError yielded as the first (and only) chunk, the real
+// establishment-time shape — is RETRIED, not surfaced. Without the classifier
+// fix this failed on the first attempt with "unexpected end of JSON input".
+func TestRetriesTruncatedFirstChunk(t *testing.T) {
+	f := &fakeProvider{steps: []step{
+		{midErr: emptyJSONErr()}, // no committing chunk yet ⇒ retryable establishment error
+		{chunks: textTurn("ok")},
+	}}
+	p := Wrap(f, tinyBackoffCfg(3))
+
+	seq, err := p.Stream(context.Background(), port.LLMRequest{})
+	if err != nil {
+		t.Fatalf("Stream returned outer error: %v", err)
+	}
+	got, derr := drain(t, seq)
+	if derr != nil {
+		t.Fatalf("drain error: %v", derr)
+	}
+	if len(got) != 3 || got[0].Text != "ok" {
+		t.Fatalf("got %+v, want textTurn(ok)", got)
+	}
+	if f.Calls() != 2 {
+		t.Fatalf("inner called %d times, want 2 (one retry after the truncated frame)", f.Calls())
+	}
+}
+
 func TestExceedsMaxAttemptsReturnsExhausted(t *testing.T) {
 	conn := &net.OpError{Op: "dial", Err: errors.New("connection refused")}
 	f := &fakeProvider{steps: []step{{outerErr: conn}}}
-
 	var backoffs int
 	clk := &manualClock{t: time.Unix(0, 0)}
 	cfg := Config{
@@ -1049,6 +1077,9 @@ func TestBreakerCountsTransientNotPermanent(t *testing.T) {
 		{"deadline exceeded transient", context.DeadlineExceeded, true},
 		{"http2 stream error transient", &http2.StreamError{StreamID: 45, Code: http2.ErrCodeInternal}, true},
 		{"http2 protocol error transient", &http2.StreamError{StreamID: 1, Code: http2.ErrCodeProtocol}, true},
+		{"json syntax error transient", emptyJSONErr(), true},
+		{"wrapped json syntax error transient", fmt.Errorf("agent: start stream: %w", emptyJSONErr()), true},
+		{"unexpected EOF transient", io.ErrUnexpectedEOF, true},
 		{"400 permanent", apiErr(400), false},
 		{"401 permanent", apiErr(401), false},
 		{"403 permanent", apiErr(403), false},
@@ -1065,6 +1096,45 @@ func TestBreakerCountsTransientNotPermanent(t *testing.T) {
 				t.Fatalf("isTransientForBreaker(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestBreakerOpensOnTruncationBurst is the P2 regression: a PERSISTENTLY
+// truncated/malformed gateway response must DRIVE the shared breaker, not merely
+// retry MaxAttempts on every call forever. With MaxAttempts:1, three consecutive
+// truncation failures open the breaker; the fourth call fails fast with a
+// *BreakerError without touching the inner provider.
+func TestBreakerOpensOnTruncationBurst(t *testing.T) {
+	clk := &manualClock{t: time.Unix(1000, 0)}
+	f := &fakeProvider{steps: []step{{outerErr: emptyJSONErr()}}} // last step is reused → always fails
+	cfg := Config{
+		MaxAttempts:      1, // one attempt per Stream so each call is one breaker failure
+		BaseBackoff:      time.Nanosecond,
+		MaxBackoff:       time.Nanosecond,
+		BreakerThreshold: 3,
+		BreakerCooldown:  30 * time.Second,
+		Clock:            clk.Now,
+	}
+	p := Wrap(f, cfg)
+
+	for i := 0; i < 3; i++ {
+		if _, err := p.Stream(context.Background(), port.LLMRequest{}); err == nil {
+			t.Fatalf("attempt %d: want a truncation error", i)
+		}
+	}
+	callsAtOpen := f.Calls()
+	if callsAtOpen != 3 {
+		t.Fatalf("inner called %d times, want 3 (each truncation must count toward the breaker)", callsAtOpen)
+	}
+
+	// Breaker now open: fail fast with *BreakerError, inner NOT called again.
+	_, err := p.Stream(context.Background(), port.LLMRequest{})
+	var be *BreakerError
+	if !errors.As(err, &be) {
+		t.Fatalf("err = %v, want *BreakerError (persistent truncation must open the breaker)", err)
+	}
+	if f.Calls() != callsAtOpen {
+		t.Fatalf("inner called %d times after breaker open, want %d", f.Calls(), callsAtOpen)
 	}
 }
 
@@ -1404,6 +1474,15 @@ type statusErr struct {
 func (e *statusErr) Error() string   { return e.msg }
 func (e *statusErr) StatusCode() int { return e.status }
 
+// emptyJSONErr returns the *json.SyntaxError the stdlib produces for empty input
+// — the exact shape the openai-go ssestream decoder yields on a truncated SSE
+// frame (json.Unmarshal(data, &chunk)), which is what surfaced as the occasional
+// "agent: start stream: unexpected end of JSON input".
+func emptyJSONErr() error {
+	var v map[string]any
+	return json.Unmarshal([]byte(""), &v)
+}
+
 func TestDefaultClassifier(t *testing.T) {
 	mk := func(code int) error { return apiErr(code) }
 	cases := []struct {
@@ -1428,6 +1507,12 @@ func TestDefaultClassifier(t *testing.T) {
 		{"unknown not", errors.New("mystery"), false},
 		{"nil not", nil, false},
 		{"context-overflow status 0 not retryable", &statusErr{status: 0, msg: "response failed: server_error: Your input exceeds the context window of this model"}, false},
+		// A truncated/malformed payload (partial SSE frame, or empty gateway error
+		// body whose status the SDK discarded) is a transient truncation, retryable.
+		{"json syntax error retryable", emptyJSONErr(), true},
+		{"wrapped json syntax error retryable", fmt.Errorf("agent: start stream: %w", emptyJSONErr()), true},
+		{"unexpected EOF retryable", io.ErrUnexpectedEOF, true},
+		{"wrapped unexpected EOF retryable", fmt.Errorf("x: %w", io.ErrUnexpectedEOF), true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
