@@ -11,6 +11,30 @@ The covered surface is the seven core packages (`session`, `governance`, `tool`,
 
 ## [Unreleased]
 
+### Changed
+
+- **`agent.RunModelRouter` + `agent.Deps.SubagentModelRouter` gain a miss-reason
+  return** (issue #287) — both now return an extra `missReason string` before the
+  terminal `ok bool`: `RunModelRouter` returns `(category string, usage
+  session.Usage, missReason string, ok bool)` and the `Deps.SubagentModelRouter`
+  closure type is `func(ctx, taskPrompt string) (category, model string, usage
+  session.Usage, missReason string, ok bool)`. `missReason` is `""` on a hit and one
+  of the new `RouterMiss*` constants on a miss, so the dispatch chokepoint can log a
+  per-miss INFO naming WHY a plain delegation fell through to the inherited default
+  model (metadata only — never the task prompt or classifier output; gauntlet #7).
+  Classified Changed (breaking; pre-v1 minor bump) per COMPATIBILITY.md — a widened
+  return signature. A composition consumer adds one return value at the
+  `buildModelRouterTask` closure and the `RunModelRouter` call site. (#287)
+
+### Added
+
+- **`agent.RouterMiss*` constants** — `RouterMissDegenerateInput`,
+  `RouterMissClassifierError`, `RouterMissCancelled`, `RouterMissBadVerdict`, and
+  `RouterMissUnknownCategory`: the string reason a model-router classification did
+  not yield a routed model, returned by `RunModelRouter`/`Deps.SubagentModelRouter`
+  (see Changed above). Classified Added per COMPATIBILITY.md (new exported
+  identifiers are a minor bump). (#287)
+
 ## [0.4.0] - 2026-06-30
 
 ### Added

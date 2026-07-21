@@ -557,7 +557,7 @@ delegation's model PER task from an operator category taxonomy. It is a sibling 
 ask reviewer — the same composition-built one-turn-engine pattern.
 
 ENGINE half (`engine/agent/modelrouter.go`): `RunModelRouter(ctx, engine, ModelRouteRequest)
-(category, usage, ok)` drives a tool-less ONE-turn classifier (role `model-router`, `modelRouterLimits`
+(category, usage, missReason, ok)` drives a tool-less ONE-turn classifier (role `model-router`, `modelRouterLimits`
 = 1 turn / 1 tool / 1 failure, 30s timeout, no-progress nudge disabled) over `buildModelRoutePrompt`
 (category names+descriptions in the clear; the untrusted task prompt inside `WriteUntrustedBlock`;
 the `category:`/`categories:`/`task to classify:` headers added to `framingHeader`). `parseRouterVerdict`
@@ -567,7 +567,13 @@ hallucinated category is a miss). The engine stays MODEL-STRING-ONLY: it returns
 composition owns the mapping. `usage` is the classifier's `sess.Usage`, returned on EVERY path
 (including early-return degenerate inputs and fail-soft misses) so the caller can fold it
 unconditionally (#92 fix). FAIL-SOFT: a `StopError`/`StopCancelled`, an unparseable verdict, or a
-degenerate input (nil engine / no categories / blank prompt) → `("", zero, false)`.
+degenerate input (nil engine / no categories / blank prompt) → `("", zero, <reason>, false)`.
+`missReason` (issue #287) is `""` on a hit and one of the exported `RouterMiss*` constants on a
+miss — `RouterMissDegenerateInput` / `RouterMissClassifierError` / `RouterMissCancelled` /
+`RouterMissBadVerdict` (`parseRouterVerdict` rejected a malformed/empty verdict) /
+`RouterMissUnknownCategory` (verdict named an unoffered category) — so the dispatch chokepoint can
+log WHY (see below). `parseRouterVerdict` additionally returns the reason so it can split
+bad-verdict from unknown-category.
 
 The per-RUN breaker `modelRouterBreaker` (default `defaultModelRouterMaxMisses`=3) mirrors
 `askReviewBreaker` exactly: its mutex serialises classifications within a run AND guards the
@@ -581,6 +587,18 @@ The closure also folds the classifier's `session.Usage` into the parent `sess.Us
 UNCONDITIONALLY (hit OR miss) via `_ = sess.RecordUsage(classifierUsage)` BEFORE the
 miss/hit branch (#92 fix): classifier spend is now visible to `budgetExhausted` (which
 reads `sess.Usage.TotalTokens()`), bounding CWE-770 unbounded accumulation.
+
+MISS OBSERVABILITY (issue #287). On a miss (`!ok || model==""`) the closure logs — BEFORE
+the breaker-open check — one INFO `"subagent model router: classification MISSED; child
+inherits the default model"` with a `reason` attr (the widened `missReason`, or the literal
+`empty-model` when a route reported ok but a blank model). The reason is METADATA ONLY (a
+harness/composition constant, never the task prompt or classifier output — gauntlet #7).
+Composition-side mapping misses carry their own reasons: `category-selector-empty
+(category=<name>)` and `category-target-unresolvable (category=<name> selector=<sel>)` (both
+operator-authored, safe). The breaker-open skip and the `hardAbort` skip stay SILENT by
+design (no classifier call was made — nothing to attribute). All three delegation families
+share the closure, so team/parallel misses get the line for free. The wire cue
+(`SubagentPayload.RoutedMiss`) is a deferred follow-up; the INFO closes the observability gap.
 
 The RUN() HOOK (`maybeRouteModel`, `engine/agent/subagent.go`): for a PLAIN default delegation
 (gated — returns empty unless `!resuming && !args.Fork && args.Model=="" && args.Agent=="" &&

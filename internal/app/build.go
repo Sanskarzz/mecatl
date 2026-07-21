@@ -4788,7 +4788,7 @@ func attachAskAdjudicator(deps agent.Deps, cfg Config, provReg *providerRegistry
 // provider-fixed-per-session hazard the rest of this file avoids. The per-session
 // closure already closes over the right (provider, parentModel), so each call re-derives
 // the contamination-safe deps for the classifier model.
-func buildModelRouterTask(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string) func(ctx context.Context, taskPrompt string) (category, model string, usage session.Usage, ok bool) {
+func buildModelRouterTask(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string) func(ctx context.Context, taskPrompt string) (category, model string, usage session.Usage, missReason string, ok bool) {
 	if cfg.RouterDisabled || len(cfg.RouterCategories) == 0 {
 		return nil // OFF: no taxonomy or kill-switched (ADR 0042); byte-identical.
 	}
@@ -4806,7 +4806,7 @@ func buildModelRouterTask(cfg Config, provReg *providerRegistry, provider port.L
 		selectorByName[c.Name] = c.Model
 	}
 	defaultCat := cfg.RouterDefaultCategory
-	return func(ctx context.Context, taskPrompt string) (string, string, session.Usage, bool) {
+	return func(ctx context.Context, taskPrompt string) (string, string, session.Usage, string, bool) {
 		// Build a fresh tool-less classifier engine (the askAdjudicatorDeps recipe): it
 		// compacts/counts/prompts on ITS model, fires no hooks, and carries no nested
 		// caps (childEngineDepsForProvider forces ChildAskReviewer + SubagentModelRouter
@@ -4824,26 +4824,32 @@ func buildModelRouterTask(cfg Config, provReg *providerRegistry, provider port.L
 		//
 		// Usage is returned on ALL paths (including misses) so the dispatch-path
 		// routeTask can fold it into the parent session's cumulative Usage (#92 fix).
-		category, classifierUsage, ok := agent.RunModelRouter(ctx, eng, agent.ModelRouteRequest{
+		category, classifierUsage, missReason, ok := agent.RunModelRouter(ctx, eng, agent.ModelRouteRequest{
 			TaskPrompt: taskPrompt,
 			Categories: cats,
 			Default:    defaultCat,
 		})
 		if !ok {
-			return "", "", classifierUsage, false // classifier miss: fail-soft inherit; still return spent usage.
+			// classifier miss: pass the engine-side reason (issue #287) through UNCHANGED
+			// so the dispatch chokepoint logs WHY; still return spent usage.
+			return "", "", classifierUsage, missReason, false
 		}
 		sel := strings.TrimSpace(selectorByName[category])
 		if sel == "" {
-			return "", "", classifierUsage, false
+			// The classifier chose a category whose taxonomy Model selector is empty — a
+			// composition-side (mapping) miss. Name the category (operator-authored, safe).
+			return "", "", classifierUsage, fmt.Sprintf("category-selector-empty (category=%s)", category), false
 		}
 		// Operator taxonomy targets are UNCAPPED: resolve through the operator-merged
 		// alias map with no allowlist membership test (the operator is authoritative — a
 		// category mapping is the operator's own binding, like models.default).
 		id, known := lookupModelAlias(cfg, sel)
 		if !known || id == "" {
-			return "", "", classifierUsage, false // unresolvable target: fail-soft inherit.
+			// The category's selector does not resolve to a concrete id — a composition-side
+			// (mapping) miss. Category name + selector are operator-authored metadata (safe).
+			return "", "", classifierUsage, fmt.Sprintf("category-target-unresolvable (category=%s selector=%s)", category, sel), false
 		}
-		return category, id, classifierUsage, true
+		return category, id, classifierUsage, "", true
 	}
 }
 

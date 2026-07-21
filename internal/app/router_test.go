@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
+	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/internal/adapter/permconfig"
@@ -84,12 +85,15 @@ func TestBuildModelRouterTaskMapsCategoryToModel(t *testing.T) {
 	if fn == nil {
 		t.Fatal("router task must be non-nil when enabled with a taxonomy")
 	}
-	cat, model, usage, ok := fn(context.Background(), "redesign the storage layer")
+	cat, model, usage, reason, ok := fn(context.Background(), "redesign the storage layer")
 	if !ok {
 		t.Fatal("a valid classification must resolve")
 	}
 	if cat != "large" || model != routerLarge {
 		t.Fatalf("routed (category, model) = (%q, %q), want (large, %q)", cat, model, routerLarge)
+	}
+	if reason != "" {
+		t.Fatalf("a successful route must carry no miss reason; got %q", reason)
 	}
 	if usage.TotalTokens() != inputTok+outputTok {
 		t.Fatalf("hit usage.TotalTokens() = %d, want %d (classifier spend must propagate through the composition closure)", usage.TotalTokens(), inputTok+outputTok)
@@ -111,9 +115,13 @@ func TestBuildModelRouterTaskPropagatesUsageOnMiss(t *testing.T) {
 	reg := regForTest(prov, providerAnthropic, "session-model")
 
 	fn := buildModelRouterTask(routerTaxonomyCfg(), reg, prov, providerAnthropic, "session-model")
-	cat, model, usage, ok := fn(context.Background(), "x")
+	cat, model, usage, reason, ok := fn(context.Background(), "x")
 	if ok || cat != "" || model != "" {
 		t.Fatalf("a garbage verdict must be a fail-soft miss; got (cat=%q, model=%q, ok=%v)", cat, model, ok)
+	}
+	// The engine-side reason (bad-verdict) passes through the composition closure unchanged.
+	if reason != agent.RouterMissBadVerdict {
+		t.Fatalf("garbage-verdict miss reason = %q, want the engine reason %q passed through", reason, agent.RouterMissBadVerdict)
 	}
 	if usage.TotalTokens() != inputTok+outputTok {
 		t.Fatalf("miss usage.TotalTokens() = %d, want %d (miss path must still propagate spent usage)", usage.TotalTokens(), inputTok+outputTok)
@@ -132,7 +140,7 @@ func TestBuildModelRouterTaskResolvesCategoryAlias(t *testing.T) {
 	cfg.ModelAliases = map[string]string{"tiny": "resolved-tiny-1.0"} // alias → concrete id
 
 	fn := buildModelRouterTask(cfg, reg, prov, providerAnthropic, "session-model")
-	_, model, _, ok := fn(context.Background(), "rename a var")
+	_, model, _, _, ok := fn(context.Background(), "rename a var")
 	if !ok || model != "resolved-tiny-1.0" {
 		t.Fatalf("aliased category routed to (%q, %v), want resolved-tiny-1.0 true", model, ok)
 	}
@@ -145,8 +153,8 @@ func TestBuildModelRouterTaskFailSoftOnMiss(t *testing.T) {
 	reg := regForTest(prov, providerAnthropic, "session-model")
 
 	fn := buildModelRouterTask(routerTaxonomyCfg(), reg, prov, providerAnthropic, "session-model")
-	if _, _, _, ok := fn(context.Background(), "x"); ok {
-		t.Fatal("a classifier miss must be fail-soft (ok=false), never a fabricated route")
+	if _, _, _, reason, ok := fn(context.Background(), "x"); ok || reason != agent.RouterMissBadVerdict {
+		t.Fatalf("a classifier miss must be fail-soft with the engine reason passed through; ok=%v reason=%q", ok, reason)
 	}
 }
 
@@ -158,8 +166,32 @@ func TestBuildModelRouterTaskFailSoftOnUnresolvableTarget(t *testing.T) {
 	cfg := routerTaxonomyCfg()
 	cfg.RouterCategories[0].Model = "sonnet" // a built-in alias meaning inherit → unresolvable
 	fn := buildModelRouterTask(cfg, reg, prov, providerAnthropic, "session-model")
-	if _, _, _, ok := fn(context.Background(), "x"); ok {
+	// The classifier picks "small" (RouterCategories[0]); its target "sonnet" resolves to
+	// inherit → a COMPOSITION-side miss naming the category + selector (issue #287).
+	_, _, _, reason, ok := fn(context.Background(), "x")
+	if ok {
 		t.Fatal("an unresolvable category target must be fail-soft (ok=false)")
+	}
+	if !strings.HasPrefix(reason, "category-target-unresolvable") || !strings.Contains(reason, "category=small") || !strings.Contains(reason, "selector=sonnet") {
+		t.Fatalf("unresolvable-target reason = %q, want a category-target-unresolvable reason naming category=small selector=sonnet", reason)
+	}
+}
+
+// Fail-soft: a category mapping to an EMPTY selector yields ok=false with the
+// composition-side category-selector-empty reason (issue #287).
+func TestBuildModelRouterTaskFailSoftOnEmptySelector(t *testing.T) {
+	prov := mockllm.New(mockllm.TextTurn(`{"category":"small"}`))
+	reg := regForTest(prov, providerAnthropic, "session-model")
+
+	cfg := routerTaxonomyCfg()
+	cfg.RouterCategories[0].Model = "" // the chosen category's selector is empty
+	fn := buildModelRouterTask(cfg, reg, prov, providerAnthropic, "session-model")
+	_, _, _, reason, ok := fn(context.Background(), "x")
+	if ok {
+		t.Fatal("an empty category selector must be fail-soft (ok=false)")
+	}
+	if !strings.HasPrefix(reason, "category-selector-empty") || !strings.Contains(reason, "category=small") {
+		t.Fatalf("empty-selector reason = %q, want a category-selector-empty reason naming category=small", reason)
 	}
 }
 
@@ -357,7 +389,7 @@ func TestRouterClassifierRunsOnSlotModel(t *testing.T) {
 	if fn == nil {
 		t.Fatal("router task must be non-nil")
 	}
-	cat, _, _, ok := fn(context.Background(), "classify this")
+	cat, _, _, _, ok := fn(context.Background(), "classify this")
 	if !ok || cat != "large" {
 		t.Fatalf("classification failed: cat=%q ok=%v", cat, ok)
 	}

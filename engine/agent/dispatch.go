@@ -1078,12 +1078,21 @@ func (e *Engine) parentCaps(r *Run, sess *session.Session, turnIdx int) parentCa
 			// (issue #94). The hardAbort check above is a fast-path skip; ctx is the
 			// race-closing bound. Fail-soft holds: a cancelled ctx → StopCancelled →
 			// ok=false → inherit the default model, the existing miss path.
-			category, model, classifierUsage, ok := route(ctx, taskPrompt)
+			category, model, classifierUsage, missReason, ok := route(ctx, taskPrompt)
 			// Fold classifier spend into the parent session's cumulative Usage
 			// UNCONDITIONALLY (on both miss and hit paths) so --max-run-tokens bounds
 			// the classifier cost (#92 fix). foldUsage is nil-safe (nop when sess==nil).
 			foldUsage(classifierUsage)
 			if !ok || strings.TrimSpace(model) == "" {
+				// Per-miss observability (issue #287): log WHY this plain delegation fell
+				// through to the inherited default model, at THIS dispatch chokepoint so all
+				// three delegation families (subagent/team/parallel) share the line for free.
+				// The nil-diag guard + the "empty-model" fallback live in logRouterMissReason
+				// so this hot closure stays under the gocyclo budget. It is emitted BEFORE the
+				// breaker-open check below; the breaker-open skip and the hardAbort skip above
+				// return earlier and stay SILENT deliberately (no classifier call was made, so
+				// there is no miss to attribute — only an actual classification attempt logs).
+				logRouterMissReason(ctx, diag, missReason)
 				if justOpened := noteRouterMiss(breaker); justOpened && diag != nil {
 					diag.Log(ctx, port.LevelInfo,
 						"subagent model router: breaker OPEN after consecutive misses; remaining subagents this run inherit the default model",
@@ -1165,6 +1174,25 @@ func foldClassifierUsage(sess *session.Session) func(session.Usage) {
 	return func(u session.Usage) {
 		_ = sess.RecordUsage(u)
 	}
+}
+
+// logRouterMissReason emits the per-miss model-router INFO (issue #287) naming WHY a plain
+// delegation fell through to the inherited default model. It is factored out of the
+// parentCaps routeTask closure so that closure stays under the gocyclo budget. The reason
+// is METADATA ONLY — a harness/composition constant, never the task prompt or the
+// classifier output (gauntlet #7). A nil diag is a no-op; a blank reason (a route that
+// reported ok but a blank model — a defensive belt-and-braces path with no reason of its
+// own) is logged as "empty-model".
+func logRouterMissReason(ctx context.Context, diag port.Diagnostics, missReason string) {
+	if diag == nil {
+		return
+	}
+	if missReason == "" {
+		missReason = "empty-model"
+	}
+	diag.Log(ctx, port.LevelInfo,
+		"subagent model router: classification MISSED; child inherits the default model",
+		"reason", missReason)
 }
 
 // surfacedCommandPreview returns the human-facing preview of a surfaced child ask: for

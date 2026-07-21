@@ -344,7 +344,10 @@ deployments (it is orthogonal to the ask-review path).
 
 **Observability.** `EvSubagentStart` carries `RoutedCategory`/`RoutedModel` (bare metadata,
 gauntlet-#7 safe) when routed; a per-classification INFO rides the existing child
-diagnostic chokepoint and a Build-once "router ACTIVE" fact narrates the config. The
+diagnostic chokepoint and a Build-once "router ACTIVE" fact narrates the config. Every
+MISS logs an INFO naming the reason (`degenerate-input`/`classifier-error`/`cancelled`/
+`bad-verdict`/`unknown-category`/`category-selector-empty`/`category-target-unresolvable`/
+`empty-model` — metadata only, issue #287); the breaker-open INFO is unchanged. The
 routed fields surface end-to-end: the session struct + the proto/client wire
 (`routed_category`/`routed_model` on the `Subagent` event payload), relayed through
 the gRPC + HTTP relays and rendered by mecatui (inline card + ctrl+a fleet roster).

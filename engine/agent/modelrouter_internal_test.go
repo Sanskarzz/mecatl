@@ -207,11 +207,11 @@ func TestRouterBreakerOpensAfterConsecutiveMisses(t *testing.T) {
 		Catalog: tool.NewCatalog(),
 		Policy:  allowAllInt(),
 		Model:   "main",
-		SubagentModelRouter: func(context.Context, string) (string, string, session.Usage, bool) {
+		SubagentModelRouter: func(context.Context, string) (string, string, session.Usage, string, bool) {
 			mu.Lock()
 			callCount++
 			mu.Unlock()
-			return "", "", session.Usage{}, false
+			return "", "", session.Usage{}, RouterMissBadVerdict, false
 		},
 	})
 	// Build a Run carrying the breaker (RunContentWith arms it when the router is wired),
@@ -245,15 +245,15 @@ func TestRouterBreakerResetsOnSuccess(t *testing.T) {
 		Catalog: tool.NewCatalog(),
 		Policy:  allowAllInt(),
 		Model:   "main",
-		SubagentModelRouter: func(context.Context, string) (string, string, session.Usage, bool) {
+		SubagentModelRouter: func(context.Context, string) (string, string, session.Usage, string, bool) {
 			mu.Lock()
 			callCount++
 			h := hit
 			mu.Unlock()
 			if h {
-				return "large", "big", session.Usage{}, true
+				return "large", "big", session.Usage{}, "", true
 			}
-			return "", "", session.Usage{}, false
+			return "", "", session.Usage{}, RouterMissBadVerdict, false
 		},
 	})
 	run := &Run{router: &modelRouterBreaker{max: defaultModelRouterMaxMisses}, children: newChildRunRegistry()}
@@ -302,11 +302,11 @@ func TestRouterBreakerSerializesConcurrentCalls(t *testing.T) {
 		Catalog: tool.NewCatalog(),
 		Policy:  allowAllInt(),
 		Model:   "main",
-		SubagentModelRouter: func(context.Context, string) (string, string, session.Usage, bool) {
+		SubagentModelRouter: func(context.Context, string) (string, string, session.Usage, string, bool) {
 			mu.Lock()
 			callCount++
 			mu.Unlock()
-			return "", "", session.Usage{}, false // always miss → the breaker must open after `max`
+			return "", "", session.Usage{}, RouterMissBadVerdict, false // always miss → the breaker must open after `max`
 		},
 	})
 	run := &Run{router: &modelRouterBreaker{max: defaultModelRouterMaxMisses}, children: newChildRunRegistry()}
@@ -355,11 +355,11 @@ func TestRouterBreakerSharedAcrossFamilies(t *testing.T) {
 		Catalog: tool.NewCatalog(),
 		Policy:  allowAllInt(),
 		Model:   "main",
-		SubagentModelRouter: func(context.Context, string) (string, string, session.Usage, bool) {
+		SubagentModelRouter: func(context.Context, string) (string, string, session.Usage, string, bool) {
 			mu.Lock()
 			callCount++
 			mu.Unlock()
-			return "", "", session.Usage{}, false // always miss
+			return "", "", session.Usage{}, RouterMissBadVerdict, false // always miss
 		},
 	})
 	run := &Run{router: &modelRouterBreaker{max: defaultModelRouterMaxMisses}, children: newChildRunRegistry()}
@@ -404,13 +404,13 @@ func TestRouteTaskPropagatesRunCtx(t *testing.T) {
 		Catalog: tool.NewCatalog(),
 		Policy:  allowAllInt(),
 		Model:   "main",
-		SubagentModelRouter: func(ctx context.Context, _ string) (string, string, session.Usage, bool) {
+		SubagentModelRouter: func(ctx context.Context, _ string) (string, string, session.Usage, string, bool) {
 			mu.Lock()
 			gotCtx = ctx
 			mu.Unlock()
 			// Block until the ctx is cancelled, proving the classifier turn observes it.
 			<-ctx.Done()
-			return "", "", session.Usage{}, false
+			return "", "", session.Usage{}, RouterMissCancelled, false
 		},
 	})
 	run := &Run{router: &modelRouterBreaker{max: defaultModelRouterMaxMisses}, children: newChildRunRegistry()}
@@ -458,10 +458,10 @@ func TestRouteTaskFoldsClassifierUsageIntoParentSession(t *testing.T) {
 		Catalog: tool.NewCatalog(),
 		Policy:  allowAllInt(),
 		Model:   "main",
-		SubagentModelRouter: func(context.Context, string) (string, string, session.Usage, bool) {
+		SubagentModelRouter: func(context.Context, string) (string, string, session.Usage, string, bool) {
 			// Return non-zero usage on EVERY call regardless of hit/miss — tests
 			// that both paths fold correctly.
-			return "large", "big-model", fixedUsage, true
+			return "large", "big-model", fixedUsage, "", true
 		},
 	})
 
@@ -507,8 +507,8 @@ func TestRouteTaskFoldsClassifierUsageOnMissPath(t *testing.T) {
 		Catalog: tool.NewCatalog(),
 		Policy:  allowAllInt(),
 		Model:   "main",
-		SubagentModelRouter: func(context.Context, string) (string, string, session.Usage, bool) {
-			return "", "", missUsage, false // always miss, but still spends tokens
+		SubagentModelRouter: func(context.Context, string) (string, string, session.Usage, string, bool) {
+			return "", "", missUsage, RouterMissBadVerdict, false // always miss, but still spends tokens
 		},
 	})
 
@@ -551,8 +551,8 @@ func TestClassifierSpendTripsMaxRunTokens(t *testing.T) {
 		Policy:       allowAllInt(),
 		Model:        "main",
 		MaxRunTokens: budget,
-		SubagentModelRouter: func(context.Context, string) (string, string, session.Usage, bool) {
-			return "large", "big", spendUsage, true
+		SubagentModelRouter: func(context.Context, string) (string, string, session.Usage, string, bool) {
+			return "large", "big", spendUsage, "", true
 		},
 	})
 

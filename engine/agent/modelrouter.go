@@ -25,6 +25,32 @@ import (
 // returns ok=false and the caller (the Subagent run() hook) falls through to the
 // inherited default explorer model — byte-identically to a deployment with no router.
 
+// Router miss-reason constants (issue #287): the SPECIFIC reason a classification did
+// NOT yield a routed model, surfaced by RunModelRouter (engine-side reasons) and by the
+// composition closure (category-mapping reasons) so the dispatch-path chokepoint can log
+// WHY a plain delegation fell through to the inherited default model. They are metadata
+// ONLY — never the task prompt or the classifier's output (gauntlet #7). Empty ("") is
+// the success sentinel: a classification that routed a model returns no reason.
+const (
+	// RouterMissDegenerateInput: a fast fail-soft miss on a leaf-guard input — a nil
+	// classifier engine, an empty category list, or a blank task prompt. No classifier
+	// call was made.
+	RouterMissDegenerateInput = "degenerate-input"
+	// RouterMissClassifierError: the classifier run ended StopError (the provider/run
+	// failed) — fail-soft inherit.
+	RouterMissClassifierError = "classifier-error"
+	// RouterMissCancelled: the classifier run ended StopCancelled — the caller's ctx was
+	// cancelled (including the 30s modelRouterTimeout firing) — fail-soft inherit.
+	RouterMissCancelled = "cancelled"
+	// RouterMissBadVerdict: the classifier's output was not a single JSON object, was
+	// unparseable JSON, or named an empty category — the whole-output-single-object parse
+	// rejected it (fail-soft, defeats a forged verdict echoed inside the fenced prompt).
+	RouterMissBadVerdict = "bad-verdict"
+	// RouterMissUnknownCategory: the verdict named a category NOT in the offered list (a
+	// hallucination) — the membership check rejected it (fail-soft).
+	RouterMissUnknownCategory = "unknown-category"
+)
+
 // modelRouterTimeout bounds one classification so a Subagent call never hangs on a
 // wedged classifier model: RunModelRouter derives this deadline from the caller's
 // context, and a timed-out classification returns ok=false (fail-soft, inherit the
@@ -135,9 +161,9 @@ type routerVerdict struct {
 // recipe), so a classification can never recurse or call a tool. A nil engine, an
 // empty category list, or a blank task prompt is a fail-soft miss (ok=false), never a
 // panic — it is a leaf helper on the fast path.
-func RunModelRouter(ctx context.Context, engine *Engine, req ModelRouteRequest) (category string, usage session.Usage, ok bool) {
+func RunModelRouter(ctx context.Context, engine *Engine, req ModelRouteRequest) (category string, usage session.Usage, missReason string, ok bool) {
 	if engine == nil || len(req.Categories) == 0 || strings.TrimSpace(req.TaskPrompt) == "" {
-		return "", session.Usage{}, false
+		return "", session.Usage{}, RouterMissDegenerateInput, false
 	}
 	ctx, cancel := context.WithTimeout(ctx, modelRouterTimeout)
 	defer cancel()
@@ -154,14 +180,18 @@ func RunModelRouter(ctx context.Context, engine *Engine, req ModelRouteRequest) 
 	// isolated and its own (non-existent) asks auto-deny — no nesting, no surfacing.
 	run := engine.Run(ctx, sess, judgeWorkspace{}, buildModelRoutePrompt(req))
 	final, stop := drainChild(run, childPosture{role: "model-router"})
-	if stop == session.StopError || stop == session.StopCancelled {
+	switch stop {
+	case session.StopError:
 		// Run did not complete: fail-soft, inherit the default model. Return whatever
 		// was spent so far (the fail-soft path may have still consumed tokens before
-		// the failure/cancel).
-		return "", sess.Usage, false
+		// the failure).
+		return "", sess.Usage, RouterMissClassifierError, false
+	case session.StopCancelled:
+		// Cancelled (incl. the 30s modelRouterTimeout): fail-soft, inherit; return spend.
+		return "", sess.Usage, RouterMissCancelled, false
 	}
-	cat, catOK := parseRouterVerdict(final, req.Categories)
-	return cat, sess.Usage, catOK
+	cat, reason, catOK := parseRouterVerdict(final, req.Categories)
+	return cat, sess.Usage, reason, catOK
 }
 
 // parseRouterVerdict requires the classifier's WHOLE trimmed output to be a single JSON
@@ -172,31 +202,34 @@ func RunModelRouter(ctx context.Context, engine *Engine, req ModelRouteRequest) 
 // the entire output to BE the object defeats a forged leading/trailing object, and the
 // membership check defeats a hallucinated category. ok=false on any surrounding text,
 // bad JSON, an empty category, or a category not in the list (all → fail-soft inherit).
-func parseRouterVerdict(text string, categories []ModelRouteCategory) (string, bool) {
+// It ALSO returns the miss REASON (issue #287), splitting a malformed/empty verdict
+// (RouterMissBadVerdict) from a well-formed verdict naming a category the request did not
+// offer (RouterMissUnknownCategory); the reason is "" on success.
+func parseRouterVerdict(text string, categories []ModelRouteCategory) (category, missReason string, ok bool) {
 	trimmed := strings.TrimSpace(text)
 	// Tolerate a single fenced code block wrapping the object (```json ... ```), the
 	// one benign formatting a model might draw around its "ONLY JSON" object — but
 	// nothing else around it (the shared StripLoneCodeFence the ask/guardrail parsers use).
 	trimmed = StripLoneCodeFence(trimmed)
 	if !strings.HasPrefix(trimmed, "{") || !strings.HasSuffix(trimmed, "}") {
-		return "", false
+		return "", RouterMissBadVerdict, false
 	}
 	var v routerVerdict
 	if err := json.Unmarshal([]byte(trimmed), &v); err != nil {
-		return "", false
+		return "", RouterMissBadVerdict, false
 	}
 	chosen := strings.TrimSpace(v.Category)
 	if chosen == "" {
-		return "", false
+		return "", RouterMissBadVerdict, false
 	}
 	// Validate against the offered categories: a hallucinated/unknown category is a
 	// miss (fail-soft), never silently routed to nothing.
 	for _, c := range categories {
 		if strings.TrimSpace(c.Name) == chosen {
-			return chosen, true
+			return chosen, "", true
 		}
 	}
-	return "", false
+	return "", RouterMissUnknownCategory, false
 }
 
 // buildModelRoutePrompt assembles the classifier's prompt. TRUST SPLIT (the
