@@ -247,6 +247,12 @@ type cliModelKeys struct {
 	slots    map[string]struct{}
 	aliases  map[string]struct{}
 	modelSet bool
+	// subagentModelSet records whether --subagent-model was set on the CLI (issue #288).
+	// It gates foldOperatorSubagentModel so a CLI flag wins over an operator-YAML
+	// models.subagent. Like modelSet it is a faithful CLI-vs-YAML discriminator ONLY at
+	// the capture point, where cfg.SubagentModel holds the bare CLI --subagent-model
+	// value (the operator-YAML fold has not run yet).
+	subagentModelSet bool
 }
 
 // captureCLIModelKeys snapshots the CLI-set model-binding keys from cfg. ORDERING
@@ -254,12 +260,15 @@ type cliModelKeys struct {
 // snapshot is a faithful CLI-vs-YAML discriminator ONLY because at that single point cfg
 // holds nothing but the CLI bindings and cfg.Model is the bare CLI --model (no operator-
 // YAML merged, no registry/operator default applied). Capturing later would misclassify
-// YAML keys as CLI-set and invert the precedence. See cliModelKeys for the full rationale.
+// YAML keys as CLI-set and invert the precedence. cfg.SubagentModel is likewise the bare
+// CLI --subagent-model here (foldOperatorSubagentModel has not run), so a non-empty value
+// means the flag was set. See cliModelKeys for the full rationale.
 func captureCLIModelKeys(cfg Config) cliModelKeys {
 	keys := cliModelKeys{
-		slots:    make(map[string]struct{}, len(cfg.ModelSlots)),
-		aliases:  make(map[string]struct{}, len(cfg.ModelAliases)),
-		modelSet: strings.TrimSpace(cfg.Model) != "",
+		slots:            make(map[string]struct{}, len(cfg.ModelSlots)),
+		aliases:          make(map[string]struct{}, len(cfg.ModelAliases)),
+		modelSet:         strings.TrimSpace(cfg.Model) != "",
+		subagentModelSet: strings.TrimSpace(cfg.SubagentModel) != "",
 	}
 	for k := range cfg.ModelSlots {
 		keys.slots[k] = struct{}{}
@@ -314,6 +323,43 @@ func foldOperatorModelDefault(cfg Config, cliKeys cliModelKeys) Config {
 	cfg.Model = id
 	cfg.diag().Log(context.Background(), port.LevelInfo,
 		"models.default: operator binding ACTIVE (session default re-bound over the registry default)", "selector", sel, "model", id)
+	return cfg
+}
+
+// foldOperatorSubagentModel applies an operator-YAML `models.subagent:` to
+// cfg.SubagentModel (issue #288), the settings.yaml twin of the --subagent-model flag.
+// The value is the def-less child-default model selector for every Subagent /
+// Parallel-branch / team-member child that does not pin its own model.
+//
+// It is OPERATOR-TIER ONLY (read from OperatorModelPolicy(), the user-global + CLI tiers;
+// a project-tier subagent: was already stripped with a WARN in captureProjectModels). It
+// is a no-op (byte-identical) when --subagent-model was set on the CLI (cliKeys.subagentModelSet
+// — the flag WINS), when there is no permResolver, no operator models: block, or an empty
+// models.subagent. The value is set VERBATIM (NOT pre-resolved): the downstream
+// normalizeSubagentModel is the ONE validator and keeps aliases verbatim by design, so
+// this fold must not resolve the selector or it would double-resolve an alias whose target
+// is itself a bare token. It runs in Build immediately BEFORE normalizeSubagentModel (after
+// foldOperatorModelRouter, so the operator-merged alias map is final) — DELIBERATELY, so a
+// YAML value goes through the SAME fail-fast normalizeSubagentModel path as the flag (a dead
+// YAML selector fails startup, unlike the fail-soft models.default). cfg is taken/returned
+// by value.
+func foldOperatorSubagentModel(cfg Config, cliKeys cliModelKeys) Config {
+	if cliKeys.subagentModelSet {
+		return cfg // CLI --subagent-model wins over the operator-YAML value.
+	}
+	res, ok := cfg.permResolver.(*permconfig.Resolver)
+	if !ok || res == nil {
+		return cfg
+	}
+	policy := res.OperatorModelPolicy()
+	if policy == nil {
+		return cfg
+	}
+	sel := strings.TrimSpace(policy.Subagent)
+	if sel == "" {
+		return cfg
+	}
+	cfg.SubagentModel = sel // verbatim — normalizeSubagentModel validates + narrates.
 	return cfg
 }
 

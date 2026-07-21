@@ -8,6 +8,7 @@ Model selection is a stack of independent mechanisms. Pick the one(s) you need:
 |---|---|
 | Short names for models you reference often | `models.aliases:` |
 | Cheaper compaction / guardrail / ask-reviewer calls | `models.slots:` (`compaction`/`guardrail`/`ask-reviewer`) |
+| A cheaper default for every delegated subagent | `models.subagent:` (the settings.yaml twin of `--subagent-model`) |
 | Plan on a strong model, execute on a cheaper one | `models.slots: plan:` (the opusplan pattern) |
 | Pick a subagent's model per task automatically | `models.router:` (a taxonomy enables it; `--subagent-model-router=false` is the off-switch) |
 | Let a trusted repo re-bind models within your cap | `models.allowlist:` + a project `.mecatl/settings.yaml` |
@@ -22,7 +23,10 @@ models:
     heavy: z-ai/glm-5.2
     coder: deepseek/deepseek-v4-flash
     quick: google/gemini-3.5-flash
-  default: z-ai/glm-5.2    # the session model
+  default: z-ai/glm-5.2    # the session model (the orchestrator)
+  subagent: coder          # the def-less child default — every plain Subagent / Parallel-branch /
+                           # team-member child runs on it (a def `model:` or per-call override still wins;
+                           # the CLI --subagent-model wins over this). Operator-tier only.
   slots:                   # route housekeeping + plan-mode to a cheaper/stronger model
     compaction: quick
     guardrail: quick

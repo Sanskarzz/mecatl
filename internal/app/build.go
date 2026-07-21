@@ -1199,6 +1199,15 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	// is ON iff RouterCategories is non-empty AND !cfg.RouterDisabled. No-op
 	// (byte-identical) when no router block.
 	cfg = foldOperatorModelRouter(cfg)
+	// Operator-YAML models.subagent (issue #288): the settings.yaml twin of
+	// --subagent-model. Fold it onto cfg.SubagentModel BEFORE normalizeSubagentModel so
+	// the YAML value goes through the SAME fail-fast validation path as the flag (a dead
+	// YAML selector fails startup, unlike fail-soft models.default). A CLI --subagent-model
+	// WINS (cliModelKeys.subagentModelSet). Runs after foldOperatorModelRouter so the
+	// operator-merged alias map is final. No-op (byte-identical) when no operator
+	// models.subagent is configured. The value is set VERBATIM — normalizeSubagentModel is
+	// the one validator and keeps aliases verbatim by design.
+	cfg = foldOperatorSubagentModel(cfg, cliModelKeys)
 	// SubagentModel (issue #35): validate + resolve the alias ONCE here — FAIL-FAST
 	// on a value that doesn't resolve to a usable model id (the --agent-source-url
 	// loud-misconfig posture; warn-and-inert would silently run the whole child
@@ -2926,9 +2935,9 @@ func normalizeSubagentModel(cfg Config) (string, error) {
 	resolved, known := lookupModelAlias(cfg, sel)
 	switch {
 	case !known:
-		return "", fmt.Errorf("--subagent-model %q: unknown model alias (not in --model-alias, not a built-in alias, and a bare token is not a concrete model id); every def-less child would silently run on the parent model — pass a concrete model id or define the alias", sel)
+		return "", fmt.Errorf("--subagent-model / models.subagent %q: unknown model alias (not in --model-alias, not a built-in alias, and a bare token is not a concrete model id); every def-less child would silently run on the parent model — pass a concrete model id or define the alias", sel)
 	case resolved == "":
-		return "", fmt.Errorf("--subagent-model %q: the alias resolves to \"inherit\" (the built-in sonnet/opus/haiku aliases mean inherit unless overridden via --model-alias), which would make the child-default override a no-op — pass a concrete model id or map the alias to one", sel)
+		return "", fmt.Errorf("--subagent-model / models.subagent %q: the alias resolves to \"inherit\" (the built-in sonnet/opus/haiku aliases mean inherit unless overridden via --model-alias), which would make the child-default override a no-op — pass a concrete model id or map the alias to one", sel)
 	}
 	cfg.diag().Log(context.Background(), port.LevelInfo,
 		"subagent default model ACTIVE: def-less Subagent explorer / Parallel-branch / undefined-team-member children run on it (the Parallel judge stays on the session model); a def `model:` or per-call override still wins",
