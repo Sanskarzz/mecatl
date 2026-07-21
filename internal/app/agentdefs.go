@@ -207,6 +207,72 @@ func resolveDefaultChildModel(cfg Config, provReg *providerRegistry, parentProvi
 	return model, childWindowFor(cfg, provReg, parentProviderID, model)
 }
 
+// routableAgentNames computes the SET of agent-def names eligible for the OPT-IN model
+// router (issue #286), returned as a SORTED slice for determinism. A def is routable iff:
+//
+//   - it expressed NO model intent — `TrimSpace(def.Model) == ""`. ANY non-empty def.Model
+//     (`inherit`, a built-in alias, an unknown alias, a concrete id) is expressed intent →
+//     PINNED, never routed (resolution behaviour untouched — the def's own model wins);
+//   - its `provider:` does NOT switch away from the parent (providerSwitchesAway) — a routed
+//     id is a PARENT-provider id, so a def on a different provider could not consume it;
+//   - it has NO INLINE MCP servers (defHasInlineMCP) — the agent+model factory declines
+//     inline-MCP defs (a v1 scope limit), so routing one would spend the classifier for a
+//     pick that can never be minted (it falls back to the pre-built def engine anyway).
+//
+// The set is consulted ONLY by the engine's router gate (agent.WithRoutableAgents →
+// routeGateOpen). It is layering-clean: only def NAME strings cross into engine/agent. A nil
+// reg (no agent source) yields nil → no def routes (byte-identical to pre-#286). It is SILENT
+// (no diagnostics): the per-def provider/MCP WARNs are emitted by the actual engine build
+// (buildAgentSubagentEngines), so re-logging here would double-emit (the build-once discipline).
+func routableAgentNames(provReg *providerRegistry, reg *agents.Registry, parentProviderID string) []string {
+	if reg == nil {
+		return nil
+	}
+	var names []string
+	for _, def := range reg.List() {
+		if strings.TrimSpace(def.Model) != "" {
+			continue // expressed model intent (incl. explicit `inherit`) → pinned.
+		}
+		if providerSwitchesAway(provReg, def, parentProviderID) {
+			continue // routed ids are parent-provider ids; a switched def can't consume one.
+		}
+		if defHasInlineMCP(def) {
+			continue // the agent+model factory declines inline-MCP defs — no classifier spend.
+		}
+		if n := strings.TrimSpace(def.Name); n != "" {
+			names = append(names, n)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// providerSwitchesAway reports whether def.Provider names a KNOWN provider DIFFERENT from
+// the parent's. It mirrors resolveProviderModel's provider-precedence decision but is
+// SIDE-EFFECT-FREE (no unknown-provider WARN — that is emitted at the real engine build):
+// an empty or parent-equal provider is not a switch; an unknown provider falls back to the
+// parent (not a switch); only a set + known + non-parent provider is a real switch.
+func providerSwitchesAway(provReg *providerRegistry, def agents.AgentDef, parentProviderID string) bool {
+	p := strings.TrimSpace(def.Provider)
+	if p == "" || p == parentProviderID || provReg == nil {
+		return false
+	}
+	_, known := provReg.Lookup(p)
+	return known
+}
+
+// defHasInlineMCP reports whether a def declares any INLINE MCP server (URL set — an entry
+// the def would connect on its own). Reference entries (URL empty, borrowing a configured
+// server's tools) do NOT count. It mirrors defMCPTools' reference/inline split.
+func defHasInlineMCP(def agents.AgentDef) bool {
+	for _, e := range def.MCPServers {
+		if !e.IsReference() {
+			return true
+		}
+	}
+	return false
+}
+
 // resolveAlias maps sel through the operator aliases then the built-in aliases,
 // returning a concrete id (or "" meaning inherit). A non-alias, non-empty sel is
 // treated as a literal model id. An unrecognised alias-looking value warns and

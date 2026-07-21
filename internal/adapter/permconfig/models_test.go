@@ -261,3 +261,71 @@ models:
 		t.Fatalf("expected a default_provider-strip WARN; got:\n%s", log)
 	}
 }
+
+// TestModelsSubagentParsed pins that models.subagent (issue #288) parses faithfully from
+// the operator tier and rides the SAME ModelsSection as models.default, exposed via
+// OperatorModelPolicy().Subagent. An unknown sibling key inside models: is still a
+// strict-parse error, so a typo cannot silently disable the operator's child-default.
+func TestModelsSubagentParsed(t *testing.T) {
+	const yamlCfg = `
+models:
+  subagent: coder
+`
+	env := envWithExplicit("/etc/mecatl/sa.yaml", yamlCfg)
+	r := newWithEnv(Options{ExplicitFiles: []string{"/etc/mecatl/sa.yaml"}}, env)
+	if r == nil {
+		t.Fatal("resolver should be non-nil with an explicit file")
+	}
+	m := r.OperatorModelPolicy()
+	if m == nil {
+		t.Fatal("operator-tier models must be honoured from the CLI/explicit tier")
+	}
+	if m.Subagent != "coder" {
+		t.Fatalf("models.subagent not parsed faithfully: got %q, want %q", m.Subagent, "coder")
+	}
+
+	// A typo'd sibling key inside models: is still a strict-parse error (the strictFields guard).
+	const bad = `
+models:
+  subagnt: coder
+`
+	if _, err := parseYAML([]byte(bad)); err == nil {
+		t.Fatal("an unknown key (subagnt) inside models: must be a strict parse error")
+	}
+}
+
+// TestProjectSubagentStrippedWithWarn pins that a project-tier models.subagent: is
+// OPERATOR-TIER ONLY — stripped with a WARN, never honoured (the same operator-only
+// captureModels discipline as default_provider/allowlist/router). The operator allowlist
+// is present (so the project block is otherwise opt-in eligible and trusted), proving the
+// subagent strip is its OWN gate, not a side effect of the opt-in. The captured project
+// bindings must NOT carry Subagent (it is dropped by omission).
+func TestProjectSubagentStrippedWithWarn(t *testing.T) {
+	var buf bytes.Buffer
+	diag := slogdiag.New(&buf, false, port.LevelDebug)
+
+	const operatorAllowlist = `
+models:
+  allowlist:
+    - gpt-4o-mini
+`
+	const projectSubagent = `
+models:
+  subagent: coder
+  default: gpt-4o-mini
+`
+	ws := &countingWS{Workspace: memfs.NewWorkspace("/repo")}
+	ws.seed(t, projectFileMecatl, projectSubagent)
+
+	env := envWithExplicit("/etc/mecatl/op.yaml", operatorAllowlist)
+	r := newWithEnv(Options{Conventional: true, TrustProject: true, ExplicitFiles: []string{"/etc/mecatl/op.yaml"}, Diagnostics: diag}, env)
+	_ = r.Resolve(context.Background(), ws)
+
+	proj := r.ProjectModelBindings(ws)
+	if proj != nil && proj.Subagent != "" {
+		t.Fatalf("a project-tier models.subagent must NEVER be honoured (operator-tier only); got %q", proj.Subagent)
+	}
+	if log := buf.String(); !strings.Contains(log, "IGNORING project-tier models.subagent") {
+		t.Fatalf("expected a subagent-strip WARN; got:\n%s", log)
+	}
+}

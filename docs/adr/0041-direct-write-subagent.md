@@ -4,7 +4,7 @@
 - Date: 2026-06-22
 - Scope: `engine/agent` (the Subagent tool's `mode:"read-write"` path), `internal/app` (composition wiring of the writable child engine + the shared merger)
 - Supersedes: the WRITABLE-SUBAGENT decision in [ADR 0040](./0040-writable-subagent-and-serialized-merge.md) ONLY (NOT 0040's Parallel single-branch auto-merge, nor the `parentMutatingCaller` dispatch-serial seam — both REUSED here)
-- Superseded by: none
+- Superseded by: [ADR 0066](./0066-route-unpinned-and-writable-delegations.md) (the "the per-call `model` arg does not re-engine a writable explorer, an accepted v1 residual" sentence ONLY — a writable explorer now honours a per-call `model` and the router pick via a writable engine factory; everything else in this ADR — direct-write, no-fork/no-merge, the `parentMutatingCaller` dispatch-serial seam — is UNCHANGED)
 
 ## Context
 
