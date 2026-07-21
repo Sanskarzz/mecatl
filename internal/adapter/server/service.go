@@ -1599,7 +1599,8 @@ func (s *Service) LoadSession(ctx context.Context, id session.SessionID) (*sessi
 
 // ForkSession creates a new peer session whose conversation history is a snapshot
 // of an existing session's, inheriting the source's mode, workspace, limits, and
-// provider/model/profile labels (ADR 0065). Same provider and model only.
+// provider/model/profile labels (ADR 0065). Same provider and model only; the ONE
+// permitted selector delta is an optional reasoning-effort override (ADR 0066).
 //
 // The source is loaded via the run-entry funnel (loadAndReopen), so a terminal
 // source is recovered to idle first (completed→Reopen / cancelled→Interrupt /
@@ -1615,13 +1616,20 @@ func (s *Service) LoadSession(ctx context.Context, id session.SessionID) (*sessi
 // title overrides the forked session's title when non-empty; empty inherits the
 // source's title verbatim.
 //
+// effortOverride (ADR 0066) overrides the forked session's reasoning-effort label
+// when non-empty; empty inherits the source's effort verbatim. The override changes
+// ONLY the effort label/engine — provider and model ALWAYS inherit (a fork carries
+// provider-private replay blobs, so cross-provider/model stays out of scope). A
+// non-empty override makes the fork need a per-session engine (sessionNeedsPerFactory
+// fires on the changed selector), which the rehydrate path below builds.
+//
 // The engine is rehydrated ONLY when the source needed a per-session engine
 // (non-default selector / no-fs profile / worktree workspace), mirroring
 // createSession's branching on sessionNeedsPerFactory; a default-FS fork rides the
 // shared engine (zero overhead, no registry entry). The MaxSessionEngines cap is
 // enforced by the rehydrate path. No runEntryMu is taken (the new session has no
 // run; the source is loaded, not driven). Returns the new id.
-func (s *Service) ForkSession(ctx context.Context, srcID session.SessionID, title string) (session.SessionID, error) {
+func (s *Service) ForkSession(ctx context.Context, srcID session.SessionID, title, effortOverride string) (session.SessionID, error) {
 	src, err := s.loadAndReopen(ctx, srcID)
 	if err != nil {
 		return "", err
@@ -1635,6 +1643,12 @@ func (s *Service) ForkSession(ctx context.Context, srcID session.SessionID, titl
 		return "", fmt.Errorf("server: seed fork history: %w", err)
 	}
 	sel := ProviderSelector{ProviderID: src.ProviderID, ModelID: src.ModelID, ReasoningEffort: src.ReasoningEffort}
+	// ADR 0066: the ONE permitted selector delta — a non-empty override replaces
+	// ONLY the effort label (provider/model inherit regardless), so a mid-
+	// conversation effort switch forks the transcript onto the new tier.
+	if effortOverride != "" {
+		sel.ReasoningEffort = effortOverride
+	}
 	profile := profileForSession(src)
 	setSessionLabels(forked, sel, profile)
 	if title != "" {

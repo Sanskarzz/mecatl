@@ -316,6 +316,19 @@ run** with a visible stream error — server-authoritative, recoverable via
 `XDG_STATE_HOME`, a sibling of the human config — the same settings-vs-state split
 as `trust.yaml`.
 
+**`/effort` (reasoning-effort picker).** Gated identically to `/models`
+(`caps.model_selection`), it opens a small enum picker over the fixed reasoning-
+effort tiers (`auto`, `low`, `medium`, `high`, `xhigh`, `max`) — `auto` is the
+unset sentinel (operator/provider default) and is sent as the empty effort. The
+cursor opens on the current (server-resolved) tier, marked with a `●`; when the
+current model is known to lack reasoning support a warning notes a tier will be
+ignored. `enter` on a tier applies **directly** via a **conversation fork** (ADR
+0066): the server forks the session's history onto a peer session at the new effort,
+so the **transcript is kept** — no restart, no wipe, no confirm step. There's a
+brief "switching effort — forking conversation…" transition while the fork rebinds;
+the source session is then closed. `esc` closes the picker. The only RPC is the fork
+itself — the enum is fixed and client-owned (no filter).
+
 **Workspace slash commands are ON by default** on top of the built-ins, expanding
 `/<name>` inputs from the conventional workspace dirs `.mecatl/commands` and
 `.claude/commands` (`<name>.md` templates — the Claude Code convention). They're

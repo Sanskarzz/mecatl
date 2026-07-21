@@ -271,7 +271,12 @@ backstop, CWE-918). See `docs/adr/0059-mcp-typed-tool-results.md`.
 **Conversation fork.** `Service.ForkSession` (`internal/adapter/server/service.go`)
 creates a new peer session whose conversation history is a snapshot of an existing
 session's, inheriting the source's mode, workspace, limits, and
-provider/model/profile labels (ADR 0065). It reuses the domain primitives the
+provider/model/profile labels (ADR 0065). The ONE permitted selector delta is an
+optional `reasoning_effort` override (ADR 0066): empty inherits the source's effort
+verbatim, while a non-empty value replaces only the effort label/engine — provider
+and model always inherit. This is how a mid-conversation effort switch works
+non-destructively (the mecatui `/effort` fork-resume): the transcript survives on
+the peer. It reuses the domain primitives the
 subagent `fork:true` path already exercises — `session.ForkSnapshot`
 (`engine/session/conversation.go`) clones the conversation with a fresh backing
 array and strips trailing unanswered tool calls (tool-pairing-valid), and

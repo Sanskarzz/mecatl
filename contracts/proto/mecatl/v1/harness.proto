@@ -49,9 +49,10 @@ service HarnessService {
 
   // ForkSession creates a new peer session whose conversation history is a
   // snapshot of an existing session's, inheriting the source's mode, workspace,
-  // limits, and provider/model/profile labels. Same provider and model only.
-  // The source must be at a turn boundary (idle/terminal); a running/awaiting
-  // source is rejected. No streaming.
+  // limits, and provider/model/profile labels. Same provider and model only;
+  // the ONE permitted selector delta is an OPTIONAL reasoning-effort override
+  // (ADR 0066). The source must be at a turn boundary (idle/terminal); a
+  // running/awaiting source is rejected. No streaming.
   rpc ForkSession(ForkSessionRequest) returns (ForkSessionResponse);
 
   // Converse drives one run. The first frame MUST be `prompt`; subsequent
@@ -557,6 +558,11 @@ message ForkSessionRequest {
   // it so the operator can distinguish "implement feature X" from "fix the bug
   // first" in ListSessions without a separate rename RPC.
   string title = 2;
+  // reasoning_effort is an OPTIONAL override for the forked session's
+  // reasoning-effort tier (ADR 0066). Empty (the default) inherits the source's
+  // effort verbatim; provider and model ALWAYS inherit — the effort is the ONE
+  // selector delta a fork may carry.
+  string reasoning_effort = 3;
 }
 
 // ForkSessionResponse carries the new forked session's id.

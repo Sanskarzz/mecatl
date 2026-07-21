@@ -183,6 +183,7 @@ func (m Model) switchToWorktree(wt client.Worktree) (tea.Model, tea.Cmd, bool) {
 	m.effectiveModel = client.ResolvedModel{}
 	m.caps = client.Capabilities{}
 	m.restartFailed = false
+	m.restartFailedForkID = ""
 	m.phase = phaseConnecting
 	m.statusMsg = "switching workspace — reconnecting…"
 

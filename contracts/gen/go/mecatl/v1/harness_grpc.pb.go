@@ -94,9 +94,10 @@ type HarnessServiceClient interface {
 	CloseSession(ctx context.Context, in *CloseSessionRequest, opts ...grpc.CallOption) (*CloseSessionResponse, error)
 	// ForkSession creates a new peer session whose conversation history is a
 	// snapshot of an existing session's, inheriting the source's mode, workspace,
-	// limits, and provider/model/profile labels. Same provider and model only.
-	// The source must be at a turn boundary (idle/terminal); a running/awaiting
-	// source is rejected. No streaming.
+	// limits, and provider/model/profile labels. Same provider and model only;
+	// the ONE permitted selector delta is an OPTIONAL reasoning-effort override
+	// (ADR 0066). The source must be at a turn boundary (idle/terminal); a
+	// running/awaiting source is rejected. No streaming.
 	ForkSession(ctx context.Context, in *ForkSessionRequest, opts ...grpc.CallOption) (*ForkSessionResponse, error)
 	// Converse drives one run. The first frame MUST be `prompt`; subsequent
 	// frames are zero or more `resume_approval` / `cancel` control frames. The
@@ -568,9 +569,10 @@ type HarnessServiceServer interface {
 	CloseSession(context.Context, *CloseSessionRequest) (*CloseSessionResponse, error)
 	// ForkSession creates a new peer session whose conversation history is a
 	// snapshot of an existing session's, inheriting the source's mode, workspace,
-	// limits, and provider/model/profile labels. Same provider and model only.
-	// The source must be at a turn boundary (idle/terminal); a running/awaiting
-	// source is rejected. No streaming.
+	// limits, and provider/model/profile labels. Same provider and model only;
+	// the ONE permitted selector delta is an OPTIONAL reasoning-effort override
+	// (ADR 0066). The source must be at a turn boundary (idle/terminal); a
+	// running/awaiting source is rejected. No streaming.
 	ForkSession(context.Context, *ForkSessionRequest) (*ForkSessionResponse, error)
 	// Converse drives one run. The first frame MUST be `prompt`; subsequent
 	// frames are zero or more `resume_approval` / `cancel` control frames. The

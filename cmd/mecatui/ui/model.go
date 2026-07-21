@@ -55,6 +55,14 @@ type SessionCreator interface {
 	// returns the server-confirmed mode. Mid-turn attempts may be rejected; the ui
 	// defers and retries at the next prompt boundary.
 	SetMode(ctx context.Context, id, mode string) (string, error)
+	// ForkSession creates a peer session from srcID's conversation-history snapshot
+	// (ADR 0065) with an OPTIONAL reasoning-effort override (ADR 0066; empty
+	// inherits the source's) and returns the new session id. The /effort fork-resume
+	// handoff uses it: the transcript SURVIVES the effort switch because the fork
+	// carries it (title is omitted — the fork inherits the source's title; provider
+	// and model ALWAYS inherit). The caller owns closing the source session and the
+	// GetSession refetch for the fork's resolved-model echo.
+	ForkSession(ctx context.Context, srcID, reasoningEffort string) (string, error)
 }
 
 // SelectionStore persists + loads the client-side model selection (last-used). It
@@ -461,6 +469,19 @@ type Model struct {
 	// m.activeModel. Cleared the moment a session is (re)established
 	// (SessionReadyMsg) or a retry is fired.
 	restartFailed bool
+
+	// restartFailedForkID is the retry origin for the /effort FORK failure: the
+	// SOURCE session id the failed fork was attempted from (the fork failure leaves
+	// the source OPEN). While it is non-empty the armed enter-retry re-fires
+	// switchEffortCmd over THIS id — re-forking PRESERVES the transcript where the
+	// default restartOnModelCmd retry (create-fresh + resetSession) would wipe it,
+	// the exact thing the fork-resume switch exists to prevent. Set by the
+	// restartFailedMsg reducer from the msg's viaFork bit (m.sessionID is "" by
+	// then, so the source id must ride its own field); cleared by the same
+	// SessionReadyMsg/attempt-start paths that own restartFailed. Empty for the
+	// /models + /worktrees failures (their retry re-creates fresh — their old
+	// session is already gone).
+	restartFailedForkID string
 
 	// usage accumulates across the session for the footer.
 	usage client.Usage
