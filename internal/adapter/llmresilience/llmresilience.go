@@ -41,8 +41,10 @@ package llmresilience
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"iter"
 	"math/rand/v2"
 	"net"
@@ -885,6 +887,22 @@ func DefaultClassifier(err error) bool {
 		return true
 	}
 
+	// A truncated or malformed payload surfaces as a JSON syntax error or an
+	// unexpected EOF: a partial SSE frame (the openai-go ssestream decoder parses
+	// each frame with encoding/json), or an empty/garbled error body some
+	// OpenAI-compatible gateways return on a transient 5xx (the SDK's error path
+	// then discards the status and hands back the raw json error, so it never
+	// reaches the *oai.Error / StatusCode arms above). At establishment this is a
+	// transient transport/proxy truncation, not a stable client error, so it is
+	// retryable — bounded by MaxAttempts + the breaker.
+	var syntaxErr *json.SyntaxError
+	if errors.As(err, &syntaxErr) {
+		return true
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+
 	return false
 }
 
@@ -972,6 +990,21 @@ func isTransientForBreaker(err error) bool {
 	// A bare DeadlineExceeded (a per-attempt timeout surfaced without a net.Error
 	// wrapper) is transient.
 	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	// A truncated/malformed payload (partial SSE frame → *json.SyntaxError, or an
+	// empty gateway body → unexpected EOF) is the SAME transient class
+	// DefaultClassifier retries. It MUST also drive the breaker: otherwise a
+	// PERSISTENTLY malformed/truncated gateway response is retried up to
+	// MaxAttempts on every call but never opens the shared breaker (contradicting
+	// the "bounded by MaxAttempts + the breaker" contract). Kept in lockstep with
+	// DefaultClassifier's matching arm.
+	var syntaxErr *json.SyntaxError
+	if errors.As(err, &syntaxErr) {
+		return true
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
 	}
 

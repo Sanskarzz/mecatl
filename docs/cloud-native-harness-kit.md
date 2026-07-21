@@ -191,3 +191,5 @@ consumer's policy, not a structural property the kit bakes in.
   unscoped future work (the shared-handle problem across the filesystem/forker/command-runner,
   environment-as-descent forking, execution-as-a-service) that isn't a decision yet and may
   never become one.
+- [`scoped-resource-grants.md`](scoped-resource-grants.md): a strawman for the tool/filesystem
+  substrate — scoped, leased, identity-bound service grants with a direct data path.
