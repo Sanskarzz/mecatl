@@ -1,0 +1,30 @@
+data: {"id":"chatcmpl-R8OUW6RMLY3rerecyswW8Sor","object":"chat.completion.chunk","created":1784316790,"model":"glm-5.2","choices":[{"index":0,"finish_reason":null,"logprobs":null,"delta":{"role":"assistant","content":"","reasoning_content":null,"tool_calls":null}}],"usage":null}
+
+data: {"id":"chatcmpl-R8OUW6RMLY3rerecyswW8Sor","object":"chat.completion.chunk","created":1784316790,"model":"glm-5.2","choices":[{"index":0,"finish_reason":null,"logprobs":null,"delta":{"role":"assistant","content":"","reasoning_content":"The","tool_calls":null}}],"usage":null}
+
+data: {"id":"chatcmpl-R8OUW6RMLY3rerecyswW8Sor","object":"chat.completion.chunk","created":1784316790,"model":"glm-5.2","choices":[{"index":0,"finish_reason":null,"logprobs":null,"delta":{"role":"assistant","content":"","reasoning_content":" user wants to know","tool_calls":null}}],"usage":null}
+
+data: {"id":"chatcmpl-R8OUW6RMLY3rerecyswW8Sor","object":"chat.completion.chunk","created":1784316790,"model":"glm-5.2","choices":[{"index":0,"finish_reason":null,"logprobs":null,"delta":{"role":"assistant","content":"","reasoning_content":" the weather in Paris","tool_calls":null}}],"usage":null}
+
+data: {"id":"chatcmpl-R8OUW6RMLY3rerecyswW8Sor","object":"chat.completion.chunk","created":1784316790,"model":"glm-5.2","choices":[{"index":0,"finish_reason":null,"logprobs":null,"delta":{"role":"assistant","content":"","reasoning_content":". I'll call","tool_calls":null}}],"usage":null}
+
+data: {"id":"chatcmpl-R8OUW6RMLY3rerecyswW8Sor","object":"chat.completion.chunk","created":1784316790,"model":"glm-5.2","choices":[{"index":0,"finish_reason":null,"logprobs":null,"delta":{"role":"assistant","content":"","reasoning_content":" the get_weather function","tool_calls":null}}],"usage":null}
+
+data: {"id":"chatcmpl-R8OUW6RMLY3rerecyswW8Sor","object":"chat.completion.chunk","created":1784316790,"model":"glm-5.2","choices":[{"index":0,"finish_reason":null,"logprobs":null,"delta":{"role":"assistant","content":"","reasoning_content":" with \"","tool_calls":null}}],"usage":null}
+
+data: {"id":"chatcmpl-R8OUW6RMLY3rerecyswW8Sor","object":"chat.completion.chunk","created":1784316790,"model":"glm-5.2","choices":[{"index":0,"finish_reason":null,"logprobs":null,"delta":{"role":"assistant","content":"","reasoning_content":"Paris\" as the","tool_calls":null}}],"usage":null}
+
+data: {"id":"chatcmpl-R8OUW6RMLY3rerecyswW8Sor","object":"chat.completion.chunk","created":1784316790,"model":"glm-5.2","choices":[{"index":0,"finish_reason":null,"logprobs":null,"delta":{"role":"assistant","content":"","reasoning_content":"city.","tool_calls":null}}],"usage":null}
+
+data: {"id":"chatcmpl-R8OUW6RMLY3rerecyswW8Sor","object":"chat.completion.chunk","created":1784316790,"model":"glm-5.2","choices":[{"index":0,"finish_reason":null,"logprobs":null,"delta":{"role":"assistant","content":"","reasoning_content":null,"tool_calls":[{"index":0,"id":"call_025b","type":"function","function":{"name":"get_weather","arguments":"{\"city\": \"Paris\"}"}}]}}],"usage":{"prompt_tokens":167,"completion_tokens":37,"total_tokens":204,"prompt_tokens_details":null}}
+
+data: {"id":"chatcmpl-R8OUW6RMLY3rerecyswW8Sor","object":"chat.completion.chunk","created":1784316790,"model":"glm-5.2","choices":[{"index":0,"finish_reason":"tool_calls","logprobs":null,"delta":{"role":"assistant","content":"","reasoning_content":null,"tool_calls":null}}],"usage":{"prompt_tokens":167,"completion_tokens":37,"total_tokens":204,"prompt_tokens_details":null}}
+
+data: {"choices":[],"x-opencode-type":"inference-cost","cost":"0.00039660","normalizedUsage":{"inputTokens":167,"outputTokens":37,"reasoningTokens":0,"cacheReadTokens":0,"cacheWrite5mTokens":0,"cacheWrite1hTokens":0}}
+
+data: {"id":"chatcmpl-R8OUW6RMLY3rerecyswW8Sor","object":"chat.completion.chunk","created":1784316790,"model":"glm-5.2","choices":[],"usage":{"prompt_tokens":167,"completion_tokens":37,"total_tokens":204,"prompt_tokens_details":null}}
+
+data: [DONE]
+
+data: {"choices":[],"cost":"0"}
+

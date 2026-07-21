@@ -8,7 +8,8 @@ A **headless agentic coding harness** in Go — the system around a model that l
 actually finish a software task: a streaming agent loop, a core tool kit, an enforced
 permission model, deterministic hooks, one-shot subagents, prompt caching, and the
 production plumbing around them (auth, resilience, observability). It speaks the OpenAI
-**Responses API** and the native **Anthropic Messages API** (plus OpenRouter) behind a
+**Responses API** and the native **Anthropic Messages API** (plus OpenRouter, and
+OpenCode Go over the **Chat Completions API**) behind a
 provider-agnostic port, and is driven over a gRPC + HTTP/SSE API — or over stdio via the
 Agent Client Protocol (`--acp`) for editors. An optional terminal UI, **`mecatui`**,
 ships as a client of the same API.
@@ -35,7 +36,7 @@ ships as a client of the same API.
 - **Workspace containment** — file tools are scoped to the session root via `os.Root` (symlink/`..`-escape safe).
 
 **Provider & context**
-- **Multi-provider** — OpenAI Responses (stateless `store:false`, reasoning items preserved across turns, cache-stable prompt prefix; any OpenAI-compatible endpoint via a base-URL override), the native Anthropic Messages API, and OpenRouter, over an embedded models.dev catalog with per-session provider/model routing, live model listing, and capability intersection.
+- **Multi-provider** — OpenAI Responses (stateless `store:false`, reasoning items preserved across turns, cache-stable prompt prefix; any OpenAI-compatible endpoint via a base-URL override), the native Anthropic Messages API, OpenRouter, and OpenCode Go (over the Chat Completions API; any OpenAI-compatible `/v1/chat/completions` endpoint), over an embedded models.dev catalog with per-session provider/model routing, live model listing, and capability intersection.
 - **Layered model selection** — semantic model **aliases** as the spine; per-function **slots** that route the internal lightweight calls (compaction summary, ask-reviewer, guardrail checker) to a cheaper model; a **plan slot** that swaps the model on entering/leaving plan mode (the *opusplan* pattern — fixed per turn, re-resolved between turns); **project-overridable** bindings capped by a non-wideable operator **allowlist**; and a **semantic subagent router** — enabled by defining an operator-defined category taxonomy (e.g. large/medium/small engineering → three models) — that classifies a task into a category and mints the child on that category's model — fail-soft, decide-once, same-provider. Composition-only. See [`docs/adr/0030`](docs/adr/0030-model-selection-heuristics.md) + [`0031`](docs/adr/0031-subagent-model-router.md) + [`0042`](docs/adr/0042-taxonomy-gated-model-router.md).
 - **Resilience** — retry/backoff + circuit breaker around the provider (never replays a partially-streamed turn); provider errors surface to clients.
 - **Context management** — two-layer cache-stable prompt; a pluggable `Compactor` (single-summary default + a tiered snip→strip→collapse→summarize cascade) with a `TokenCounter` seam (heuristic or offline tiktoken).

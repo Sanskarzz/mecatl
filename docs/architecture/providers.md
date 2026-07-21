@@ -71,7 +71,8 @@ model per session**. The wiring lives entirely in the composition layer
 **The registry (`internal/app/registry.go`).** `buildProviderRegistry` constructs,
 once at `Build`, the set of AVAILABLE providers — a provider is available iff one of
 its credential env vars resolves (the var NAMES come from the embedded models.dev
-catalog, `internal/adapter/providercatalog`; `OPENAI_API_KEY`/`OPENROUTER_API_KEY`/`ANTHROPIC_API_KEY`).
+catalog, `internal/adapter/providercatalog`; `OPENAI_API_KEY`/`OPENROUTER_API_KEY`/`ANTHROPIC_API_KEY` —
+and `OPENCODE_API_KEY`, supplied by composition since OpenCode Go is not in the vendored catalog).
 Only available providers are held (an unkeyed provider is omitted — its availability
 is itself sensitive, CWE-200). OpenRouter rides the SAME stateless openai adapter with
 the OpenRouter base URL substituted. **Anthropic (P1) is the first native non-OpenAI
@@ -85,6 +86,18 @@ and model-aware, and the `(thinking,signature[],redacted)` reasoning-replay list
 into the opaque `Message.Reasoning` STRING) are absorbed at adapter-construction, not in
 the DTO. `UseMock` short-circuits to a single synthetic
 `mock` entry (offline). The zero-keys case is the named, actionable `errNoProvider`.
+
+**OpenCode Go (`internal/adapter/openaichat`)** is the Chat Completions wire adapter —
+the sibling of the openai Responses adapter, built on the same `openai-go` SDK via
+`client.Chat.Completions`. It serves provider id `opencode` (base URL
+`https://opencode.ai/zen/go/v1`, key `OPENCODE_API_KEY`) and is the generic OpenAI
+Chat-Completions protocol adapter (usable by any such endpoint). Reasoning-effort passes
+through un-clamped (the endpoint accepts `xhigh`/`max`); reasoning-replay and phase are
+dropped (Chat Completions is stateless across turns), so no port/proto/engine-API change
+was needed. Live model listing rides `openCodeLister` (the `openaicompat` lister
+wrapped to stamp adapter-static text+image modalities, so a live refresh doesn't
+flip an uncatalogued model's Image capability to false). See
+[`docs/adr/0067-openai-chat-completions-adapter.md`](../adr/0067-openai-chat-completions-adapter.md).
 `buildProvider` returns the registry **and** its default provider so the shared engine
 + every child/fork/team engine keep receiving the single default provider exactly as
 before (the default path is byte-identical). A composition-only `providerConstructor`

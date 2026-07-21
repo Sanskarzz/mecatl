@@ -2,8 +2,9 @@
 
 `mecatl` is a headless, agentic coding harness. It owns its own context
 window, tool loop, permission policy and lifecycle hooks, and talks to OpenAI
-(or any OpenAI-compatible `/v1/responses` endpoint), OpenRouter, or Anthropic
-(the native Messages API). The server, `mecated`, exposes one agent run over
+(or any OpenAI-compatible `/v1/responses` endpoint), OpenRouter, Anthropic
+(the native Messages API), or OpenCode Go (Chat Completions — and any
+OpenAI-compatible `/v1/chat/completions` endpoint). The server, `mecated`, exposes one agent run over
 **gRPC** and **HTTP/SSE** concurrently — or, opt-in, over **ACP on stdio** for
 an editor that spawned it.
 

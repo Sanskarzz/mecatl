@@ -1160,6 +1160,7 @@ func parseFlags(argv []string) (config, error) {
 		OpenAIBaseURL:     "override the OpenAI API base URL (compatible endpoints)",
 		OpenRouterBaseURL: "override the OpenRouter API base URL (default https://openrouter.ai/api/v1; key from OPENROUTER_API_KEY)",
 		AnthropicBaseURL:  "override the native Anthropic API base URL (compatible/proxy endpoints; key from ANTHROPIC_API_KEY)",
+		OpenCodeBaseURL:   "override the OpenCode Go API base URL (default https://opencode.ai/zen/go/v1; key from OPENCODE_API_KEY)",
 	})
 	// ToolHive LLM gateway (issue #262): registered adjacent to the provider
 	// flags above (the credential-source family) AND grouped near --toolhive/

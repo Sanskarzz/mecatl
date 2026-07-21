@@ -16,6 +16,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/anthropic"
 	"github.com/stacklok/mecatl/internal/adapter/llmresilience"
 	"github.com/stacklok/mecatl/internal/adapter/openai"
+	"github.com/stacklok/mecatl/internal/adapter/openaichat"
 	"github.com/stacklok/mecatl/internal/adapter/openaicompat"
 	"github.com/stacklok/mecatl/internal/adapter/openrouter"
 	"github.com/stacklok/mecatl/internal/adapter/providercatalog"
@@ -29,6 +30,11 @@ const (
 	providerOpenAI     = "openai"
 	providerOpenRouter = "openrouter"
 	providerAnthropic  = "anthropic"
+	// providerOpenCode is OpenCode Go (https://opencode.ai/zen/go/v1), an
+	// OpenAI-compatible subscription gateway that speaks the Chat Completions wire
+	// protocol uniformly. Unlike openai/openrouter (Responses API) it rides the
+	// native Chat Completions adapter (openaichat). Key-driven (OPENCODE_API_KEY).
+	providerOpenCode = "opencode"
 	// providerToolhive (issue #262) is the intent-driven ToolHive LLM gateway
 	// proxy entry: unlike the three above, it is registered by CONFIG-DETECTED
 	// INTENT (or an explicit base-url override), never a credential.
@@ -54,12 +60,21 @@ var builtinDefaultModel = map[string]string{
 	// default than Opus. It is catalogued in providercatalog (resolves cleanly
 	// through modelCapability) and supports extended thinking (adaptive).
 	providerAnthropic: "claude-sonnet-4-6",
+	// opencode (OpenCode Go): a confirmed live model id (GET /zen/go/v1/models,
+	// 2026-07-17). Bare id — OpenCode Go does not namespace. Not catalogued in
+	// providercatalog, so this default cannot fall back to the catalog.
+	providerOpenCode: "glm-5.2",
 }
 
 // openRouterDefaultBaseURL is the OpenRouter Responses-compatible API base URL.
 // OpenRouter rides the SAME stateless openai adapter (it speaks the Responses
 // API) with this base URL substituted — there is NO separate wire adapter in P0.
 const openRouterDefaultBaseURL = "https://openrouter.ai/api/v1"
+
+// openCodeDefaultBaseURL is the OpenCode Go Chat-Completions API base URL
+// (verified live 2026-07-17). The SDK appends "/chat/completions"; the generic
+// openaicompat lister appends "/models".
+const openCodeDefaultBaseURL = "https://opencode.ai/zen/go/v1"
 
 // openaiStaticCaps / anthropicStaticCaps are the adapters' STATIC transmit
 // capabilities — the authority modelCapability ANDs with the catalog. The shared
@@ -71,6 +86,7 @@ const openRouterDefaultBaseURL = "https://openrouter.ai/api/v1"
 var (
 	openaiStaticCaps    = (&openai.Provider{}).Capabilities()
 	anthropicStaticCaps = (&anthropic.Provider{}).Capabilities()
+	opencodeStaticCaps  = (&openaichat.Provider{}).Capabilities()
 )
 
 // envDetector resolves an environment variable to its value. It is the injectable
@@ -97,6 +113,13 @@ type envDetector func(name string) string
 // A provider id absent from the catalog returns nil (unavailable), exactly like
 // an unset env var.
 func providerEnvVars(providerID string) []string {
+	// opencode (OpenCode Go) is NOT in the vendored models.dev subset, so the
+	// catalog lookup below would return nil. Its credential env var is fixed by
+	// convention (OPENCODE_API_KEY) — supply it directly so env auto-detection
+	// works like every other provider.
+	if providerID == providerOpenCode {
+		return []string{"OPENCODE_API_KEY"}
+	}
 	p, ok := providercatalog.Default().Provider(providerID)
 	if !ok {
 		return nil
@@ -414,9 +437,10 @@ func (r *providerRegistry) remintEntry(pid, model string) {
 // TestRegistryZeroKeys pins the load-bearing substrings.
 var errNoProvider = errors.New(
 	"no LLM provider available: set one of ANTHROPIC_API_KEY (Claude), " +
-		"OPENAI_API_KEY (OpenAI), or OPENROUTER_API_KEY (one key, many models — a good first choice) " +
+		"OPENAI_API_KEY (OpenAI), OPENROUTER_API_KEY (one key, many models — a good first choice), " +
+		"or OPENCODE_API_KEY (OpenCode Go) " +
 		"in the environment; for an OpenAI- or Anthropic-compatible/proxy endpoint pass the matching key " +
-		"plus --openai-base-url / --anthropic-base-url / --openrouter-base-url; to try mecatl offline with " +
+		"plus --openai-base-url / --anthropic-base-url / --openrouter-base-url / --opencode-base-url; to try mecatl offline with " +
 		"no key run with --mock; see docs/usage.md for provider setup")
 
 // buildProviderRegistry constructs the registry from cfg and the injected env
@@ -493,6 +517,21 @@ func buildProviderRegistry(cfg Config, detect envDetector) (*providerRegistry, e
 		// inject a mock transport). KEYLESS: the lister never receives the key.
 		entry.lister = openRouterLister{inner: openrouter.NewLister(cfg.liveModelHTTPClient)}
 		entries[providerOpenRouter] = entry
+	}
+
+	// opencode (OpenCode Go): the native Chat Completions adapter (openaichat, NOT
+	// the openai Responses adapter), keyed by OPENCODE_API_KEY. Its /models endpoint
+	// is OpenAI-shaped, so it opts into LIVE model listing via the generic
+	// openaicompat lister (bare ids, no display name). The lister IS keyed here —
+	// unlike openrouter's keyless public catalog, OpenCode Go requires the bearer.
+	if key := providerKey(cfg.OpenCodeKey, providerOpenCode, detect); key != "" {
+		baseURL := cfg.OpenCodeBaseURL
+		if baseURL == "" {
+			baseURL = openCodeDefaultBaseURL
+		}
+		entry := newOpenCodeEntry(cfg, providerOpenCode, key, baseURL)
+		entry.lister = openCodeLister{inner: openaicompat.NewLister(baseURL, key, cfg.liveModelHTTPClient)}
+		entries[providerOpenCode] = entry
 	}
 
 	// anthropic: the native Messages-API adapter (NOT the openai adapter). AVAILABLE
@@ -655,7 +694,52 @@ func newOpenAICompatEntry(cfg Config, id, key, baseURL string, extra ...openai.O
 	return providerEntry{id: id, provider: llm, available: true, baseURL: baseURL, remint: construct}
 }
 
-// newAnthropicEntry constructs a resilience-wrapped native-Anthropic provider
+// newOpenCodeEntry constructs a resilience-wrapped OpenCode Go provider entry
+// over the native Chat Completions adapter (openaichat). It is the Chat
+// Completions sibling of newOpenAICompatEntry (Responses): SAME construct/remint
+// discipline (the shared .provider is construct(defaultEffort), the per-session
+// re-mint is construct(sessionEffort), so resilience wrapping cannot drift), SAME
+// providerConstructor test seam. It differs in two ways: the adapter is
+// openaichat.New (Chat Completions), and the remint's caps argument is IGNORED —
+// openaichat has no per-model modality gating (all its models are text+image via
+// static caps), so a caps-driven re-mint would rebuild an identical adapter; only
+// the reasoning-effort axis re-mints meaningfully.
+func newOpenCodeEntry(cfg Config, id, key, baseURL string) providerEntry {
+	cfg.diag().Log(context.Background(), port.LevelInfo, "LLM provider available", "provider", id, "model", cfg.Model, "base_url", baseURL)
+	if cfg.providerConstructor != nil {
+		return providerEntry{id: id, provider: cfg.providerConstructor(cfg, id, key, baseURL), available: true, baseURL: baseURL}
+	}
+	construct := func(effort string, _ port.ProviderCapabilities) port.LLMProvider {
+		opts := []openaichat.Option{openaichat.WithAPIKey(key)}
+		if baseURL != "" {
+			opts = append(opts, openaichat.WithBaseURL(baseURL))
+		}
+		if effort != "" {
+			opts = append(opts, openaichat.WithReasoningEffort(effort))
+		}
+		var llm port.LLMProvider = openaichat.New(opts...)
+		return llmresilience.Wrap(llm, llmresilience.Config{
+			MaxAttempts:       cfg.LLMMaxAttempts,
+			BaseBackoff:       llmBaseBackoff,
+			MaxBackoff:        llmMaxBackoff,
+			PerAttemptTimeout: cfg.LLMPerAttemptTimeout,
+			StreamIdleTimeout: cfg.LLMStreamIdleTimeout,
+			BreakerThreshold:  cfg.LLMBreakerThreshold,
+			BreakerCooldown:   cfg.LLMBreakerCooldown,
+			Diagnostics:       cfg.diag().With("provider", id),
+		})
+	}
+	llm := construct(operatorDefaultEffortFor(cfg, id), opencodeStaticCaps)
+	cfg.diag().Log(context.Background(), port.LevelInfo, "LLM resilience enabled",
+		"provider", id,
+		"max_attempts", cfg.LLMMaxAttempts,
+		"per_attempt_timeout", cfg.LLMPerAttemptTimeout,
+		"stream_idle_timeout", cfg.LLMStreamIdleTimeout,
+		"breaker_threshold", cfg.LLMBreakerThreshold,
+		"breaker_cooldown", cfg.LLMBreakerCooldown)
+	return providerEntry{id: id, provider: llm, available: true, baseURL: baseURL, remint: construct}
+}
+
 // entry. It honors the SAME composition-only providerConstructor test seam first
 // (so the offline multi-provider e2e can back "anthropic" with a mock), else
 // constructs the anthropic adapter with WithMaxTokens set to the default model's

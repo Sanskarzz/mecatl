@@ -343,6 +343,44 @@ func (l gatewayLister) ListModels(ctx context.Context) ([]modelEntry, error) {
 	return out, nil
 }
 
+// openCodeLister wraps the generic openaicompat lister for OpenCode Go. It is the
+// sibling of gatewayLister with ONE deliberate difference: it stamps the ADAPTER's
+// static input modalities (text+image) rather than leaving them nil.
+//
+// Why: OpenCode Go's /models envelope carries no modality metadata, so a raw
+// gatewayLister row has InputModalities==nil. modelCapability treats a PRESENT
+// live row as authoritative, so nil would FLIP an uncatalogued model's Image from
+// the adapter-static default (true) to false the instant a live refresh lands —
+// contradicting the documented "uncatalogued → adapter static caps" fallback and
+// making the picker/session echo diverge before vs after the refresh. Stamping the
+// adapter modalities resolves the unknown-metadata case to that documented
+// fallback STABLY (no flip), and the picker (projectModelEntry) + the session echo
+// (modelCapability) agree for free since both read this same modelEntry. (ToolHive
+// keeps the conservative nil-modality gatewayLister — a separate, deliberate
+// choice, unchanged.)
+type openCodeLister struct {
+	inner *openaicompat.Lister
+}
+
+func (l openCodeLister) ListModels(ctx context.Context) ([]modelEntry, error) {
+	raw, err := l.inner.ListModels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]modelEntry, 0, len(raw))
+	for _, m := range raw {
+		out = append(out, modelEntry{
+			ID:          m.ID,
+			DisplayName: m.DisplayName,
+			ToolCall:    true, // same rationale as gatewayLister: fail-safe via provider 4xx
+			// Adapter-static modalities (openaichat is text+image). Not per-model
+			// truth (the endpoint gives none), but the documented stable fallback.
+			InputModalities: []string{"text", "image"},
+		})
+	}
+	return out, nil
+}
+
 // embeddedModels projects the embedded providercatalog subset for a provider into
 // []modelEntry — the FALLBACK FLOOR used by BOTH the synchronous seed
 // (modelSnapshot) and the live refresh when a provider has no lister or its fetch
