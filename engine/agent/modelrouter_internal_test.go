@@ -138,6 +138,167 @@ func TestRunNamedAgentBeatsRouter(t *testing.T) {
 	}
 }
 
+// routableAgentTool builds a Subagent with a "reviewer" specialist declared ROUTABLE
+// (WithRoutableAgents), a pre-built specialist engine emitting "SPECIALIST", and an
+// agent+model factory minting "AGENTMODEL:<agent>:<model>". factoryOK=false makes the
+// factory decline (the inline-MCP-decline shape). defLimits binds the def's per-call limits
+// so a test can prove they survive a routed engine swap. wireFactory=false omits the
+// agent+model factory entirely (the "pick can't be consumed" gate).
+func routableAgentTool(factoryOK, wireFactory bool, defLimits session.Limits) *SubagentTool {
+	opts := []SubagentOption{
+		WithAgentEngines(map[string]*Engine{"reviewer": markerEngine("SPECIALIST")},
+			[]AgentMeta{{Name: "reviewer", Description: "a specialist", Limits: defLimits}}),
+		WithRoutableAgents([]string{"reviewer"}),
+	}
+	if wireFactory {
+		opts = append(opts, WithAgentModelEngineFactory(func(agentName, model string) (*Engine, bool) {
+			if !factoryOK {
+				return nil, false
+			}
+			return markerEngine("AGENTMODEL:" + agentName + ":" + model), true
+		}))
+	}
+	return NewSubagentTool(markerEngine("DEFAULT"), opts...).(*SubagentTool)
+}
+
+// hitRoute returns a routeTask that always classifies to model, counting consultations.
+func hitRoute(calls *int, model string) func(context.Context, string) (string, string, bool) {
+	return func(context.Context, string) (string, string, bool) { *calls++; return "large", model, true }
+}
+
+// TestRunRoutableAgentRoutesViaFactory (issue #286): a ROUTABLE (unpinned) `agent`
+// delegation IS classified and its SCOPED engine is rebuilt on the routed model via the
+// agent+model factory. The classifier is consulted once and the factory engine (not the
+// pre-built specialist) runs.
+func TestRunRoutableAgentRoutesViaFactory(t *testing.T) {
+	tl := routableAgentTool(true, true, session.Limits{})
+	var calls int
+	caps := parentCaps{children: newChildRunRegistry(), routeTask: hitRoute(&calls, "router-model")}
+	res, err := tl.ExecuteWithParent(context.Background(),
+		session.NewToolCall("p1", "Subagent", json.RawMessage(`{"prompt":"review it","agent":"reviewer"}`)),
+		memfs.NewWorkspace("/ws"), nil, caps)
+	if err != nil {
+		t.Fatalf("transport error: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("a routable agent must consult the classifier exactly once; calls=%d", calls)
+	}
+	if !strings.Contains(res.Content, "AGENTMODEL:reviewer:router-model") {
+		t.Fatalf("a routed routable agent must run the factory engine on the routed model; got %q", res.Content)
+	}
+	if strings.Contains(res.Content, "SPECIALIST") {
+		t.Fatalf("a routed routable agent must NOT run the pre-built specialist engine; got %q", res.Content)
+	}
+}
+
+// TestSelectReadOnlyAgentEnginePreservesDefLimitsOnRoutedSwap pins that the routed engine
+// swap keeps the def's PER-CALL limits (only the engine changes) — the unit-level guard for
+// the "per-def limits untouched" contract.
+func TestSelectReadOnlyAgentEnginePreservesDefLimitsOnRoutedSwap(t *testing.T) {
+	defLimits := session.Limits{MaxTurns: 7, MaxToolCalls: 13}
+	tl := routableAgentTool(true, true, defLimits)
+	eng, limits, _, ok := tl.selectReadOnlyAgentEngine("p1", "reviewer", "router-model")
+	if !ok || eng == nil {
+		t.Fatalf("selectReadOnlyAgentEngine = (%v, ok=%v), want a non-nil engine", eng, ok)
+	}
+	if eng.Model() != "AGENTMODEL:reviewer:router-model" {
+		t.Fatalf("routed swap must run the factory engine; Model()=%q", eng.Model())
+	}
+	if limits != defLimits {
+		t.Fatalf("per-def limits must survive the routed swap; got %+v want %+v", limits, defLimits)
+	}
+}
+
+// TestRunRoutableAgentMissUsesPrebuilt (issue #286): a routable agent whose classification
+// MISSES falls back to the pre-built specialist engine (fail-soft); the classifier is still
+// consulted once (the miss is a real classification attempt, not a skip).
+func TestRunRoutableAgentMissUsesPrebuilt(t *testing.T) {
+	tl := routableAgentTool(true, true, session.Limits{})
+	var calls int
+	caps := parentCaps{children: newChildRunRegistry(), routeTask: func(context.Context, string) (string, string, bool) {
+		calls++
+		return "", "", false // miss
+	}}
+	res, err := tl.ExecuteWithParent(context.Background(),
+		session.NewToolCall("p1", "Subagent", json.RawMessage(`{"prompt":"review it","agent":"reviewer"}`)),
+		memfs.NewWorkspace("/ws"), nil, caps)
+	if err != nil {
+		t.Fatalf("transport error: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("a routable agent must consult the classifier once even on a miss; calls=%d", calls)
+	}
+	if !strings.Contains(res.Content, "SPECIALIST") {
+		t.Fatalf("a routable-agent miss must fall back to the pre-built specialist; got %q", res.Content)
+	}
+}
+
+// TestRunRoutableAgentNoFactoryDoesNotSpendClassifier (issue #286): a routable agent with
+// NO agent+model factory wired must NOT spend the classifier (the pick could not be
+// consumed) — calls==0 — and runs the pre-built specialist.
+func TestRunRoutableAgentNoFactoryDoesNotSpendClassifier(t *testing.T) {
+	tl := routableAgentTool(true, false /*no factory*/, session.Limits{})
+	var calls int
+	caps := parentCaps{children: newChildRunRegistry(), routeTask: hitRoute(&calls, "router-model")}
+	res, err := tl.ExecuteWithParent(context.Background(),
+		session.NewToolCall("p1", "Subagent", json.RawMessage(`{"prompt":"review it","agent":"reviewer"}`)),
+		memfs.NewWorkspace("/ws"), nil, caps)
+	if err != nil {
+		t.Fatalf("transport error: %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("a routable agent with no agent+model factory must NOT spend the classifier; calls=%d", calls)
+	}
+	if !strings.Contains(res.Content, "SPECIALIST") {
+		t.Fatalf("it must run the pre-built specialist; got %q", res.Content)
+	}
+}
+
+// TestRunRoutableAgentFactoryDeclineUsesPrebuilt (issue #286, ADVERSARIAL — the inline-MCP
+// decline shape): the classifier hits but the agent+model factory DECLINES (returns false);
+// the call falls back to the pre-built specialist, no error.
+func TestRunRoutableAgentFactoryDeclineUsesPrebuilt(t *testing.T) {
+	tl := routableAgentTool(false /*factory declines*/, true, session.Limits{})
+	var calls int
+	caps := parentCaps{children: newChildRunRegistry(), routeTask: hitRoute(&calls, "router-model")}
+	res, err := tl.ExecuteWithParent(context.Background(),
+		session.NewToolCall("p1", "Subagent", json.RawMessage(`{"prompt":"review it","agent":"reviewer"}`)),
+		memfs.NewWorkspace("/ws"), nil, caps)
+	if err != nil {
+		t.Fatalf("transport error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("a factory decline must fall back cleanly, got error: %q", res.Content)
+	}
+	if calls != 1 {
+		t.Fatalf("the classifier is consulted once; calls=%d", calls)
+	}
+	if !strings.Contains(res.Content, "SPECIALIST") {
+		t.Fatalf("a factory decline must fall back to the pre-built specialist; got %q", res.Content)
+	}
+}
+
+// TestRunExplicitAgentModelBypassesRouter (issue #286 precedence): an explicit `agent`+`model`
+// pins the specialist-on-that-model — the router never fires (per-call model wins), even for a
+// routable def.
+func TestRunExplicitAgentModelBypassesRouter(t *testing.T) {
+	tl := routableAgentTool(true, true, session.Limits{})
+	var calls int
+	caps := parentCaps{children: newChildRunRegistry(), routeTask: hitRoute(&calls, "router-model")}
+	res, err := tl.ExecuteWithParent(context.Background(),
+		session.NewToolCall("p1", "Subagent", json.RawMessage(`{"prompt":"x","agent":"reviewer","model":"fast"}`)),
+		memfs.NewWorkspace("/ws"), nil, caps)
+	if err != nil {
+		t.Fatalf("transport error: %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("an explicit agent+model must NOT consult the router; calls=%d", calls)
+	}
+	if !strings.Contains(res.Content, "AGENTMODEL:reviewer:fast") {
+		t.Fatalf("agent+model must pin the specialist on the explicit model; got %q", res.Content)
+	}
+}
+
 // PRECEDENCE: a `resume` call continues a persisted child on the default explorer engine
 // (the v1 resume invariant) — the router must NOT fire (the run() hook gates routing on
 // !resuming). A regression dropping the `resuming` guard would re-classify a resumed

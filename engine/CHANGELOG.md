@@ -28,6 +28,15 @@ The covered surface is the seven core packages (`session`, `governance`, `tool`,
 
 ### Added
 
+- **`agent.WithRoutableAgents(names []string) SubagentOption`** — injects the
+  composition-computed SET of agent-def names eligible for the OPT-IN model router
+  (issue #286): a def that expressed NO model intent (absent `model:`) is CLASSIFIED and
+  its scoped engine rebuilt on the routed model (via the agent+model factory), while a def
+  that pinned ANY model (incl. explicit `inherit`) is honoured verbatim. nil/empty (the
+  default) means no def routes — byte-identical to pre-#286. Layering-clean (def NAME
+  strings only). Classified Added per COMPATIBILITY.md (a new exported option constructor is
+  a minor bump; the `SubagentTool` struct is unexported). (#286)
+
 - **`agent.WithWritableEngineFactory(f func(model string) (*Engine, bool))
   SubagentOption`** — injects the composition factory that mints a WRITABLE explorer
   child engine on a per-call OVERRIDE model for a mode:"read-write" Subagent call with

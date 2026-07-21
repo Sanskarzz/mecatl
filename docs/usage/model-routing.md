@@ -155,11 +155,16 @@ models:
 - **The classifier** is a tiny one-turn call on the `router` slot (or `classifier-slot`),
   reusing the hardened single-JSON-verdict parse; the task prompt is fenced as untrusted.
 - **Precedence** (the router fills the gap, never overrides): an explicit per-call
-  `model`, a named `agent`, a `fork`, or a `resume` already pins the engine → the router
-  does NOT fire. Otherwise: per-call `model` > agent-def `Model` > fork/resume > **router**
-  > inherited default.
+  `model`, an agent-def's own `model:`, a `fork`, or a `resume` already pins the engine →
+  the router does NOT fire. Otherwise: per-call `model` > agent-def `model:` (incl. explicit
+  `inherit`) > fork/resume > **router** > `--subagent-model` default > session model.
 - **Per-category `model`** is an alias / slot / concrete id, resolved through the same
   alias map (operator targets are **uncapped** — the operator is authoritative).
+- **Unpinned agent-defs route too** (issue #286): a delegation to a named `agent` that
+  declared **no `model:`** is classified and its scoped engine rebuilt on the routed model.
+  To keep a def on a fixed model — i.e. to opt it OUT of routing — set its `model:`
+  explicitly; **`model: inherit`** pins it to the session model without routing. (A def that
+  switches `provider:` or declares inline MCP servers is never routed.)
 - **Writable delegations route too** (issue #285): a `mode:"read-write"` explorer picks its
   model from the same taxonomy, running the WRITABLE engine on the routed model (direct-write
   against your workspace). A writable specialist (`agent`) or a `resume` keeps its own model.

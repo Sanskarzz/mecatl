@@ -614,6 +614,21 @@ type SubagentTool struct {
 	// returns *Engine — both agent-layer types — and no adapter/proto/server type crosses.
 	agentModelFactory func(agentName, model string) (*Engine, bool)
 
+	// routableAgents is the composition-computed SET of agent-def names that expressed NO
+	// model intent (absent `model:` — issue #286) and are therefore eligible for the OPT-IN
+	// model router: an `agent`-named delegation to one of these, read-only and with the
+	// agent+model factory wired, is CLASSIFIED and the def's SCOPED engine is rebuilt on the
+	// routed model (via agentModelFactory), fail-soft to the pre-built def engine on a miss.
+	// A def that expressed model intent (ANY def.Model — `inherit`, a built-in alias, an
+	// unknown alias, a concrete id) is PINNED and NEVER in this set. Composition ALSO
+	// excludes a def whose `provider:` switches away from the parent (routed ids are
+	// parent-provider ids) and a def with INLINE MCP servers (the agent+model factory would
+	// decline — excluding avoids wasted classifier spend). nil/empty (the default) means NO
+	// def routes — byte-identical to pre-#286. It is consulted ONLY by the router gate
+	// (routeGateOpen); the engine layer stays model-string-only (names only — no adapter/
+	// registry/provider type crosses).
+	routableAgents map[string]struct{}
+
 	// agentWritableFactory, when non-nil, mints a WRITABLE child engine for a
 	// mode:"read-write"+`agent` call: the named specialist's scoped engine
 	// (catalog/prompt/hooks/memory) is REBUILT with allowMutating=true so Edit/Write
@@ -994,6 +1009,30 @@ func WithAgentEngines(engines map[string]*Engine, meta []AgentMeta) SubagentOpti
 	}
 }
 
+// WithRoutableAgents injects the composition-computed SET of agent-def names eligible for
+// the OPT-IN model router (issue #286): a def that expressed NO model intent (absent
+// `model:`), does not switch provider away from the parent, and has no inline MCP servers.
+// An `agent`-named delegation to one of these — read-only, with the agent+model factory
+// wired — is CLASSIFIED and its SCOPED engine rebuilt on the routed model (fail-soft to the
+// pre-built def engine). A def NOT in this set is PINNED (its `model:`, incl. explicit
+// `inherit`, is honoured verbatim — resolution unchanged). nil/empty (the default) means NO
+// def routes — byte-identical to pre-#286. It is layering-clean: only def NAME strings flow
+// in. It is inert when the router is off (routeTask nil) — wiring it unconditionally is safe.
+func WithRoutableAgents(names []string) SubagentOption {
+	return func(t *SubagentTool) {
+		if len(names) == 0 {
+			t.routableAgents = nil
+			return
+		}
+		t.routableAgents = make(map[string]struct{}, len(names))
+		for _, n := range names {
+			if n = strings.TrimSpace(n); n != "" {
+				t.routableAgents[n] = struct{}{}
+			}
+		}
+	}
+}
+
 // NewSubagentTool constructs the Subagent tool tool over a pre-built child *Engine.
 //
 // The composition root (cmd/mecated, WP11) is responsible for building childEngine
@@ -1276,10 +1315,14 @@ func (t *SubagentTool) ExecuteWithParent(ctx context.Context, call session.ToolC
 //     "not supported in this deployment" (validateMode catches this first, but the
 //     defensive guard here is belt-and-suspenders); an inline-MCP def is a v1 scope
 //     limit (the factory returns (nil,false) and a model-addressable error surfaces).
-//   - `agent` only (read-only): routes to the pre-built specialist engine (agentEngines).
-//   - `model` only: mints a generic explorer child for the requested model via
-//     engineFactory (re-derives the provider-closing Deps).
-//   - neither: the default explorer + the Subagent tool's default limits.
+//   - `agent` only (read-only): routes to the pre-built specialist engine (agentEngines)
+//     via selectReadOnlyAgentEngine — which, for a ROUTABLE def (issue #286), applies the
+//     OPT-IN router's routedModel by rebuilding the def's scoped engine on it (fail-soft to
+//     the pre-built engine on a factory decline; per-def limits untouched).
+//   - `model` only (no agent): mints a generic explorer child for the requested model via
+//     engineFactory (read-only) or writableEngineFactory (writable, issue #285).
+//   - neither: the default explorer + the Subagent tool's default limits (or the router's
+//     routedModel for a plain default delegation).
 //
 // It returns ok=false with a model-addressable error ToolResult on a bad selection (an
 // unsupported combination, an unknown agent, an unwired/unroutable model), and the chosen
@@ -1317,48 +1360,56 @@ func (t *SubagentTool) selectChildEngine(callID session.ToolCallID, args subagen
 		return engine, limits, session.ToolResult{}, true
 	}
 
-	// Route to a named specialist when requested; otherwise the default explorer. An
-	// unknown name is a model-addressable error listing the valid names, so the model
-	// can retry — it never silently falls back (which would run the wrong scope/prompt).
-	engine = t.childEngine
-	limits = t.limits // default explorer bound; a named agent with per-def limits overrides.
+	// Route to a named specialist when requested (each arm returns): a WRITABLE specialist
+	// (mode:"read-write"+agent, ADR 0058) via selectWritableSpecialistEngine, else the
+	// read-only specialist (selectReadOnlyAgentEngine — which also applies the issue-#286
+	// routable-def routed override). An unknown name is a model-addressable error inside
+	// those helpers; it never silently falls back to the wrong scope/prompt.
 	if wantAgent != "" {
-		// A WRITABLE specialist (mode:"read-write"+agent, ADR 0058) routes through
-		// agentWritableFactory; otherwise the pre-built read-only specialist engine.
-		// The name-truth check fires BEFORE the factory (an unknown name is the same
-		// model-addressable error the read-only path returns, never a factory call).
-		// The pre-built agentEngines map is read for the name-truth check ONLY; a fresh
-		// engine is minted per call, never inserted (no map reuse — a writable specialist
-		// never accidentally runs the read-only pre-built engine).
 		if writable {
 			return t.selectWritableSpecialistEngine(callID, wantAgent)
 		}
-		// read-only agent: the pre-built specialist engine.
-		eng, found := t.agentEngines[wantAgent]
-		if !found {
-			return nil, session.Limits{}, session.NewToolError(callID, "Subagent: "+t.unknownAgentHint(wantAgent)), false
-		}
-		engine = eng
-		if l, found := t.agentLimits[wantAgent]; found {
-			limits = l
-		}
+		return t.selectReadOnlyAgentEngine(callID, wantAgent, routedModel)
 	}
 
-	// Writable EXPLORER (mode:"read-write" with NO `agent` — issue #285): honour a per-call
-	// `model` and the OPT-IN router pick on the WRITABLE engine (selectWritableExplorerEngine).
-	// It returns BEFORE the read-only `model`/router arms below, so a writable call NEVER runs
-	// a read-only engine (the pre-#285 bug: the writable clobber in resolveEngineAndLimits
-	// discarded a read-only per-model engine and ran the DEFAULT writable model instead). A
-	// writable specialist (wantAgent != "") already returned from the block above via
-	// selectWritableSpecialistEngine, so wantAgent == "" here.
+	// No `agent`: the default-explorer path. A writable EXPLORER (issue #285) honours a
+	// per-call `model`/router pick on the WRITABLE engine (selectWritableExplorerEngine);
+	// otherwise the read-only default explorer honours them (selectReadOnlyModelEngine) or
+	// keeps the default explorer. Both return BEFORE any read-only clobber, so a writable
+	// call NEVER runs a read-only engine (the pre-#285 bug the writable clobber caused).
+	engine = t.childEngine
+	limits = t.limits
 	if writable {
 		return t.selectWritableExplorerEngine(callID, wantModel, routedModel, limits)
 	}
-
-	// READ-ONLY per-call `model` override (R9/D6) or the OPT-IN router pick — resolved by
-	// selectReadOnlyModelEngine (extracted for the gocyclo budget). Reached only when
-	// !writable (the writable arm returned above).
 	return t.selectReadOnlyModelEngine(callID, wantModel, routedModel, engine, limits)
+}
+
+// selectReadOnlyAgentEngine resolves a read-only `agent` delegation to its pre-built SCOPED
+// specialist engine (agentEngines) + per-def limits, then applies the issue-#286 routable-def
+// routed override: when the OPT-IN router classified this delegation (routedModel != "", set
+// ONLY for a def in t.routableAgents — maybeRouteModel/routeGateOpen gate it) and the
+// agent+model factory is wired, the def's SCOPED engine is REBUILT on the routed model via
+// agentModelFactory. It is FAIL-SOFT — a factory decline (e.g. an inline-MCP def) or a miss
+// keeps the pre-built def engine, never an error (the router is never load-bearing). Per-def
+// limits are UNTOUCHED — only the engine swaps (the def's own turn/tool bounds still bind). An
+// unknown name is the same model-addressable error the pinned path returns (never a silent
+// fallback to the wrong scope). Extracted from selectChildEngine for the gocyclo budget.
+func (t *SubagentTool) selectReadOnlyAgentEngine(callID session.ToolCallID, wantAgent, routedModel string) (*Engine, session.Limits, session.ToolResult, bool) {
+	eng, found := t.agentEngines[wantAgent]
+	if !found {
+		return nil, session.Limits{}, session.NewToolError(callID, "Subagent: "+t.unknownAgentHint(wantAgent)), false
+	}
+	limits := t.limits
+	if l, ok := t.agentLimits[wantAgent]; ok {
+		limits = l
+	}
+	if routedModel != "" && t.agentModelFactory != nil {
+		if eng2, ok := t.agentModelFactory(wantAgent, routedModel); ok && eng2 != nil {
+			eng = eng2
+		}
+	}
+	return eng, limits, session.ToolResult{}, true
 }
 
 // selectReadOnlyModelEngine resolves the READ-ONLY explorer engine for a per-call `model`
@@ -1689,37 +1740,59 @@ func (t *SubagentTool) validatePreconditions(callID session.ToolCallID, args sub
 	return writable, forkHistory, session.ToolResult{}, true
 }
 
-// maybeRouteModel consults the OPT-IN semantic model router (ADR 0031) for a PLAIN
-// default delegation and returns the classified category + the ALREADY-RESOLVED concrete
-// model id to mint the child on (both empty when not routed). PRECEDENCE is enforced by
-// GATING: an explicit per-call `model`, a named `agent`, a `fork`, or a `resume` already
-// pins the child's engine/conversation, so the router fires only when NONE of them did —
-// it fills the gap, never overrides an explicit choice. caps.routeTask is nil when no
-// router is wired (the byte-identical default) or on a child run (no nesting — a child
-// has no Subagent tool, so structurally no parentCaps.routeTask). FAIL-SOFT: a router
-// miss (ok=false) returns empty strings and the caller inherits the default explorer.
+// maybeRouteModel consults the OPT-IN semantic model router (ADR 0031) and returns the
+// classified category + the ALREADY-RESOLVED concrete model id to mint the child on (both
+// empty when not routed). PRECEDENCE is enforced by GATING: an explicit per-call `model`, a
+// `fork`, or a `resume` already pins the child's engine/conversation, so the router never
+// fires for them — it fills the gap, never overrides an explicit choice. caps.routeTask is
+// nil when no router is wired (the byte-identical default) or on a child run (no nesting —
+// a child has no Subagent tool, so structurally no parentCaps.routeTask). FAIL-SOFT: a
+// router miss (ok=false) returns empty strings and the caller inherits its default engine.
 //
-// The WRITABLE gate (issue #285): a mode:"read-write" plain delegation only routes when
-// t.writableEngineFactory is wired — the routed pick can only take effect through that
-// factory (selectChildEngine's writable arm), so a writable call whose pick would be
-// DISCARDED (factory unwired) must not spend the classifier at all. A read-only delegation
-// always routes (writable==false). It is a method (not a free func) only to read
-// t.writableEngineFactory.
+// Two gate shapes (routeGateOpen):
+//   - NO `agent` (a plain default delegation): routes, EXCEPT a writable delegation whose
+//     writable engine factory is unwired (issue #285 — the pick would be DISCARDED by
+//     selectChildEngine's writable arm, so don't spend the classifier).
+//   - a NAMED `agent` (issue #286): routes ONLY a ROUTABLE def — one that expressed NO model
+//     intent (composition put it in t.routableAgents) — and only READ-ONLY with the
+//     agent+model factory wired (the pick is consumed by rebuilding the def's SCOPED engine
+//     on the routed model). A pinned def (ANY def.Model, incl. explicit `inherit`), a
+//     writable specialist, or an unwired factory is NEVER routed — no classifier spend when
+//     the pick couldn't be consumed.
 //
-// The ctx is the run's ctx, threaded to routeTask so a Run.Cancel propagates into the
-// classifier turn (issue #94).
+// It is a method (not a free func) to read t.writableEngineFactory / t.agentModelFactory /
+// t.routableAgents. The ctx is the run's ctx, threaded to routeTask so a Run.Cancel
+// propagates into the classifier turn (issue #94).
 func (t *SubagentTool) maybeRouteModel(ctx context.Context, args subagentArgs, resuming, writable bool, caps parentCaps) (category, model string) {
-	if resuming || args.Fork || caps.routeTask == nil ||
-		strings.TrimSpace(args.Model) != "" || strings.TrimSpace(args.Agent) != "" {
+	if resuming || args.Fork || caps.routeTask == nil || strings.TrimSpace(args.Model) != "" {
 		return "", ""
 	}
-	if writable && t.writableEngineFactory == nil {
-		return "", "" // a writable delegation's routed pick would be discarded — don't spend the classifier.
+	if !t.routeGateOpen(strings.TrimSpace(args.Agent), writable) {
+		return "", ""
 	}
 	if cat, m, ok := caps.routeTask(ctx, args.Prompt); ok {
 		return cat, strings.TrimSpace(m)
 	}
 	return "", ""
+}
+
+// routeGateOpen reports whether a delegation is eligible for model routing given its
+// resolved `agent` name and writable flag (the per-call model / fork / resume / nil-router
+// gates are checked by the caller). See maybeRouteModel for the two gate shapes. It never
+// spends the classifier when the routed pick could not be consumed.
+func (t *SubagentTool) routeGateOpen(wantAgent string, writable bool) bool {
+	if wantAgent == "" {
+		// Plain default delegation: a writable one needs the writable engine factory to
+		// consume the pick (issue #285); a read-only one always routes.
+		return !writable || t.writableEngineFactory != nil
+	}
+	// Named agent (issue #286): route ONLY a routable, read-only def with the agent+model
+	// factory wired. A writable specialist or a pinned def (not in routableAgents) is skipped.
+	if writable || t.agentModelFactory == nil {
+		return false
+	}
+	_, routable := t.routableAgents[wantAgent]
+	return routable
 }
 
 // resolveEngineAndLimits resolves one Subagent call's child engine and base

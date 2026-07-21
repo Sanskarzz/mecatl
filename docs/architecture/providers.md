@@ -328,8 +328,19 @@ through the alias machinery (operator targets are **uncapped**) and mints the ch
 same-provider** (the engine layer stays model-string-only; the chosen model is never a
 `port.LLMRequest` field). Both the foreground and background paths route.
 
-**Precedence** (by gating): explicit per-call `model` > agent-def `Model` > fork/resume >
-**router** > inherited default. The router fills the gap; it never overrides pinned intent.
+**Precedence** (by gating): explicit per-call `model` > agent-def `Model` (incl. explicit
+`inherit`) > fork/resume > **router** > `--subagent-model` default > session model. The
+router fills the gap; it never overrides pinned intent.
+
+**Named agent-defs too (issue #286, [ADR 0066](../adr/0066-route-unpinned-and-writable-delegations.md)).**
+A delegation to a named `agent` that declared **no `model:`** (expressed no model intent) is
+ROUTABLE — the router classifies it and rebuilds the def's SCOPED engine (its
+catalog/prompt/hooks) on the picked model, fail-soft to the pre-built def engine on a miss.
+ANY non-empty `def.Model` — `inherit`, a built-in alias, a concrete id — PINS the def
+(routing skips it); **explicit `model: inherit` is how you opt a def OUT of routing**.
+Composition excludes a def that switches provider or declares inline MCP from the routable
+set (the pick could not mint there), so the classifier is never spent for it. Team members
+and Parallel branches are out of scope (unchanged).
 
 **Writable delegations too (issue #285).** A `mode:"read-write"` delegation honours the
 same axes: a per-call `model` (or the router pick) rebuilds the WRITABLE explorer on that

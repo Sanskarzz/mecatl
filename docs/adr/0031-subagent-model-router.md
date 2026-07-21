@@ -4,7 +4,7 @@
 - Date: 2026-06-17
 - Scope: composition (`internal/app`) + the engine `Subagent` delegation path (`engine/agent`); a new operator-tier `models.router:` config subtree and a `--subagent-model-router` enable flag. No `port.LLMRequest`, proto, or wire-contract change.
 - Supersedes: none (it REALISES the "Layer 3b" deferred item of [ADR 0030](./0030-model-selection-heuristics.md))
-- Superseded by: [ADR 0042](./0042-taxonomy-gated-model-router.md) (the ENABLE-MODEL decision ONLY — the "Operator-tier only" paragraph's flag-to-enable gate is replaced by taxonomy-presence-enables + a `disabled:`/`--subagent-model-router=false` kill-switch, the guardrails-parity model; everything else in this ADR — the engine half, the breaker, precedence, fail-soft, observability, and the cost-amplification analysis — is REUSED unchanged)
+- Superseded by: [ADR 0042](./0042-taxonomy-gated-model-router.md) (the ENABLE-MODEL decision ONLY — the "Operator-tier only" paragraph's flag-to-enable gate is replaced by taxonomy-presence-enables + a `disabled:`/`--subagent-model-router=false` kill-switch, the guardrails-parity model; everything else in this ADR — the engine half, the breaker, precedence, fail-soft, observability, and the cost-amplification analysis — is REUSED unchanged); AND [ADR 0066](./0066-route-unpinned-and-writable-delegations.md) (the AGENT-GATING rule ONLY — a named `agent` that expressed NO model intent (no `def.Model`) is now ROUTABLE, explicit `model: inherit` being the pin; the engine half, breaker, precedence spine, fail-soft, and observability are otherwise unchanged)
 
 ## Context
 

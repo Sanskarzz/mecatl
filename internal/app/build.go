@@ -4993,6 +4993,13 @@ func buildSubagentTool(ctx context.Context, cfg Config, provReg *providerRegistr
 	// v1 scope limit (the factory declines; selectChildEngine surfaces the error).
 	opts = append(opts, agent.WithAgentModelEngineFactory(
 		buildAgentModelEngineFactory(ctx, cfg, provReg, provider, parentProviderID, parentModel, reg, skillIdx, hooks, sandboxedRunner, mainMgr)))
+	// ROUTABLE agent defs (issue #286): the SET of def names that expressed NO model intent
+	// (absent `model:`), don't switch provider, and have no inline MCP — so the OPT-IN router
+	// may classify an `agent`-named delegation to them and rebuild the def's scoped engine on
+	// the routed model (via the agent+model factory above). Wired UNCONDITIONALLY: it is inert
+	// when the router is off (routeTask nil) or no def qualifies (nil set = byte-identical).
+	opts = append(opts, agent.WithRoutableAgents(
+		routableAgentNames(provReg, reg, parentProviderID)))
 	// WRITABLE named specialist (mode:"read-write"+`agent`, ADR 0058): a factory that
 	// REBUILDS the named specialist's scoped engine with allowMutating=true on the def's
 	// resolved model, using the MAIN session's command runner (direct-write parity, ADR

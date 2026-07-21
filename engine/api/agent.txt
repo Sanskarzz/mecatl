@@ -121,6 +121,7 @@ func WithParallelJudge(j BranchJudge) ParallelOption
 func WithParallelStore(store port.SessionStore) ParallelOption
 func WithParallelSubagentStopHook(h port.HookRunner) ParallelOption
 func WithReadOnlyForker(f tool.WorkspaceForker) SupervisorOption
+func WithRoutableAgents(names []string) SubagentOption
 func WithSubagentEngineFactory(f func(model string) (*Engine, bool)) SubagentOption
 func WithSubagentNoFSNote() SubagentOption
 func WithSubagentShellDisabledNote(reason string) SubagentOption

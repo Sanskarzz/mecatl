@@ -600,14 +600,31 @@ design (no classifier call was made — nothing to attribute). All three delegat
 share the closure, so team/parallel misses get the line for free. The wire cue
 (`SubagentPayload.RoutedMiss`) is a deferred follow-up; the INFO closes the observability gap.
 
-The RUN() HOOK (`(*SubagentTool).maybeRouteModel`, `engine/agent/subagent.go`): for a PLAIN
-default delegation (gated — returns empty unless `!resuming && !args.Fork && args.Model=="" &&
-args.Agent=="" && caps.routeTask != nil`), it calls `caps.routeTask(args.Prompt)` BETWEEN
-`validateFork` and `resolveEngineAndLimits`, threading the routed model into `selectChildEngine`
-via the EXISTING per-call `model` factory path (`t.engineFactory(routedModel)` — decide-once,
-contamination-safe, same-provider). PRECEDENCE by gating: per-call `model` > agent-def `Model` >
-fork/resume > router > inherited default. Both foreground and background route (the decision is
-threaded into `backgroundChild`).
+The RUN() HOOK (`(*SubagentTool).maybeRouteModel` → `routeGateOpen`, `engine/agent/subagent.go`):
+the router is consulted BETWEEN `validateFork` and `resolveEngineAndLimits` and its pick is
+threaded into `selectChildEngine`. The gate (`routeGateOpen`) has TWO shapes: for NO `agent`
+(a plain default delegation) it routes unless a writable call's factory is unwired (issue #285);
+for a NAMED `agent` (issue #286) it routes ONLY a ROUTABLE def — read-only, agent+model factory
+wired, and `wantAgent ∈ t.routableAgents` — otherwise it skips (no classifier spend when the
+pick could not be consumed). The per-call `model`/`fork`/`resume`/nil-router gates are checked
+first. PRECEDENCE by gating: per-call `model` > agent-def `Model` (incl. explicit `inherit`) >
+fork/resume > router > `--subagent-model` default > session model. Both foreground and background
+route (the decision is threaded into `backgroundChild`).
+
+ROUTABLE agent-defs (issue #286, [ADR 0066](../adr/0066-route-unpinned-and-writable-delegations.md)):
+a def that expressed NO model intent (`TrimSpace(def.Model)==""`) is eligible for routing; ANY
+non-empty `def.Model` (`inherit`/alias/concrete/unknown) PINS it (explicit `inherit` is the opt-out).
+Composition computes the set via `routableAgentNames` (`internal/app/agentdefs.go`) — a def is
+included iff unpinned AND `!providerSwitchesAway` (routed ids are parent-provider ids) AND
+`!defHasInlineMCP` (the agent+model factory declines inline-MCP defs) — sorted, SIDE-EFFECT-FREE
+(the per-def WARNs are the real engine build's job), wired via `agent.WithRoutableAgents`.
+`selectChildEngine`'s read-only agent branch (`selectReadOnlyAgentEngine`) applies the routed pick
+by rebuilding the def's SCOPED engine on it via the EXISTING `agentModelFactory`
+(`WithAgentModelEngineFactory`), FAIL-SOFT to the pre-built def engine on a decline (e.g. an
+inline-MCP def); per-def limits are UNTOUCHED (only the engine swaps). Team members / Parallel
+branches are out of scope. Guarded by `engine/agent`'s `TestRunRoutableAgent*` +
+`TestRunNamedAgentBeatsRouter` (the pin: no `WithRoutableAgents` ⇒ named agents stay unrouted) +
+`internal/app`'s `TestRoutableAgentNamesMatrix` + the `TestRoutableDef*E2E` composition e2es.
 
 WRITABLE parity (issue #285): a `mode:"read-write"` explorer (no `agent`) honours the per-call
 `model` and the router pick the SAME way — through `writableEngineFactory`
