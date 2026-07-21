@@ -17,7 +17,7 @@ share one event shape.
 | `POST /v1/sessions/{id}/approve` | `{ask_id, allow}` | `204` |
 | `POST /v1/sessions/{id}/cancel` | — | `204` |
 | `POST /v1/sessions/{id}/cancel-child` | `{child_id}` | `204`; `404` for an unknown / already-finished child |
-| `POST /v1/sessions/{id}/fork` | `{"title": "...", "reasoning_effort": "..."}` (both optional; empty/absent inherits the source's) | `201` `{session_id}` — create a peer session from `{id}`'s conversation history snapshot (ADR 0065); same provider/model only, with the ONE optional selector delta a reasoning-effort override (ADR 0066); `412` if `{id}` is running/awaiting |
+| `POST /v1/sessions/{id}/fork` | `{"title": "...", "reasoning_effort": "..."}` (both optional; empty/absent inherits the source's) | `201` `{session_id}` — create a peer session from `{id}`'s conversation history snapshot (ADR 0065); same provider/model only, with the ONE optional selector delta a reasoning-effort override (ADR 0068); `412` if `{id}` is running/awaiting |
 
 **Inventory & introspection** (the HTTP mirrors of the gRPC inventory RPCs in §9):
 

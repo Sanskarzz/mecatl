@@ -711,7 +711,7 @@ func (s *sessionAdapter) SetMode(ctx context.Context, id, mode string) (string, 
 	return s.cl.SetMode(ctx, id, mode)
 }
 
-// ForkSession implements the ui SessionCreator's fork seam (ADR 0066): the title
+// ForkSession implements the ui SessionCreator's fork seam (ADR 0068): the title
 // stays inherited ("") — the /effort fork-resume switches effort ONLY, so the fork
 // keeps the source's title, provider, and model.
 func (s *sessionAdapter) ForkSession(ctx context.Context, srcID, reasoningEffort string) (string, error) {

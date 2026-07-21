@@ -1671,7 +1671,7 @@ type ForkSessionRequest struct {
 	// first" in ListSessions without a separate rename RPC.
 	Title string `protobuf:"bytes,2,opt,name=title,proto3" json:"title,omitempty"`
 	// reasoning_effort is an OPTIONAL override for the forked session's
-	// reasoning-effort tier (ADR 0066). Empty (the default) inherits the source's
+	// reasoning-effort tier (ADR 0068). Empty (the default) inherits the source's
 	// effort verbatim; provider and model ALWAYS inherit — the effort is the ONE
 	// selector delta a fork may carry.
 	ReasoningEffort string `protobuf:"bytes,3,opt,name=reasoning_effort,json=reasoningEffort,proto3" json:"reasoning_effort,omitempty"`

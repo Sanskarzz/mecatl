@@ -51,7 +51,7 @@ service HarnessService {
   // snapshot of an existing session's, inheriting the source's mode, workspace,
   // limits, and provider/model/profile labels. Same provider and model only;
   // the ONE permitted selector delta is an OPTIONAL reasoning-effort override
-  // (ADR 0066). The source must be at a turn boundary (idle/terminal); a
+  // (ADR 0068). The source must be at a turn boundary (idle/terminal); a
   // running/awaiting source is rejected. No streaming.
   rpc ForkSession(ForkSessionRequest) returns (ForkSessionResponse);
 
@@ -559,7 +559,7 @@ message ForkSessionRequest {
   // first" in ListSessions without a separate rename RPC.
   string title = 2;
   // reasoning_effort is an OPTIONAL override for the forked session's
-  // reasoning-effort tier (ADR 0066). Empty (the default) inherits the source's
+  // reasoning-effort tier (ADR 0068). Empty (the default) inherits the source's
   // effort verbatim; provider and model ALWAYS inherit — the effort is the ONE
   // selector delta a fork may carry.
   string reasoning_effort = 3;

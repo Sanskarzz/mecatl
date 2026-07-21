@@ -356,7 +356,7 @@ func (h *HTTPHandler) setMode(w http.ResponseWriter, r *http.Request) {
 // labels; same provider and model only. The source must be at a turn boundary
 // (idle/terminal); a running/awaiting source is rejected with 412. An OPTIONAL
 // JSON body `{"title": "...", "reasoning_effort": "..."}` overrides the forked
-// session's title and/or reasoning-effort tier (ADR 0066; empty/absent inherits
+// session's title and/or reasoning-effort tier (ADR 0068; empty/absent inherits
 // the source's — provider and model always inherit). Returns 201 + the new
 // session id.
 func (h *HTTPHandler) forkSession(w http.ResponseWriter, r *http.Request) {
