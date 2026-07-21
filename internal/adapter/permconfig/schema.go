@@ -138,6 +138,17 @@ type ModelsSection struct {
 	// project-overridable session default (ADR 0030 Phase 4) — within the operator
 	// allowlist; the operator's own Default is uncapped. Empty = absent.
 	Default string `yaml:"default"`
+	// Subagent is the OPERATOR-TIER def-less child-default model selector (alias or
+	// concrete id): the settings.yaml twin of the --subagent-model flag (issue #288).
+	// It sets the global default model for every Subagent / Parallel-branch / team-member
+	// child that does not pin its own model (via an agent definition or a per-call
+	// override). Operator-tier ONLY: a project-tier subagent: is IGNORED with a WARN (the
+	// child-default model is an operator decision — the same operator-only captureModels
+	// discipline as default_provider/allowlist/router). The CLI --subagent-model WINS when
+	// both are set. Validated FAIL-FAST at Build (normalizeSubagentModel): a value that
+	// does not resolve to a usable model id is a startup error (unlike fail-soft
+	// models.default). Empty = absent (the flag/inherit-parent behaviour is unchanged).
+	Subagent string `yaml:"subagent"`
 	// DefaultProvider is the OPERATOR-TIER deployment-wide default provider id (e.g.
 	// openai, openrouter, anthropic, toolhive). It mirrors the --default-provider flag
 	// (app.Config.DefaultProvider) so an operator can declare "toolhive is my default
@@ -246,6 +257,7 @@ func (m *ModelsSection) strictFields() map[string]any {
 		"slots":            &m.Slots,
 		"aliases":          &m.Aliases,
 		"default":          &m.Default,
+		"subagent":         &m.Subagent,
 		"default_provider": &m.DefaultProvider,
 		"allowlist":        &m.Allowlist,
 		"router":           &m.Router,

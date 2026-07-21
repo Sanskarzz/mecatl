@@ -11,6 +11,50 @@ The covered surface is the seven core packages (`session`, `governance`, `tool`,
 
 ## [Unreleased]
 
+<<<<<<< HEAD
+### Changed
+
+- **`agent.RunModelRouter` + `agent.Deps.SubagentModelRouter` gain a miss-reason
+  return** (issue #287) — both now return an extra `missReason string` before the
+  terminal `ok bool`: `RunModelRouter` returns `(category string, usage
+  session.Usage, missReason string, ok bool)` and the `Deps.SubagentModelRouter`
+  closure type is `func(ctx, taskPrompt string) (category, model string, usage
+  session.Usage, missReason string, ok bool)`. `missReason` is `""` on a hit and one
+  of the new `RouterMiss*` constants on a miss, so the dispatch chokepoint can log a
+  per-miss INFO naming WHY a plain delegation fell through to the inherited default
+  model (metadata only — never the task prompt or classifier output; gauntlet #7).
+  Classified Changed (breaking; pre-v1 minor bump) per COMPATIBILITY.md — a widened
+  return signature. A composition consumer adds one return value at the
+  `buildModelRouterTask` closure and the `RunModelRouter` call site. (#287)
+
+### Added
+
+- **`agent.WithRoutableAgents(names []string) SubagentOption`** — injects the
+  composition-computed SET of agent-def names eligible for the OPT-IN model router
+  (issue #286): a def that expressed NO model intent (absent `model:`) is CLASSIFIED and
+  its scoped engine rebuilt on the routed model (via the agent+model factory), while a def
+  that pinned ANY model (incl. explicit `inherit`) is honoured verbatim. nil/empty (the
+  default) means no def routes — byte-identical to pre-#286. Layering-clean (def NAME
+  strings only). Classified Added per COMPATIBILITY.md (a new exported option constructor is
+  a minor bump; the `SubagentTool` struct is unexported). (#286)
+
+- **`agent.WithWritableEngineFactory(f func(model string) (*Engine, bool))
+  SubagentOption`** — injects the composition factory that mints a WRITABLE explorer
+  child engine on a per-call OVERRIDE model for a mode:"read-write" Subagent call with
+  no `agent` (issue #285), so a writable subagent honours the per-call `model` and the
+  OPT-IN router pick instead of always running on its default model. nil (the default,
+  and always on the no-FS path) leaves the writable-explorer-per-model path unwired (a
+  read-write+`model` call then errors from validateMode — never a silent inherit).
+  Classified Added per COMPATIBILITY.md (a new exported option constructor is a minor
+  bump; the `SubagentTool` struct is unexported). (#285)
+
+- **`agent.RouterMiss*` constants** — `RouterMissDegenerateInput`,
+  `RouterMissClassifierError`, `RouterMissCancelled`, `RouterMissBadVerdict`, and
+  `RouterMissUnknownCategory`: the string reason a model-router classification did
+  not yield a routed model, returned by `RunModelRouter`/`Deps.SubagentModelRouter`
+  (see Changed above). Classified Added per COMPATIBILITY.md (new exported
+  identifiers are a minor bump). (#287)
+
 ### Fixed
 
 - **`port.RouteToolResultParts` now drops empty-render text-summarised blocks**

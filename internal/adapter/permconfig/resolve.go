@@ -567,6 +567,18 @@ func (r *Resolver) captureProjectModels(ws tool.WorkspaceReader, file string, bl
 			"file", file, "root", ws.Root())
 	}
 
+	// (1d) A project-tier subagent: is OPERATOR-TIER ONLY (issue #288 — the SAME
+	// operator-only captureModels discipline as default_provider/allowlist/router) —
+	// strip + WARN, but keep the rest. The def-less child-default model is an operator
+	// decision (it mirrors the --subagent-model flag); a project must not declare which
+	// model its delegated children run on. captureProjectModels never copies Subagent
+	// onto acc, so the strip is the WARN — the field is structurally dropped.
+	if block.Subagent != "" {
+		r.diag.Log(context.Background(), port.LevelWarn,
+			"models: IGNORING project-tier models.subagent (operator-tier only — the child-default model is an operator decision; set it in your user-global settings.yaml or pass --subagent-model)",
+			"file", file, "root", ws.Root())
+	}
+
 	// (2) Opt-in by operator allowlist, then trust-gated.
 	op := r.operatorModels
 	if op == nil || len(op.Allowlist) == 0 {

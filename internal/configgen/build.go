@@ -211,6 +211,8 @@ func modelsSubtree(docs Docs) *Subtree {
 		switch f.Key {
 		case "default":
 			f.ExampleValue = "sonnet"
+		case "subagent":
+			f.ExampleValue = "coder"
 		case "router":
 			f.EnableNote = "A non-empty `categories` list ENABLES the router (taxonomy-presence " +
 				"enable, ADR 0042 — NOT a CLI enable-flag); `disabled: true` (or " +

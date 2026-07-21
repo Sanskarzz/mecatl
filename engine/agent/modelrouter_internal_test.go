@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/stacklok/mecatl/engine/adapter/memfs"
+	"github.com/stacklok/mecatl/engine/adapter/memstore"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/tool"
@@ -137,6 +138,167 @@ func TestRunNamedAgentBeatsRouter(t *testing.T) {
 	}
 }
 
+// routableAgentTool builds a Subagent with a "reviewer" specialist declared ROUTABLE
+// (WithRoutableAgents), a pre-built specialist engine emitting "SPECIALIST", and an
+// agent+model factory minting "AGENTMODEL:<agent>:<model>". factoryOK=false makes the
+// factory decline (the inline-MCP-decline shape). defLimits binds the def's per-call limits
+// so a test can prove they survive a routed engine swap. wireFactory=false omits the
+// agent+model factory entirely (the "pick can't be consumed" gate).
+func routableAgentTool(factoryOK, wireFactory bool, defLimits session.Limits) *SubagentTool {
+	opts := []SubagentOption{
+		WithAgentEngines(map[string]*Engine{"reviewer": markerEngine("SPECIALIST")},
+			[]AgentMeta{{Name: "reviewer", Description: "a specialist", Limits: defLimits}}),
+		WithRoutableAgents([]string{"reviewer"}),
+	}
+	if wireFactory {
+		opts = append(opts, WithAgentModelEngineFactory(func(agentName, model string) (*Engine, bool) {
+			if !factoryOK {
+				return nil, false
+			}
+			return markerEngine("AGENTMODEL:" + agentName + ":" + model), true
+		}))
+	}
+	return NewSubagentTool(markerEngine("DEFAULT"), opts...).(*SubagentTool)
+}
+
+// hitRoute returns a routeTask that always classifies to model, counting consultations.
+func hitRoute(calls *int, model string) func(context.Context, string) (string, string, bool) {
+	return func(context.Context, string) (string, string, bool) { *calls++; return "large", model, true }
+}
+
+// TestRunRoutableAgentRoutesViaFactory (issue #286): a ROUTABLE (unpinned) `agent`
+// delegation IS classified and its SCOPED engine is rebuilt on the routed model via the
+// agent+model factory. The classifier is consulted once and the factory engine (not the
+// pre-built specialist) runs.
+func TestRunRoutableAgentRoutesViaFactory(t *testing.T) {
+	tl := routableAgentTool(true, true, session.Limits{})
+	var calls int
+	caps := parentCaps{children: newChildRunRegistry(), routeTask: hitRoute(&calls, "router-model")}
+	res, err := tl.ExecuteWithParent(context.Background(),
+		session.NewToolCall("p1", "Subagent", json.RawMessage(`{"prompt":"review it","agent":"reviewer"}`)),
+		memfs.NewWorkspace("/ws"), nil, caps)
+	if err != nil {
+		t.Fatalf("transport error: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("a routable agent must consult the classifier exactly once; calls=%d", calls)
+	}
+	if !strings.Contains(res.Content, "AGENTMODEL:reviewer:router-model") {
+		t.Fatalf("a routed routable agent must run the factory engine on the routed model; got %q", res.Content)
+	}
+	if strings.Contains(res.Content, "SPECIALIST") {
+		t.Fatalf("a routed routable agent must NOT run the pre-built specialist engine; got %q", res.Content)
+	}
+}
+
+// TestSelectReadOnlyAgentEnginePreservesDefLimitsOnRoutedSwap pins that the routed engine
+// swap keeps the def's PER-CALL limits (only the engine changes) — the unit-level guard for
+// the "per-def limits untouched" contract.
+func TestSelectReadOnlyAgentEnginePreservesDefLimitsOnRoutedSwap(t *testing.T) {
+	defLimits := session.Limits{MaxTurns: 7, MaxToolCalls: 13}
+	tl := routableAgentTool(true, true, defLimits)
+	eng, limits, _, ok := tl.selectReadOnlyAgentEngine("p1", "reviewer", "router-model")
+	if !ok || eng == nil {
+		t.Fatalf("selectReadOnlyAgentEngine = (%v, ok=%v), want a non-nil engine", eng, ok)
+	}
+	if eng.Model() != "AGENTMODEL:reviewer:router-model" {
+		t.Fatalf("routed swap must run the factory engine; Model()=%q", eng.Model())
+	}
+	if limits != defLimits {
+		t.Fatalf("per-def limits must survive the routed swap; got %+v want %+v", limits, defLimits)
+	}
+}
+
+// TestRunRoutableAgentMissUsesPrebuilt (issue #286): a routable agent whose classification
+// MISSES falls back to the pre-built specialist engine (fail-soft); the classifier is still
+// consulted once (the miss is a real classification attempt, not a skip).
+func TestRunRoutableAgentMissUsesPrebuilt(t *testing.T) {
+	tl := routableAgentTool(true, true, session.Limits{})
+	var calls int
+	caps := parentCaps{children: newChildRunRegistry(), routeTask: func(context.Context, string) (string, string, bool) {
+		calls++
+		return "", "", false // miss
+	}}
+	res, err := tl.ExecuteWithParent(context.Background(),
+		session.NewToolCall("p1", "Subagent", json.RawMessage(`{"prompt":"review it","agent":"reviewer"}`)),
+		memfs.NewWorkspace("/ws"), nil, caps)
+	if err != nil {
+		t.Fatalf("transport error: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("a routable agent must consult the classifier once even on a miss; calls=%d", calls)
+	}
+	if !strings.Contains(res.Content, "SPECIALIST") {
+		t.Fatalf("a routable-agent miss must fall back to the pre-built specialist; got %q", res.Content)
+	}
+}
+
+// TestRunRoutableAgentNoFactoryDoesNotSpendClassifier (issue #286): a routable agent with
+// NO agent+model factory wired must NOT spend the classifier (the pick could not be
+// consumed) — calls==0 — and runs the pre-built specialist.
+func TestRunRoutableAgentNoFactoryDoesNotSpendClassifier(t *testing.T) {
+	tl := routableAgentTool(true, false /*no factory*/, session.Limits{})
+	var calls int
+	caps := parentCaps{children: newChildRunRegistry(), routeTask: hitRoute(&calls, "router-model")}
+	res, err := tl.ExecuteWithParent(context.Background(),
+		session.NewToolCall("p1", "Subagent", json.RawMessage(`{"prompt":"review it","agent":"reviewer"}`)),
+		memfs.NewWorkspace("/ws"), nil, caps)
+	if err != nil {
+		t.Fatalf("transport error: %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("a routable agent with no agent+model factory must NOT spend the classifier; calls=%d", calls)
+	}
+	if !strings.Contains(res.Content, "SPECIALIST") {
+		t.Fatalf("it must run the pre-built specialist; got %q", res.Content)
+	}
+}
+
+// TestRunRoutableAgentFactoryDeclineUsesPrebuilt (issue #286, ADVERSARIAL — the inline-MCP
+// decline shape): the classifier hits but the agent+model factory DECLINES (returns false);
+// the call falls back to the pre-built specialist, no error.
+func TestRunRoutableAgentFactoryDeclineUsesPrebuilt(t *testing.T) {
+	tl := routableAgentTool(false /*factory declines*/, true, session.Limits{})
+	var calls int
+	caps := parentCaps{children: newChildRunRegistry(), routeTask: hitRoute(&calls, "router-model")}
+	res, err := tl.ExecuteWithParent(context.Background(),
+		session.NewToolCall("p1", "Subagent", json.RawMessage(`{"prompt":"review it","agent":"reviewer"}`)),
+		memfs.NewWorkspace("/ws"), nil, caps)
+	if err != nil {
+		t.Fatalf("transport error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("a factory decline must fall back cleanly, got error: %q", res.Content)
+	}
+	if calls != 1 {
+		t.Fatalf("the classifier is consulted once; calls=%d", calls)
+	}
+	if !strings.Contains(res.Content, "SPECIALIST") {
+		t.Fatalf("a factory decline must fall back to the pre-built specialist; got %q", res.Content)
+	}
+}
+
+// TestRunExplicitAgentModelBypassesRouter (issue #286 precedence): an explicit `agent`+`model`
+// pins the specialist-on-that-model — the router never fires (per-call model wins), even for a
+// routable def.
+func TestRunExplicitAgentModelBypassesRouter(t *testing.T) {
+	tl := routableAgentTool(true, true, session.Limits{})
+	var calls int
+	caps := parentCaps{children: newChildRunRegistry(), routeTask: hitRoute(&calls, "router-model")}
+	res, err := tl.ExecuteWithParent(context.Background(),
+		session.NewToolCall("p1", "Subagent", json.RawMessage(`{"prompt":"x","agent":"reviewer","model":"fast"}`)),
+		memfs.NewWorkspace("/ws"), nil, caps)
+	if err != nil {
+		t.Fatalf("transport error: %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("an explicit agent+model must NOT consult the router; calls=%d", calls)
+	}
+	if !strings.Contains(res.Content, "AGENTMODEL:reviewer:fast") {
+		t.Fatalf("agent+model must pin the specialist on the explicit model; got %q", res.Content)
+	}
+}
+
 // PRECEDENCE: a `resume` call continues a persisted child on the default explorer engine
 // (the v1 resume invariant) — the router must NOT fire (the run() hook gates routing on
 // !resuming). A regression dropping the `resuming` guard would re-classify a resumed
@@ -147,7 +309,8 @@ func TestRunResumeDoesNotRoute(t *testing.T) {
 	route := func(context.Context, string) (string, string, bool) { calls++; return "large", "router-model", true }
 	caps := parentCaps{children: newChildRunRegistry(), routeTask: route}
 	args := subagentArgs{Prompt: "x", Resume: "subagent-abc"}
-	cat, model := maybeRouteModel(context.Background(), args, true /*resuming*/, caps)
+	tl := routerTool()
+	cat, model := tl.maybeRouteModel(context.Background(), args, true /*resuming*/, false /*writable*/, caps)
 	if calls != 0 {
 		t.Fatalf("routeTask must NOT be consulted on a resume; called %d times", calls)
 	}
@@ -192,6 +355,117 @@ func TestRunNilRouteTaskNoRouting(t *testing.T) {
 	}
 }
 
+// writableRouterTool builds a Subagent whose DEFAULT writable explorer emits
+// "WRITABLE-DEFAULT" and whose writable engine factory mints "WRITABLE-ROUTED:<model>"
+// (found=true) — so a test can tell whether a routed writable pick took effect or the call
+// fell back to the default writable explorer. found=false makes every factory call a miss.
+func writableRouterTool(found bool) *SubagentTool {
+	wf := func(model string) (*Engine, bool) {
+		if !found {
+			return nil, false
+		}
+		return markerEngine("WRITABLE-ROUTED:" + model), true
+	}
+	return NewSubagentTool(markerEngine("READ-ONLY"),
+		WithWritableChildEngine(markerEngine("WRITABLE-DEFAULT")),
+		WithWritableEngineFactory(wf)).(*SubagentTool)
+}
+
+// TestRunWritableRoutesWhenFactoryWired (issue #285): a PLAIN writable delegation
+// (mode:"read-write", no model/agent) with the writable engine factory wired consults the
+// router (calls==1) and mints the child on the routed pick via the WRITABLE factory.
+func TestRunWritableRoutesWhenFactoryWired(t *testing.T) {
+	tl := writableRouterTool(true)
+	var calls int
+	caps := parentCaps{children: newChildRunRegistry(), routeTask: func(context.Context, string) (string, string, bool) {
+		calls++
+		return "large", "big-model", true
+	}}
+	res, err := tl.ExecuteWithParent(context.Background(),
+		session.NewToolCall("p1", "Subagent", json.RawMessage(`{"prompt":"implement it","mode":"read-write"}`)),
+		memfs.NewWorkspace("/ws"), nil, caps)
+	if err != nil {
+		t.Fatalf("transport error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("a routed writable delegation must complete, got error: %q", res.Content)
+	}
+	if calls != 1 {
+		t.Fatalf("the router must be consulted exactly once for a plain writable delegation with a wired factory; calls=%d", calls)
+	}
+	if !strings.Contains(res.Content, "WRITABLE-ROUTED:big-model") {
+		t.Fatalf("a routed writable pick must mint the WRITABLE factory engine on the routed model; got %q", res.Content)
+	}
+}
+
+// TestRunWritableRoutedFactoryMissFailSoft: when the router returns a pick but the writable
+// factory misses it (nil,false), the call FAILS SOFT to the default writable explorer —
+// never an error (the router is never load-bearing).
+func TestRunWritableRoutedFactoryMissFailSoft(t *testing.T) {
+	tl := writableRouterTool(false) // factory always misses
+	caps := parentCaps{children: newChildRunRegistry(), routeTask: func(context.Context, string) (string, string, bool) {
+		return "large", "big-model", true
+	}}
+	res, err := tl.ExecuteWithParent(context.Background(),
+		session.NewToolCall("p1", "Subagent", json.RawMessage(`{"prompt":"implement it","mode":"read-write"}`)),
+		memfs.NewWorkspace("/ws"), nil, caps)
+	if err != nil {
+		t.Fatalf("transport error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("a routed writable factory miss must fall back cleanly, got error: %q", res.Content)
+	}
+	if !strings.Contains(res.Content, "WRITABLE-DEFAULT") {
+		t.Fatalf("a routed writable factory miss must fall back to the DEFAULT writable explorer; got %q", res.Content)
+	}
+}
+
+// TestRunWritableDoesNotSpendClassifierWhenFactoryUnwired (issue #285): a writable
+// delegation whose routed pick would be DISCARDED (writable engine factory UNWIRED) must
+// NOT spend the classifier at all — calls==0 — and runs the default writable explorer.
+func TestRunWritableDoesNotSpendClassifierWhenFactoryUnwired(t *testing.T) {
+	// Writable explorer wired, but NO WithWritableEngineFactory.
+	tl := NewSubagentTool(markerEngine("READ-ONLY"),
+		WithWritableChildEngine(markerEngine("WRITABLE-DEFAULT"))).(*SubagentTool)
+	var calls int
+	caps := parentCaps{children: newChildRunRegistry(), routeTask: func(context.Context, string) (string, string, bool) {
+		calls++
+		return "large", "big-model", true
+	}}
+	res, err := tl.ExecuteWithParent(context.Background(),
+		session.NewToolCall("p1", "Subagent", json.RawMessage(`{"prompt":"implement it","mode":"read-write"}`)),
+		memfs.NewWorkspace("/ws"), nil, caps)
+	if err != nil {
+		t.Fatalf("transport error: %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("a writable delegation with no writable factory must NOT spend the classifier; calls=%d", calls)
+	}
+	if res.IsError || !strings.Contains(res.Content, "WRITABLE-DEFAULT") {
+		t.Fatalf("it must run the default writable explorer; got error=%v content=%q", res.IsError, res.Content)
+	}
+}
+
+// TestWritableResumeUsesWritableChildEngine (issue #285): a writable RESUME continues on
+// the WRITABLE explorer engine (not the read-only default explorer validateResume returns),
+// so its Edit/Write survive. Asserted at resolveEngineAndLimits — the single seam that
+// forces the swap — with a store wired so validateResume passes.
+func TestWritableResumeUsesWritableChildEngine(t *testing.T) {
+	writable := markerEngine("WRITABLE-DEFAULT")
+	tl := NewSubagentTool(markerEngine("READ-ONLY"),
+		WithWritableChildEngine(writable),
+		WithSubagentStore(memstore.New())).(*SubagentTool)
+
+	args := subagentArgs{Prompt: "continue", Resume: "subagent-abc"}
+	engine, _, _, ok := tl.resolveEngineAndLimits("p1", args, true /*resuming*/, true /*writable*/, "")
+	if !ok {
+		t.Fatal("a writable resume with a wired store must resolve")
+	}
+	if engine != writable {
+		t.Fatal("a writable resume must run on the WRITABLE explorer engine, not the read-only default explorer")
+	}
+}
+
 // The per-run router breaker opens after defaultModelRouterMaxMisses CONSECUTIVE misses
 // and then SKIPS the classifier for the rest of the run. This drives the breaker through
 // the Engine.parentCaps closure (the production binding), so the threshold + skip are
@@ -207,11 +481,11 @@ func TestRouterBreakerOpensAfterConsecutiveMisses(t *testing.T) {
 		Catalog: tool.NewCatalog(),
 		Policy:  allowAllInt(),
 		Model:   "main",
-		SubagentModelRouter: func(context.Context, string) (string, string, session.Usage, bool) {
+		SubagentModelRouter: func(context.Context, string) (string, string, session.Usage, string, bool) {
 			mu.Lock()
 			callCount++
 			mu.Unlock()
-			return "", "", session.Usage{}, false
+			return "", "", session.Usage{}, RouterMissBadVerdict, false
 		},
 	})
 	// Build a Run carrying the breaker (RunContentWith arms it when the router is wired),
@@ -245,15 +519,15 @@ func TestRouterBreakerResetsOnSuccess(t *testing.T) {
 		Catalog: tool.NewCatalog(),
 		Policy:  allowAllInt(),
 		Model:   "main",
-		SubagentModelRouter: func(context.Context, string) (string, string, session.Usage, bool) {
+		SubagentModelRouter: func(context.Context, string) (string, string, session.Usage, string, bool) {
 			mu.Lock()
 			callCount++
 			h := hit
 			mu.Unlock()
 			if h {
-				return "large", "big", session.Usage{}, true
+				return "large", "big", session.Usage{}, "", true
 			}
-			return "", "", session.Usage{}, false
+			return "", "", session.Usage{}, RouterMissBadVerdict, false
 		},
 	})
 	run := &Run{router: &modelRouterBreaker{max: defaultModelRouterMaxMisses}, children: newChildRunRegistry()}
@@ -302,11 +576,11 @@ func TestRouterBreakerSerializesConcurrentCalls(t *testing.T) {
 		Catalog: tool.NewCatalog(),
 		Policy:  allowAllInt(),
 		Model:   "main",
-		SubagentModelRouter: func(context.Context, string) (string, string, session.Usage, bool) {
+		SubagentModelRouter: func(context.Context, string) (string, string, session.Usage, string, bool) {
 			mu.Lock()
 			callCount++
 			mu.Unlock()
-			return "", "", session.Usage{}, false // always miss → the breaker must open after `max`
+			return "", "", session.Usage{}, RouterMissBadVerdict, false // always miss → the breaker must open after `max`
 		},
 	})
 	run := &Run{router: &modelRouterBreaker{max: defaultModelRouterMaxMisses}, children: newChildRunRegistry()}
@@ -355,11 +629,11 @@ func TestRouterBreakerSharedAcrossFamilies(t *testing.T) {
 		Catalog: tool.NewCatalog(),
 		Policy:  allowAllInt(),
 		Model:   "main",
-		SubagentModelRouter: func(context.Context, string) (string, string, session.Usage, bool) {
+		SubagentModelRouter: func(context.Context, string) (string, string, session.Usage, string, bool) {
 			mu.Lock()
 			callCount++
 			mu.Unlock()
-			return "", "", session.Usage{}, false // always miss
+			return "", "", session.Usage{}, RouterMissBadVerdict, false // always miss
 		},
 	})
 	run := &Run{router: &modelRouterBreaker{max: defaultModelRouterMaxMisses}, children: newChildRunRegistry()}
@@ -404,13 +678,13 @@ func TestRouteTaskPropagatesRunCtx(t *testing.T) {
 		Catalog: tool.NewCatalog(),
 		Policy:  allowAllInt(),
 		Model:   "main",
-		SubagentModelRouter: func(ctx context.Context, _ string) (string, string, session.Usage, bool) {
+		SubagentModelRouter: func(ctx context.Context, _ string) (string, string, session.Usage, string, bool) {
 			mu.Lock()
 			gotCtx = ctx
 			mu.Unlock()
 			// Block until the ctx is cancelled, proving the classifier turn observes it.
 			<-ctx.Done()
-			return "", "", session.Usage{}, false
+			return "", "", session.Usage{}, RouterMissCancelled, false
 		},
 	})
 	run := &Run{router: &modelRouterBreaker{max: defaultModelRouterMaxMisses}, children: newChildRunRegistry()}
@@ -458,10 +732,10 @@ func TestRouteTaskFoldsClassifierUsageIntoParentSession(t *testing.T) {
 		Catalog: tool.NewCatalog(),
 		Policy:  allowAllInt(),
 		Model:   "main",
-		SubagentModelRouter: func(context.Context, string) (string, string, session.Usage, bool) {
+		SubagentModelRouter: func(context.Context, string) (string, string, session.Usage, string, bool) {
 			// Return non-zero usage on EVERY call regardless of hit/miss — tests
 			// that both paths fold correctly.
-			return "large", "big-model", fixedUsage, true
+			return "large", "big-model", fixedUsage, "", true
 		},
 	})
 
@@ -507,8 +781,8 @@ func TestRouteTaskFoldsClassifierUsageOnMissPath(t *testing.T) {
 		Catalog: tool.NewCatalog(),
 		Policy:  allowAllInt(),
 		Model:   "main",
-		SubagentModelRouter: func(context.Context, string) (string, string, session.Usage, bool) {
-			return "", "", missUsage, false // always miss, but still spends tokens
+		SubagentModelRouter: func(context.Context, string) (string, string, session.Usage, string, bool) {
+			return "", "", missUsage, RouterMissBadVerdict, false // always miss, but still spends tokens
 		},
 	})
 
@@ -551,8 +825,8 @@ func TestClassifierSpendTripsMaxRunTokens(t *testing.T) {
 		Policy:       allowAllInt(),
 		Model:        "main",
 		MaxRunTokens: budget,
-		SubagentModelRouter: func(context.Context, string) (string, string, session.Usage, bool) {
-			return "large", "big", spendUsage, true
+		SubagentModelRouter: func(context.Context, string) (string, string, session.Usage, string, bool) {
+			return "large", "big", spendUsage, "", true
 		},
 	})
 

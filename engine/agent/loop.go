@@ -247,7 +247,9 @@ type Deps struct {
 	// It is a composition closure — the engine layer is model-string-only (the layering
 	// rule): composition owns the classifier engine, the category taxonomy, and the
 	// category→model mapping (aliases/slots/the allowlist cap), and hands the engine
-	// only func(ctx, string)(string, string, session.Usage, bool). It is consulted by
+	// only func(ctx, string)(string, string, session.Usage, string, bool) (the trailing
+	// string is the miss REASON — issue #287, logged at the dispatch chokepoint on a
+	// miss; empty on a hit). It is consulted by
 	// the Subagent run() hook ONLY for a plain default delegation (no per-call model,
 	// no agent, no fork, no resume) and is FAIL-SOFT throughout: ok=false (any
 	// classifier failure, an unknown category, the breaker open) → the call falls
@@ -266,7 +268,7 @@ type Deps struct {
 	// cancellation-propagation gap the hardAbort TOCTOU otherwise leaves). Fail-soft
 	// holds regardless: a cancelled ctx yields StopCancelled → ok=false → inherit the
 	// default model, exactly the existing miss path.
-	SubagentModelRouter func(ctx context.Context, taskPrompt string) (category, model string, usage session.Usage, ok bool)
+	SubagentModelRouter func(ctx context.Context, taskPrompt string) (category, model string, usage session.Usage, missReason string, ok bool)
 
 	// ProgressiveTools, when true, enables progressive tool disclosure
 	// (pattern 9): the per-turn request advertises lightweight specs for tools
