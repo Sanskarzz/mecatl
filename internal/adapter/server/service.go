@@ -1260,13 +1260,25 @@ func (s *Service) capabilities() *mecatlv1.ServerCapabilities {
 	// returns, so the server-wide caps echo and the ACP gate share ONE source.
 	pcaps := s.cfg.DefaultCapabilities
 	return &mecatlv1.ServerCapabilities{
-		Mcp:            s.cfg.MCPProvider != nil,
-		SlashCommands:  s.cfg.Commands != nil,
-		Teams:          s.cfg.MemberEngine != nil,
-		Agents:         len(s.cfg.Agents) > 0,
-		Soul:           s.cfg.Soul != nil,
-		UserModel:      s.cfg.UserModel != nil,
-		ModelSelection: len(s.currentModels()) > 0,
+		Mcp:           s.cfg.MCPProvider != nil,
+		SlashCommands: s.cfg.Commands != nil,
+		Teams:         s.cfg.MemberEngine != nil,
+		Agents:        len(s.cfg.Agents) > 0,
+		Soul:          s.cfg.Soul != nil,
+		UserModel:     s.cfg.UserModel != nil,
+		// ModelSelection advertises "the client should offer the model picker". It
+		// is true when either the inventory is already non-empty OR an on-demand
+		// model refresher is wired (composition wires one whenever ≥1 available
+		// provider has a live lister). The refresher arm matters because the
+		// inventory is seeded from the CATALOG at Build and filled for UNCATALOGUED
+		// providers (e.g. the ToolHive gateway, OpenCode Go) only by the ASYNC live
+		// refresh — so a session created in the create-races-the-swap window would
+		// otherwise read len(currentModels())==0 and freeze ModelSelection=false for
+		// its whole life (caps are read once at CreateSession, never refetched). This
+		// matches the client's documented semantics ("true when ≥1 provider is
+		// available"); opening the picker fires ListModels, which runs the refresher
+		// and populates the list, and the empty-list state is handled gracefully.
+		ModelSelection: len(s.currentModels()) > 0 || s.modelsRefresher.Load() != nil,
 		Memory:         has(memory.RememberToolName),
 		Skills:         has(skills.ToolName),
 		Bash:           has(tools.BashToolName),

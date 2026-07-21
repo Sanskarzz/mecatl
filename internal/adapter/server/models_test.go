@@ -172,8 +172,23 @@ func TestSetModelsSwap(t *testing.T) {
 	}
 }
 
-// TestCapabilitiesModelSelection asserts the model_selection cap flips with a
-// non-empty Config.Models snapshot (mirrors the agents cap test).
+// TestCapabilitiesModelSelectionRefresherWired is the regression for the
+// uncatalogued-provider picker bug: an EMPTY model inventory (the static catalog
+// seed contributes nothing for an uncatalogued provider) must STILL advertise
+// ModelSelection=true when an on-demand refresher is wired — otherwise a session
+// created before the async live swap lands freezes the picker off for its whole
+// life (caps are read once at CreateSession). Opening the picker fires ListModels,
+// which runs the refresher and fills the list.
+func TestCapabilitiesModelSelectionRefresherWired(t *testing.T) {
+	svc := modelsService(t, nil) // empty inventory
+	if capsFromCreate(t, svc).GetModelSelection() {
+		t.Fatal("precondition: empty inventory + no refresher should be false")
+	}
+	svc.SetModelsRefresher(func(context.Context) {})
+	if !capsFromCreate(t, svc).GetModelSelection() {
+		t.Fatal("ModelSelection cap false with an empty inventory but a wired refresher (uncatalogued-provider picker regresses)")
+	}
+}
 func TestCapabilitiesModelSelection(t *testing.T) {
 	on := capsFromCreate(t, modelsService(t, cannedModels()))
 	if !on.GetModelSelection() {
