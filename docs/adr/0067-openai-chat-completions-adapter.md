@@ -1,4 +1,4 @@
-# ADR 0066 — OpenAI Chat Completions adapter (OpenCode Go provider)
+# ADR 0067 — OpenAI Chat Completions adapter (OpenCode Go provider)
 
 - Status: Accepted
 - Date: 2026-07-17

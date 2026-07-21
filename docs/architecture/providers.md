@@ -97,7 +97,7 @@ dropped (Chat Completions is stateless across turns), so no port/proto/engine-AP
 was needed. Live model listing rides `openCodeLister` (the `openaicompat` lister
 wrapped to stamp adapter-static text+image modalities, so a live refresh doesn't
 flip an uncatalogued model's Image capability to false). See
-[`docs/adr/0066-openai-chat-completions-adapter.md`](../adr/0066-openai-chat-completions-adapter.md).
+[`docs/adr/0067-openai-chat-completions-adapter.md`](../adr/0067-openai-chat-completions-adapter.md).
 `buildProvider` returns the registry **and** its default provider so the shared engine
 + every child/fork/team engine keep receiving the single default provider exactly as
 before (the default path is byte-identical). A composition-only `providerConstructor`
