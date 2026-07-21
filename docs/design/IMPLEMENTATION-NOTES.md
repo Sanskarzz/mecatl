@@ -557,7 +557,7 @@ delegation's model PER task from an operator category taxonomy. It is a sibling 
 ask reviewer — the same composition-built one-turn-engine pattern.
 
 ENGINE half (`engine/agent/modelrouter.go`): `RunModelRouter(ctx, engine, ModelRouteRequest)
-(category, usage, ok)` drives a tool-less ONE-turn classifier (role `model-router`, `modelRouterLimits`
+(category, usage, missReason, ok)` drives a tool-less ONE-turn classifier (role `model-router`, `modelRouterLimits`
 = 1 turn / 1 tool / 1 failure, 30s timeout, no-progress nudge disabled) over `buildModelRoutePrompt`
 (category names+descriptions in the clear; the untrusted task prompt inside `WriteUntrustedBlock`;
 the `category:`/`categories:`/`task to classify:` headers added to `framingHeader`). `parseRouterVerdict`
@@ -567,7 +567,13 @@ hallucinated category is a miss). The engine stays MODEL-STRING-ONLY: it returns
 composition owns the mapping. `usage` is the classifier's `sess.Usage`, returned on EVERY path
 (including early-return degenerate inputs and fail-soft misses) so the caller can fold it
 unconditionally (#92 fix). FAIL-SOFT: a `StopError`/`StopCancelled`, an unparseable verdict, or a
-degenerate input (nil engine / no categories / blank prompt) → `("", zero, false)`.
+degenerate input (nil engine / no categories / blank prompt) → `("", zero, <reason>, false)`.
+`missReason` (issue #287) is `""` on a hit and one of the exported `RouterMiss*` constants on a
+miss — `RouterMissDegenerateInput` / `RouterMissClassifierError` / `RouterMissCancelled` /
+`RouterMissBadVerdict` (`parseRouterVerdict` rejected a malformed/empty verdict) /
+`RouterMissUnknownCategory` (verdict named an unoffered category) — so the dispatch chokepoint can
+log WHY (see below). `parseRouterVerdict` additionally returns the reason so it can split
+bad-verdict from unknown-category.
 
 The per-RUN breaker `modelRouterBreaker` (default `defaultModelRouterMaxMisses`=3) mirrors
 `askReviewBreaker` exactly: its mutex serialises classifications within a run AND guards the
@@ -582,14 +588,56 @@ UNCONDITIONALLY (hit OR miss) via `_ = sess.RecordUsage(classifierUsage)` BEFORE
 miss/hit branch (#92 fix): classifier spend is now visible to `budgetExhausted` (which
 reads `sess.Usage.TotalTokens()`), bounding CWE-770 unbounded accumulation.
 
-The RUN() HOOK (`maybeRouteModel`, `engine/agent/subagent.go`): for a PLAIN default delegation
-(gated — returns empty unless `!resuming && !args.Fork && args.Model=="" && args.Agent=="" &&
-caps.routeTask != nil`), it calls `caps.routeTask(args.Prompt)` BETWEEN `validateFork` and
-`resolveEngineAndLimits`, threading the routed model into `selectChildEngine` via the EXISTING
-per-call `model` factory path (`t.engineFactory(routedModel)` — decide-once, contamination-safe,
-same-provider). PRECEDENCE by gating: per-call `model` > agent-def `Model` > fork/resume > router >
-inherited default. Both foreground and background route (the decision is threaded into
-`backgroundChild`). `EvSubagentStart` carries `RoutedCategory`/`RoutedModel` (bare
+MISS OBSERVABILITY (issue #287). On a miss (`!ok || model==""`) the closure logs — BEFORE
+the breaker-open check — one INFO `"subagent model router: classification MISSED; child
+inherits the default model"` with a `reason` attr (the widened `missReason`, or the literal
+`empty-model` when a route reported ok but a blank model). The reason is METADATA ONLY (a
+harness/composition constant, never the task prompt or classifier output — gauntlet #7).
+Composition-side mapping misses carry their own reasons: `category-selector-empty
+(category=<name>)` and `category-target-unresolvable (category=<name> selector=<sel>)` (both
+operator-authored, safe). The breaker-open skip and the `hardAbort` skip stay SILENT by
+design (no classifier call was made — nothing to attribute). All three delegation families
+share the closure, so team/parallel misses get the line for free. The wire cue
+(`SubagentPayload.RoutedMiss`) is a deferred follow-up; the INFO closes the observability gap.
+
+The RUN() HOOK (`(*SubagentTool).maybeRouteModel` → `routeGateOpen`, `engine/agent/subagent.go`):
+the router is consulted BETWEEN `validateFork` and `resolveEngineAndLimits` and its pick is
+threaded into `selectChildEngine`. The gate (`routeGateOpen`) has TWO shapes: for NO `agent`
+(a plain default delegation) it routes unless a writable call's factory is unwired (issue #285);
+for a NAMED `agent` (issue #286) it routes ONLY a ROUTABLE def — read-only, agent+model factory
+wired, and `wantAgent ∈ t.routableAgents` — otherwise it skips (no classifier spend when the
+pick could not be consumed). The per-call `model`/`fork`/`resume`/nil-router gates are checked
+first. PRECEDENCE by gating: per-call `model` > agent-def `Model` (incl. explicit `inherit`) >
+fork/resume > router > `--subagent-model` default > session model. Both foreground and background
+route (the decision is threaded into `backgroundChild`).
+
+ROUTABLE agent-defs (issue #286, [ADR 0066](../adr/0066-route-unpinned-and-writable-delegations.md)):
+a def that expressed NO model intent (`TrimSpace(def.Model)==""`) is eligible for routing; ANY
+non-empty `def.Model` (`inherit`/alias/concrete/unknown) PINS it (explicit `inherit` is the opt-out).
+Composition computes the set via `routableAgentNames` (`internal/app/agentdefs.go`) — a def is
+included iff unpinned AND `!providerSwitchesAway` (routed ids are parent-provider ids) AND
+`!defHasInlineMCP` (the agent+model factory declines inline-MCP defs) — sorted, SIDE-EFFECT-FREE
+(the per-def WARNs are the real engine build's job), wired via `agent.WithRoutableAgents`.
+`selectChildEngine`'s read-only agent branch (`selectReadOnlyAgentEngine`) applies the routed pick
+by rebuilding the def's SCOPED engine on it via the EXISTING `agentModelFactory`
+(`WithAgentModelEngineFactory`), FAIL-SOFT to the pre-built def engine on a decline (e.g. an
+inline-MCP def); per-def limits are UNTOUCHED (only the engine swaps). Team members / Parallel
+branches are out of scope. Guarded by `engine/agent`'s `TestRunRoutableAgent*` +
+`TestRunNamedAgentBeatsRouter` (the pin: no `WithRoutableAgents` ⇒ named agents stay unrouted) +
+`internal/app`'s `TestRoutableAgentNamesMatrix` + the `TestRoutableDef*E2E` composition e2es.
+
+WRITABLE parity (issue #285): a `mode:"read-write"` explorer (no `agent`) honours the per-call
+`model` and the router pick the SAME way — through `writableEngineFactory`
+(`WithWritableEngineFactory`, minted by `buildWritableSubagentEngineFactory` sharing the
+`writableExplorerDeps` recipe with `buildWritableSubagentChildEngine`). `selectChildEngine`'s
+writable arm returns BEFORE the read-only `model`/router arms (the pre-#285 bug: the
+unconditional writable clobber in `resolveEngineAndLimits` discarded a read-only per-model
+engine and ran the DEFAULT writable model), so `resolveEngineAndLimits` now only swaps for a
+writable RESUME. `validateMode` rejects `read-write`+`model` with no writable factory (a LOUD
+error, never a silent inherit), and `maybeRouteModel` is now a METHOD gated on `!writable ||
+writableEngineFactory != nil` so a writable delegation whose routed pick would be discarded
+(factory unwired) never spends the classifier. `read-write`+`agent` (a writable specialist) and
+`read-write`+`resume` keep their own engines, unchanged. `EvSubagentStart` carries `RoutedCategory`/`RoutedModel` (bare
 metadata: a category label + a model id, gauntlet-#7 safe), surfaced end-to-end —
 the session struct + a per-classification INFO + the proto/client wire
 (`routed_category`/`routed_model` on the `Subagent` event payload, relayed through

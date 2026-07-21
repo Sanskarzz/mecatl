@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -10,9 +11,9 @@ import (
 )
 
 // Tests for the /effort picker (ADR 0055): a tiny SELECTING enum overlay that
-// RESTARTS the session on the SAME provider/model with the chosen reasoning-effort
-// tier, mirroring the /models restart-now handoff. Renders purely from client state
-// (no proto in ui).
+// FORK-RESUMES the session onto a peer at the chosen reasoning-effort tier (ADR
+// 0066) — enter applies DIRECTLY (no confirm step) and the transcript SURVIVES.
+// Renders purely from client state (no proto in ui).
 
 // pressEffortKey routes a key through onEffortKey, asserting it was handled.
 func pressEffortKey(t *testing.T, m Model, msg tea.KeyPressMsg) Model {
@@ -147,11 +148,14 @@ func TestEffortEscCloses(t *testing.T) {
 	}
 }
 
-// TestEffortPickRestartsWithPreservedModel is the load-bearing behavioural test: it
-// opens the picker, moves to a real tier, presses enter, and asserts the picker fired
-// the restart handoff carrying the CURRENT provider/model (PRESERVED) plus the new
-// effort — and that the re-create CreateSession recorded exactly that selector.
-func TestEffortPickRestartsWithPreservedModel(t *testing.T) {
+// TestEffortPickForksDirectly is the load-bearing behavioural test (ADR 0066): it
+// opens the picker, moves to a real tier, presses enter ONCE, and asserts the
+// switchEffort fork-resume handoff fired DIRECTLY — no confirm step — with the
+// selection synchronously applied (model preserved, effort changed, recorded as
+// the explicit this-session pick), the overlay dismissed, and the phase driven to
+// connecting. The fork carries ONLY the effort delta (the source id + effort); the
+// model is preserved on the fork (never sent).
+func TestEffortPickForksDirectly(t *testing.T) {
 	store := &fakeStore{}
 	m := newModelsModel(t, sampleModels(), store, modelsCaps(), client.ModelSelection{})
 	// newModelsModel delivered openai/gpt-5 as the effective model — that is what the
@@ -160,17 +164,18 @@ func TestEffortPickRestartsWithPreservedModel(t *testing.T) {
 
 	mm, _ := m.runEffort()
 	m = mm.(Model)
-	// Move to "high" (index 3) and press enter to restart.
+	// Move to "high" (index 3) and press enter — this applies DIRECTLY (no confirm).
 	m = pressEffortKey(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
 	m = pressEffortKey(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
 	m = pressEffortKey(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
 	mm, cmd, handled := m.onEffortKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = mm.(Model)
 	if !handled {
-		t.Fatal("enter should be handled by the picker")
+		t.Fatal("enter should be handled by the open picker")
 	}
-	// The restart applied the selection synchronously: the model is PRESERVED, the new
-	// effort is set, and it is recorded as the explicit this-session pick.
+
+	// The selection applied synchronously: model PRESERVED, effort changed, recorded
+	// as the explicit this-session pick.
 	want := client.ModelSelection{ProviderID: "openai", ModelID: "gpt-5", ReasoningEffort: "high"}
 	if m.activeModel != want {
 		t.Fatalf("activeModel = %+v, want %+v (model preserved, effort changed)", m.activeModel, want)
@@ -178,18 +183,24 @@ func TestEffortPickRestartsWithPreservedModel(t *testing.T) {
 	if m.pickedThisSession != want {
 		t.Fatalf("pickedThisSession = %+v, want %+v", m.pickedThisSession, want)
 	}
-	// The picker overlay is dismissed and the session is mid-restart.
+	// The overlay is dismissed (no confirm step) and the session is mid-switch.
 	if m.effort.view != effortNone {
-		t.Errorf("the restart should dismiss the effort overlay, view = %v", m.effort.view)
+		t.Errorf("the switch should dismiss the effort overlay, view = %v", m.effort.view)
 	}
 	if m.phase != phaseConnecting {
-		t.Errorf("the restart should drive phaseConnecting, got %v", m.phase)
+		t.Errorf("the switch should drive phaseConnecting, got %v", m.phase)
 	}
-	// Run the restart cmd batch: the re-create CreateSession must carry the preserved
-	// model + the new effort.
+	// Run the fork cmd batch: ForkSession carries the SOURCE id + the effort ONLY.
 	m = feedCmd(t, m, cmd)
-	if conv.createdSel != want {
-		t.Fatalf("re-create CreateSession carried %+v, want %+v", conv.createdSel, want)
+	if conv.forkedFrom != "sess-test-0001" {
+		t.Fatalf("forkedFrom = %q, want the source session sess-test-0001", conv.forkedFrom)
+	}
+	if conv.forkedEffort != "high" {
+		t.Fatalf("forkedEffort = %q, want high", conv.forkedEffort)
+	}
+	// The source session is closed once (best-effort, after a successful fork).
+	if got := conv.closed(); len(got) != 1 || got[0] != "sess-test-0001" {
+		t.Fatalf("closed = %v, want [sess-test-0001] (source closed once after the fork)", got)
 	}
 	// The pick is persisted per-workspace (the effort rides the selection).
 	if store.saves < 1 || store.lastSel != want {
@@ -197,8 +208,217 @@ func TestEffortPickRestartsWithPreservedModel(t *testing.T) {
 	}
 }
 
+// TestEffortPickPreservesTranscript is the HEADLINE regression guard against
+// re-introducing resetSession (ADR 0066): a fork-resume must leave m.conv (the
+// conversation transcript) UNCHANGED across the switch + the SessionReadyMsg
+// rebind — the fork carries the conversation server-side, so the client must NOT
+// wipe it. Asserts the transcript, the session-id rebind to the fork id, and the
+// effective-model refresh from the refetch.
+func TestEffortPickPreservesTranscript(t *testing.T) {
+	store := &fakeStore{}
+	m := newModelsModel(t, sampleModels(), store, modelsCaps(), client.ModelSelection{})
+	conv := m.deps.Session.(*fakeConv)
+	// The fork's GetSession refetch echoes the resolved model at the new effort.
+	conv.resolvedModel = client.ResolvedModel{ProviderID: "openai", ModelID: "gpt-5", ReasoningEffort: "high"}
+	// Stage a transcript: a user block + an assistant block (the fork must keep both).
+	m.conv.addUser("what is the plan?")
+	m.conv.startAssistant()
+	m.conv.appendAssistant("the plan is …")
+	before := m.conv
+
+	mm, _ := m.runEffort()
+	m = mm.(Model)
+	m = pressEffortKey(t, m, tea.KeyPressMsg{Code: tea.KeyDown}) // low (index 1)
+	mm, cmd, _ := m.onEffortKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = mm.(Model)
+	// The transcript is UNTOUCHED by the handoff itself.
+	if len(m.conv.blocks) != len(before.blocks) {
+		t.Fatalf("transcript blocks = %d after the handoff, want %d (fork must not wipe it)", len(m.conv.blocks), len(before.blocks))
+	}
+	m = feedCmd(t, m, cmd)
+	// After the fork + SessionReadyMsg: the transcript is STILL unchanged …
+	if len(m.conv.blocks) != len(before.blocks) {
+		t.Fatalf("transcript blocks = %d after the fork, want %d (regression: resetSession re-introduced?)", len(m.conv.blocks), len(before.blocks))
+	}
+	for i := range before.blocks {
+		if m.conv.blocks[i].raw != before.blocks[i].raw || m.conv.blocks[i].kind != before.blocks[i].kind {
+			t.Errorf("block %d changed across the fork: (%v,%q) → (%v,%q)", i,
+				before.blocks[i].kind, before.blocks[i].raw, m.conv.blocks[i].kind, m.conv.blocks[i].raw)
+		}
+	}
+	// … the session id rebinds to the fork id …
+	if m.sessionID != "sess-fork-1" {
+		t.Errorf("sessionID = %q, want the fork id sess-fork-1", m.sessionID)
+	}
+	// … the source is closed exactly once …
+	if got := conv.closed(); len(got) != 1 || got[0] != "sess-test-0001" {
+		t.Errorf("closed = %v, want [sess-test-0001]", got)
+	}
+	// … and the effective model updates from the refetch (the new effort echo drives
+	// the header suffix + the /effort cursor ●).
+	if m.effectiveModel.ReasoningEffort != "high" {
+		t.Errorf("effectiveModel.ReasoningEffort = %q, want high (from the fork's GetSession refetch)", m.effectiveModel.ReasoningEffort)
+	}
+	if m.phase != phaseIdle {
+		t.Errorf("phase = %v, want phaseIdle (the fork's SessionReadyMsg rebinds idle)", m.phase)
+	}
+}
+
+// TestEffortPickFailureLeavesSourceOpen asserts the recoverable failure path (ADR
+// 0066): a failed fork does NOT close the source session — the old session is still
+// the user's live one — and the recoverable reducer leaves the app idle with
+// enter-to-retry armed.
+func TestEffortPickFailureLeavesSourceOpen(t *testing.T) {
+	m := newModelsModel(t, sampleModels(), &fakeStore{}, modelsCaps(), client.ModelSelection{})
+	conv := m.deps.Session.(*fakeConv)
+	conv.forkErr = context.DeadlineExceeded
+
+	mm, _ := m.runEffort()
+	m = mm.(Model)
+	m = pressEffortKey(t, m, tea.KeyPressMsg{Code: tea.KeyDown}) // low
+	mm, cmd, _ := m.onEffortKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = mm.(Model)
+	m = feedCmd(t, m, cmd)
+	// The recoverable reducer fired (NOT the terminal fatal path).
+	if !m.restartFailed {
+		t.Error("restartFailed = false, want true (recoverable failure armed)")
+	}
+	if m.phase != phaseIdle {
+		t.Errorf("phase = %v, want phaseIdle (recoverable, not fatal)", m.phase)
+	}
+	// The failure carried the fork origin + the SURVIVING source session id (so the
+	// enter-retry re-forks — preserving the transcript — instead of re-creating).
+	if m.restartFailedForkID != "sess-test-0001" {
+		t.Errorf("restartFailedForkID = %q, want the source session sess-test-0001", m.restartFailedForkID)
+	}
+	// The source session was NOT closed — a failed fork leaves the live session alone.
+	if got := conv.closed(); len(got) != 0 {
+		t.Errorf("closed = %v, want empty (the source session is NOT closed on a failed fork)", got)
+	}
+}
+
+// TestEffortPickFailureRetryReforks is the Finding-1 regression guard (ADR 0066):
+// after a failed fork, the armed enter-RETRY must re-fire the FORK from the
+// surviving source session — NOT the restartOnModelCmd create-fresh + resetSession
+// path, which would lose the transcript (the exact thing the fork-resume switch
+// exists to prevent). Drives a failed fork, then the enter-retry, and asserts the
+// fake records a SECOND ForkSession (from the same source id, at the picked effort)
+// and ZERO CreateSession calls.
+func TestEffortPickFailureRetryReforks(t *testing.T) {
+	m := newModelsModel(t, sampleModels(), &fakeStore{}, modelsCaps(), client.ModelSelection{})
+	conv := m.deps.Session.(*fakeConv)
+	conv.forkErr = context.DeadlineExceeded
+
+	mm, _ := m.runEffort()
+	m = mm.(Model)
+	m = pressEffortKey(t, m, tea.KeyPressMsg{Code: tea.KeyDown}) // low
+	mm, cmd, _ := m.onEffortKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = mm.(Model)
+	m = feedCmd(t, m, cmd) // the fork fails → the recoverable state is armed
+	if !m.restartFailed || m.restartFailedForkID != "sess-test-0001" {
+		t.Fatalf("precondition: restartFailed=%v forkID=%q, want armed over sess-test-0001", m.restartFailed, m.restartFailedForkID)
+	}
+	if conv.forkCount != 1 {
+		t.Fatalf("precondition: forkCount = %d, want 1 (the failed pick)", conv.forkCount)
+	}
+	// The failing pick applied the selection synchronously — the retry re-fires it.
+	want := client.ModelSelection{ProviderID: "openai", ModelID: "gpt-5", ReasoningEffort: "low"}
+	if m.activeModel != want {
+		t.Fatalf("precondition: activeModel = %+v, want %+v", m.activeModel, want)
+	}
+
+	// The fork succeeded in creating the peer session — only the fork RPC erred, so
+	// the RETRY's GetSession refetch must succeed (a permanent getSessionErr would
+	// re-fail the retried fork post-refetch, masking the create-vs-fork assertion).
+	mm2, retryCmd := m.onIdleSubmit()
+	m = mm2.(Model)
+	if m.phase != phaseConnecting {
+		t.Fatalf("phase = %v, want phaseConnecting (the retry is in flight)", m.phase)
+	}
+	conv.forkErr = nil // the transient blip clears; the retry's fork now succeeds
+	m = feedCmd(t, m, retryCmd)
+
+	// THE PIN: the retry re-FORKED (from the surviving source, at the picked effort)
+	// — it did NOT create-fresh (no resetSession, no transcript loss).
+	if conv.forkCount != 2 {
+		t.Fatalf("forkCount = %d, want 2 (the retry re-fired the fork)", conv.forkCount)
+	}
+	if conv.forkedFrom != "sess-test-0001" {
+		t.Errorf("retry forkedFrom = %q, want the surviving source sess-test-0001", conv.forkedFrom)
+	}
+	if conv.forkedEffort != "low" {
+		t.Errorf("retry forkedEffort = %q, want low (the picked tier)", conv.forkedEffort)
+	}
+	if conv.createCount != 0 {
+		t.Errorf("createCount = %d, want 0 — the retry must NOT create-fresh (that would wipe the transcript)", conv.createCount)
+	}
+	// The retried fork succeeded: the session rebinds to the fork id, the app is idle,
+	// and the source is closed exactly once (by the successful retry only).
+	if m.sessionID != "sess-fork-2" {
+		t.Errorf("sessionID = %q, want the retry's fork id sess-fork-2", m.sessionID)
+	}
+	if m.restartFailed || m.restartFailedForkID != "" {
+		t.Errorf("restartFailed=%v forkID=%q after the successful retry, want cleared", m.restartFailed, m.restartFailedForkID)
+	}
+	if m.phase != phaseIdle {
+		t.Errorf("phase = %v, want phaseIdle (the retried fork's SessionReadyMsg rebinds idle)", m.phase)
+	}
+	if got := conv.closed(); len(got) != 1 || got[0] != "sess-test-0001" {
+		t.Errorf("closed = %v, want [sess-test-0001] (the failed attempt closes nothing; the successful retry closes the source once)", got)
+	}
+}
+
+// TestEffortPickRefetchFailureKeepsFork covers the post-fork GetSession-refetch
+// failure leg (ADR 0066): the fork SUCCEEDS (the peer session exists) but the
+// resolved-model refetch fails. The app must DEGRADE gracefully — recoverable
+// (restartFailed armed, the fork origin recorded for a re-fork retry), NOT stuck in
+// phaseConnecting and NOT fatal — and the source session IS closed (the fork itself
+// succeeded). m.effectiveModel may stay stale (the footer heal re-derives it), but
+// the fork happened. (The transcript is the fork's guarantee: it rides the
+// server-side copy regardless of the refetch.)
+func TestEffortPickRefetchFailureKeepsFork(t *testing.T) {
+	m := newModelsModel(t, sampleModels(), &fakeStore{}, modelsCaps(), client.ModelSelection{})
+	conv := m.deps.Session.(*fakeConv)
+	conv.getSessionErr = context.DeadlineExceeded // the fork succeeds; the refetch fails
+
+	mm, _ := m.runEffort()
+	m = mm.(Model)
+	m = pressEffortKey(t, m, tea.KeyPressMsg{Code: tea.KeyDown}) // low
+	mm, cmd, _ := m.onEffortKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = mm.(Model)
+	m = feedCmd(t, m, cmd)
+
+	// The fork FIRED and succeeded (the peer session was created server-side) …
+	if conv.forkCount != 1 || conv.forkedFrom != "sess-test-0001" {
+		t.Fatalf("fork: count=%d from=%q, want 1 / sess-test-0001 (the fork succeeded)", conv.forkCount, conv.forkedFrom)
+	}
+	// … so the source session was closed (best-effort, after the successful fork) …
+	if got := conv.closed(); len(got) != 1 || got[0] != "sess-test-0001" {
+		t.Fatalf("closed = %v, want [sess-test-0001] (the fork succeeded — the source closes)", got)
+	}
+	// … and NOTHING was created fresh (the fork path never calls CreateSession).
+	if conv.createCount != 0 {
+		t.Errorf("createCount = %d, want 0 (the fork path never re-creates)", conv.createCount)
+	}
+	// The app degraded to the RECOVERABLE state — armed with the fork origin (a
+	// re-fork retry, not a create), idle, NOT stuck in connecting, NOT fatal.
+	if !m.restartFailed {
+		t.Error("restartFailed = false, want true (the refetch failure stays recoverable)")
+	}
+	if m.restartFailedForkID != "sess-test-0001" {
+		t.Errorf("restartFailedForkID = %q, want the fork origin sess-test-0001", m.restartFailedForkID)
+	}
+	if m.phase != phaseIdle {
+		t.Errorf("phase = %v, want phaseIdle (recoverable — NOT stuck connecting, NOT fatal)", m.phase)
+	}
+	if !strings.Contains(stripANSIstr(m.statusMsg), "press enter to retry") {
+		t.Errorf("statusMsg = %q, want the enter-to-retry notice", m.statusMsg)
+	}
+}
+
 // TestEffortPickAutoSendsEmpty asserts the auto sentinel maps to the EMPTY effort on
-// the wire (and in the persisted selection) — the clean-state convention.
+// the fork (and in the persisted selection) — the clean-state convention. The pick
+// applies DIRECTLY (one enter, no confirm).
 func TestEffortPickAutoSendsEmpty(t *testing.T) {
 	store := &fakeStore{}
 	m := newModelsModel(t, sampleModels(), store, modelsCaps(), client.ModelSelection{})
@@ -214,15 +434,15 @@ func TestEffortPickAutoSendsEmpty(t *testing.T) {
 	if m.effort.cursor != 0 {
 		t.Fatalf("cursor = %d, want 0 (auto)", m.effort.cursor)
 	}
-	mm, cmd, _ := m.onEffortKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	mm, cmd, _ := m.onEffortKey(tea.KeyPressMsg{Code: tea.KeyEnter}) // apply directly
 	m = mm.(Model)
 	want := client.ModelSelection{ProviderID: "openai", ModelID: "gpt-5", ReasoningEffort: ""}
 	if m.activeModel != want {
 		t.Fatalf("activeModel = %+v, want %+v (auto ⇒ empty effort)", m.activeModel, want)
 	}
 	m = feedCmd(t, m, cmd)
-	if conv.createdSel.ReasoningEffort != "" {
-		t.Fatalf("auto pick carried effort %q, want empty", conv.createdSel.ReasoningEffort)
+	if conv.forkedEffort != "" {
+		t.Fatalf("auto pick forked effort %q, want empty (the auto sentinel maps to unset)", conv.forkedEffort)
 	}
 }
 
@@ -272,6 +492,90 @@ func TestEffortPickerGolden(t *testing.T) {
 	}
 	got := stripANSI([]byte(m.View().Content))
 	compareGolden(t, "effort_picker.golden", got)
+}
+
+// TestEffortPickCurrentTierForksToo pins that enter on the ALREADY-CURRENT tier
+// still applies directly (no no-op short-circuit): the fork fires with the current
+// tier's effort. Re-forking at the same tier is cheap + honest (the server may
+// normalise/clamp it), and a silent no-op would read as a dead key.
+func TestEffortPickCurrentTierForksToo(t *testing.T) {
+	store := &fakeStore{}
+	m := newModelsModel(t, sampleModels(), store, modelsCaps(), client.ModelSelection{})
+	conv := m.deps.Session.(*fakeConv)
+	// The cursor opens on the CURRENT tier (unset ⇒ "auto", index 0) — enter WITHOUT
+	// moving picks the already-current tier and forks directly.
+	mm, _ := m.runEffort()
+	m = mm.(Model)
+	mm, cmd, handled := m.onEffortKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = mm.(Model)
+	if !handled {
+		t.Fatal("enter on the current tier should be handled")
+	}
+	if m.effort.view != effortNone {
+		t.Errorf("the switch should dismiss the effort overlay, view = %v", m.effort.view)
+	}
+	if m.phase != phaseConnecting {
+		t.Errorf("phase = %v, want phaseConnecting (the fork fires even on the current tier)", m.phase)
+	}
+	m = feedCmd(t, m, cmd)
+	if conv.forkCount != 1 {
+		t.Fatalf("forkCount = %d, want 1 (the fork fires even on the current tier)", conv.forkCount)
+	}
+	if conv.forkedEffort != "" {
+		t.Errorf("forkedEffort = %q, want empty (the current tier is unset/auto)", conv.forkedEffort)
+	}
+}
+
+// TestEffortPickCurrentTierNonAutoForksToo extends the fork-fires-even-on-current-
+// tier invariant to a NON-AUTO tier: with the source at ReasoningEffort "high" the
+// cursor opens on "high", and enter WITHOUT moving still forks — carrying "high"
+// verbatim. A silent no-op would read as a dead key whatever the tier, not just auto.
+func TestEffortPickCurrentTierNonAutoForksToo(t *testing.T) {
+	store := &fakeStore{}
+	m := newModelsModel(t, sampleModels(), store, modelsCaps(), client.ModelSelection{})
+	m.effectiveModel.ReasoningEffort = "high" // the CURRENT tier is non-auto
+	conv := m.deps.Session.(*fakeConv)
+
+	mm, _ := m.runEffort()
+	m = mm.(Model)
+	// The cursor opens on the current "high" row (index 3) — enter WITHOUT moving.
+	if m.effort.cursor != 3 {
+		t.Fatalf("cursor = %d, want 3 (the current 'high' row)", m.effort.cursor)
+	}
+	mm, cmd, handled := m.onEffortKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = mm.(Model)
+	if !handled {
+		t.Fatal("enter on the current non-auto tier should be handled")
+	}
+	if m.phase != phaseConnecting {
+		t.Errorf("phase = %v, want phaseConnecting (the fork fires even on the current tier)", m.phase)
+	}
+	m = feedCmd(t, m, cmd)
+	if conv.forkCount != 1 {
+		t.Fatalf("forkCount = %d, want 1 (the fork fires even on the current tier)", conv.forkCount)
+	}
+	if conv.forkedEffort != "high" {
+		t.Errorf("forkedEffort = %q, want high (the current non-auto tier rides the fork)", conv.forkedEffort)
+	}
+}
+
+// TestEffortPickerSwallowsOtherKeys pins the picker's keyboard ownership: an
+// arbitrary rune key while the picker is open is swallowed (handled=true) and
+// neither dismisses the overlay nor leaks to the prompt — only enter/esc/arrows
+// act.
+func TestEffortPickerSwallowsOtherKeys(t *testing.T) {
+	m := newModelsModel(t, sampleModels(), &fakeStore{}, modelsCaps(), client.ModelSelection{})
+	mm, _ := m.runEffort()
+	m = mm.(Model)
+	// A stray rune key is swallowed; the overlay stays on the panel.
+	mm, _, handled := m.onEffortKey(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	if !handled {
+		t.Fatal("a stray rune key should be handled (swallowed) by the picker overlay")
+	}
+	m = mm.(Model)
+	if m.effort.view != effortPanel {
+		t.Fatalf("view = %v, want effortPanel (the key must not leak or dismiss)", m.effort.view)
+	}
 }
 
 // TestEffortRendersInHeader asserts the resolved effort appears beside the model in

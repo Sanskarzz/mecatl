@@ -91,7 +91,7 @@ func TestForkSessionInheritsHistoryAndLabels(t *testing.T) {
 	// Reset the factory recorder so the NEXT call is unambiguously the fork's.
 	calls.Store(0)
 	gotSel.Store(server.ProviderSelector{})
-	newID, err := svc.ForkSession(ctx, src.ID, "")
+	newID, err := svc.ForkSession(ctx, src.ID, "", "")
 	if err != nil {
 		t.Fatalf("ForkSession: %v", err)
 	}
@@ -163,6 +163,124 @@ func TestForkSessionInheritsHistoryAndLabels(t *testing.T) {
 	}
 }
 
+// TestForkSessionEffortOverride verifies the ADR 0066 effort override: a source
+// with provider+model+effort "low", forked with override "high", yields a peer
+// whose ReasoningEffort label is "high" while ProviderID/ModelID inherit verbatim,
+// with a per-session engine rehydrated on the override selector, and
+// svc.ResolvedModel(forkID) echoing the new effort.
+func TestForkSessionEffortOverride(t *testing.T) {
+	ctx := context.Background()
+
+	wantSel := server.ProviderSelector{ProviderID: "openrouter", ModelID: "anthropic/claude-3.5-sonnet", ReasoningEffort: "low"}
+
+	var (
+		gotSel atomic.Value
+		calls  atomic.Int32
+	)
+	factory := func(_ context.Context, sel server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile, _ string, _ session.PermissionMode) (server.SessionEngineResult, error) {
+		calls.Add(1)
+		gotSel.Store(sel)
+		eng := agent.NewEngine(agent.Deps{
+			LLM:     mockllm.New(mockllm.TextTurn("r"), mockllm.TextTurn("r")),
+			Catalog: tool.NewCatalog(),
+			Policy:  permpolicy.NewPolicy(nil, nil),
+			Model:   "test-model",
+		})
+		return server.SessionEngineResult{Engine: eng, Close: func() error { return nil }, ReasoningEffort: sel.ReasoningEffort}, nil
+	}
+	svc, store := newMCPServiceStore(t, "shared", factory)
+
+	src, err := svc.CreateSessionWithProvider(ctx, "/work/forksrc", session.ModeDefault, session.Limits{}, wantSel)
+	if err != nil {
+		t.Fatalf("CreateSessionWithProvider: %v", err)
+	}
+	driveCompletedTurn(t, svc, src.ID, "hi")
+
+	// Reset the factory recorder so the NEXT call is unambiguously the fork's.
+	calls.Store(0)
+	gotSel.Store(server.ProviderSelector{})
+	newID, err := svc.ForkSession(ctx, src.ID, "", "high")
+	if err != nil {
+		t.Fatalf("ForkSession: %v", err)
+	}
+	// The fork rehydrated a per-session engine on the OVERRIDE selector (provider +
+	// model inherited, effort replaced).
+	if calls.Load() != 1 {
+		t.Fatalf("factory called %d times for the fork, want exactly 1 (the override needs a per-session engine)", calls.Load())
+	}
+	wantForkSel := server.ProviderSelector{ProviderID: "openrouter", ModelID: "anthropic/claude-3.5-sonnet", ReasoningEffort: "high"}
+	if got := gotSel.Load(); got != wantForkSel {
+		t.Fatalf("fork rehydration factory saw selector %v, want %v (effort overridden, provider/model inherited)", got, wantForkSel)
+	}
+	if !svc.HasSessionEngineForTest(newID) {
+		t.Fatalf("fork has no per-session engine registered (an effort-override fork MUST rehydrate one)")
+	}
+
+	forked, err := store.Load(ctx, newID)
+	if err != nil {
+		t.Fatalf("Load forked: %v", err)
+	}
+	if forked.ReasoningEffort != "high" {
+		t.Fatalf("forked ReasoningEffort = %q, want high (the override)", forked.ReasoningEffort)
+	}
+	if forked.ProviderID != wantSel.ProviderID || forked.ModelID != wantSel.ModelID {
+		t.Fatalf("forked provider/model = %q/%q, want the source's %q/%q (ALWAYS inherited)",
+			forked.ProviderID, forked.ModelID, wantSel.ProviderID, wantSel.ModelID)
+	}
+	// The ResolvedModel echo carries the new effort.
+	if got := svc.ResolvedModel(newID); got.ReasoningEffort != "high" {
+		t.Fatalf("ResolvedModel(fork).ReasoningEffort = %q, want high", got.ReasoningEffort)
+	}
+	// The source is untouched.
+	srcAfter, err := store.Load(ctx, src.ID)
+	if err != nil {
+		t.Fatalf("Load src: %v", err)
+	}
+	if srcAfter.ReasoningEffort != "low" {
+		t.Fatalf("source ReasoningEffort = %q after the fork, want low (the override touches ONLY the fork)", srcAfter.ReasoningEffort)
+	}
+}
+
+// TestForkSessionEmptyEffortInherits verifies an empty effort override inherits the
+// source's effort verbatim (ADR 0066 default), provider/model included. A non-empty
+// effort needs a per-session engine, so the source is built on a factory-backed
+// service (the effort label only sticks when the engine factory runs).
+func TestForkSessionEmptyEffortInherits(t *testing.T) {
+	ctx := context.Background()
+	wantSel := server.ProviderSelector{ProviderID: "openrouter", ModelID: "m", ReasoningEffort: "low"}
+	factory := func(_ context.Context, sel server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile, _ string, _ session.PermissionMode) (server.SessionEngineResult, error) {
+		eng := agent.NewEngine(agent.Deps{
+			LLM:     mockllm.New(mockllm.TextTurn("r"), mockllm.TextTurn("r")),
+			Catalog: tool.NewCatalog(),
+			Policy:  permpolicy.NewPolicy(nil, nil),
+			Model:   "test-model",
+		})
+		return server.SessionEngineResult{Engine: eng, Close: func() error { return nil }, ReasoningEffort: sel.ReasoningEffort}, nil
+	}
+	svc, store := newMCPServiceStore(t, "shared", factory)
+
+	src, err := svc.CreateSessionWithProvider(ctx, "/ws", session.ModeDefault, session.Limits{}, wantSel)
+	if err != nil {
+		t.Fatalf("CreateSessionWithProvider: %v", err)
+	}
+	driveCompletedTurn(t, svc, src.ID, "hi")
+
+	newID, err := svc.ForkSession(ctx, src.ID, "", "")
+	if err != nil {
+		t.Fatalf("ForkSession empty effort: %v", err)
+	}
+	forked, err := store.Load(ctx, newID)
+	if err != nil {
+		t.Fatalf("Load forked: %v", err)
+	}
+	if forked.ReasoningEffort != wantSel.ReasoningEffort {
+		t.Fatalf("forked ReasoningEffort = %q, want the source's %q (empty override inherits)", forked.ReasoningEffort, wantSel.ReasoningEffort)
+	}
+	if forked.ProviderID != wantSel.ProviderID || forked.ModelID != wantSel.ModelID {
+		t.Fatalf("forked provider/model = %q/%q, want the source's %q/%q", forked.ProviderID, forked.ModelID, wantSel.ProviderID, wantSel.ModelID)
+	}
+}
+
 // TestForkSessionTitleOverride verifies the optional title parameter: empty
 // inherits the source's title, non-empty overrides it.
 func TestForkSessionTitleOverride(t *testing.T) {
@@ -180,7 +298,7 @@ func TestForkSessionTitleOverride(t *testing.T) {
 	}
 
 	// Empty title → inherits source's.
-	inherited, err := svc.ForkSession(ctx, src.ID, "")
+	inherited, err := svc.ForkSession(ctx, src.ID, "", "")
 	if err != nil {
 		t.Fatalf("ForkSession empty title: %v", err)
 	}
@@ -191,7 +309,7 @@ func TestForkSessionTitleOverride(t *testing.T) {
 
 	// Non-empty title → overrides.
 	override := "fix the bug first"
-	overridden, err := svc.ForkSession(ctx, src.ID, override)
+	overridden, err := svc.ForkSession(ctx, src.ID, override, "")
 	if err != nil {
 		t.Fatalf("ForkSession override title: %v", err)
 	}
@@ -233,7 +351,7 @@ func TestForkSessionDefaultFSRidesSharedEngine(t *testing.T) {
 	}
 	driveCompletedTurn(t, svc, src.ID, "hello")
 
-	newID, err := svc.ForkSession(ctx, src.ID, "")
+	newID, err := svc.ForkSession(ctx, src.ID, "", "")
 	if err != nil {
 		t.Fatalf("ForkSession: %v", err)
 	}
@@ -275,7 +393,7 @@ func TestForkSessionRejectsRunningSource(t *testing.T) {
 		t.Fatalf("Save running: %v", err)
 	}
 
-	_, ferr := svc.ForkSession(ctx, sess.ID, "")
+	_, ferr := svc.ForkSession(ctx, sess.ID, "", "")
 	if !errors.Is(ferr, server.ErrFailedPrecondition) {
 		t.Fatalf("ForkSession on a running source: err = %v, want ErrFailedPrecondition", ferr)
 	}
@@ -289,7 +407,7 @@ func TestForkSessionCompletedSourceRecoversToIdle(t *testing.T) {
 	svc, store := newMCPServiceStore(t, "shared", nil)
 	id := persistCompleted(t, store)
 
-	newID, err := svc.ForkSession(ctx, id, "")
+	newID, err := svc.ForkSession(ctx, id, "", "")
 	if err != nil {
 		t.Fatalf("ForkSession on a completed source: %v", err)
 	}
@@ -468,12 +586,103 @@ func TestHTTPForkSessionRoundTrip(t *testing.T) {
 	}
 }
 
+// effortFactory is a SessionEngine factory that stamps the selector's effort onto
+// the result so the fork's ResolvedModel echo + label carry it (ADR 0066).
+func effortFactory(_ context.Context, sel server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile, _ string, _ session.PermissionMode) (server.SessionEngineResult, error) {
+	eng := agent.NewEngine(agent.Deps{
+		LLM:     mockllm.New(mockllm.TextTurn("r"), mockllm.TextTurn("r")),
+		Catalog: tool.NewCatalog(),
+		Policy:  permpolicy.NewPolicy(nil, nil),
+		Model:   "test-model",
+	})
+	return server.SessionEngineResult{Engine: eng, Close: func() error { return nil }, ReasoningEffort: sel.ReasoningEffort}, nil
+}
+
+// TestGRPCForkSessionEffortOverride is the gRPC ADR 0066 arm: an effort-override
+// fork threads reasoning_effort over the wire to the forked session's label.
+func TestGRPCForkSessionEffortOverride(t *testing.T) {
+	svc, _ := newMCPServiceStore(t, "gRPC reply", effortFactory)
+	client, cleanup := dialGRPC(t, svc)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	src, err := svc.CreateSessionWithProvider(ctx, "/ws/grpc", session.ModeDefault, session.Limits{},
+		server.ProviderSelector{ProviderID: "openrouter", ModelID: "m", ReasoningEffort: "low"})
+	if err != nil {
+		t.Fatalf("CreateSessionWithProvider: %v", err)
+	}
+	driveCompletedTurn(t, svc, src.ID, "hi")
+
+	forkResp, err := client.ForkSession(ctx, &mecatlv1.ForkSessionRequest{
+		SourceSessionId: string(src.ID),
+		ReasoningEffort: "high",
+	})
+	if err != nil {
+		t.Fatalf("ForkSession effort override: %v", err)
+	}
+	loaded, err := svc.LoadSession(ctx, session.SessionID(forkResp.GetSessionId()))
+	if err != nil {
+		t.Fatalf("LoadSession on the effort-override fork: %v", err)
+	}
+	if loaded.ReasoningEffort != "high" {
+		t.Fatalf("effort-override fork reasoning_effort = %q, want high", loaded.ReasoningEffort)
+	}
+	if loaded.ProviderID != "openrouter" || loaded.ModelID != "m" {
+		t.Fatalf("effort-override fork provider/model = %q/%q, want the inherited openrouter/m", loaded.ProviderID, loaded.ModelID)
+	}
+	// The ResolvedModel echo (what the ui reads) carries the new effort.
+	if got := svc.ResolvedModel(session.SessionID(forkResp.GetSessionId())); got.ReasoningEffort != "high" {
+		t.Fatalf("ResolvedModel(fork).ReasoningEffort = %q, want high", got.ReasoningEffort)
+	}
+}
+
+// TestHTTPForkSessionEffortOverride is the HTTP ADR 0066 arm: a fork body carrying
+// reasoning_effort threads the field to the forked session's label.
+func TestHTTPForkSessionEffortOverride(t *testing.T) {
+	svc, _ := newMCPServiceStore(t, "HTTP reply", effortFactory)
+	srv := httptest.NewServer(server.NewHTTPHandler(svc))
+	defer srv.Close()
+
+	ctx := context.Background()
+	src, err := svc.CreateSessionWithProvider(ctx, "/ws", session.ModeDefault, session.Limits{},
+		server.ProviderSelector{ProviderID: "openrouter", ModelID: "m", ReasoningEffort: "low"})
+	if err != nil {
+		t.Fatalf("CreateSessionWithProvider: %v", err)
+	}
+	driveCompletedTurn(t, svc, src.ID, "hi")
+
+	forkResp, err := http.Post(srv.URL+"/v1/sessions/"+string(src.ID)+"/fork", "application/json",
+		strings.NewReader(`{"reasoning_effort":"high"}`))
+	if err != nil {
+		t.Fatalf("POST effort fork: %v", err)
+	}
+	defer forkResp.Body.Close()
+	if forkResp.StatusCode != http.StatusCreated {
+		t.Fatalf("effort fork status = %d, want 201", forkResp.StatusCode)
+	}
+	var forkOut struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.NewDecoder(forkResp.Body).Decode(&forkOut); err != nil {
+		t.Fatalf("decode effort fork: %v", err)
+	}
+	loaded, err := svc.LoadSession(ctx, session.SessionID(forkOut.SessionID))
+	if err != nil {
+		t.Fatalf("LoadSession on the effort-override fork: %v", err)
+	}
+	if loaded.ReasoningEffort != "high" {
+		t.Fatalf("effort-override fork reasoning_effort = %q, want high", loaded.ReasoningEffort)
+	}
+}
+
 // TestForkSessionUnknownSourceNotFound: forking a never-created id surfaces
 // ErrNotFound (gRPC NotFound / HTTP 404).
 func TestForkSessionUnknownSourceNotFound(t *testing.T) {
 	t.Run("service", func(t *testing.T) {
 		svc := newMCPService(t, "shared", nil)
-		_, err := svc.ForkSession(context.Background(), "never-created", "")
+		_, err := svc.ForkSession(context.Background(), "never-created", "", "")
 		if !errors.Is(err, server.ErrNotFound) {
 			t.Fatalf("ForkSession unknown id: err = %v, want ErrNotFound", err)
 		}
@@ -517,7 +726,7 @@ func TestForkSessionRespectsEngineCap(t *testing.T) {
 	}
 	driveCompletedTurn(t, svc, src.ID, "hi")
 
-	_, ferr := svc.ForkSession(ctx, src.ID, "")
+	_, ferr := svc.ForkSession(ctx, src.ID, "", "")
 	if !errors.Is(ferr, server.ErrTooManySessionEngines) {
 		t.Fatalf("ForkSession past cap: err = %v, want ErrTooManySessionEngines", ferr)
 	}

@@ -355,14 +355,17 @@ func (h *HTTPHandler) setMode(w http.ResponseWriter, r *http.Request) {
 // inherits the source's mode, workspace, limits, and provider/model/profile
 // labels; same provider and model only. The source must be at a turn boundary
 // (idle/terminal); a running/awaiting source is rejected with 412. An OPTIONAL
-// JSON body `{"title": "..."}` overrides the forked session's title (empty/absent
-// inherits the source's). Returns 201 + the new session id.
+// JSON body `{"title": "...", "reasoning_effort": "..."}` overrides the forked
+// session's title and/or reasoning-effort tier (ADR 0066; empty/absent inherits
+// the source's — provider and model always inherit). Returns 201 + the new
+// session id.
 func (h *HTTPHandler) forkSession(w http.ResponseWriter, r *http.Request) {
 	id := session.SessionID(r.PathValue("id"))
 	var body struct {
-		Title string `json:"title"`
+		Title           string `json:"title"`
+		ReasoningEffort string `json:"reasoning_effort"`
 	}
-	// An empty body is valid (title inherits the source's); only a malformed
+	// An empty body is valid (title/effort inherit the source's); only a malformed
 	// non-empty body is an error.
 	if r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -370,7 +373,7 @@ func (h *HTTPHandler) forkSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	newID, err := h.svc.ForkSession(r.Context(), id, body.Title)
+	newID, err := h.svc.ForkSession(r.Context(), id, body.Title, body.ReasoningEffort)
 	if err != nil {
 		writeServiceError(w, err)
 		return

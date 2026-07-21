@@ -1208,6 +1208,15 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	// is ON iff RouterCategories is non-empty AND !cfg.RouterDisabled. No-op
 	// (byte-identical) when no router block.
 	cfg = foldOperatorModelRouter(cfg)
+	// Operator-YAML models.subagent (issue #288): the settings.yaml twin of
+	// --subagent-model. Fold it onto cfg.SubagentModel BEFORE normalizeSubagentModel so
+	// the YAML value goes through the SAME fail-fast validation path as the flag (a dead
+	// YAML selector fails startup, unlike fail-soft models.default). A CLI --subagent-model
+	// WINS (cliModelKeys.subagentModelSet). Runs after foldOperatorModelRouter so the
+	// operator-merged alias map is final. No-op (byte-identical) when no operator
+	// models.subagent is configured. The value is set VERBATIM — normalizeSubagentModel is
+	// the one validator and keeps aliases verbatim by design.
+	cfg = foldOperatorSubagentModel(cfg, cliModelKeys)
 	// SubagentModel (issue #35): validate + resolve the alias ONCE here — FAIL-FAST
 	// on a value that doesn't resolve to a usable model id (the --agent-source-url
 	// loud-misconfig posture; warn-and-inert would silently run the whole child
@@ -2935,9 +2944,9 @@ func normalizeSubagentModel(cfg Config) (string, error) {
 	resolved, known := lookupModelAlias(cfg, sel)
 	switch {
 	case !known:
-		return "", fmt.Errorf("--subagent-model %q: unknown model alias (not in --model-alias, not a built-in alias, and a bare token is not a concrete model id); every def-less child would silently run on the parent model — pass a concrete model id or define the alias", sel)
+		return "", fmt.Errorf("--subagent-model / models.subagent %q: unknown model alias (not in --model-alias, not a built-in alias, and a bare token is not a concrete model id); every def-less child would silently run on the parent model — pass a concrete model id or define the alias", sel)
 	case resolved == "":
-		return "", fmt.Errorf("--subagent-model %q: the alias resolves to \"inherit\" (the built-in sonnet/opus/haiku aliases mean inherit unless overridden via --model-alias), which would make the child-default override a no-op — pass a concrete model id or map the alias to one", sel)
+		return "", fmt.Errorf("--subagent-model / models.subagent %q: the alias resolves to \"inherit\" (the built-in sonnet/opus/haiku aliases mean inherit unless overridden via --model-alias), which would make the child-default override a no-op — pass a concrete model id or map the alias to one", sel)
 	}
 	cfg.diag().Log(context.Background(), port.LevelInfo,
 		"subagent default model ACTIVE: def-less Subagent explorer / Parallel-branch / undefined-team-member children run on it (the Parallel judge stays on the session model); a def `model:` or per-call override still wins",
@@ -4607,16 +4616,58 @@ func parallelChildDeps(cfg Config, provReg *providerRegistry, provider port.LLMP
 // explorer and Parallel branches.
 func buildWritableSubagentChildEngine(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, runner tool.CommandRunner) *agent.Engine {
 	model, windowFn := resolveDefaultChildModel(cfg, provReg, parentProviderID, parentModel)
-	// Read-only explorer surface (Read/Grep/Glob + Bash) LAYERED with Edit/Write — a
-	// writable child MAY mutate the parent tree DIRECTLY. Subagent/Parallel/ToolSearch
-	// stay excluded (readOnlyExplorerCatalog never adds them), so a writable child
-	// can't recurse or fan out.
+	return agent.NewEngine(writableExplorerDeps(cfg, provider, model, "task:read-write", windowFn, runner))
+}
+
+// writableExplorerDeps builds the agent.Deps for a WRITABLE explorer child engine on a
+// given model + role. It is the SHARED body of buildWritableSubagentChildEngine (the
+// default-model writable explorer, role "task:read-write") and
+// buildWritableSubagentEngineFactory (the per-call/routed-model writable explorer, role
+// "task:read-write:model=<model>") — extracted so the two never drift (issue #285). The
+// catalog is the read-only explorer surface (Read/Grep/Glob + Bash) LAYERED with
+// Edit/Write — a writable child MAY mutate the parent tree DIRECTLY; Subagent/Parallel/
+// ToolSearch stay excluded (readOnlyExplorerCatalog never adds them), so a writable child
+// can't recurse or fan out. The runner is the MAIN session's command runner (direct-write
+// parity, ADR 0041 — no fork, no copy, no merge-back). Both roles begin "task:" so
+// roleFamily buckets them as "subagent" (a writable subagent IS a subagent) while staying
+// distinguishable in raw role-tagged diagnostics. The caller owns model + windowFn
+// resolution (resolveDefaultChildModel for the default engine; the override id VERBATIM
+// with childWindowFor for the factory — the buildParallelEngineFactory discipline).
+func writableExplorerDeps(cfg Config, provider port.LLMProvider, model, role string, windowFn func() int, runner tool.CommandRunner) agent.Deps {
 	childCat := readOnlyExplorerCatalog(runner)
 	childCat.MustRegister(tools.EditTool{})
 	childCat.MustRegister(tools.WriteTool{})
-	deps := childEngineDepsForProvider(cfg, "task:read-write", provider, model, windowFn,
+	return childEngineDepsForProvider(cfg, role, provider, model, windowFn,
 		childCat, promptConfig(modelCfgFor(cfg, model), cfg.gitStatus), nil)
-	return agent.NewEngine(deps)
+}
+
+// buildWritableSubagentEngineFactory returns the per-call model-override factory the
+// Subagent tool invokes for a mode:"read-write" call with a per-call `model` (or the OPT-IN
+// router pick) and NO `agent` (issue #285). It mirrors buildParallelEngineFactory's SHAPE:
+// given an opaque model id it mints a fresh WRITABLE explorer engine pinned to that model on
+// the parent's provider, re-deriving the provider-closing Deps (Compactor/TokenCounter/
+// Env.Model/ContextWindow) via the contamination-safe per-provider path, NEVER a
+// clone-and-swap. It shares writableExplorerDeps with buildWritableSubagentChildEngine so the
+// catalog/runner/prompt recipe cannot drift. The routed/override id is used VERBATIM — NOT
+// through resolveDefaultChildModel (which would re-run the def-less `SubagentModel > parent`
+// chain and discard the pick when a cheap child default is configured) — the same discipline
+// buildParallelEngineFactory/buildSubagentEngineFactory use. The MAIN session's command
+// runner is captured ONCE outside the closure (the buildAgentWritableEngineFactory pattern),
+// so every minted writable engine shares the one runner. A blank model → (nil, false); any
+// non-blank model routes on the parent provider with its window re-derived through
+// childWindowFor. Cross-provider routing by a bare model id is out of scope (the registry is
+// keyed by provider) — same posture as the read-only Subagent + Parallel factories.
+func buildWritableSubagentEngineFactory(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, _ string) func(model string) (*agent.Engine, bool) {
+	mainRunner := buildCommandRunner(cfg)
+	return func(model string) (*agent.Engine, bool) {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			return nil, false
+		}
+		windowFn := childWindowFor(cfg, provReg, parentProviderID, model)
+		deps := writableExplorerDeps(cfg, provider, model, "task:read-write:model="+model, windowFn, mainRunner)
+		return agent.NewEngine(deps), true
+	}
 }
 
 // buildParallelEngineFactory returns the per-branch model-override factory the Parallel
@@ -4788,7 +4839,7 @@ func attachAskAdjudicator(deps agent.Deps, cfg Config, provReg *providerRegistry
 // provider-fixed-per-session hazard the rest of this file avoids. The per-session
 // closure already closes over the right (provider, parentModel), so each call re-derives
 // the contamination-safe deps for the classifier model.
-func buildModelRouterTask(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string) func(ctx context.Context, taskPrompt string) (category, model string, usage session.Usage, ok bool) {
+func buildModelRouterTask(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string) func(ctx context.Context, taskPrompt string) (category, model string, usage session.Usage, missReason string, ok bool) {
 	if cfg.RouterDisabled || len(cfg.RouterCategories) == 0 {
 		return nil // OFF: no taxonomy or kill-switched (ADR 0042); byte-identical.
 	}
@@ -4806,7 +4857,7 @@ func buildModelRouterTask(cfg Config, provReg *providerRegistry, provider port.L
 		selectorByName[c.Name] = c.Model
 	}
 	defaultCat := cfg.RouterDefaultCategory
-	return func(ctx context.Context, taskPrompt string) (string, string, session.Usage, bool) {
+	return func(ctx context.Context, taskPrompt string) (string, string, session.Usage, string, bool) {
 		// Build a fresh tool-less classifier engine (the askAdjudicatorDeps recipe): it
 		// compacts/counts/prompts on ITS model, fires no hooks, and carries no nested
 		// caps (childEngineDepsForProvider forces ChildAskReviewer + SubagentModelRouter
@@ -4824,26 +4875,32 @@ func buildModelRouterTask(cfg Config, provReg *providerRegistry, provider port.L
 		//
 		// Usage is returned on ALL paths (including misses) so the dispatch-path
 		// routeTask can fold it into the parent session's cumulative Usage (#92 fix).
-		category, classifierUsage, ok := agent.RunModelRouter(ctx, eng, agent.ModelRouteRequest{
+		category, classifierUsage, missReason, ok := agent.RunModelRouter(ctx, eng, agent.ModelRouteRequest{
 			TaskPrompt: taskPrompt,
 			Categories: cats,
 			Default:    defaultCat,
 		})
 		if !ok {
-			return "", "", classifierUsage, false // classifier miss: fail-soft inherit; still return spent usage.
+			// classifier miss: pass the engine-side reason (issue #287) through UNCHANGED
+			// so the dispatch chokepoint logs WHY; still return spent usage.
+			return "", "", classifierUsage, missReason, false
 		}
 		sel := strings.TrimSpace(selectorByName[category])
 		if sel == "" {
-			return "", "", classifierUsage, false
+			// The classifier chose a category whose taxonomy Model selector is empty — a
+			// composition-side (mapping) miss. Name the category (operator-authored, safe).
+			return "", "", classifierUsage, fmt.Sprintf("category-selector-empty (category=%s)", category), false
 		}
 		// Operator taxonomy targets are UNCAPPED: resolve through the operator-merged
 		// alias map with no allowlist membership test (the operator is authoritative — a
 		// category mapping is the operator's own binding, like models.default).
 		id, known := lookupModelAlias(cfg, sel)
 		if !known || id == "" {
-			return "", "", classifierUsage, false // unresolvable target: fail-soft inherit.
+			// The category's selector does not resolve to a concrete id — a composition-side
+			// (mapping) miss. Category name + selector are operator-authored metadata (safe).
+			return "", "", classifierUsage, fmt.Sprintf("category-target-unresolvable (category=%s selector=%s)", category, sel), false
 		}
-		return category, id, classifierUsage, true
+		return category, id, classifierUsage, "", true
 	}
 }
 
@@ -4945,6 +5002,13 @@ func buildSubagentTool(ctx context.Context, cfg Config, provReg *providerRegistr
 	// v1 scope limit (the factory declines; selectChildEngine surfaces the error).
 	opts = append(opts, agent.WithAgentModelEngineFactory(
 		buildAgentModelEngineFactory(ctx, cfg, provReg, provider, parentProviderID, parentModel, reg, skillIdx, hooks, sandboxedRunner, mainMgr)))
+	// ROUTABLE agent defs (issue #286): the SET of def names that expressed NO model intent
+	// (absent `model:`), don't switch provider, and have no inline MCP — so the OPT-IN router
+	// may classify an `agent`-named delegation to them and rebuild the def's scoped engine on
+	// the routed model (via the agent+model factory above). Wired UNCONDITIONALLY: it is inert
+	// when the router is off (routeTask nil) or no def qualifies (nil set = byte-identical).
+	opts = append(opts, agent.WithRoutableAgents(
+		routableAgentNames(provReg, reg, parentProviderID)))
 	// WRITABLE named specialist (mode:"read-write"+`agent`, ADR 0058): a factory that
 	// REBUILDS the named specialist's scoped engine with allowMutating=true on the def's
 	// resolved model, using the MAIN session's command runner (direct-write parity, ADR
@@ -4975,6 +5039,14 @@ func buildSubagentTool(ctx context.Context, cfg Config, provReg *providerRegistr
 	// Skipped under no-FS (buildNoFSSubagentTool, above, wires no writable path).
 	writableEngine := buildWritableSubagentChildEngine(cfg, provReg, provider, parentProviderID, parentModel, buildCommandRunner(cfg))
 	opts = append(opts, agent.WithWritableChildEngine(writableEngine))
+	// WRITABLE EXPLORER per-call/routed model (mode:"read-write"+`model`, no `agent`;
+	// issue #285): a factory that rebuilds the WRITABLE explorer on the requested model via
+	// the SAME writableExplorerDeps recipe (MAIN runner, direct-write parity). It also backs
+	// the OPT-IN router's writable pick. The closure hands engine/agent only
+	// func(string)(*Engine,bool). Skipped under no-FS (buildNoFSSubagentTool wires no
+	// writable path).
+	opts = append(opts, agent.WithWritableEngineFactory(
+		buildWritableSubagentEngineFactory(cfg, provReg, provider, parentProviderID, parentModel)))
 	return agent.NewSubagentTool(
 		buildChildEngine(cfg, provReg, provider, parentProviderID, parentModel, sandboxedRunner),
 		opts...,

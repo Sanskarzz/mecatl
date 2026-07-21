@@ -11,11 +11,13 @@ import (
 )
 
 // effort.go is the /effort picker — a tiny SELECTING overlay (cursor + enter) for
-// the reasoning-effort tier (ADR 0055). It mirrors the /models picker's restart-now
-// handoff (it is the SAME per-session server setting: changing it RESTARTS the
-// session on the SAME provider/model with the new effort), but it is much simpler:
-// a FIXED enum, no RPC, no filter. Like /models it renders purely from client state
-// (no proto in ui) and is idle-only / esc-dismissable.
+// the reasoning-effort tier (ADR 0055). Enter on a tier applies DIRECTLY via a
+// FORK-RESUME (ADR 0066): the server forks the session's conversation onto a peer
+// session at the new effort, so the transcript SURVIVES — no confirm step (the
+// switch is non-destructive, so it is never a teardown warning), no wipe. It is
+// much simpler than /models: a FIXED enum, no filter; the only RPC is the fork
+// itself. Like /models it renders purely from client state (no proto in ui) and is
+// idle-only / esc-dismissable.
 //
 // # Vocab + the auto sentinel
 //
@@ -171,21 +173,19 @@ func (m Model) onEffortKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 
 // chooseEffort handles enter on the cursor row: it builds a selection carrying the
 // CURRENT provider/model (so the model is PRESERVED — only the effort changes) plus
-// the picked effort, then RESTARTS the session via the SAME restartOnModel handoff
-// the /models picker uses (effort is a per-session server setting applied at
-// CreateSession). A cursor past the enum end is a no-op (defensive). It delegates to
-// restartOnModel for the full teardown/persist/re-create (closeEffort is folded into
-// restartOnModel's overlay dismissal via the shared overlay-close paths — we close
-// the effort overlay first so the restart's view rebuild starts clean).
+// the picked effort, then fires the switchEffort FORK-RESUME handoff DIRECTLY (ADR
+// 0066) — no confirm step: the fork is non-destructive (the transcript survives on
+// the peer session), so there is nothing to warn about. A cursor past the enum end
+// is a no-op (defensive).
 func (m Model) chooseEffort() (tea.Model, tea.Cmd, bool) {
 	if m.effort.cursor < 0 || m.effort.cursor >= len(effortTiers) {
 		return m, nil, true
 	}
 	sel := m.effortSelection(effortValue(effortTiers[m.effort.cursor]))
-	// Dismiss the effort overlay before the restart so the (model-picker-oriented)
-	// restart teardown doesn't leave a stale effort overlay flag set.
+	// Dismiss the effort overlay BEFORE the handoff (it drives phaseConnecting) so a
+	// stale overlay flag can't survive the transition; focus returns to the prompt.
 	m.effort.view = effortNone
-	return m.restartOnModel(sel)
+	return m.switchEffort(sel)
 }
 
 // effortSelection builds the ModelSelection for a restart that changes ONLY the
@@ -214,10 +214,10 @@ func (m Model) effortSelection(effort string) client.ModelSelection {
 // centerCard. current is the effective effort the server resolved (the ● marker
 // target). Returns "" when the overlay is closed.
 func renderEffortOverlay(th theme.Theme, st effortState, current string, noReasoning bool, width, height int) string {
-	if st.view != effortPanel {
-		return ""
+	if st.view == effortPanel {
+		return centerCard(th, renderEffortPanel(th, st, current, noReasoning), width, height)
 	}
-	return centerCard(th, renderEffortPanel(th, st, current, noReasoning), width, height)
+	return ""
 }
 
 // renderEffortPanel renders the fixed enum: a title, one row per tier with the cursor
@@ -237,12 +237,12 @@ func renderEffortPanel(th theme.Theme, st effortState, current string, noReasoni
 		b.WriteString(renderRow(th, marker+effortRowText(tier), i == st.cursor) + "\n")
 	}
 	// UX (ADR 0055): when the current model is KNOWN to lack reasoning support, warn
-	// that a chosen tier will be ignored — so a restart for an unattainable effort is
+	// that a chosen tier will be ignored — so a switch for an unattainable effort is
 	// acknowledged in the picker, not only in the (invisible) server log.
 	if noReasoning {
 		b.WriteString("\n" + th.Style("warning").Render("this model has no reasoning support — a tier will be ignored"))
 	}
-	b.WriteString("\n" + th.Style("muted").Render("↑/↓ move · enter use · esc close"))
+	b.WriteString("\n" + th.Style("muted").Render("↑/↓ move · enter apply · esc close"))
 	b.WriteString("\n" + th.Style("muted").Render("● current  ·  auto = provider default"))
 	return b.String()
 }

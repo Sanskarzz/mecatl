@@ -315,6 +315,7 @@ func (m Model) applySessionReady(msg client.SessionReadyMsg) (tea.Model, tea.Cmd
 		m.activeMode = client.ModeString(client.ModeFromString(msg.Mode))
 	}
 	m.restartFailed = false // a session is (re)established; any prior failure clears
+	m.restartFailedForkID = ""
 	m.phase = phaseIdle
 	m.statusMsg = "connected"
 	// Now that we are idle + (still) empty, the welcome splash shows: transmit the
@@ -365,14 +366,26 @@ func (m Model) updateLifecycle(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		m.fatalErr = msg.Err.Error()
 		return m, nil, true
 	case restartFailedMsg:
-		// A /models restart-now re-create failed. Unlike ConnectErrMsg this is NOT
-		// terminal: we deliberately destroyed a working session, so leave the app
+		// A /models restart-now re-create (or a /worktrees re-create, or an /effort
+		// fork) failed. Unlike ConnectErrMsg this is NOT terminal: we deliberately
+		// destroyed a working session (or attempted a fork), so leave the app
 		// RECOVERABLE (idle, no session) with a loud status naming the failed model and
-		// enter-to-retry armed (the selection still lives in m.activeModel). The
-		// transcript is gone, but the app stays usable.
+		// enter-to-retry armed (the selection still lives in m.activeModel). On the
+		// /models + /worktrees paths the transcript is gone, but the app stays usable;
+		// on the /effort path the source session (and transcript) SURVIVES — see
+		// restartFailedForkID.
 		m.phase = phaseIdle
 		m.sessionID = ""
 		m.restartFailed = true
+		// Record the retry origin: an /effort fork failure (msg.viaFork) re-forks from
+		// the SURVIVING source session on retry — m.sessionID is "" by now, so the
+		// source id must ride its own field. A non-fork failure clears it so a stale
+		// origin from an earlier failed fork can't leak into a create retry.
+		if msg.viaFork {
+			m.restartFailedForkID = msg.sourceID
+		} else {
+			m.restartFailedForkID = ""
+		}
 		m.statusMsg = m.deps.Theme.Style("errorText").Render(
 			"could not switch to " + sanitizeTerminal(msg.model) + ": " +
 				sanitizeTerminal(msg.err.Error()) + " — press enter to retry")
@@ -1713,6 +1726,12 @@ func (m Model) onIdleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 //     the resolving msg owns its lifecycle (SessionReadyMsg clears it on success;
 //     restartFailedMsg re-sets it on a re-failure). The in-flight phaseConnecting
 //     window swallows idle keys, so the un-cleared flag can't misfire meanwhile.
+//   - RETRY a failed /effort FORK (restartFailedForkID != ""): re-fire the FORK from
+//     the surviving source session (switchEffortCmd), NOT restartOnModelCmd — the
+//     source session is still open, and re-forking PRESERVES the transcript where a
+//     create-fresh retry would wipe it (the exact thing the fork-resume switch exists
+//     to prevent). The effort rides m.activeModel (the switch applied it
+//     synchronously before the fork failed).
 //   - RESUME a paused queue: enter on an EMPTY line fires the next staged prompt.
 //   - otherwise a normal submitPrompt (a no-op on an empty sessionID).
 func (m Model) onIdleSubmit() (tea.Model, tea.Cmd) {
@@ -1723,6 +1742,9 @@ func (m Model) onIdleSubmit() (tea.Model, tea.Cmd) {
 		m.refreshView()
 		// m.sp.Tick re-arms the spinner for the idle→connecting transition (the
 		// phase-gated TickMsg handler dropped the chain at idle).
+		if m.restartFailedForkID != "" {
+			return m, tea.Batch(m.switchEffortCmd(m.restartFailedForkID, m.activeModel), m.sp.Tick)
+		}
 		return m, tea.Batch(m.restartOnModelCmd("", m.activeModel), m.sp.Tick)
 	}
 	if m.queuePaused != "" && len(m.queued) > 0 && empty {

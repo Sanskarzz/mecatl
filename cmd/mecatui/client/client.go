@@ -123,6 +123,25 @@ func (c *Client) CreateSession(ctx context.Context, workspace string, mode mecat
 	return resp.GetSessionId(), capabilitiesFrom(resp.GetCapabilities()), resolvedModelFrom(resp.GetResolvedModel()), nil
 }
 
+// ForkSession creates a peer session from the conversation-history snapshot of the
+// session srcID (ADR 0065) and returns the bare new session id. reasoningEffort is
+// the OPTIONAL effort override (ADR 0066): empty inherits the source's effort
+// verbatim; provider and model ALWAYS inherit. This is the SINGLE proto-build point
+// for the fork — the ui passes plain strings and never sees the proto request. The
+// caller owns the follow-up GetSession refetch for the forked session's resolved
+// model/capabilities echo (ForkSessionResponse carries only the id, no streaming).
+func (c *Client) ForkSession(ctx context.Context, srcID, title, reasoningEffort string) (string, error) {
+	resp, err := c.svc.ForkSession(ctx, &mecatlv1.ForkSessionRequest{
+		SourceSessionId: srcID,
+		Title:           title,
+		ReasoningEffort: reasoningEffort,
+	})
+	if err != nil {
+		return "", fmt.Errorf("fork session: %w", err)
+	}
+	return resp.GetSessionId(), nil
+}
+
 // IsInvalidArgument reports whether err carries gRPC codes.InvalidArgument — the
 // code the server maps a REJECTED CreateSession selector to (an unknown
 // provider_id surfaces as server.ErrInvalidArgument → codes.InvalidArgument via
