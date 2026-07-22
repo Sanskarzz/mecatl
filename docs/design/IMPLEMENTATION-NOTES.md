@@ -2475,6 +2475,164 @@ prompt directive.
   parity). strict/trusted/**auto** keep enforcing — under `auto` the interactive
   approve-once ask IS the enforcement (gated on `Deps.Interactive`, not on posture).
 
+**Plan approval — the plan-approval gate ([ADR 0069](../adr/0069-plan-approval-gate.md),
+issue #206).** Plan mode (`session.ModePlan`) gains a structured approve→execute gate that
+reuses the permission-ask machinery, mirroring the guardrail approve-once shape above (a
+tool call refined into an askable ask, a serialized provenance marker, a verdict tail).
+
+- **The PresentPlan signalling tool (`engine/agent/presentplan.go`
+  (`NewPresentPlanTool`), `engine/agent/presentplan.go` (`PlanApprovedProceedText`)).**
+  Read-only / signaling-only; `Spec().Name == "PresentPlan"`. The model calls it once it
+  has presented a complete plan in its preceding assistant text. `Execute` is VESTIGIAL
+  (returns an "awaiting operator approval" result) — the dispatcher intercepts the call by
+  name in plan mode BEFORE execution. The plan CONTENT rides the tool's `plan` string
+  argument (the model should ALSO present it in its message text for the transcript); the
+  optional `note` is a one-line aside. `PlanApprovedProceedText`
+  ("Plan approved by operator. Proceed with execution.") is the harness-framed proceed
+  message the composition layer injects as ordinary recorded history on the continuation
+  run (event-silent — a recorded user message, NOT a diagnostics line).
+- **The model-visible plan-approval contract (discoverability — the gate only fires if
+  the model KNOWS to call `PresentPlan`).** Three reinforcing layers make the workflow
+  explicit so the model does not improvise it (the reported bug: a model treated an
+  inline "acceptable" as approval and kept executing, never surfacing the gate): (1)
+  `Spec().Description` (`engine/agent/presentplan.go` (`Spec`)) — call EXACTLY ONCE when
+  the plan is complete, then STOP; an inline "acceptable"/"looks good"/"approved" in chat
+  is NOT approval. (2) `internal/app/build.go` (`applyPlanModePosture` /
+  `planModePostureNote`) — appended to a plan-mode session engine's Role in
+  `sessionEngineFactory` on create-in-plan AND on the CASE-1 rebuild when the session
+  flips into plan mode. (3) `engine/prompt/builder.go` — the plan-mode volatile suffix
+  carries the same contract per-turn, so a plan session on the SHARED engine (no plan
+  slot) is covered too. This mirrors the "plan mode is a reinforced system-reminder, not
+  a one-shot instruction" posture (docs/adr/0024-system-prompt-research.md).
+- **The `PlanOnly` catalog gate (`engine/tool/tool.go` (`PlanOnly`)).** A new OPTIONAL
+  marker interface; the catalog's mode projection (`engine/tool/catalog.go`
+  (`Available`) / `Specs` / `AdvertisedSpecs`) EXCLUDES a `PlanOnly` tool from
+  every non-plan mode. `PresentPlan` is registered into EVERY catalog (shared +
+  per-session, so `TestPerSessionCatalogMatchesSharedCatalog` name-set equality holds) but
+  advertised ONLY in `ModePlan`. The dispatcher's name+mode check is defense-in-depth on
+  top of the projection gate.
+- **The dispatcher's plan-ask surface (`engine/agent/dispatch.go` (`surfacePlanAsk`)).**
+  Sibling of `askHookApproval` over the shared `surfaceAsk` spine: mint askID, build a
+  `session.PendingAsk{PlanOriginated: true}`, `PauseForApproval` → `StateAwaiting` → emit
+  `EvPermissionAsk` → block on the verdict. Sequenced one-at-a-time in dispatch Phase 1
+  (never the parallel fan-out), routed in `runReadBatch` AND `runOne` (the defensive
+  mutate-serial mirror). Headless guard: `!e.deps.Interactive && !e.deps.PlanModeAutoApprove`
+  → synthesize a deny result (fail-safe, no silent mode flip); the `PlanModeAutoApprove`
+  exception surfaces the ask even headless so the composition observer can resolve it.
+  The plan content rides the args through the EXISTING channel: `surfacePlanAsk` copies
+  `c.Args` into `PendingAsk.Args` (the model passes the plan in the PresentPlan `plan`
+  argument), so proto `PermissionAsk.args` carries it to the mecatui plan-approval modal —
+  the SAME posture as every other permission ask (Write/Bash asks carry their args for
+  operator review); the operator is the intended audience. Gauntlet #7 holds: the
+  `EvApproval` payload carries ONLY tool NAME + verdict + askID + call id — NO args.
+- **The scrollable plan-approval modal (`cmd/mecatui/ui/permission.go`
+  (`renderPlanApprovalModal`), `cmd/mecatui/ui/permission.go` (`planBodyFromArgs`)).**
+  The mecatui modal parses the `plan` (falling back to `note`) out of `ask.Args` JSON and
+  renders it between the model line and the buttons so the operator can READ what they are
+  approving (not just "plan ready for operator approval"). A long plan is line-capped to
+  `maxPlanLines` (12) with a "+N more lines · ctrl+t expand" affordance, and the global
+  ctrl+t (`expandTools`) toggle reveals the full plan — the SAME established reveal
+  pattern as Edit/Write diffs and tool-result bodies. The model-authored plan text is
+  terminal-sanitized. Backwards/forwards compat: no `plan` arg → `note`; no note → the
+  reason line; malformed args JSON → the reason line (an older model that put the plan only
+  in message text never breaks the modal).
+- **Verdict → mode (`engine/agent/loop.go` (`planApprovedTarget`)).** Allow-once →
+  `ModeDefault`; allow-always → `ModeAccept`; deny → terminate CLEANLY with
+  `engine/session/session.go` (`StopPlanIterate`) (the iterate pause — issue #206
+  UX fix). On Allow, `surfacePlanAsk` sets the run-scoped `planApprovedTarget` and
+  synthesizes an allow result; `runLoop` terminates with `StopPlanApproved` (a
+  CLEAN terminal — `completed`, Reopen-recoverable) at TWO sites (an EARLY check
+  load-bearing for the awaiting-resume path, and a post-dispatch check for the live
+  path). On Deny, `surfacePlanAsk` sets the run-scoped `planIterateRequested` and
+  synthesizes a deny result teaching the model the turn is pausing for operator
+  feedback; `runLoop` terminates with `StopPlanIterate` at the SAME two sites (EARLY
+  + post-dispatch) — the run ENDS so the operator's next typed prompt drives the
+  revision (the model does NOT continue iterating in-turn with no operator input,
+  the old behaviour the operator reported). The session stays `ModePlan` on Deny (no
+  mode flip — `terminateComplete` only flips when `planApprovedTarget != ""`).
+  `engine/agent/loop.go` (`terminateComplete`) flips the mode AT the terminal boundary:
+  AFTER `sess.Stop(reason)` → `StateCompleted`, `sess.SetMode(planApprovedTarget)` is legal
+  (the `engine/session/session.go` (`SetMode`) invariant — rejected from
+  `Running`/`Awaiting` — is preserved, pinned by `TestPlanApprovalDoesNotFlipMidTurn`).
+  The error path does NOT flip (an errored plan run stays in plan mode, honestly).
+  `planApprovedTarget`/`planIterateRequested` are RUN-SCOPED and NOT serialized (the
+  serialized `PlanOriginated` marker is the cross-process contract).
+- **Resume skip (the serialized marker).** `engine/session/session.go`
+  (`PlanOriginated`) (`json:"plan_originated,omitempty"`, sibling of
+  `HookOriginated`) survives a snapshot. The awaiting-resume path
+  (`engine/agent/dispatch.go` (`resolvePendingCall`)) keys the plan-flip branch on it: an
+  Allow does NOT re-present the plan or run any tool — it synthesizes the allow result and
+  re-sets `r.planApprovedTarget` (AllowOnce→`ModeDefault`, AllowAlways→`ModeAccept`), so
+  `driveFromAwaiting`'s `runLoop` sees it at the EARLY check and terminates
+  `StopPlanApproved`; a Deny sets `r.planIterateRequested` in the shared deny arm (guarded
+  on `ask.PlanOriginated`), so the resumed run terminates `StopPlanIterate` (the iterate
+  pause — the cross-process twin of the live-path deny, so a plan ask denied via
+  ResumeApproval ALSO pauses for operator feedback rather than continuing in-turn). The
+  read-time `engine/session/session.go` (`Origin`)
+  accessor + `engine/session/session.go` (`AskOrigin`) enum
+  (`AskOriginNone`/`AskOriginHook`/`AskOriginPlan`) derive the single provenance from the
+  two serialized bools (Hook takes precedence on a construction-invariant violation); this
+  retires the `session.go` caveat that warned against folding a third provenance signal
+  into an enum with the run-scoped `ConfiguredAsk`/`FlooredConfiguredAllow` (those stay
+  run-scoped, never-serialized).
+- **The atomic ApprovePlan RPC (composition, NOT the loop).** `internal/adapter/server/service.go`
+  (`ApprovePlan`) composes EXISTING seams: a live run is rejected
+  (`internal/adapter/server/errors.go` (`ErrNotAwaitingPlan`) → 409); the session must be
+  `StateAwaiting` on a `PlanOriginated` ask; `target_mode → verdict`
+  (`internal/adapter/server/service.go` (`planVerdictForMode`): `ModeDefault`→allow-once,
+  `ModeAccept`→allow-always, `ModePlan`/zero→deny); `resumeFromAwaiting` re-enters the loop
+  AT the ask; on Allow a FRESH continuation run starts via `StartRunContent`
+  (`loadAndReopen` → `engineAndWorkspaceFor` CASE 1 rebuild on the flipped mode → execute
+  model) carrying `PlanApprovedProceedText` + an optional note. `forwardRunEvents` relays
+  BOTH runs' events on the one channel. On deny, NO continuation runs — the resumed run
+  terminates `StopPlanIterate` (the iterate pause), so the operator's next typed
+  `StartRunContent` prompt drives the revision. Wire:
+  `contracts/proto/mecatl/v1/harness.proto` (`ApprovePlanRequest`) + `rpc ApprovePlan`,
+  `internal/adapter/server/grpc_approveplan.go`, `POST /v1/sessions/{id}/plan:approve` in
+  `internal/adapter/server/http.go`. The `PermissionAsk` proto is UNCHANGED (the tool name
+  is the discriminator).
+- **Auto-approve observer (opt-in composition, NOT the loop).** `internal/adapter/server/service.go`
+  (`MaybeAutoApprovePlan`) fires on `EvPermissionAsk` when
+  `cfg.PlanModeAutoApprove` (OPT-IN, DEFAULT OFF) + `ev.Ask.Origin() == AskOriginPlan` +
+  headless (`!cfg.Interactive`) all hold — auto-resolves via the EXISTING `ApprovePlan`
+  path (`ModeDefault` + a loud note). NEVER fires for a non-plan ask, NEVER interactively,
+  NEVER load-bearing for safety. The engine's `agent.Deps.PlanModeAutoApprove` loosens the
+  `surfacePlanAsk` headless guard so the ask is SURFACED even headless; the engine NEVER
+  auto-approves on its own. OPERATOR-TIER ONLY
+  (`internal/adapter/permconfig/resolve.go` (`OperatorPlanModeAutoApprove`) — a project-tier
+  `plan_mode_auto_approve:` is WARN-ignored). Wired via `internal/app/build.go`
+  (`Config.PlanModeAutoApprove`, `foldOperatorPlanModeAutoApprove`) +
+  `cmd/mecated/main.go` (`--plan-mode-auto-approve`). ACP composes it from
+  `session/set_mode` + `session/prompt` (NO new ACP method — see `internal/adapter/acp/doc.go`).
+- **Interactive plan-approval continuation (issue #206 mecatui fix).** The ApprovePlan
+  RPC + the headless auto-approve path BOTH start an atomic continuation run carrying
+  `agent.PlanApprovedProceedText`; the INTERACTIVE mecatui path did NOT — it resolved
+  the ask over the plain gRPC `ResumeApproval` frame on the existing Converse stream,
+  which flips the mode + ends the run `StopPlanApproved` but starts NO execution run, so
+  the session sat idle. The fix: `cmd/mecatui/ui/update.go` (`submitProceedPrompt`) fires
+  the proceed prompt from the `ResultMsg{Stop:"plan_approved"}` handler (`applyResult`),
+  opening a FRESH Converse stream (like `submitPrompt`) and sending `SendPrompt(sessionID,
+  planApprovedProceedText, nil)` so `StartRunContent` reopens the `StopPlanApproved`-completed
+  session and the CASE-1 mode→model rebuild picks up the flipped mode → the agent executes.
+  The proceed text is a STABLE WIRE CONTRACT duplicated as `cmd/mecatui/ui/permission.go`
+  (`planApprovedProceedText`) because `ui`/`client` CANNOT import `engine/agent` (the
+  layering rule); it MUST stay byte-identical to `engine/agent.PlanApprovedProceedText`.
+  ORDERING: it fires post-terminal (on `ResultMsg`), NEVER immediately after `SendApproval`
+  — the gRPC `Converse` handler IGNORES a second Prompt frame on the same stream
+  (`internal/adapter/server/grpc.go` `readControl` default arm), and `StartRunContent`'s
+  run-entry funnel requires the approval run to have terminated; `ResultMsg` is the
+  client-side guarantee (mirroring the server's own `autoApproveContinuation` poll for the
+  terminal `StopPlanApproved` state). A deny (`StopPlanIterate`) and a non-plan ask
+  (`end_turn`/etc.) never trip the `plan_approved` gate. KNOWN GAP: the TUI header mode
+  echo is NOT refreshed by a continuation run (it reuses the session, so no new
+  `SessionReadyMsg` carries the flipped mode) — cosmetic; the execute run proceeds
+  correctly regardless.
+- **Cloud-native (ADR 0027): NO new inventory row.** `Run.planApprovedTarget` is
+  run-scoped (deliberately NOT serialized); `ApprovePlan` reuses `resumeFromAwaiting` +
+  `StartRunContent` (both already inventoried); `PendingAsk.PlanOriginated` is a serialized
+  `PendingAsk` field in the same class as `HookOriginated` (already covered by the snapshot
+  round-trip discipline).
+
 ### `workspacetrust` (WORKSPACE-TRUST — see `WORKSPACE-TRUST-SPIKE.md`)
 
 **Phase 1:** a stdlib+`xdgconfig` leaf reading an operator-authored, **read-only**

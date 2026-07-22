@@ -197,6 +197,18 @@ type Deps struct {
 	// with no declared approver auto-denies a subagent ask rather than hanging).
 	Interactive bool
 
+	// PlanModeAutoApprove is an OPT-IN, OPERATOR-TIER-ONLY, DEFAULT-OFF flag that
+	// tells the engine to SURFACE a plan-approval ask (PresentPlan) even when headless
+	// (no human approver attached), so the composition layer's Service can auto-resolve
+	// it via ApprovePlan without operator interaction. It is DELIBERATELY ONLY the
+	// PresentPlan gate — a non-plan ask (policy/hook) is still headless-auto-denied.
+	// DEFAULT false (fail-safe: a headless plan ask is auto-denied like every other ask).
+	// It is a plain bool — NOT a port.LLMRequest field and never reaches the model.
+	// Child engines inherit it from the parent (so a Subagent/team child's plan ask also
+	// parks rather than auto-denies), allowing composition to auto-approve at the Service
+	// layer.
+	PlanModeAutoApprove bool
+
 	// ChildAskReviewer, when non-nil, reviews a child agent's (subagent / team
 	// member / parallel branch) permission ask that the harness could not resolve
 	// statically and that no attached human can answer — instead of blanket-denying
@@ -518,6 +530,33 @@ type Run struct {
 	// per session" / no-clone-swap discipline applied to run-scoped knobs). The zero
 	// value is the legacy run (no override, no extras), so Run/RunContent are unchanged.
 	opts RunOptions
+	// planApprovedTarget is the permission mode a plan-approval Allow verdict will
+	// flip the session into at the terminal boundary: AllowOnce → ModeDefault,
+	// AllowAlways → ModeAccept. It is RUN-SCOPED (zero/"" = no approval pending),
+	// set ONLY by surfacePlanAsk / the resolvePendingCall PlanOriginated allow
+	// branch, and read ONLY by terminateComplete — which, after the session reaches
+	// StateCompleted, flips the mode out of ModePlan and saves. It is deliberately
+	// NOT serialized: it is a within-run transient that the StopPlanApproved clean
+	// terminal + the serialized PlanOriginated marker already cover cross-process
+	// (a parked plan-ask resumes via resolvePendingCall, which re-sets it on the
+	// resumed run before runLoop sees it). Set before the run goroutine reaches
+	// terminateComplete and only read after, so it needs no synchronisation.
+	planApprovedTarget session.PermissionMode
+	// planIterateRequested is the run-scoped flag set when the operator DENIES a
+	// plan-approval ask (issue #206): the run terminates CLEANLY with StopPlanIterate
+	// instead of continuing in-turn (the old behaviour kept the model iterating with
+	// NO operator input). It mirrors planApprovedTarget in shape — RUN-SCOPED (zero/
+	// false = no iterate pending), set ONLY by surfacePlanAsk's deny branch and by the
+	// resolvePendingCall PlanOriginated deny arm (a cross-process resumed plan ask
+	// denied via ResumeApproval), and read ONLY by runLoop at its EARLY check and its
+	// post-dispatch Step 6 check, which terminateComplete(StopPlanIterate). It does
+	// NOT flip the mode — the session stays ModePlan so the operator's next prompt
+	// drives the revision (terminateComplete only flips when planApprovedTarget !=
+	// ""). Deliberately NOT serialized (a within-run transient; the serialized
+	// PlanOriginated marker covers cross-process — a parked plan-ask denied on resume
+	// re-sets it before runLoop sees it). Set before the run goroutine reaches
+	// runLoop and only read after, so it needs no synchronisation.
+	planIterateRequested bool
 	// fragments are the EPHEMERAL turn-0 instruction fragments (project instructions /
 	// soul / memory index / user model, produced by Deps.Instructions) prepended to the
 	// LLMRequest.Messages on EVERY turn of this run (incl. resume) but NEVER persisted into
@@ -961,6 +1000,20 @@ func (e *Engine) runLoop(ctx context.Context, r *Run, sess *session.Session, ws 
 	var bgPendingNudged bool
 
 	for {
+		// Plan-approval gate (issue #206): terminate immediately if a plan verdict
+		// (approved OR iterate) is pending. This EARLY check catches the awaiting-
+		// resume path (driveFromAwaiting → runLoop, where resolvePendingCall set
+		// r.planApprovedTarget / r.planIterateRequested and the pending call's result
+		// was already recorded) so the resumed run does NOT loop back to the model.
+		// The live path hits the post-dispatch Step 6 check first and returns there,
+		// so this is belt-and-suspenders there; for the resume path it is the
+		// load-bearing gate. CLEAN terminal (completed path, Reopen-recoverable);
+		// terminateComplete flips the mode at the boundary on Allow only (Deny stays
+		// ModePlan).
+		if e.planApprovalTerminal(ctx, r, sess, lastText, total) {
+			return
+		}
+
 		// Step 2a: background-completion NOTICE injection (A2 — notice-only), BEFORE
 		// the terminal checks so the notice is durable history even when the run ends
 		// at this very boundary. Newly-finished background children that were neither
@@ -1094,6 +1147,17 @@ func (e *Engine) runLoop(ctx context.Context, r *Run, sess *session.Session, ws 
 			return
 		}
 		e.save(ctx, sess)
+
+		// Plan-approval gate (issue #206): if a plan verdict (approved OR iterate)
+		// is pending this turn, terminate instead of looping back to the model. On
+		// Allow the run ends with StopPlanApproved (terminateComplete flips the mode
+		// at the boundary); on Deny (iterate) the run ends with StopPlanIterate so
+		// the operator's next typed prompt drives the revision (the session stays
+		// ModePlan — no mode flip). CLEAN terminals (completed path,
+		// Reopen-recoverable), parallel to StopBudget/StopNoProgress.
+		if e.planApprovalTerminal(ctx, r, sess, lastText, total) {
+			return
+		}
 	}
 }
 
@@ -1977,12 +2041,46 @@ func (e *Engine) terminate(ctx context.Context, r *Run, sess *session.Session, r
 	e.save(ctx, sess)
 }
 
+// planApprovalTerminal is the shared plan-approval termination check the loop runs
+// at its EARLY check (load-bearing for the awaiting-resume path) and its post-
+// dispatch Step 6 check (the live path). It terminates the run CLEANLY when a plan
+// verdict is pending: StopPlanApproved on Allow (terminateComplete then flips the
+// mode at the boundary — AllowOnce→ModeDefault, AllowAlways→ModeAccept), or
+// StopPlanIterate on Deny (the iterate pause — the run ENDS so the operator's next
+// typed prompt drives the revision; the session stays ModePlan, no mode flip). It
+// returns true when it terminated (so the caller returns); false to continue the
+// loop. Factored out of runLoop so the two verdict arms do not each add a branch to
+// runLoop's cyclomatic complexity.
+func (e *Engine) planApprovalTerminal(ctx context.Context, r *Run, sess *session.Session, lastText string, total session.Usage) bool {
+	switch {
+	case r.planApprovedTarget != "":
+		e.terminateComplete(ctx, r, sess, session.StopPlanApproved, lastText, total)
+		return true
+	case r.planIterateRequested:
+		e.terminateComplete(ctx, r, sess, session.StopPlanIterate, lastText, total)
+		return true
+	}
+	return false
+}
+
 // terminateComplete ends the run successfully (the model finished its turn),
 // recording the explicit stop reason and emitting the result Event.
 func (e *Engine) terminateComplete(ctx context.Context, r *Run, sess *session.Session, reason session.StopReason, text string, usage session.Usage) {
 	e.drainChildren(ctx, r)
 	if !sess.State.IsTerminal() {
 		_ = sess.Stop(reason)
+	}
+	// Plan-approval gate (issue #206, Wave 2): flip the session out of plan mode
+	// when a plan was approved. r.planApprovedTarget is set only by the
+	// plan-allow branch (AllowOnce→ModeDefault, AllowAlways→ModeAccept); the
+	// session is now StateCompleted, where SetMode is legal (session.go rejects it
+	// only from Running/Awaiting — pinned by TestPlanApprovalDoesNotFlipMidTurn).
+	// The error path (terminate) does NOT flip: an errored plan run stays in plan
+	// mode, honestly. Save the flipped mode so a Reopen/restart continues in the
+	// approved posture.
+	if r.planApprovedTarget != "" {
+		_ = sess.SetMode(r.planApprovedTarget)
+		e.save(ctx, sess)
 	}
 	e.fireStop(ctx, r, sess, reason)
 	e.emitResult(r, sess, reason, text, usage, "")

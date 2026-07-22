@@ -450,6 +450,60 @@ func TestStopBudgetIsCleanReopenableTerminal(t *testing.T) {
 	}
 }
 
+// TestStopPlanApprovedIsCleanTerminal pins that StopPlanApproved is a CLEAN terminal,
+// parallel to StopBudget / StopNoProgress / StopStructuredOutput: Stop(StopPlanApproved)
+// drives the session to COMPLETED (not failed) and the completed session is
+// Reopen-recoverable. Emitted when an operator approves a presented plan (issue #206).
+func TestStopPlanApprovedIsCleanTerminal(t *testing.T) {
+	s := newTestSession(Limits{})
+	if err := s.BeginTurn(); err != nil {
+		t.Fatalf("BeginTurn: %v", err)
+	}
+	if err := s.Stop(StopPlanApproved); err != nil {
+		t.Fatalf("Stop(StopPlanApproved): %v", err)
+	}
+	if s.State != StateCompleted {
+		t.Fatalf("state after Stop(StopPlanApproved) = %q, want completed (clean terminal)", s.State)
+	}
+	if r, ok := s.RecordedStopReason(); !ok || r != StopPlanApproved {
+		t.Fatalf("recorded stop = %q (ok=%v), want %q", r, ok, StopPlanApproved)
+	}
+	if err := s.Reopen(); err != nil {
+		t.Fatalf("Reopen after StopPlanApproved: %v (a plan-approved terminal must stay recoverable)", err)
+	}
+	if s.State != StateIdle {
+		t.Fatalf("state after Reopen = %q, want idle", s.State)
+	}
+}
+
+// TestStopPlanIterateIsCleanTerminal pins that StopPlanIterate is a CLEAN terminal,
+// parallel to StopPlanApproved / StopBudget / StopNoProgress / StopStructuredOutput:
+// Stop(StopPlanIterate) drives the session to COMPLETED (not failed) and the completed
+// session is Reopen-recoverable. Emitted when an operator chooses to iterate on a
+// presented plan (issue #206: the plan-approval gate's deny/iterate verdict) — the run
+// ends so the operator's next prompt drives the revision.
+func TestStopPlanIterateIsCleanTerminal(t *testing.T) {
+	s := newTestSession(Limits{})
+	if err := s.BeginTurn(); err != nil {
+		t.Fatalf("BeginTurn: %v", err)
+	}
+	if err := s.Stop(StopPlanIterate); err != nil {
+		t.Fatalf("Stop(StopPlanIterate): %v", err)
+	}
+	if s.State != StateCompleted {
+		t.Fatalf("state after Stop(StopPlanIterate) = %q, want completed (clean terminal)", s.State)
+	}
+	if r, ok := s.RecordedStopReason(); !ok || r != StopPlanIterate {
+		t.Fatalf("recorded stop = %q (ok=%v), want %q", r, ok, StopPlanIterate)
+	}
+	if err := s.Reopen(); err != nil {
+		t.Fatalf("Reopen after StopPlanIterate: %v (a plan-iterate terminal must stay recoverable)", err)
+	}
+	if s.State != StateIdle {
+		t.Fatalf("state after Reopen = %q, want idle", s.State)
+	}
+}
+
 func TestReopenFromCompletedReturnsToIdleAndResetsCounters(t *testing.T) {
 	s := newTestSession(Limits{MaxTurns: 5})
 	// Drive one turn and complete cleanly.

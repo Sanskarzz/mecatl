@@ -740,6 +740,22 @@ type Config struct {
 	// true (the bidi/HTTP surfaces have a client); the offline demo leaves it false.
 	Interactive bool
 
+	// PlanModeAutoApprove is an OPT-IN, OPERATOR-TIER-ONLY, DEFAULT-OFF flag that
+	// auto-approves a plan-mode PresentPlan ask when the run ends without a human
+	// operator. It is a deliberate autonomous-approval capability — an operator
+	// deployment decision, NEVER load-bearing for safety — and lives ONLY in
+	// composition (the Service), never the engine loop (mirroring the ChildAskReviewer
+	// discipline). When enabled and the deployment is headless (Interactive=false), the
+	// Service auto-resolves a parked plan-approval ask via the EXISTING ApprovePlan path
+	// (ModeDefault + a loud note). It does NOT fire when interactive (a human can
+	// approve), NOT in non-plan modes, NOT for non-plan asks. The engine's surfacePlanAsk
+	// headless guard is also loosened so the PresentPlan EMITS EvPermissionAsk and parks
+	// (which the Service then observes). DEFAULT false (the existing safe default:
+	// headless plan ask is auto-denied). Operator-tier only: the operator-global
+	// settings.yaml plan_mode_auto_approve: key is folded by foldOperatorPlanModeAutoApprove;
+	// a project-tier key is WARN-ignored by permconfig.
+	PlanModeAutoApprove bool
+
 	// Observability relays, injected by the caller (mecated wires telemetry; the
 	// embedded TUI server leaves both nil). The engine nil-guards each.
 	Sink             port.EventSink
@@ -1056,6 +1072,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	cfg = foldOperatorPosture(cfg)
 	cfg = foldOperatorOutputEconomy(cfg)
 	cfg = foldOperatorReasoningEffort(cfg)
+	cfg = foldOperatorPlanModeAutoApprove(cfg)
 	cfg.Posture = resolvePosture(cfg, postureNoCeiling)
 	cfg = applyPosture(cfg)
 	// AUTHORITATIVE root/no-sandbox refusal: applied HERE, after the full posture fold,
@@ -1492,6 +1509,10 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		LeaseOwner:         leaseOwner,
 		LeaseTTL:           cfg.SessionLeaseTTL,
 		LeaseRenewInterval: cfg.SessionLeaseRenewInterval,
+		// Plan-mode auto-approve (issue #206 Wave 6a): plumb the operator flag and
+		// the interactivity bit so the Service observer can gate the auto-approve.
+		PlanModeAutoApprove: cfg.PlanModeAutoApprove,
+		Interactive:         cfg.Interactive,
 	}
 	applyTeamConfig(&svcCfg, cfg, reg, provider, mainMgr, agentReg, assets.skillReadRoots, assets.skillIndex, assets)
 
@@ -1893,6 +1914,14 @@ func sessionEngineFactory(
 		// provider never contaminates compaction/counting.
 		deps := engineDepsForProvider(cfg, resolvedProvider, resolvedModel, windowFn, store, policy, hooks, mcpProvider, instructions)
 		deps.Catalog = cat
+		// MODEL-VISIBLE plan-approval contract (issue #206): the gate only fires
+		// when the model CALLS PresentPlan, and nothing else tells it to — an
+		// uninstructed model treats an inline "acceptable" as approval and keeps
+		// going (the observed bug). Tell it the workflow up front, on the Role,
+		// like applyNoFSPosture does for the no-FS profile. Fires on creation AND
+		// on the CASE-1 rebuild when the session flips into plan mode. When mode
+		// is not ModePlan the helper returns the Config unchanged.
+		deps.PromptConfig = applyPlanModePosture(deps.PromptConfig, mode)
 		// Guardrails (issue #27), RE-DERIVED per session so a FRESH per-session checker
 		// budget is built: decorate THIS session's main hooks with the LLM-backed
 		// content checker, over the session's resolved provider/model. OFF-by-default
@@ -2702,6 +2731,10 @@ func engineDepsForProvider(
 		// to the human when a client is attached. childEngineDepsForProvider forces this
 		// back to false (a child never surfaces further).
 		Interactive: cfg.Interactive,
+		// PlanModeAutoApprove (issue #206 Wave 6a): when true, the engine surfaces a
+		// plan-approval ask (PresentPlan) even when headless so the Service can
+		// auto-resolve it. Operator-tier only, DEFAULT off.
+		PlanModeAutoApprove: cfg.PlanModeAutoApprove,
 	}
 }
 
@@ -2910,6 +2943,14 @@ func logBuildConfigFacts(cfg Config) {
 				"in an untrusted repo can name filter/diff drivers that execute code; run with " +
 				"--trust-project (or confirm trust in mecatui) to enable the subagent shell",
 			args: []any{"workspace", cfg.Workspace},
+		})
+	}
+	// Plan-mode auto-approve (issue #206 Wave 6a): narrate the OPT-IN flag when ON
+	// so the operator sees at startup that plans will be approved WITHOUT a human.
+	if cfg.PlanModeAutoApprove {
+		facts = append(facts, diagFact{
+			level: port.LevelWarn,
+			msg:   "plan_mode_auto_approve: ON (NO HUMAN REVIEW) — a plan-mode run ending headless is auto-approved via ApprovePlan(ModeDefault); plans are NOT reviewed by a human operator",
 		})
 	}
 	for _, f := range facts {
@@ -5792,6 +5833,39 @@ func applyNoFSPosture(pc prompt.Config, note string) prompt.Config {
 	return pc
 }
 
+// planModePostureNote is the system-prompt suffix a plan-mode session's Role
+// carries (issue #206). It makes the plan-approval workflow EXPLICIT so the
+// model does not improvise it: explore/read freely, and when the plan is
+// complete call PresentPlan EXACTLY ONCE and STOP. Two load-bearing clauses:
+// (1) an inline "acceptable"/"looks good"/"approved" in chat is NOT approval —
+// the ONLY approval channel is the PresentPlan tool gate; (2) after calling
+// PresentPlan the model must STOP and wait, not continue executing. Without
+// these the model treats any affirmative user word as the green light and
+// proceeds (the bug reported in #206's first real-world use).
+const planModePostureNote = "You are in PLAN MODE: explore, read, and reason, but make NO changes. " +
+	"When your plan is complete, present it in your message text and then call the PresentPlan tool EXACTLY ONCE, " +
+	"and STOP — do not continue working after calling it. Pass the FULL plan text in the PresentPlan `plan` argument " +
+	"so the operator can read it in the approval modal. The plan is NOT approved until the operator approves it " +
+	"THROUGH the PresentPlan gate: an inline 'acceptable', 'looks good', 'approved', or 'go ahead' in chat is NOT " +
+	"approval and must NOT trigger execution. Only the harness proceed message that follows an approved PresentPlan " +
+	"starts execution."
+
+// applyPlanModePosture appends the plan-approval contract to a plan-mode
+// session's Role (DefaultRole fallback first — the applyNoFSPosture idiom). It
+// does NOT touch Env (plan mode has a normal filesystem for reads). When mode is
+// NOT ModePlan the Config is returned unchanged — the caller may call it
+// unconditionally.
+func applyPlanModePosture(pc prompt.Config, mode session.PermissionMode) prompt.Config {
+	if mode != session.ModePlan {
+		return pc
+	}
+	if pc.Role == "" {
+		pc.Role = prompt.DefaultRole()
+	}
+	pc.Role += "\n\n" + planModePostureNote
+	return pc
+}
+
 // lookupMemberDef resolves spec.AgentType against the registry, returning the def
 // and true on a hit. An empty AgentType or a miss returns false (the caller falls
 // back to the default member catalog); a miss on a NON-empty AgentType also warns,
@@ -5909,6 +5983,30 @@ func foldOperatorReasoningEffort(cfg Config) Config {
 		return cfg
 	}
 	cfg.ReasoningEffort = yamlEffort
+	return cfg
+}
+
+// foldOperatorPlanModeAutoApprove merges the OPERATOR-TIER plan-mode-auto-approve:
+// YAML bool (read by the permconfig resolver from the user-global + CLI tiers
+// ONLY — never the project file, which is IGNORED with a WARN) onto
+// cfg.PlanModeAutoApprove. Unlike posture/output-economy (string folds with CLI
+// out-rank), a bool has no CLI flag twin in the fold path — the CLI flag sets
+// Config.PlanModeAutoApprove directly, and this fold only raises it when the
+// operator YAML says true and the flag left it false. It is a no-op when no
+// operator-tier key was configured or the flag already set it. Mirrors
+// foldOperatorPosture/foldOperatorOutputEconomy. cfg is taken and returned by
+// value (issue #206 Wave 6a).
+func foldOperatorPlanModeAutoApprove(cfg Config) Config {
+	if cfg.PlanModeAutoApprove {
+		return cfg // already enabled (CLI flag or direct Config set).
+	}
+	res, ok := cfg.permResolver.(*permconfig.Resolver)
+	if !ok || res == nil {
+		return cfg
+	}
+	if res.OperatorPlanModeAutoApprove() {
+		cfg.PlanModeAutoApprove = true
+	}
 	return cfg
 }
 
