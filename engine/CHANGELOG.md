@@ -106,7 +106,6 @@ The covered surface is the seven core packages (`session`, `governance`, `tool`,
   enum; the wire stop field is a string passthrough, exactly like `StopPlanApproved`).
   Classified Added per COMPATIBILITY.md (a new exported const is a minor bump). (#206)
 
-<<<<<<< HEAD
 ### Changed
 
 - **`agent.RunModelRouter` + `agent.Deps.SubagentModelRouter` gain a miss-reason
