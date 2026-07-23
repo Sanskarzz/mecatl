@@ -275,23 +275,26 @@ navigate here, unlike the read-only overlays — so a name like `kimi`/`jamba` f
 as typed.) `esc` is **two-stage**: with a non-empty filter it clears the filter (the
 picker stays open); with an empty filter it closes the picker.
 
-`enter` opens a **confirmation overlay** for the cursor model with three choices:
-
-- **`enter` — start a new session now** on the picked model. Because the provider is
-  FIXED per session, switching live means a real handoff: the old session is closed
-  (`CloseSession`) and a fresh one is created on the picked model. The conversation
-  transcript is reset and the header rebinds to the NEW session's effective model;
-  there is no history carryover (the server has no history-seed surface).
-- **`s` — keep this session; switch next time.** The pick becomes the pending-next
-  selection (applied on the NEXT `CreateSession`) and a notice names both the live
-  model and the queued-next one, so it's clear nothing changed *yet*.
-- **`esc` — cancel**, reverting the pending-next to what it was before the pick.
+`enter` on the cursor row **switches immediately** — the conversation is ALWAYS kept.
+Because the provider is FIXED per session, switching live means a real handoff: the
+old session is closed (`CloseSession`) and a fresh one is created on the picked model
+**seeded with the current session's conversation** via `source_session_id` on the
+`CreateSessionRequest` (`CreateSessionWithCarryover`). The server snapshots the source
+conversation and seeds it into the new session, so the model sees the full prior
+context. The header rebinds to the NEW session's effective model and a transient status
+note reads **`switched to <model> — conversation kept`**. For a **cross-provider**
+switch the server strips the prior model's provider-private state (reasoning cache,
+provider phase, item ids) and replays the text/roles/tool calls to the new provider, so
+the note honestly adds **`(prior reasoning cache dropped)`** — the conversation still
+carries. (There is no confirm overlay and no same-provider gate: the server accepts
+carryover for any provider.) If no live session exists yet (pre-first-connect, or a
+failure left no session), the pick falls back to a plain `CreateSession` — there's no
+source to carry from. **Dropping the conversation is a separate action**: run `/clear`
+to reset the transcript and start fresh on the current model.
 
 `ctrl+g` sets the cursor row as the **client global default** (the `★` row) — used
 by new/unseen workspaces; it is control-modified so a bare `g` stays typeable in the
-filter. When the pending-next differs from the model the live session runs on, the
-**header** shows a muted **`next: <model>`** badge previewing it (the first segment
-dropped under width pressure). The pick is persisted **client-side** to a state file:
+filter. The pick is persisted **client-side** to a state file:
 `$XDG_STATE_HOME/mecatui/models.yaml` (fallback `~/.local/state/mecatui/models.yaml`)
 — a per-workspace map (realpath-keyed) plus a global `default:` block. Read
 precedence on launch (highest → lowest): an in-session restart pick → the `--model`
@@ -650,7 +653,7 @@ whether the input is focused or blurred. The panel carries a tinted top-pad row 
 the top border, and one blank spacer row sits above the panel so it isn't jammed against the
 conversation history.
 
-**Header bar.** `mecatui · session <id> · <model> · [next: <model>] · mode <mode> · <server>`.
+**Header bar.** `mecatui · session <id> · <model> · mode <mode> · <server>`.
 The **mode segment** shows the server-confirmed permission posture for the current session;
 when a mid-turn switch has been deferred it shows `mode <target> pending` until the retry
 succeeds at the next prompt boundary. The **model segment** shows the EFFECTIVE model the server resolved THIS session to —
@@ -661,11 +664,10 @@ it. The human display name is resolved from the held `/models` (ListModels) inve
 by `(provider_id, model_id)`, falling back to the raw model id when the inventory has
 no entry yet (or a passthrough id). An older server that omits `resolved_model`
 degrades to the pre-existing fallback (the picker's active selection, then the
-launch-time `--model`). The optional **`next:` badge** previews the pending-next
-`/models` selection when it differs from the live model (suppressed when they match
-or when no effective model is known yet); it is the FIRST segment shed under width
-pressure (before the socket). The header only CHOOSES which KNOWN string to display;
-it never resolves a default itself.
+launch-time `--model`). A `/models` pick switches IMMEDIATELY and rebinds the header
+to the new session's effective model — there is no separate "pending-next" preview
+(the conversation is always carried over; see `/models`). The header only CHOOSES
+which KNOWN string to display; it never resolves a default itself.
 
 **Operator-posture badge.** Right-aligned on the header — distinct from the per-session
 `mode` segment, which is the PermissionMode — the server-wide automation posture surfaces
@@ -1106,7 +1108,7 @@ the per-frame styling cost is O(changed blocks) rather than O(scrollback). The
 seam, and the cache-equivalence oracle in `render_cache_test.go` proves the
 cache is output-invisible after every conversation mutator. Both per-block
 caches (`blockCache` and the inner assistant-glamour memo `blockMD`) are dropped
-when the conversation is rebuilt — `/clear` and the `/models` restart-now
+when the conversation is rebuilt — `/clear` and the `/models` seamless-switch
 handoff — because a rebuilt transcript reuses block indices.
 
 **Input render memoization.** The INPUT region got the same treatment (issue #45):

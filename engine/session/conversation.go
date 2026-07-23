@@ -229,6 +229,46 @@ func ForkSnapshot(c *Conversation) []Message {
 	return msgs[:lastAssistant]
 }
 
+// StripProviderState returns a copy of messages with every provider-private
+// replay blob cleared (Message.Reasoning, Message.ProviderPhase, and each
+// ToolCall.ItemID), yielding a provider-neutral history: the roles, text,
+// tool calls (ID/Name/Args), tool results, and media parts are preserved
+// verbatim. Both the OpenAI and Anthropic adapters treat an EMPTY blob as
+// "no blob" and omit it on the wire, so a stripped history replays safely
+// to ANY provider — the new request's thinking/reasoning config is derived
+// from the NEW model, not the stripped history. Used for CROSS-provider
+// model-switch carryover, where a verbatim replay would hand one provider's
+// encrypted blob to another (HTTP 400). Same-provider carryover does NOT
+// strip (blobs replay, cache stays warm).
+//
+// The input slice is not mutated; a fresh backing array is returned (each
+// Message is a value, but a Message with tool calls shares the ToolCalls
+// backing array with the input unless copied — copy it before clearing
+// ItemID so the caller's messages are never mutated). A nil or empty input
+// is returned as-is.
+func StripProviderState(messages []Message) []Message {
+	if len(messages) == 0 {
+		return messages
+	}
+	out := make([]Message, len(messages))
+	for i, m := range messages {
+		m.Reasoning = ""
+		m.ProviderPhase = ""
+		if len(m.ToolCalls) > 0 {
+			// Copy the ToolCalls backing array BEFORE zeroing ItemID: the
+			// shallow per-element copy above aliases the input's slice, so a
+			// naive in-place clear would mutate the caller's history.
+			calls := slices.Clone(m.ToolCalls)
+			for j := range calls {
+				calls[j].ItemID = ""
+			}
+			m.ToolCalls = calls
+		}
+		out[i] = m
+	}
+	return out
+}
+
 // Turn records one model call together with the tools it triggered. It is a
 // value object summarizing a single iteration of the agent loop.
 type Turn struct {

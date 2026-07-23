@@ -166,6 +166,14 @@ type fakeConv struct {
 	createCount       int
 	closedIDs         []string
 	mu                sync.Mutex
+	// carryoverFrom records the source session id the LAST
+	// CreateSessionWithCarryover carried (issue #20), and carryoverCount counts
+	// those calls — the /models carryover e2e asserts the live session id
+	// threads into the carryover create. carryoverIDs records every source id
+	// in order so a test can inspect which session seeded each carryover.
+	carryoverFrom  string
+	carryoverCount int
+	carryoverIDs   []string
 	// recreated, when non-nil, is closed on the SECOND CreateSession (the restart-now
 	// handoff's re-create) — the deterministic signal a teatest sequences the model
 	// switch on, output-independent. createdOnce guards `created`; a dedicated Once
@@ -347,6 +355,39 @@ func (c *fakeConv) CreateSessionInWorkspace(_ context.Context, workspace string,
 		c.mode = client.ModeDefaultString
 	}
 	return id, c.caps, resolved, nil
+}
+
+// CreateSessionWithCarryover implements the ui SessionCreator's carryover seam
+// (issue #20): it records the source session id (so the carryover e2e asserts
+// the live session id threaded into the carryover create) and delegates to the
+// shared create body — the fake models NO server-side seeding (the carryover is
+// server-side semantics; the ui e2e asserts the id rebind + the carryover method
+// was called with the right source, not transcript preservation, which the
+// server-side create_carryover_test.go owns). carryoverCount + carryoverIDs let
+// a test assert it was NOT called.
+func (c *fakeConv) CreateSessionWithCarryover(ctx context.Context, sourceSessionID string, sel client.ModelSelection, mode string) (string, client.Capabilities, client.ResolvedModel, error) {
+	c.mu.Lock()
+	c.carryoverFrom = sourceSessionID
+	c.carryoverCount++
+	c.carryoverIDs = append(c.carryoverIDs, sourceSessionID)
+	c.mu.Unlock()
+	return c.CreateSessionInWorkspace(ctx, "", sel, mode)
+}
+
+// carryoverCalls returns how many times CreateSessionWithCarryover was invoked
+// (test-goroutine read), so a different-provider test can assert it stayed at 0.
+func (c *fakeConv) carryoverCalls() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.carryoverCount
+}
+
+// carryoverSources returns a copy of the recorded carryover source ids in order
+// (test-goroutine read).
+func (c *fakeConv) carryoverSources() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.carryoverIDs...)
 }
 
 // CloseSession records the id closed (restart-now closes the old session first).

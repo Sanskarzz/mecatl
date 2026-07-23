@@ -14,7 +14,7 @@ record; current behaviour is in the linked [architecture](../architecture.md) do
 
 | Subsystem | Status | Design record | Architecture |
 |---|---|---|---|
-| Multi-provider / multi-model | ✅ P0+P1+live listing & metadata · ⛔ disk cache (P2) · ⛔ secrets/OAuth/per-client keys (P3) | [MULTI-PROVIDER.md](../adr/0016-multi-provider.md) | [providers](../architecture/providers.md) |
+| Multi-provider / multi-model | ✅ P0+P1+live listing & metadata · ✅ same-provider history carryover (issue #20) · ⛔ disk cache (P2) · ⛔ secrets/OAuth/per-client keys (P3) | [MULTI-PROVIDER.md](../adr/0016-multi-provider.md) | [providers](../architecture/providers.md) |
 | OpenAI Responses adapter | ✅ shipped (research brief frozen) | [OPENAI-RESPONSES-API.md](../adr/0017-openai-responses-api.md) | [providers](../architecture/providers.md) |
 | Agent definitions (Tier-1 specialists) | ✅ shipped · ⛔ per-agent memory write path · ⛔ `local` tier | [AGENT-DEFINITIONS.md](../adr/0013-agent-definitions.md) | [subagents & teams](../architecture/subagents-and-teams.md) |
 | Agent teams (kernel, supervisor, coordination) | ✅ shipped (substrate) · ⛔ mutating-fork join strategies · ⛔ `TeamStore` restart durability | [AGENT-TEAMS-SPIKE.md](../adr/0014-agent-teams.md) | [subagents & teams](../architecture/subagents-and-teams.md) |

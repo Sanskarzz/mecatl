@@ -47,7 +47,11 @@ func (h *HarnessServer) CreateSession(ctx context.Context, req *mecatlv1.CreateS
 	// shared-engine fast path. An unknown/unavailable provider, or model_id without
 	// provider_id, surfaces as InvalidArgument via toStatus.
 	sel := ProviderSelector{ProviderID: req.GetProviderId(), ModelID: req.GetModelId(), ReasoningEffort: req.GetReasoningEffort()}
-	sess, err := h.svc.CreateSessionWithProfile(ctx, req.GetWorkspace(), modeFromProto(req.GetMode()), limitsFromProto(req.GetLimits()), sel, profile)
+	var opts []CreateSessionOption
+	if src := req.GetSourceSessionId(); src != "" {
+		opts = append(opts, WithSourceSession(session.SessionID(src)))
+	}
+	sess, err := h.svc.CreateSessionWithProfile(ctx, req.GetWorkspace(), modeFromProto(req.GetMode()), limitsFromProto(req.GetLimits()), sel, profile, opts...)
 	if err != nil {
 		return nil, toStatus(err)
 	}

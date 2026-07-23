@@ -110,13 +110,42 @@ func (c *Client) Close() error {
 // to (echoed verbatim); an older server that omits the field yields the zero value
 // (see resolvedModelFrom), which the ui renders as no model segment.
 func (c *Client) CreateSession(ctx context.Context, workspace string, mode mecatlv1.PermissionMode, sel ModelSelection) (string, Capabilities, ResolvedModel, error) {
-	resp, err := c.svc.CreateSession(ctx, &mecatlv1.CreateSessionRequest{
+	return c.createSession(ctx, &mecatlv1.CreateSessionRequest{
 		Workspace:       workspace,
 		Mode:            mode,
 		ProviderId:      sel.ProviderID,
 		ModelId:         sel.ModelID,
 		ReasoningEffort: sel.ReasoningEffort,
 	})
+}
+
+// CreateSessionWithCarryover is CreateSession seeded with the source session's
+// conversation history (issue #20). sourceSessionID, when non-empty, sets
+// source_session_id on the request; the server snapshots the source (it must be
+// at a turn boundary) and seeds the new session's history. The server is the
+// authority on same-vs-cross: a same-provider carryover replays verbatim, a
+// cross-provider carryover strips the prior provider's private replay blobs.
+// An empty sourceSessionID is byte-identical to CreateSession (no carryover).
+// The caller owns closing the source session AFTER the new one is ready (the
+// server snapshotted it at create time). This is the SINGLE proto-build point
+// for the carryover selector — the ui passes plain strings and never sees the
+// proto.
+func (c *Client) CreateSessionWithCarryover(ctx context.Context, workspace string, mode mecatlv1.PermissionMode, sel ModelSelection, sourceSessionID string) (string, Capabilities, ResolvedModel, error) {
+	return c.createSession(ctx, &mecatlv1.CreateSessionRequest{
+		Workspace:       workspace,
+		Mode:            mode,
+		ProviderId:      sel.ProviderID,
+		ModelId:         sel.ModelID,
+		ReasoningEffort: sel.ReasoningEffort,
+		SourceSessionId: sourceSessionID,
+	})
+}
+
+// createSession is the shared proto-build→call→unwrap body for both CreateSession
+// and CreateSessionWithCarryover, so the carryover variant stays byte-identical to
+// the plain create apart from the source_session_id field.
+func (c *Client) createSession(ctx context.Context, req *mecatlv1.CreateSessionRequest) (string, Capabilities, ResolvedModel, error) {
+	resp, err := c.svc.CreateSession(ctx, req)
 	if err != nil {
 		return "", Capabilities{}, ResolvedModel{}, fmt.Errorf("create session: %w", err)
 	}

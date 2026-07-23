@@ -892,6 +892,93 @@ func TestCompactionThroughLoopNeverOrphans(t *testing.T) {
 	}
 }
 
+// TestCarryoverSeededCompactsOnTurn0 proves the issue-#20 carryover path is safe
+// when the SEEDED history already exceeds the compaction window: a fresh idle
+// session is seeded (SeedHistory — the exact seam the service's seedCarryover uses
+// on a session.ForkSnapshot) with a conversation large enough to trip the
+// threshold, then drives ONE turn through the REAL engine loop (mockllm + memfs,
+// the compaction harness). The loop's maybeCompact must fire on turn 0 over the
+// seeded history and the turn must complete cleanly. Asserts the three carryover
+// compaction invariants: (a) the run completes (no provider orphan-400 → no
+// StateFailed), (b) the most-recent GENUINE user instruction survives VERBATIM
+// (snapCutToRecentUserTurn), and (c) the resulting history stays tool-pairing-valid
+// (session.ValidateToolPairing) — no orphaned tool result crosses into the replay.
+// MUTATION-VERIFY: reverting snapCutToRecentUserTurn (the recent user task falls
+// into the summarised head) turns sawTask red; a compaction that emits an orphan
+// turns ValidateToolPairing red; a dangling seeded call (orphan) trips the
+// SeedHistory pairing guard itself.
+func TestCarryoverSeededCompactsOnTurn0(t *testing.T) {
+	// Build a carryover-style source conversation: a genuine user instruction, then
+	// many large assistant/tool pairs so the accumulated history crosses the
+	// compaction threshold (ContextWindow 200, ratio 0.8 → threshold ~160 chars/4).
+	const recentTask = "ACTUAL TASK: rename Foo to Bar"
+	conv := &session.Conversation{}
+	conv.Append(session.NewUserMessage("original setup"))
+	conv.Append(session.NewUserMessage(recentTask))
+	for i := 0; i < 8; i++ {
+		id := session.ToolCallID(string(rune('a' + i)))
+		conv.Append(session.NewAssistantMessage("", "", []session.ToolCall{
+			session.NewToolCall(id, "Read", json.RawMessage(`{"path":"f.go"}`)),
+		}))
+		conv.Append(session.NewToolMessage(session.NewToolResult(id, strings.Repeat("data ", 50))))
+	}
+	// Mirror the service carryover: ForkSnapshot (deep copy, strips trailing
+	// orphans — here none) then SeedHistory into a FRESH idle session. SeedHistory
+	// re-validates pairing, so the seeded history is provider-replayable.
+	snap := session.ForkSnapshot(conv)
+	sess := session.New("s-carry-compact", session.ModeDefault, "/ws", session.Limits{}, time.Unix(0, 0))
+	if err := sess.SeedHistory(snap); err != nil {
+		t.Fatalf("SeedHistory: %v", err)
+	}
+	if len(sess.Conversation.Messages) == 0 {
+		t.Fatalf("seeded history is empty — the test does not exercise carryover compaction")
+	}
+
+	llm := mockllm.New(mockllm.TextTurn("done"))
+	e := agent.NewEngine(agent.Deps{
+		LLM:             llm,
+		Catalog:         catalogWith(t, readBodyTool()),
+		Policy:          allowAll(),
+		Model:           "m",
+		Compactor:       agent.HeuristicCompactor{KeepLastTurns: 3},
+		ContextWindow:   func() int { return 200 }, // threshold ~160: the seeded history trips it on turn 0
+		CompactionRatio: 0.8,
+	})
+
+	r := e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), "continue the task")
+	var sawCompaction bool
+	for ev := range r.Events() {
+		if ev.Type == session.EvCompaction {
+			sawCompaction = true
+		}
+	}
+
+	// (a) The run completes WITHOUT a provider orphan-400 (which would land the
+	// session in StateFailed) — the seeded over-window history compacted on turn 0.
+	if sess.State == session.StateFailed {
+		reason, _ := sess.StopReason()
+		t.Fatalf("session reached StateFailed (orphan-400 on seeded replay): %v", reason)
+	}
+	if !sawCompaction {
+		t.Fatalf("compaction never triggered on the seeded over-window history; the test does not exercise turn-0 compaction")
+	}
+	// (c) The compacted history is tool-pairing valid — no orphaned tool result.
+	if err := session.ValidateToolPairing(sess.Conversation.Messages); err != nil {
+		t.Fatalf("post-compaction history has unpaired tools: %v", err)
+	}
+	// (b) The most-recent genuine user instruction survives VERBATIM (the
+	// snapCutToRecentUserTurn invariant — it must NOT fall into the summarised head).
+	var sawTask bool
+	for _, m := range sess.Conversation.Messages {
+		if m.Role == session.RoleUser && m.Text == recentTask {
+			sawTask = true
+		}
+	}
+	if !sawTask {
+		t.Fatalf("most-recent genuine user instruction did not survive turn-0 compaction verbatim: %+v", sess.Conversation.Messages)
+	}
+}
+
 // TestContextWindowResolvedAtUse is the STRUCTURAL guard the whole resolve-at-use
 // unification rests on: Deps.ContextWindow is a closure resolved at the point of use,
 // NOT a value frozen at construction. An Engine built over a MUTABLE int must observe

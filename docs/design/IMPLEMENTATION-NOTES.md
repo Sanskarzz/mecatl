@@ -76,6 +76,32 @@ transient provider failure). Regression:
 
 ---
 
+## Model-switch context carryover (issue #20)
+
+When the mecatui `/models` picker confirms a model switch, the client calls
+`CreateSessionWithCarryover` (`cmd/mecatui/client/client.go`) which sets
+`source_session_id` on the `CreateSessionRequest`. A model switch ALWAYS keeps the
+conversation (seamless UX — no confirm overlay, no same-provider gate; `/clear` is the
+fresh-start verb). The server-side `Service.validateCarryover`
+(`internal/adapter/server/service.go`) loads the source session, canonicalises each
+side's provider (empty ⇒ the server default), and snapshots the conversation via
+`session.ForkSnapshot` (the ADR-0065 fork primitive). Carryover is allowed across ANY
+provider: SAME provider → the snapshot is returned VERBATIM (provider-private replay
+blobs — `Message.Reasoning`/`ProviderPhase`/`ToolCall.ItemID` — replay intact, keeping
+the prompt-cache prefix warm); DIFFERENT provider → the snapshot is STRIPPED to a
+provider-neutral copy via `session.StripProviderState` (clearing the replay blobs while
+preserving text/roles/tool-call IDs/Args/tool results), so the history replays safely
+to any provider. Model is intentionally NOT compared — a model mismatch within a
+provider is the point of the switch. Running/awaiting source → `FailedPrecondition`,
+missing → `NotFound`. The snapshot is seeded into the new session with
+`Session.SeedHistory` before the first save — zero `engine/`/domain change. Turn-zero
+compaction is free via the existing `maybeCompact`. The client surfaces a transient
+`switched to <model> — conversation kept` status note on the rebind, appending
+`(prior reasoning cache dropped)` for a cross-provider switch (the strip). With no live
+session the pick falls back to a plain `CreateSession` (no source to carry from).
+
+---
+
 ## Domain — `engine/governance/`
 
 Permission `Effect`/`Scope`/`Rule` + `Evaluator`, bash splitting/canonicalization, hook

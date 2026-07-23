@@ -53,6 +53,15 @@ The service is `mecatl.v1.HarnessService`.
 | `SetMode(SetModeRequest)` | unary | Change the session's permission posture; rejected mid-turn with `InvalidArgument` |
 | `CloseSession(CloseSessionRequest)` | unary | Release session resources (learned rules, per-session engine); idempotent |
 | `Converse(stream ConverseRequest) → stream ConverseResponse` | bidi | Drive one agent run |
+| `ForkSession(ForkSessionRequest)` | unary | Fork a peer session from a conversation snapshot (same provider/model); returns `session_id` |
+
+A `CreateSessionRequest` may carry an optional `source_session_id` to **seed the new
+session's conversation history** from an existing session (issue #20).  The source
+must be on the same provider (`InvalidArgument` otherwise), must be at a turn boundary
+(not running/awaiting), and its history is snapshotted via `ForkSnapshot` + `SeedHistory`.
+Model is intentionally NOT compared — v1 carries context onto a different model within
+the same provider.  This is the back-end of the mecatui `/models` picker's `[c]`
+carry-over key.
 
 ### Inventory RPCs (read-only, startup snapshots)
 
@@ -221,7 +230,7 @@ The HTTP adapter wraps the same service. Every event is one SSE `data:` line car
 
 | Method + path | Body | Response |
 |---|---|---|
-| `POST /v1/sessions` | `{workspace, mode?, limits?, provider_id?, model_id?, profile?}` | `201` `{session_id}` |
+| `POST /v1/sessions` | `{workspace, mode?, limits?, provider_id?, model_id?, profile?, source_session_id?}` | `201` `{session_id}` |
 | `GET /v1/sessions/{id}` | — | `200` session snapshot |
 | `POST /v1/sessions/{id}/mode` | `{mode}` | `200` updated session snapshot; rejected mid-turn |
 | `DELETE /v1/sessions/{id}` | — | `204` — close the session |
@@ -229,6 +238,7 @@ The HTTP adapter wraps the same service. Every event is one SSE `data:` line car
 | `POST /v1/sessions/{id}/approve` | `{ask_id, verdict}` (`allow_once`\|`allow_always`\|`deny`; legacy `{ask_id, allow}` bool still accepted) | `204` |
 | `POST /v1/sessions/{id}/cancel` | — | `204` |
 | `POST /v1/sessions/{id}/cancel-child` | `{child_id}` | `204`; `404` for unknown/finished child |
+| `POST /v1/sessions/{id}/fork` | `{title?}` | `200` `{session_id}` — fork a peer session from a conversation snapshot |
 
 Scheduled-tasks has its own REST surface under `/v1/schedules` — see [Scheduled tasks](/what-you-get/scheduled-tasks.md#managing-schedules-grpc-rest-and-cli).
 

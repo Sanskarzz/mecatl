@@ -36,6 +36,17 @@ type SessionCreator interface {
 	// different root. The workspace becomes the session's tool root (Read/Edit/
 	// Write/Grep/Glob/Bash cwd all resolve there); osfs confinement is unchanged.
 	CreateSessionInWorkspace(ctx context.Context, workspace string, sel client.ModelSelection, mode string) (string, client.Capabilities, client.ResolvedModel, error)
+	// CreateSessionWithCarryover is CreateSession seeded with sourceSessionID's
+	// conversation history (issue #20, model-switch carryover): it restarts on a
+	// picked model AND carries the current session's transcript onto the new
+	// session. The server is the authority on same-vs-cross (a same-provider
+	// carryover replays verbatim; a cross-provider carryover strips the prior
+	// provider's replay blobs) and a turn-boundary source; the ui offers the
+	// switch unconditionally when a live session exists. The caller owns closing
+	// the source session AFTER the new one is ready (the server snapshotted it
+	// at create time). Same return shape as CreateSession so the
+	// footer/effective-model heal path is shared.
+	CreateSessionWithCarryover(ctx context.Context, sourceSessionID string, sel client.ModelSelection, mode string) (string, client.Capabilities, client.ResolvedModel, error)
 	// CloseSession ends a server-side session by id. The /models restart-now handoff
 	// closes the OLD session before creating the new one so a model switch leaves no
 	// orphaned server-side session. Best-effort: the caller proceeds with the new
@@ -478,6 +489,16 @@ type Model struct {
 	// switch. The genuine first session AND /clear keep the splash unchanged (only a
 	// restart sets this); it is never cleared (a restart is one-way for the run).
 	restartedThisRun bool
+
+	// pendingModelSwitchNote is the transient status note armed by chooseModel when the
+	// user picks a model — surfaced on the SessionReadyMsg rebind as "switched to
+	// <model> — conversation kept" (or, for a cross-provider switch, the honest caveat
+	// that the prior model's reasoning cache was stripped). It is a one-shot: a single
+	// non-empty value is consumed by applySessionReady and cleared, so a later
+	// connect/reconnect that happens to pass through applySessionReady (e.g. the
+	// startup create) never echoes a stale model-switch note. Empty ⇒ the rebind falls
+	// back to the plain "connected" status.
+	pendingModelSwitchNote string
 
 	// restartFailed is true while a /models restart-now handoff's re-create FAILED and
 	// the app is in the RECOVERABLE no-session state (phaseIdle, sessionID==""). It is

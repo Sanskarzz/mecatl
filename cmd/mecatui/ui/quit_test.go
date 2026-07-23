@@ -343,6 +343,13 @@ func (errSession) CreateSession(ctx context.Context, sel client.ModelSelection, 
 	return errSession{}.CreateSessionInWorkspace(ctx, "", sel, mode)
 }
 
+// CreateSessionWithCarryover satisfies the SessionCreator carryover seam (issue #20).
+// errSession models a always-failing connect for the fatal-exit proof, so the
+// carryover variant fails identically — the source id is irrelevant to that path.
+func (errSession) CreateSessionWithCarryover(ctx context.Context, _ string, sel client.ModelSelection, mode string) (string, client.Capabilities, client.ResolvedModel, error) {
+	return errSession{}.CreateSessionInWorkspace(ctx, "", sel, mode)
+}
+
 func (errSession) CreateSessionInWorkspace(_ context.Context, _ string, _ client.ModelSelection, _ string) (string, client.Capabilities, client.ResolvedModel, error) {
 	return "", client.Capabilities{}, client.ResolvedModel{}, context.DeadlineExceeded
 }

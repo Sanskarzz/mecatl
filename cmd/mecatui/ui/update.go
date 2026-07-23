@@ -317,7 +317,15 @@ func (m Model) applySessionReady(msg client.SessionReadyMsg) (tea.Model, tea.Cmd
 	m.restartFailed = false // a session is (re)established; any prior failure clears
 	m.restartFailedForkID = ""
 	m.phase = phaseIdle
-	m.statusMsg = "connected"
+	// A model switch arms a transient "switched to <model> — conversation kept" note
+	// (chooseModel); surface it on the rebind instead of the bare "connected", then
+	// clear the one-shot so a later connect never echoes a stale note.
+	if note := m.pendingModelSwitchNote; note != "" {
+		m.pendingModelSwitchNote = ""
+		m.statusMsg = m.deps.Theme.Style("success").Render(note)
+	} else {
+		m.statusMsg = "connected"
+	}
 	// Now that we are idle + (still) empty, the welcome splash shows: transmit the
 	// Kitty mascot if the terminal supports it (no-op otherwise). The WindowSizeMsg
 	// path also fires this, but at connect the phase was still phaseConnecting when

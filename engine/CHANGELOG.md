@@ -13,6 +13,19 @@ The covered surface is the seven core packages (`session`, `governance`, `tool`,
 
 ### Added
 
+- **`session.StripProviderState`** — provider-neutral history for cross-provider
+  model-switch carryover (minor): a pure function returning a copy of a message
+  slice with every provider-private replay blob cleared (`Message.Reasoning`,
+  `Message.ProviderPhase`, each `ToolCall.ItemID`), preserving the
+  provider-neutral fields (`Role`, `Text`, `ToolCall` ID/Name/Args,
+  `ToolResult` incl. its `Parts`, `Message.Parts`) verbatim. Both provider
+  adapters treat an empty blob as "no blob" and omit it on the wire, so a
+  stripped history replays safely to ANY provider — the new request's
+  reasoning config is derived from the NEW model. Neither the input slice nor
+  any shared `ToolCalls` backing array is mutated; nil/empty input passes
+  through. Classified Added per COMPATIBILITY.md (a new exported function is a
+  minor bump).
+
 - **`session.PendingAsk.PlanOriginated` + `session.AskOrigin` enum +
   `session.PendingAsk.Origin()`** (issue #206, Wave 1) — a new serialized `bool`
   field (`json:"plan_originated,omitempty"`, sibling of `HookOriginated`) marking an

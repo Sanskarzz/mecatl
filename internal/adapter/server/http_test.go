@@ -7,12 +7,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
+	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/internal/adapter/server"
 )
 
@@ -870,6 +872,87 @@ func TestHTTPScheduleCreateOneShot(t *testing.T) {
 	}
 	if !stored.Spec.Trigger.OneShot.Equal(wantOneShot) {
 		t.Errorf("stored one_shot = %v, want %v", stored.Spec.Trigger.OneShot, wantOneShot)
+	}
+}
+
+// TestHTTPCreateSessionWithCarryover drives "source_session_id" THROUGH the HTTP
+// createSession handler: a source session with a small valid conversation, carried
+// over via the JSON body, yields a NEW session whose persisted history is seeded
+// verbatim. MUTATION-VERIFY: deleting the `if body.SourceSessionID != ""` wiring
+// in http.go leaves the new session with an EMPTY history — the len/content
+// assertions below go red (the handler still returns 201, so an error-path check
+// alone would not catch it).
+func TestHTTPCreateSessionWithCarryover(t *testing.T) {
+	// Two text turns: the source's prompt and the post-carryover prompt (each
+	// prompt re-registers the run, so a Persist while the run is live captures the
+	// history — the HTTP prompt handler defers deregister, unlike the
+	// service-level driveCompletedTurn which Finishes before persisting).
+	svc := newService(t, mockllm.New(
+		mockllm.TextTurn("HTTP-CARRY-SRC-REPLY"),
+		mockllm.TextTurn("HTTP-CARRY-NEW-REPLY"),
+	), allowRules())
+	srv := httptest.NewServer(server.NewHTTPHandler(svc))
+	defer srv.Close()
+
+	// Build the source over HTTP create, then drive its turn through the
+	// SERVICE-level API (StartRun→drain→Persist→FinishRun, the driveCompletedTurn
+	// pattern) so its history is durably persisted for loadAndReopen on carryover.
+	srcID := createHTTPSession(t, srv)
+	if got := driveCompletedTurn(t, svc, session.SessionID(srcID), "carry this context"); got != "HTTP-CARRY-SRC-REPLY" {
+		t.Fatalf("source turn reply = %q", got)
+	}
+
+	// The wire field: source_session_id in the JSON body must cross the handler.
+	createResp, err := http.Post(srv.URL+"/v1/sessions", "application/json",
+		strings.NewReader(`{"workspace":"/ws","source_session_id":"`+srcID+`"}`))
+	if err != nil {
+		t.Fatalf("POST /v1/sessions with carryover: %v", err)
+	}
+	defer createResp.Body.Close()
+	if createResp.StatusCode != http.StatusCreated {
+		t.Fatalf("carryover create status = %d, want 201", createResp.StatusCode)
+	}
+	var out struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.NewDecoder(createResp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode carryover create: %v", err)
+	}
+	if out.SessionID == "" || out.SessionID == srcID {
+		t.Fatalf("carryover session id = %q, want a new distinct id", out.SessionID)
+	}
+
+	newSess, err := svc.GetSession(context.Background(), session.SessionID(out.SessionID))
+	if err != nil {
+		t.Fatalf("GetSession new: %v", err)
+	}
+	if len(newSess.Conversation.Messages) == 0 {
+		t.Fatalf("carryover seeded NO history — the source_session_id wiring did not reach the service")
+	}
+	var sawUser, sawAssistant bool
+	for _, m := range newSess.Conversation.Messages {
+		if m.Role == session.RoleUser && strings.Contains(m.Text, "carry this context") {
+			sawUser = true
+		}
+		if m.Role == session.RoleAssistant && strings.Contains(m.Text, "HTTP-CARRY-SRC-REPLY") {
+			sawAssistant = true
+		}
+	}
+	if !sawUser || !sawAssistant {
+		t.Fatalf("seeded history missing the source's user/assistant text (user=%v assistant=%v)", sawUser, sawAssistant)
+	}
+
+	// The seeded session runs a turn to completion over the WIRE: the carried
+	// history replays with no provider 400 (the ForkSnapshot+SeedHistory pairing).
+	promptResp, err := http.Post(srv.URL+"/v1/sessions/"+out.SessionID+"/prompt", "application/json",
+		strings.NewReader(`{"text":`+strconv.Quote("continue")+`}`))
+	if err != nil {
+		t.Fatalf("POST carryover prompt: %v", err)
+	}
+	events := parseSSE(t, bufio.NewReader(promptResp.Body))
+	promptResp.Body.Close()
+	if res := lastResult(t, events); res.GetStop() != "end_turn" {
+		t.Fatalf("carryover-session prompt result = %+v, want end_turn", res)
 	}
 }
 

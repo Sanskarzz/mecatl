@@ -220,17 +220,34 @@ func TestModelsFilterNarrows(t *testing.T) {
 	if m.models.cursor != 0 {
 		t.Errorf("cursor after narrowing = %d, want 0 (clamped to filtered bounds)", m.models.cursor)
 	}
-	// enter opens the confirm overlay; [s] (switch next time) applies it to pendingNext.
-	m = pressModelsKey(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
-	if m.models.view != modelsConfirm {
-		t.Fatalf("enter should open the confirm overlay, view = %v", m.models.view)
-	}
-	mm, _, _ = m.onModelsKey(tea.KeyPressMsg{Code: 's', Text: "s"})
-	m = mm.(Model)
+	// enter switches IMMEDIATELY (no confirm overlay): a live session exists, so the
+	// carryover handoff fires. The picker closes and the phase moves to connecting.
 	want := client.ModelSelection{ProviderID: "openrouter", ModelID: "anthropic/claude"}
+	mm, cmd, _ = m.onModelsKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = mm.(Model)
+	if m.models.view != modelsNone {
+		t.Fatalf("enter should switch immediately and close the picker, view = %v", m.models.view)
+	}
+	if m.phase != phaseConnecting {
+		t.Fatalf("enter should drive phaseConnecting (seamless switch), phase = %v", m.phase)
+	}
 	if m.activeModel != want {
 		t.Errorf("activeModel = %+v, want the filtered+chosen %+v", m.activeModel, want)
 	}
+	// Running the armed cmd fires CreateSessionWithCarryover with the live session id
+	// as the source — the seamless switch's carryover seam.
+	m = feedCmd(t, m, cmd)
+	if got := conv(m).carryoverCalls(); got != 1 {
+		t.Errorf("CreateSessionWithCarryover calls = %d, want 1 (seamless carryover switch)", got)
+	}
+}
+
+// conv extracts the wired *fakeConv from a newModelsModel-built Model (the Session
+// and Conv deps are the same *fakeConv). A tiny local helper so the seamless-switch
+// assertions can reach the fake's call counters without plumbing.
+func conv(m Model) *fakeConv {
+	c, _ := m.deps.Session.(*fakeConv)
+	return c
 }
 
 // TestModelsFilterByProvider proves provider_id is a match field: "openai" → the 3
@@ -491,52 +508,163 @@ func TestModelsNoMatchNote(t *testing.T) {
 	}
 }
 
-// TestModelsChooseSwitchNextSetsActiveAndPersists asserts enter→[s] (keep this
-// session; switch next time) sets the active/pendingNext selection, fires the Save,
-// and emits a notice naming both the live + next models. This is the DEFER path
-// (today's apply-on-next-create behavior) now reached via the confirm overlay.
-func TestModelsChooseSwitchNextSetsActiveAndPersists(t *testing.T) {
+// TestModelsChooseNoSessionUsesPlainCreate asserts that when NO live session exists
+// (a failure left no session — the recoverable post-failure state), picking a model
+// falls back to the plain create path (restartOnModel): CreateSession — NOT
+// CreateSessionWithCarryover (there's no source to carry from). The pick is still
+// persisted per-workspace and the phase drives to connecting. This is the honest
+// fallback for the seamless switch when there is nothing to carry.
+func TestModelsChooseNoSessionUsesPlainCreate(t *testing.T) {
 	store := &fakeStore{}
-	m := newModelsModel(t, sampleModels(), store, modelsCaps(), client.ModelSelection{})
+	recv := &fakeRecver{gate: make(chan struct{})}
+	conv := &fakeConv{recv: recv, send: &fakeSender{}, caps: modelsCaps()}
+	m := New(Deps{
+		Session:        conv,
+		Conv:           conv,
+		Models:         sampleModels(),
+		SelectionStore: store,
+		Theme:          theme.New("aztec", theme.AztecPalette()),
+		Server:         "127.0.0.1:8080",
+		Workspace:      "/workspace",
+		Mode:           "default",
+		Ctx:            context.Background(),
+		NoAltScreen:    true,
+	})
+	// Simulate the recoverable post-failure state: idle, no session, retry-armed. This
+	// is the realistic no-session-idle scenario (pre-first-connect is phaseConnecting,
+	// where the picker is closed).
+	m = applyAll(m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	m.phase = phaseIdle
+	m.sessionID = ""
+	m.restartFailed = true
 	mm, cmd := m.runModels()
 	m = feedCmd(t, mm.(Model), cmd)
+	if m.sessionID != "" {
+		t.Fatalf("precondition: no live session should exist, got %q", m.sessionID)
+	}
 
-	// Move to the 4th row (openrouter/claude) and press enter to open the confirm.
+	// Move to the 4th row (openrouter/claude) and enter — seamless switch (no session ⇒
+	// plain create, no carryover source).
 	for i := 0; i < 3; i++ {
 		m = pressModelsKey(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	m = pressModelsKey(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
-	if m.models.view != modelsConfirm {
-		t.Fatalf("enter should open the confirm overlay, view = %v", m.models.view)
-	}
-	// [s] = switch next time: applies to pendingNext, closes the picker, persists.
-	mm, cmd = m.onModelsKeyTuple(tea.KeyPressMsg{Code: 's', Text: "s"})
+	mm, cmd, _ = m.onModelsKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = mm.(Model)
 	want := client.ModelSelection{ProviderID: "openrouter", ModelID: "anthropic/claude"}
 	if m.activeModel != want {
 		t.Fatalf("activeModel = %+v, want %+v", m.activeModel, want)
 	}
-	if m.models.active != want {
-		t.Fatalf("models.active = %+v, want %+v", m.models.active, want)
-	}
 	if m.models.view != modelsNone {
-		t.Errorf("the switch-next path should close the picker, view = %v", m.models.view)
+		t.Errorf("enter should close the picker, view = %v", m.models.view)
 	}
-	// The notice names BOTH the next model AND the live/effective one (no "nothing
-	// happened" confusion). newModelsModel delivered openai/gpt-5 as the effective
-	// model, so the "still running <live>" half must name GPT-5.
-	st := stripANSIstr(m.statusMsg)
-	if !strings.Contains(st, "next session will use") || !strings.Contains(st, "Claude") {
-		t.Errorf("status should name the next model, got %q", st)
+	if m.phase != phaseConnecting {
+		t.Fatalf("phase = %v, want phaseConnecting (seamless switch)", m.phase)
 	}
-	if !strings.Contains(st, "still running") || !strings.Contains(st, "GPT-5") {
-		t.Errorf("status should also name the LIVE/effective model (still running GPT-5), got %q", st)
-	}
-	// Run the Save cmd and assert the store recorded the pick for the workspace.
+	// Run the armed create cmd: a plain CreateSession fires (NOT carryover).
 	m = feedCmd(t, m, cmd)
+	if conv.createCount != 1 {
+		t.Fatalf("CreateSession calls = %d, want 1 (the plain create path, no source to carry from)", conv.createCount)
+	}
+	if got := conv.carryoverCalls(); got != 0 {
+		t.Fatalf("CreateSessionWithCarryover calls = %d, want 0 (no live session ⇒ no carryover)", got)
+	}
+	if conv.createdSel != want {
+		t.Errorf("CreateSession carried %+v, want %+v", conv.createdSel, want)
+	}
+	// The pick is persisted per-workspace.
 	if store.saves != 1 || store.lastSel != want || store.lastWS != "/workspace" {
 		t.Fatalf("store: saves=%d lastSel=%+v lastWS=%q, want 1 / %+v / /workspace",
 			store.saves, store.lastSel, store.lastWS, want)
+	}
+	// With no live session, priorProvider=="" so crossProvider is false — the
+	// armed status note surfaces the plain "conversation kept" form on the
+	// SessionReadyMsg rebind, NEVER the cross-provider "prior reasoning cache
+	// dropped" caveat (there was no prior model to strip). Mirrors
+	// TestModelsChooseSwitchArmsStatusNote's stripANSIstr idiom.
+	st := stripANSIstr(m.statusMsg)
+	if !strings.Contains(st, "conversation kept") {
+		t.Errorf("status = %q, want it to contain \"conversation kept\" (no live session ⇒ no strip caveat)", st)
+	}
+	if strings.Contains(st, "prior reasoning cache dropped") {
+		t.Errorf("status = %q, must NOT carry the cross-provider strip caveat with no live session", st)
+	}
+	if m.pendingModelSwitchNote != "" {
+		t.Errorf("the note should be consumed (one-shot) after the rebind, got %q", m.pendingModelSwitchNote)
+	}
+}
+
+// TestModelsChooseSwitchArmsStatusNote asserts the seamless switch arms the transient
+// "switched to <model> — conversation kept" status note, surfaced on the SessionReadyMsg
+// rebind (NOT a blocking modal). Same-provider: the simple form. Cross-provider: the
+// honest caveat that the prior reasoning cache was dropped (the server-side strip).
+func TestModelsChooseSwitchArmsStatusNote(t *testing.T) {
+	cases := []struct {
+		name           string
+		live           client.ResolvedModel
+		pickDowns      int // cursor downs from row 0 to the picked row
+		wantNoteSubstr string
+	}{
+		{
+			name:           "same-provider",
+			live:           client.ResolvedModel{ProviderID: "openai", ModelID: "gpt-5"},
+			pickDowns:      1, // gpt-5-mini, also openai
+			wantNoteSubstr: "switched to GPT-5 mini — conversation kept",
+		},
+		{
+			name:           "cross-provider",
+			live:           client.ResolvedModel{ProviderID: "openai", ModelID: "gpt-5"},
+			pickDowns:      3, // anthropic/claude, openrouter
+			wantNoteSubstr: "switched to Claude — conversation kept (prior reasoning cache dropped)",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &fakeStore{}
+			recv := &fakeRecver{gate: make(chan struct{})}
+			conv := &fakeConv{
+				recv:              recv,
+				send:              &fakeSender{},
+				caps:              modelsCaps(),
+				echoSelAsResolved: true, // the rebind's SessionReadyMsg mirrors the picked selector
+			}
+			m := New(Deps{
+				Session:        conv,
+				Conv:           conv,
+				Models:         sampleModels(),
+				SelectionStore: store,
+				Theme:          theme.New("aztec", theme.AztecPalette()),
+				Server:         "127.0.0.1:8080",
+				Workspace:      "/workspace",
+				Mode:           "default",
+				Ctx:            context.Background(),
+				NoAltScreen:    true,
+			})
+			m = applyAll(m, tea.WindowSizeMsg{Width: 100, Height: 30},
+				client.SessionReadyMsg{SessionID: "sess-test-0001", Capabilities: modelsCaps(), ResolvedModel: tc.live})
+			mm, cmd := m.runModels()
+			m = feedCmd(t, mm.(Model), cmd)
+
+			for i := 0; i < tc.pickDowns; i++ {
+				m = pressModelsKey(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
+			}
+			mm, cmd, _ = m.onModelsKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+			m = mm.(Model)
+			// The note is armed (pendingModelSwitchNote); it is NOT yet the visible status
+			// (the rebind has not landed).
+			if m.pendingModelSwitchNote == "" {
+				t.Fatalf("enter should arm the model-switch note (pendingModelSwitchNote), got empty")
+			}
+			// Drive the carryover cmd → SessionReadyMsg → applySessionReady surfaces the note.
+			m = feedCmd(t, m, cmd)
+			st := stripANSIstr(m.statusMsg)
+			if !strings.Contains(st, tc.wantNoteSubstr) {
+				t.Fatalf("status = %q, want it to contain %q", st, tc.wantNoteSubstr)
+			}
+			// The one-shot note was consumed.
+			if m.pendingModelSwitchNote != "" {
+				t.Errorf("the note should be consumed (one-shot) after the rebind, got %q", m.pendingModelSwitchNote)
+			}
+		})
 	}
 }
 
@@ -670,20 +798,23 @@ func TestModelsReconcileKeepsAvailable(t *testing.T) {
 }
 
 // TestModelsSaveFailureFailSoft asserts a Save error surfaces as a notice but the
-// active selection still holds for the run.
+// active selection still holds for the run. The seamless switch persists the pick via
+// saveSelectionCmd (batched with the carryover create); a failing Save surfaces as a
+// muted notice without aborting the switch.
 func TestModelsSaveFailureFailSoft(t *testing.T) {
 	store := &fakeStore{err: errors.New("disk full")}
 	m := newModelsModel(t, sampleModels(), store, modelsCaps(), client.ModelSelection{})
 	mm, cmd := m.runModels()
 	m = feedCmd(t, mm.(Model), cmd)
-	m = pressModelsKey(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})       // open confirm
-	mm, cmd = m.onModelsKeyTuple(tea.KeyPressMsg{Code: 's', Text: "s"}) // switch next
+	// Pick gpt-5 (row 0 — the live model) via the seamless switch (enter switches
+	// immediately, firing the carryover handoff + the persist).
+	mm, cmd, _ = m.onModelsKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = mm.(Model)
 	want := client.ModelSelection{ProviderID: "openai", ModelID: "gpt-5"}
 	if m.activeModel != want {
 		t.Fatalf("active should hold for the run despite the save failure, got %+v", m.activeModel)
 	}
-	m = feedCmd(t, m, cmd) // runs the failing Save + the selectionSavedMsg reduction
+	m = feedCmd(t, m, cmd) // runs the carryover create + the failing Save + the selectionSavedMsg reduction
 	if !strings.Contains(stripANSIstr(m.statusMsg), "could not persist") {
 		t.Errorf("a persist failure should surface as a notice, got %q", stripANSIstr(m.statusMsg))
 	}
@@ -1403,22 +1534,42 @@ func TestModelsPickerGlobalDefaultGolden(t *testing.T) {
 	compareGolden(t, "models_global_default.golden", got)
 }
 
-// TestModelsConfirmOverlayGolden locks the post-Enter confirmation overlay (the
-// restart-now / switch-next / undo choices).
-func TestModelsConfirmOverlayGolden(t *testing.T) {
-	m := newModelsModel(t, sampleModels(), &fakeStore{}, modelsCaps(), client.ModelSelection{})
+// TestModelsChooseCrossProviderStillCarries asserts the redesign's core promise: a
+// CROSS-PROVIDER pick STILL carries the conversation (no client-side gate). The live
+// session is openai/gpt-5; claude is openrouter. Choosing it fires
+// CreateSessionWithCarryover (the server strips the prior provider's reasoning cache).
+// This replaces the old same-provider gate the confirm overlay enforced.
+func TestModelsChooseCrossProviderStillCarries(t *testing.T) {
+	store := &fakeStore{}
+	m := newModelsModel(t, sampleModels(), store, modelsCaps(), client.ModelSelection{})
 	mm, cmd := m.runModels()
 	m = feedCmd(t, mm.(Model), cmd)
-	// Move to claude and open the confirm overlay.
+	// claude is 3 down — cross-provider (openrouter vs live openai).
 	for i := 0; i < 3; i++ {
 		m = pressModelsKey(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	m = pressModelsKey(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
-	if m.models.view != modelsConfirm {
-		t.Fatalf("view = %v, want modelsConfirm", m.models.view)
+	mm, cmd, _ = m.onModelsKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = mm.(Model)
+	if m.models.view != modelsNone {
+		t.Fatalf("enter should switch immediately and close the picker, view = %v", m.models.view)
 	}
-	got := stripANSI([]byte(m.View().Content))
-	compareGolden(t, "models_confirm.golden", got)
+	if m.phase != phaseConnecting {
+		t.Fatalf("phase = %v, want phaseConnecting (seamless cross-provider switch)", m.phase)
+	}
+	// Run the armed cmd: the carryover method fires (NOT the plain create) — no gate.
+	m = feedCmd(t, m, cmd)
+	if got := conv(m).carryoverCalls(); got != 1 {
+		t.Fatalf("CreateSessionWithCarryover calls = %d, want 1 (cross-provider still carries, no gate)", got)
+	}
+	if srcs := conv(m).carryoverSources(); len(srcs) != 1 || srcs[0] != "sess-test-0001" {
+		t.Fatalf("carryover source ids = %v, want [sess-test-0001] (the old session)", srcs)
+	}
+	// The cross-provider caveat surfaced on the rebind (the note is armed at chooseModel
+	// time and consumed by applySessionReady into statusMsg).
+	st := stripANSIstr(m.statusMsg)
+	if !strings.Contains(st, "switched to Claude — conversation kept (prior reasoning cache dropped)") {
+		t.Fatalf("cross-provider switch should surface the strip caveat, got %q", st)
+	}
 }
 
 // pressModelsKey routes a key through onModelsKey, asserting it was handled.

@@ -4,7 +4,7 @@
 - Date: 2026-07-14
 - Scope: a new `ForkSession` wire RPC + HTTP route, a `Service.ForkSession` method in `internal/adapter/server`, reuse of existing domain primitives (`session.ForkSnapshot`/`SeedHistory`/`New`); no `engine/`, `port`, or domain-package change
 - Supersedes: none
-- Superseded by: none
+- Superseded by: [ADR 0071](./0071-seamless-model-switch.md) (in part — the same-provider constraint for the *carryover* path; the `ForkSession` RPC itself remains same-provider/model-locked)
 
 ## Context
 
@@ -70,6 +70,7 @@ The fork inherits the source's `ProviderID`/`ModelID` labels and rehydrates the 
 - [ADR 0027 — Cloud-native arc](./0027-cloud-native.md) — the `rehydrateSession` Phase-1 path the forked session's engine is rebuilt through.
 - [ADR 0038 — Event-sourced rehydration](./0038-event-sourced-rehydration.md) — the event-log `Fold` that makes arbitrary-point reconstruction possible in a future v2.
 - [ADR 0041 — Direct-write subagent](./0041-direct-write-subagent.md) — the trust-model precedent for a non-sandboxed child (peer-parity).
+- `CreateSession.source_session_id` (issue #20) reuses the same `ForkSnapshot`/`SeedHistory` primitives for same-provider conversation carryover on model switch — a client-side session-create variant under the same same-provider constraint.
 - [`docs/architecture.md`](../architecture.md) — the sessions/storage section (fork paragraph added when implementation ships).
 - [`docs/design/PRODUCTION-READINESS.md`](../design/PRODUCTION-READINESS.md) — the status tracker (conversation-fork row added when implementation ships).
 - [`docs/usage.md`](../usage.md) — the operator guide (ForkSession route added when implementation ships).

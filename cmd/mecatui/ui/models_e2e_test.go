@@ -175,13 +175,13 @@ func TestModelsE2EFilterAndSelect(t *testing.T) {
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 
-	// Type a filter that uniquely narrows to the openrouter/claude row, press enter to
-	// open the confirm overlay, then 's' (switch next time) to set pendingNext.
+	// Type a filter that uniquely narrows to the openrouter/claude row, then press
+	// enter — the seamless switch (no confirm overlay): a live session exists, so the
+	// carryover handoff fires and activeModel is set to the filtered+chosen model.
 	for _, r := range "claude" {
 		tm.Send(tea.KeyPressMsg{Code: r, Text: string(r)})
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
-	tm.Send(tea.KeyPressMsg{Code: 's', Text: "s"})
 
 	// Graceful double-ctrl+c quit.
 	tm.Send(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
@@ -191,6 +191,6 @@ func TestModelsE2EFilterAndSelect(t *testing.T) {
 	fm := tm.FinalModel(t).(Model)
 	want := client.ModelSelection{ProviderID: "openrouter", ModelID: "anthropic/claude"}
 	if fm.activeModel != want {
-		t.Errorf("final activeModel = %+v, want the filtered+chosen %+v", fm.activeModel, want)
+		t.Errorf("final activeModel = %+v, want the filtered+chosen %+v (seamless switch)", fm.activeModel, want)
 	}
 }

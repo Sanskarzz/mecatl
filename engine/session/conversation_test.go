@@ -316,6 +316,221 @@ func TestForkMidToolCallRepairedNotOrphaned(t *testing.T) {
 	}
 }
 
+// TestStripProviderState pins the CROSS-provider carryover contract: the three
+// provider-private replay blobs (Message.Reasoning, Message.ProviderPhase,
+// ToolCall.ItemID) are cleared, every provider-neutral field (Role, Text,
+// ToolCall ID/Name/Args, ToolResult incl. its Parts, Message.Parts) survives
+// verbatim, and the input — including the shared ToolCalls backing arrays — is
+// NEVER mutated.
+func TestStripProviderState(t *testing.T) {
+	media, err := NewImageContent("image/png", []byte{0x89, 0x50})
+	if err != nil {
+		t.Fatalf("NewImageContent: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		msgs []Message
+	}{
+		{
+			name: "nil input passes through",
+			msgs: nil,
+		},
+		{
+			name: "empty input passes through",
+			msgs: []Message{},
+		},
+		{
+			name: "assistant blobs cleared, text/role/calls preserved",
+			msgs: []Message{
+				NewUserMessage("goal"),
+				{
+					Role:          RoleAssistant,
+					Text:          "working on it",
+					Reasoning:     "openai-encrypted-blob",
+					ProviderPhase: "commentary",
+					ToolCalls: []ToolCall{
+						{ID: "c1", Name: "Read", Args: json.RawMessage(`{"path":"a.go"}`), ItemID: "fc_item_1"},
+					},
+				},
+			},
+		},
+		{
+			name: "every ToolCall ItemID cleared, ID/Name/Args preserved",
+			msgs: []Message{
+				{
+					Role: RoleAssistant,
+					ToolCalls: []ToolCall{
+						{ID: "c1", Name: "Read", Args: json.RawMessage(`{"path":"a.go"}`), ItemID: "fc_item_1"},
+						{ID: "c2", Name: "Grep", Args: json.RawMessage(`{"pattern":"foo"}`), ItemID: "fc_item_2"},
+					},
+				},
+				NewToolMessage(NewToolResult("c1", "file body")),
+				NewToolMessage(NewToolResult("c2", "3 matches")),
+			},
+		},
+		{
+			name: "tool results and parts untouched",
+			msgs: []Message{
+				NewUserMessageWithParts("look at this", []Content{media}),
+				{
+					Role:      RoleAssistant,
+					Reasoning: "anthropic-thinking-signature",
+					ToolCalls: []ToolCall{
+						{ID: "c1", Name: "Read", Args: json.RawMessage(`{}`), ItemID: "fc_item_1"},
+					},
+				},
+				NewToolMessage(NewToolResultWithParts("c1", "summary", []Content{NewTextBlock("block text")})),
+			},
+		},
+		{
+			name: "message with no blobs passes through",
+			msgs: []Message{
+				NewSystemMessage("sys"),
+				NewUserMessage("plain question"),
+				NewAssistantMessage("plain answer", "", nil),
+			},
+		},
+		{
+			name: "mixed blob-bearing and blob-free messages",
+			msgs: []Message{
+				NewUserMessage("goal"),
+				{
+					Role:          RoleAssistant,
+					Text:          "blob turn",
+					Reasoning:     "blob",
+					ProviderPhase: "final_answer",
+					ToolCalls: []ToolCall{
+						{ID: "c1", Name: "Read", Args: json.RawMessage(`{}`), ItemID: "fc_item_1"},
+					},
+				},
+				NewToolMessage(NewToolResult("c1", "ok")),
+				NewAssistantMessage("blob-free turn", "", nil),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Snapshot the input's pre-strip blob state for the mutate-verify.
+			type blobState struct {
+				reasoning string
+				phase     string
+				itemIDs   []string
+			}
+			before := make([]blobState, len(tt.msgs))
+			for i, m := range tt.msgs {
+				before[i].reasoning = m.Reasoning
+				before[i].phase = m.ProviderPhase
+				before[i].itemIDs = make([]string, len(m.ToolCalls))
+				for j, c := range m.ToolCalls {
+					before[i].itemIDs[j] = c.ItemID
+				}
+			}
+
+			stripped := StripProviderState(tt.msgs)
+
+			if len(stripped) != len(tt.msgs) {
+				t.Fatalf("stripped len = %d, want %d", len(stripped), len(tt.msgs))
+			}
+			if tt.msgs == nil && stripped != nil {
+				t.Fatalf("StripProviderState(nil) = %v, want nil", stripped)
+			}
+
+			for i, m := range stripped {
+				if m.Reasoning != "" {
+					t.Fatalf("msg %d: Reasoning = %q, want cleared", i, m.Reasoning)
+				}
+				if m.ProviderPhase != "" {
+					t.Fatalf("msg %d: ProviderPhase = %q, want cleared", i, m.ProviderPhase)
+				}
+				for j, c := range m.ToolCalls {
+					if c.ItemID != "" {
+						t.Fatalf("msg %d call %d: ItemID = %q, want cleared", i, j, c.ItemID)
+					}
+				}
+
+				// Provider-neutral fields preserved verbatim.
+				orig := tt.msgs[i]
+				if m.Role != orig.Role || m.Text != orig.Text {
+					t.Fatalf("msg %d: Role/Text drifted: got (%q,%q), want (%q,%q)",
+						i, m.Role, m.Text, orig.Role, orig.Text)
+				}
+				if len(m.ToolCalls) != len(orig.ToolCalls) {
+					t.Fatalf("msg %d: ToolCalls len = %d, want %d", i, len(m.ToolCalls), len(orig.ToolCalls))
+				}
+				for j, c := range m.ToolCalls {
+					o := orig.ToolCalls[j]
+					if c.ID != o.ID || c.Name != o.Name || string(c.Args) != string(o.Args) {
+						t.Fatalf("msg %d call %d: neutral fields drifted: got (%q,%q,%s), want (%q,%q,%s)",
+							i, j, c.ID, c.Name, c.Args, o.ID, o.Name, o.Args)
+					}
+				}
+				// ToolResult is carried by pointer and StripProviderState never
+				// rewrites it, so the SAME immutable pointer must survive.
+				if m.ToolResult != orig.ToolResult {
+					t.Fatalf("msg %d: ToolResult pointer drifted: got %+v, want %+v", i, m.ToolResult, orig.ToolResult)
+				}
+				if len(m.Parts) != len(orig.Parts) {
+					t.Fatalf("msg %d: Parts len = %d, want %d", i, len(m.Parts), len(orig.Parts))
+				}
+			}
+
+			// Stripping orphans nothing: a history that was pairing-valid on input
+			// stays pairing-valid (call IDs are untouched). Rows that are
+			// deliberately mid-conversation (a dangling trailing call) are excluded.
+			if err := ValidateToolPairing(tt.msgs); err == nil {
+				if err := ValidateToolPairing(stripped); err != nil {
+					t.Fatalf("stripped history not pairing-valid (input was): %v", err)
+				}
+			}
+
+			// MUTATE-VERIFY: the input slice AND its ToolCalls backing arrays are
+			// untouched — every blob/ItemID the input carried is still there.
+			for i, m := range tt.msgs {
+				if m.Reasoning != before[i].reasoning || m.ProviderPhase != before[i].phase {
+					t.Fatalf("msg %d: input mutated: Reasoning/ProviderPhase now (%q,%q), were (%q,%q)",
+						i, m.Reasoning, m.ProviderPhase, before[i].reasoning, before[i].phase)
+				}
+				for j, c := range m.ToolCalls {
+					if c.ItemID != before[i].itemIDs[j] {
+						t.Fatalf("msg %d call %d: input ToolCalls backing array mutated: ItemID now %q, was %q",
+							i, j, c.ItemID, before[i].itemIDs[j])
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestStripProviderStateToolCallsBackingArrayNotAliased pins the load-bearing
+// half of the no-mutation contract: when the input carries tool calls, the
+// result's ToolCalls slice must be a COPY — zeroing ItemID on the result must
+// never write through a shared backing array into the caller's history.
+func TestStripProviderStateToolCallsBackingArrayNotAliased(t *testing.T) {
+	orig := []Message{
+		{
+			Role: RoleAssistant,
+			ToolCalls: []ToolCall{
+				{ID: "c1", Name: "Read", Args: json.RawMessage(`{}`), ItemID: "fc_item_1"},
+			},
+		},
+	}
+	stripped := StripProviderState(orig)
+	if stripped[0].ToolCalls[0].ItemID != "" {
+		t.Fatalf("stripped ItemID = %q, want cleared", stripped[0].ToolCalls[0].ItemID)
+	}
+	if orig[0].ToolCalls[0].ItemID != "fc_item_1" {
+		t.Fatalf("input ToolCalls backing array was mutated: ItemID = %q, want fc_item_1",
+			orig[0].ToolCalls[0].ItemID)
+	}
+	// And the arrays really are distinct storage, not two headers on one array.
+	stripped[0].ToolCalls[0].ItemID = "rewritten"
+	if orig[0].ToolCalls[0].ItemID != "fc_item_1" {
+		t.Fatalf("result aliases the input backing array: a write to the copy reached the original")
+	}
+}
+
 // TestForkEmptyParentConversation proves a turn-0 fork (the parent has produced no
 // real history yet, only the just-the-fork-call assistant turn) yields an empty,
 // trivially-valid snapshot — the fork degrades to a fresh-context child, NOT an

@@ -3,6 +3,7 @@
 - Status: Accepted (P0/P1 shipped; P2/P3 deferred)
 - Date: 2026
 - Scope: the provider registry, per-session engine binding, DTO neutrality at the LLM port, capability single-source intersection, live model listing, and per-sub-agent provider selection
+- Superseded by: [ADR 0071](./0071-seamless-model-switch.md) (in part — the "Mid-session model switch" confirm-overlay UX and the "Same-provider history carryover" gate; the rest of this ADR stands)
 
 ## Context
 
@@ -591,12 +592,24 @@ even a partial one, wins over the deployment default).
 `enter` confirm offers "start a new session now" (a `CloseSession` of the old session
 + a fresh `CreateSession` on the picked model, with a clean transcript) or "switch
 next time" (the pending-next selection applied on the next create). Provider stays
-FIXED per session (the switch is a NEW session, never a live re-route); there is no
-history carryover (the server has no history-seed surface). The header `next:` badge
-previews a pending-next that differs from the live model.
+FIXED per session (the switch is a NEW session, never a live re-route). The header
+`next:` badge previews a pending-next that differs from the live model.
 
-Open / deferred items: a server-side history-seed surface (to carry context across
-a restart-now switch), and a zero-keys first-run UX. (The `small_model` tier — the
+**Same-provider history carryover — shipped (issue #20):** the `/models` picker also
+offers `[c]` **carry-over** when the cursor model shares the live session's provider
+(`liveProviderID()` in `cmd/mecatui/ui/models.go`).  The client calls
+`CreateSessionWithCarryover` (`cmd/mecatui/client/client.go`) which sets
+`source_session_id` on the `CreateSessionRequest`.  The server-side
+`validateCarryover` (`internal/adapter/server/service.go`) snapshots the source
+session's conversation via `session.ForkSnapshot` and seeds it into the new session
+with `SeedHistory` before the first save — zero `engine/` or domain change.  The
+gate is same-provider only (cross-provider → `InvalidArgument`).  Model is
+intentionally NOT compared — v1 carries the conversation onto a different model
+within the same provider.  Cross-provider strip (`session.StripReasoning`) is the
+deferred v2.
+
+Open / deferred items: cross-provider context carryover (requires replay-blob
+stripping — v2), and a zero-keys first-run UX.  (The `small_model` tier — the
 sub-agent cheap model — is SHIPPED as `Config.SubagentModel` / `--subagent-model`;
 see the "Def-less child default model" subsection under §10.)
 
