@@ -1,25 +1,37 @@
-// Package cliconfig holds the small slices of CLI/composition wiring that the three
-// command mains (cmd/mecated, cmd/mecatui, cmd/mecatequi) would otherwise copy-paste —
-// extracted here so they cannot drift apart. It is a CMD-SIDE composition helper: it
-// may read the process environment (os.Getenv) and register flags (flag.FlagSet), then
-// apply the resolved values onto an app.Config.
+// Package cliconfig holds the small slices of CLI/composition wiring that the four
+// command mains (cmd/mecated, cmd/mecatui, cmd/mecatequi, cmd/mecak8s) would otherwise
+// copy-paste — extracted here so they cannot drift apart. It is a CMD-SIDE composition
+// helper: it may read the process environment (os.Getenv) and register flags
+// (flag.FlagSet), then apply the resolved values onto an app.Config.
 //
 // Why it lives in internal/ and not in internal/app: app.Build deliberately reads the
 // environment ONLY through its injected envDetector seam (see internal/app/build.go),
 // so the os.Getenv reads for provider credentials belong OUTSIDE app — in the cmd layer
 // or a cmd-side helper like this one. The dependency direction stays inward
-// (cmd -> cliconfig -> app); cliconfig never imports a cmd main.
+// (cmd -> cliconfig -> app); cliconfig never imports a cmd main. The credentials-FILE
+// parsing itself (auth.yaml) lives one layer further out, in the small leaf adapter
+// internal/adapter/authfile, so a future credential-writing subcommand can depend on
+// that schema directly without pulling in cliconfig's flag/model-alias machinery too;
+// cliconfig only wires it (path resolution + precedence against the environment).
 package cliconfig
 
 import (
+	"cmp"
 	"flag"
 	"fmt"
 	"os"
 	"sort"
 	"strings"
 
+	"github.com/stacklok/mecatl/internal/adapter/authfile"
+	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
 	"github.com/stacklok/mecatl/internal/app"
 )
+
+// knownAuthProviders is the closed set of provider names an auth.yaml entry
+// may use — passed into authfile.Load so that package stays agnostic of which
+// providers mecatl specifically knows about.
+var knownAuthProviders = []string{"anthropic", "openai", "openrouter", "opencode"}
 
 // Provider credential / base-URL environment variables. These are the SECRET-shaped
 // inputs the cmd layer reads on the operator's behalf (the registry also auto-detects
@@ -56,21 +68,24 @@ var DefaultProviderFlagHelp = ProviderFlagHelp{
 
 // ProviderFlags holds the values bound by RegisterProviderFlags. The base-URL fields
 // are populated by flag parsing; the key fields are populated by Apply (read from the
-// environment) so a key never has to round-trip through the process argv. It is the ONE
-// place the three provider credentials + base URLs are wired onto app.Config, so the
-// six fields can never again be partially wired (the bug that left mecatequi unable to
-// reach Anthropic / OpenRouter).
+// environment, then from an auth.yaml credentials file) so a key never has to
+// round-trip through the process argv. It is the ONE place the three provider
+// credentials + base URLs are wired onto app.Config, so the six fields can never again
+// be partially wired (the bug that left mecatequi unable to reach Anthropic /
+// OpenRouter).
 type ProviderFlags struct {
 	openAIBaseURL     *string
 	openRouterBaseURL *string
 	anthropicBaseURL  *string
 	openCodeBaseURL   *string
+	authFile          *string
 }
 
 // RegisterProviderFlags registers --openai-base-url / --openrouter-base-url /
-// --anthropic-base-url on fs and returns the binding to pass to Apply later. The help
-// text comes from help, falling back per-field to DefaultProviderFlagHelp so a caller
-// may pass a zero value (or override only the fields it words differently).
+// --anthropic-base-url / --auth-file on fs and returns the binding to pass to Apply
+// later. The help text comes from help, falling back per-field to
+// DefaultProviderFlagHelp so a caller may pass a zero value (or override only the
+// fields it words differently).
 func RegisterProviderFlags(fs *flag.FlagSet, help ProviderFlagHelp) *ProviderFlags {
 	help = help.withDefaults()
 	pf := &ProviderFlags{
@@ -78,30 +93,63 @@ func RegisterProviderFlags(fs *flag.FlagSet, help ProviderFlagHelp) *ProviderFla
 		openRouterBaseURL: new(string),
 		anthropicBaseURL:  new(string),
 		openCodeBaseURL:   new(string),
+		authFile:          new(string),
 	}
 	fs.StringVar(pf.openAIBaseURL, "openai-base-url", "", help.OpenAIBaseURL)
 	fs.StringVar(pf.openRouterBaseURL, "openrouter-base-url", "", help.OpenRouterBaseURL)
 	fs.StringVar(pf.anthropicBaseURL, "anthropic-base-url", "", help.AnthropicBaseURL)
 	fs.StringVar(pf.openCodeBaseURL, "opencode-base-url", "", help.OpenCodeBaseURL)
+	fs.StringVar(pf.authFile, "auth-file", "",
+		"path to a YAML credentials file (providers.<name>.api_key for anthropic/openai/openrouter/opencode); "+
+			"overrides the conventional default $XDG_CONFIG_HOME/mecatl/auth.yaml (usually ~/.config/mecatl/auth.yaml, "+
+			"a settings.yaml sibling). A credential already present in the environment always wins over this file "+
+			"for that provider")
 	return pf
 }
 
-// Apply reads the three provider-credential environment variables and writes all six
-// values (3 keys + 3 base URLs) onto cfg. It is safe to call exactly once after fs has
-// been parsed. It returns the resolved keys so a caller that needs to make a presence
-// decision (mecated flips UseOpenAI on a present key; mecatui's "no provider at all"
-// guard) can read them without re-querying the environment — but it NEVER logs them.
+// Apply reads the three provider-credential environment variables, then fills any
+// still-empty credential from an auth.yaml credentials file (the explicit --auth-file
+// path, or the conventional $XDG_CONFIG_HOME/mecatl/auth.yaml default), and writes all
+// six app.Config values (3 keys + 3 base URLs) onto cfg. It is safe to call exactly
+// once after fs has been parsed. It returns the resolved keys so a caller that needs to
+// make a presence decision (mecated flips UseOpenAI on a present key; mecatui's "no
+// provider at all" guard) can read them without re-querying the environment — but it
+// NEVER logs them. A non-empty ResolvedKeys.AuthFileWarning should be surfaced by the
+// caller (cmd/ mains: slog.Warn) — see loadAuthFile for when it fires.
 func (pf *ProviderFlags) Apply(cfg *app.Config) ResolvedKeys {
 	keys := ReadProviderKeys()
+
+	// A nil receiver (a config built WITHOUT RegisterProviderFlags — e.g. a test that
+	// constructs the cmd config struct directly) has no --auth-file flag to read, so it
+	// falls through to the conventional default path exactly like an unset flag would.
+	explicitPath := ""
+	if pf != nil {
+		explicitPath = *pf.authFile
+	}
+	path := explicitPath
+	if path == "" {
+		path = authfile.DefaultPath(xdgconfig.OSEnv)
+	}
+	af, warning := authfile.Load(path, explicitPath != "", xdgconfig.OSEnv, knownAuthProviders)
+	keys.AuthFileWarning = warning
+	// The environment always wins: cmp.Or keeps a credential already present and
+	// falls back to the file only when the environment left it empty, so a
+	// deployment that only ever used env vars sees byte-identical behavior
+	// whether or not an auth.yaml happens to exist.
+	keys.OpenAI = cmp.Or(keys.OpenAI, af.APIKey("openai"))
+	keys.OpenRouter = cmp.Or(keys.OpenRouter, af.APIKey("openrouter"))
+	keys.Anthropic = cmp.Or(keys.Anthropic, af.APIKey("anthropic"))
+	keys.OpenCode = cmp.Or(keys.OpenCode, af.APIKey("opencode"))
+
 	cfg.OpenAIKey = keys.OpenAI
 	cfg.OpenRouterKey = keys.OpenRouter
 	cfg.AnthropicKey = keys.Anthropic
 	cfg.OpenCodeKey = keys.OpenCode
 	// A nil receiver (a config built WITHOUT RegisterProviderFlags — e.g. a test that
-	// constructs the cmd config struct directly) applies the env keys but leaves the
-	// base URLs at their zero value, exactly as the pre-extraction inline code did when
-	// the base-url flags were never set. This keeps embeddedConfig/appConfig safe to
-	// call on a hand-built config.
+	// constructs the cmd config struct directly) applies the env/auth-file keys but
+	// leaves the base URLs at their zero value, exactly as the pre-extraction inline
+	// code did when the base-url flags were never set. This keeps embeddedConfig/
+	// appConfig safe to call on a hand-built config.
 	if pf != nil {
 		cfg.OpenAIBaseURL = *pf.openAIBaseURL
 		cfg.OpenRouterBaseURL = *pf.openRouterBaseURL
@@ -126,15 +174,23 @@ func ReadProviderKeys() ResolvedKeys {
 	}
 }
 
-// ResolvedKeys is the set of provider credentials read from the environment by Apply.
-// It lets a caller branch on credential presence (e.g. "an OpenAI key implies the user
-// wants the real provider") without a second os.Getenv. The values are SECRET-shaped:
-// callers must not log or print them.
+// ResolvedKeys is the set of provider credentials resolved by Apply (environment, then
+// auth.yaml). It lets a caller branch on credential presence (e.g. "an OpenAI key
+// implies the user wants the real provider") without a second os.Getenv. The four key
+// fields are SECRET-shaped: callers must not log or print them.
 type ResolvedKeys struct {
 	OpenAI     string
 	OpenRouter string
 	Anthropic  string
 	OpenCode   string
+	// AuthFileWarning is non-empty when the auth.yaml credentials file (the explicit
+	// --auth-file path, or the conventional default) could not be read or parsed
+	// cleanly. It is set only by Apply (ReadProviderKeys alone never touches the file).
+	// Never fatal — Apply always falls back to whatever was resolved from the
+	// environment — but a caller should log it (cmd/ mains: slog.Warn) so a typo in
+	// auth.yaml doesn't fail silently. Not secret-shaped: it names the file path and the
+	// problem, never a key value.
+	AuthFileWarning string
 }
 
 // Any reports whether at least one provider credential is present. It is the shared
