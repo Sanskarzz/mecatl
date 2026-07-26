@@ -319,13 +319,29 @@ the existing run-entry funnel. The pieces:
   `redisstore` (multi-replica, via a Lua CAS for the atomic Claim). All pass
   the shared `scheduleconformance` suite.
 - **`internal/adapter/scheduler`** — the tick loop, gated by a leader-lease on
-  the well-known `__scheduler__` id (only the leader ticks). On each tick:
+  the well-known `__scheduler__` id (only the leader ticks). Leadership is a
+  STANDBY loop (ADR 0073 follow-up): `Start` is infallible-at-launch — a
+  non-leader serves RPCs and retries the acquire on a jittered backoff,
+  promoting when the leader's lease lapses; a definitive Renew loss demotes the
+  leader back to standby (failover), and a sticky
+  store-unsupported flag stops the loop re-acquiring forever. `FireNow` is
+  gated on leadership (`ErrNotLeader` → FailedPrecondition/412). On each tick:
   `Due` → misfire policy → `Claim` (at-most-once) → `FireFunc` → `RecordFire`.
   The `FireFunc` seam is how composition injects the run-entry funnel.
+  **Scaling shape (ADR 0074):** one server hosts MANY concurrent sessions (the
+  per-session `SessionLease` is the exclusion primitive across both vertical
+  session-density and horizontal replicas); the scheduler stays a single global
+  leader for the cheap tick (`Claim` is the correctness fence, leadership is
+  hygiene), and the expensive fire DRIVE is decoupled into a bounded pool
+  (Phase 2), sharded per-schedule only if throughput later demands it.
 - **Composition** (`internal/app/build.go` `buildScheduler`/`startScheduler`)
-  wires the scheduler behind `--scheduler`, reusing the configured store (by
-  type-assertion on a `ScheduleStore()` accessor) and the session-lease backend
-  (same backend, different id). The `FireFunc` mints a fresh `sched--`
+  wires the scheduler ON BY DEFAULT ([ADR 0073](adr/0073-schedule-tool.md)
+  decision 2 — the opt-in `--scheduler` flag is deleted; `--no-scheduler` is
+  the disable knob) whenever the configured store exposes a `ScheduleStore()`
+  accessor (discovered by type-assertion) — a store with none (the in-memory
+  default) stays on the byte-identical no-scheduling path. The leader-lease
+  reuses the session-lease backend (same backend, different id). The
+  `FireFunc` mints a fresh `sched--`
   top-level session per fire via `Service.CreateSessionWithProfile` +
   `StartRunContent` with subagent-grade defaults (bounded budgets, read-leaning
   posture unless `mutating: true`, headless ask model, fail-closed model
@@ -337,8 +353,12 @@ the existing run-entry funnel. The pieces:
   (`sweepScheduleFires`, peer of the main/child passes) sweeps per-fire
   sessions on their own age horizon — never the main or child pass. The
   `--schedule-fire-retention` flag (operator-tier, peer of
-  `--child-retention`) defaults to 7d when `--scheduler` is on; 0 disables
-  (fire sessions are never swept).
+  `--child-retention`) defaults to 7d whenever unset (the scheduler is on by
+  default); an explicit 0 disables (fire sessions are never swept). The
+  shared create-seam (`validateScheduleSpec`) also enforces the
+  `--scheduler-min-interval` cadence floor and rejects an
+  unknown/uncatalogued provider+model selector, fail-closed, for both the
+  in-chat `Schedule` tool and the REST/gRPC handler.
 
 See [ADR 0059](adr/0059-scheduled-tasks.md) for the frozen rationale (the 10
 resolved decisions + the leader-lease decision) and the consequences. The two
@@ -443,27 +463,17 @@ The events project onto the `Event.schedule` field (proto field 15); a skipped
 fire with no session is dropped from the durable log (the log is session-keyed)
 and surfaces only via the operator diagnostic.
 
-### Declarative config + CLI (Phase 2b, issue #233)
+### Schedule metrics
 
-Beyond the wire API, Phase 2b adds two operator-facing management surfaces (both
-composition/`cmd`-layer, no `engine/agent` change), reusing the Phase 5 + 2a
-substrate:
+The operator-facing declarative surfaces Phase 2b once added — the operator-tier
+`settings.yaml` `schedules:` block and the `mecated schedules` CLI — were
+**removed** by [ADR 0073](adr/0073-schedule-tool.md): the in-chat `Schedule`
+tool + the retained REST/gRPC API + the OS scheduler cover the use cases, so the
+declarative reconcile and the CLI subcommand group no longer exist. The
+surviving management surfaces are the in-chat `Schedule` tool, the
+`ScheduleService` gRPC + REST `/v1/schedules` API, and the mecatui `/schedule`
+overlay. What remains here is the metrics surface:
 
-- **Operator-tier `settings.yaml` `schedules:` block.** The `permconfig.Resolver`
-  exposes an operator-tier `schedules:` YAML subtree (`Resolver.OperatorSchedules`,
-  read from the user-global + CLI tiers ONLY — a project-tier `schedules:` is IGNORED
-  with a WARN). On startup `Build` parses it (`foldOperatorSchedules`) and, after the
-  scheduler starts, **reconciles** it into the durable `ScheduleStore`
-  (`reconcileSchedules`, `internal/app/schedules.go`): an idempotent upsert — create
-  missing, update differing, leave unchanged alone. It is **no-delete**: a schedule
-  removed from the YAML is NOT removed from the store (an operator must delete it
-  explicitly via the API/CLI). The subtree is parsed strictly per-element (an unknown
-  key inside a declaration is a parse error). See [usage.md](usage.md#declarative-schedules-settingsyaml-phase-2b)
-  for the syntax.
-- **`mecated schedules <verb>` CLI** (`cmd/mecated/schedules_cmd.go`) — a thin HTTP
-  client over the running server's `/v1/schedules` REST surface (dials
-  `--server-addr`): `create`, `list`, `inspect`, `pause`, `resume`, `delete`, `fire`.
-  It never boots the daemon (a bare/unknown verb exits 2 with the usage banner).
 - **Schedule metrics** — two instruments emitted via the composition-injected
   `Config.ScheduleMetrics` callback (`internal/adapter/telemetry/metrics.go`
   `EmitSchedule`): `mecatl.schedule.fires` (counter, by `outcome` =

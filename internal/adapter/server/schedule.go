@@ -72,7 +72,7 @@ func (s *Service) CreateSchedule(ctx context.Context, spec port.ScheduleSpec) (p
 		return port.Schedule{}, ErrNoScheduleStore
 	}
 	now := s.cfg.Now()
-	cronNextFire, err := validateScheduleSpec(spec, now)
+	cronNextFire, err := s.validateScheduleSpec(spec, now)
 	if err != nil {
 		return port.Schedule{}, err
 	}
@@ -160,16 +160,23 @@ const defaultOneShotMaxRetries = 3
 func scheduleSingletonExplicit(_ port.ScheduleSpec) bool { return false }
 
 // validateScheduleSpec validates the trigger XOR, the cron grammar (via
-// cronparse), the one-shot future invariant, and the Mutating/Mode invariant.
-// It is fail-closed: a bad spec is rejected, never silently saved as a
-// never-fires schedule. For a cron trigger it ALSO returns the first
-// NextFireAt computed by the SAME cronparse.NextFire call that validates the
-// grammar — the parse is inherently required to validate a cron expression,
-// so the caller (CreateSchedule) reuses this return value instead of parsing
-// the identical expression a second time. For a one-shot trigger, or on any
-// validation error, it returns the zero time (the caller already knows a
-// one-shot's first fire is its own OneShot instant).
-func validateScheduleSpec(spec port.ScheduleSpec, now time.Time) (time.Time, error) {
+// cronparse), the one-shot future invariant, the Mutating/Mode invariant, the
+// provider+model selector, and the scheduler cadence floor. It is fail-closed:
+// a bad spec is rejected, never silently saved as a never-fires schedule. For
+// a cron trigger it ALSO returns the first NextFireAt computed by the SAME
+// cronparse.NextFire call that validates the grammar — the parse is inherently
+// required to validate a cron expression, so the caller (CreateSchedule)
+// reuses this return value instead of parsing the identical expression a
+// second time. For a one-shot trigger, or on any validation error, it returns
+// the zero time (the caller already knows a one-shot's first fire is its own
+// OneShot instant).
+//
+// It is a Service METHOD (ADR 0073): the selector validation resolves against
+// the projected selectable-model inventory (the same provider+model pairs
+// ListModels advertises) and the cadence floor against the composition-
+// injected scheduler MinInterval — two deployment-level inputs the spec
+// alone cannot carry.
+func (s *Service) validateScheduleSpec(spec port.ScheduleSpec, now time.Time) (time.Time, error) {
 	if spec.Name == "" {
 		return time.Time{}, fmt.Errorf("%w: schedule name is required", ErrInvalidArgument)
 	}
@@ -222,24 +229,87 @@ func validateScheduleSpec(spec port.ScheduleSpec, now time.Time) (time.Time, err
 	default:
 		return time.Time{}, fmt.Errorf("%w: unknown schedule profile %q (supported: \"\" (default) and %q)", ErrInvalidArgument, spec.Profile, ProfileNoFS)
 	}
+	// Selector validation (ADR 0073, AC1.2c): a non-empty selector must name a
+	// provider+model pair the deployment actually serves — resolved against the
+	// SAME projected selectable-model inventory ListModels advertises (the
+	// composition-computed snapshot, live-swapped by SetModels). Fail-closed,
+	// like an invalid cron: a schedule fire must not silently target a provider
+	// the deployment never configured, surfacing hours later as a fire-time
+	// failure. An empty selector (the deployment default) is ALWAYS valid.
+	if err := s.validateScheduleSelector(spec.Selector); err != nil {
+		return time.Time{}, err
+	}
 	switch spec.Trigger.Kind() {
 	case port.TriggerOneShot:
 		if !spec.Trigger.OneShot.After(now) {
 			return time.Time{}, fmt.Errorf("%w: one-shot trigger time must be in the future", ErrInvalidArgument)
 		}
 	case port.TriggerCron:
-		// cronparse.NextFire is the fail-closed grammar check; a bad expression
-		// is rejected here so a schedule with a bad cron is never saved. Its
-		// result IS the first NextFireAt — return it so CreateSchedule does not
-		// need a second, redundant parse of the same expression.
-		loc := scheduler.LoadLocation(spec.Timezone)
-		next, err := cronparse.NextFire(spec.Trigger.Cron, now, loc)
+		return s.validateCronTrigger(spec, now)
+	}
+	return time.Time{}, nil
+}
+
+// validateCronTrigger validates the cron arm of the trigger switch: the
+// grammar (fail-closed via cronparse.NextFire — a bad expression is rejected
+// here so a schedule with a bad cron is never saved) and the cadence floor.
+// It returns the first NextFireAt computed by the SAME cronparse.NextFire call
+// that validates the grammar — the parse is inherently required to validate a
+// cron expression, so the caller (validateScheduleSpec) reuses this return
+// value instead of parsing the identical expression a second time.
+func (s *Service) validateCronTrigger(spec port.ScheduleSpec, now time.Time) (time.Time, error) {
+	loc := scheduler.LoadLocation(spec.Timezone)
+	next, err := cronparse.NextFire(spec.Trigger.Cron, now, loc)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%w: invalid cron expression %q: %v", ErrInvalidArgument, spec.Trigger.Cron, err)
+	}
+	// The cadence floor (ADR 0073, AC1.3 — SchedulerMinInterval, no longer
+	// inert): two consecutive computed fires are the schedule's true
+	// cadence, so a fixed-field cron that fires multiple times within one
+	// minute (e.g. "*/30 * * * * *" has no seconds field, but "* * * * *"
+	// fires every 60s) is measured honestly. A cadence tighter than the
+	// floor is rejected fail-closed. A one-shot has no cadence and never
+	// reaches this check.
+	if floor := s.scheduleMinInterval(); floor > 0 {
+		after, err := cronparse.NextFire(spec.Trigger.Cron, next, loc)
 		if err != nil {
 			return time.Time{}, fmt.Errorf("%w: invalid cron expression %q: %v", ErrInvalidArgument, spec.Trigger.Cron, err)
 		}
-		return next, nil
+		if cadence := after.Sub(next); cadence < floor {
+			return time.Time{}, fmt.Errorf("%w: schedule cadence %v is tighter than the configured minimum interval %v (--scheduler-min-interval)", ErrInvalidArgument, cadence, floor)
+		}
 	}
-	return time.Time{}, nil
+	return next, nil
+}
+
+// validateScheduleSelector rejects (fail-closed) a non-empty
+// ScheduleProviderSelector that names a provider+model pair the deployment
+// does not serve, per the projected selectable-model inventory (the same
+// composition-computed snapshot ListModels reads; atomically swapped by
+// SetModels when the live catalog refresh lands). An empty selector — the
+// deployment default — is always valid, as is any pair the inventory
+// advertises. A deployment with an EMPTY inventory (a store-only/no-provider
+// child service) admits only the empty selector: a fire there can only ever
+// run on the default, so a pinned selector could never resolve.
+func (s *Service) validateScheduleSelector(sel port.ScheduleProviderSelector) error {
+	if sel.ProviderID == "" && sel.ModelID == "" {
+		return nil
+	}
+	for _, m := range *s.models.Load() {
+		if m.GetProviderId() == sel.ProviderID && m.GetId() == sel.ModelID {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: unknown provider+model selector %q/%q (not in the deployment's configured model inventory; an empty selector uses the deployment default)", ErrInvalidArgument, sel.ProviderID, sel.ModelID)
+}
+
+// scheduleMinInterval returns the scheduler cadence floor composition
+// injected via SetScheduleMinInterval (0 = no floor — the byte-identical
+// pre-floor posture). It is independent of the tick loop: the floor guards
+// the create-seam whether or not a scheduler is wired (a --no-scheduler
+// deployment still manages schedules manually through this seam).
+func (s *Service) scheduleMinInterval() time.Duration {
+	return time.Duration(s.scheduleMinIntervalNanos.Load())
 }
 
 // GetSchedule loads a schedule by name.
@@ -277,7 +347,7 @@ func (s *Service) UpdateSchedule(ctx context.Context, spec port.ScheduleSpec) (p
 	// The computed cron next-fire is not needed here (Update preserves the
 	// existing State, including NextFireAt); the call is still made for its
 	// validation side effect (the shared create-seam checks).
-	if _, err := validateScheduleSpec(spec, now); err != nil {
+	if _, err := s.validateScheduleSpec(spec, now); err != nil {
 		return port.Schedule{}, err
 	}
 	applyScheduleDefaults(&spec)
@@ -370,6 +440,8 @@ func (s *Service) FireNow(ctx context.Context, name string) (port.ScheduleFire, 
 			return port.ScheduleFire{}, fmt.Errorf("%w: %v", ErrFireNowOverlap, err)
 		case errors.Is(err, scheduler.ErrFireNowExhausted):
 			return port.ScheduleFire{}, fmt.Errorf("%w: %v", ErrScheduleExhausted, err)
+		case errors.Is(err, scheduler.ErrNotLeader):
+			return port.ScheduleFire{}, fmt.Errorf("%w: %v", ErrScheduleNotLeader, err)
 		default:
 			return port.ScheduleFire{}, err
 		}

@@ -922,25 +922,20 @@ type Config struct {
 	// composition-supplied FireFunc (mints a fresh "sched--" top-level session
 	// via Service.CreateSessionWithProfile + StartRunContent with subagent-grade
 	// defaults + fail-closed model pinning), and records the outcome. The loop is
-	// storage-agnostic; engine/agent never imports it. OFF by default — a
-	// byte-identical no-scheduler path when SchedulerEnabled is false. The
-	// ScheduleStore is discovered by type-asserting the configured store for the
-	// ScheduleStore() ACCESSOR (the jsonlstore + redisstore expose one); a store
-	// that does not expose one FAILS LOUD when --scheduler is enabled. The
-	// leader-lease reuses the SAME backend as the run-entry session lease (a
-	// different id — port.SchedulerLeaderLeaseID — so the two never contend); nil
-	// Lease = single-replica by affinity. See ADR 0059.
+	// storage-agnostic; engine/agent never imports it. ON by default on any
+	// schedule-capable store (ADR 0073 decision 2): the cmd layer feeds
+	// SchedulerEnabled = !--no-scheduler, and a store with no ScheduleStore (the
+	// in-memory default) takes the byte-identical no-scheduler path whether
+	// enabled or not. The ScheduleStore is discovered by type-asserting the
+	// configured store for the ScheduleStore() ACCESSOR (the jsonlstore +
+	// redisstore expose one). The leader-lease reuses the SAME backend as the
+	// run-entry session lease (a different id — port.SchedulerLeaderLeaseID — so
+	// the two never contend); nil Lease = single-replica by affinity. See ADR
+	// 0059 + ADR 0073.
 	SchedulerEnabled            bool
 	SchedulerTickInterval       time.Duration // 0 → default 30s (the scheduler's own default)
 	SchedulerMinInterval        time.Duration // 0 → no floor enforced at the create-seam
 	SchedulerMaxConcurrentFires int           // 0 → default 4
-	// DeclaredSchedules are the operator-tier schedule declarations parsed from the
-	// `schedules:` YAML subtree (issue #233, Phase 2b), folded onto cfg by
-	// foldOperatorSchedules. They are reconciled into the durable ScheduleStore by
-	// reconcileSchedules after the scheduler starts (idempotent: missing → Create,
-	// differing → Update, unchanged → no-op). Empty when no operator-tier schedules:
-	// block was configured — the byte-identical default.
-	DeclaredSchedules []port.ScheduleSpec
 }
 
 // GuardrailRule is one operator-tier guardrail rule (issue #27): a tool-NAME matcher,
@@ -1107,13 +1102,6 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	// list comes from YAML (flags cannot express it). This runs after the resolver is
 	// built and before the provider/model fail-fast normalization below.
 	cfg = foldOperatorGuardrails(cfg)
-
-	// Schedules operator-tier config (issue #233, Phase 2b): fold the user-global +
-	// CLI `schedules:` YAML subtree (the resolver collected it from the OPERATOR
-	// tiers ONLY — a project file's block is ignored with a WARN) onto cfg as parsed
-	// []port.ScheduleSpec. The reconcile into the durable store runs AFTER the
-	// scheduler starts (reconcileSchedules, below). Runs after the resolver is built.
-	cfg = foldOperatorSchedules(cfg)
 
 	// Per-slot models (ADR 0030, Phase 1+2): fold the operator-tier `models:` YAML
 	// subtree (user-global + CLI only — a project file's models: block is handled by
@@ -1525,6 +1513,18 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		return nil, fmt.Errorf("build service: %w", err)
 	}
 
+	// Model-facing Schedule tool (ADR 0073): late-bind the catalog assets'
+	// ScheduleManager factory to the Service's schedule seam NOW — the Service
+	// (whose schedule methods satisfy port.ScheduleManager verbatim) did not
+	// exist when buildEngine assembled the shared catalog + the sessFactory
+	// (the chicken-and-egg the late-bound factory closes). svc.ScheduleManager
+	// is nil unless the store backs a ScheduleStore (the SAME gate the
+	// capabilities echo uses), so the tool registration + the capability bit
+	// agree. Every later assembleCatalog call (the per-session factories, which
+	// run at session creation) reads it; the shared catalog assembled before
+	// this line legitimately has no Schedule tool.
+	assets.scheduleManagerFactory = svc.ScheduleManager
+
 	// LIVE model listing: Build seeded svcCfg.Models with the EMBEDDED snapshot
 	// synchronously above (so the ModelSelection cap is honest from t=0 and Build
 	// NEVER touches the network). Now kick a SINGLE background refresh that fetches
@@ -1564,16 +1564,11 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		commandConnClose()
 		return nil, err
 	}
-
-	// Declared schedules reconcile (issue #233, Phase 2b): make the durable
-	// ScheduleStore match the operator's `schedules:` YAML — missing → Create,
-	// differing → Update, unchanged → no-op (idempotent). Runs ONLY when the
-	// scheduler is enabled AND there are declared schedules, so the default
-	// byte-identical path never reaches here. Errors are logged per schedule, never
-	// fatal (a broken store at reconcile time does not block startup).
-	if cfg.SchedulerEnabled && len(cfg.DeclaredSchedules) > 0 {
-		reconcileSchedules(ctx, cfg, svc)
-	}
+	// The cadence floor guards the SHARED create-seam (validateScheduleSpec)
+	// whether or not the tick loop runs — a --no-scheduler deployment still
+	// manages schedules manually through the same seam (ADR 0073, AC1.3). It
+	// is therefore wired UNCONDITIONALLY, not folded into startScheduler.
+	svc.SetScheduleMinInterval(cfg.SchedulerMinInterval)
 
 	// Child-session retention GC (issue #38): wired AFTER the Service exists
 	// because the sweep's liveness predicate is the Service's in-flight run
@@ -1905,6 +1900,7 @@ func sessionEngineFactory(
 			clientMgr:  mgr,
 			narrate:    false,
 			noFS:       noFS,
+			mode:       mode,
 		})
 
 		// Identical to the main engine in every NON-provider Deps field except the
@@ -1922,6 +1918,14 @@ func sessionEngineFactory(
 		// on the CASE-1 rebuild when the session flips into plan mode. When mode
 		// is not ModePlan the helper returns the Config unchanged.
 		deps.PromptConfig = applyPlanModePosture(deps.PromptConfig, mode)
+		// MODEL-VISIBLE Schedule affordance (ADR 0073, the ADR-0070 gate): when
+		// this session's catalog carries the Schedule tool (a scheduleManager
+		// resolves non-nil — the SAME gate registerScheduleTool uses), tell the
+		// model the tool exists + the exact verb workflow up front, on the Role
+		// (the StablePrefix layer). A session whose store backs no ScheduleStore
+		// has no tool, so the note is withheld (the model is never told about a
+		// tool it cannot call).
+		deps.PromptConfig = applySchedulePosture(deps.PromptConfig, scheduleManagerPresent(assets))
 		// Guardrails (issue #27), RE-DERIVED per session so a FRESH per-session checker
 		// budget is built: decorate THIS session's main hooks with the LLM-backed
 		// content checker, over the session's resolved provider/model. OFF-by-default
@@ -2152,26 +2156,36 @@ func buildSessionLease(cfg Config, store port.SessionStore) (port.SessionLease, 
 }
 
 // buildScheduler resolves the OPTIONAL in-process scheduled-tasks tick loop
-// (issue #189, Phase 1f). It mirrors buildSessionLease: when SchedulerEnabled is
-// false it returns (nil, noop, nil) so the default path is byte-identical. When
-// enabled it discovers the port.ScheduleStore by type-asserting the configured
-// store for the ScheduleStore() ACCESSOR (the jsonlstore + redisstore expose
-// one); a store that does not expose one FAILS LOUD — the operator asked for
-// scheduling, a store that can't store schedules is a misconfiguration. The
-// leader-lease reuses the SAME backend as the run-entry session lease (owner
-// leaseOwner, id port.SchedulerLeaderLeaseID) so the two never contend. The
-// FireFunc is LATE-BOUND: buildScheduler returns the *scheduler.Scheduler with
-// Fire nil; Build calls SetFire(makeFireFunc(svc)) after NewService, then
-// Start. The returned close calls sched.Stop (which drains in-flight fires,
-// releases the leader lease).
-func buildScheduler(cfg Config, store port.SessionStore, sessionLease port.SessionLease, leaseOwner string) (*scheduler.Scheduler, func(), error) {
+// (issue #189, Phase 1f; ADR 0073 decision 2 — ON BY DEFAULT). It mirrors
+// buildSessionLease: when SchedulerEnabled is false (the operator's explicit
+// --no-scheduler opt-out) it returns (nil, noop, nil). When enabled it
+// discovers the port.ScheduleStore by type-asserting the configured store for
+// the ScheduleStore() ACCESSOR (the jsonlstore + redisstore expose one); a
+// store that does not expose one (the in-memory default: mecademo, mecatequi,
+// offline tests) is SILENTLY INERT — the byte-identical no-scheduling path
+// ((nil, noop, nil)), never a startup failure. (The pre-ADR-0073 enabled-but-
+// no-store case FAILED LOUD because enabling was an explicit operator ask;
+// with the default ON, no-store is the common case, so inert is the honest
+// posture.) The leader-lease reuses the SAME backend as the run-entry session
+// lease (owner leaseOwner, id port.SchedulerLeaderLeaseID) so the two never
+// contend. The FireFunc is LATE-BOUND: buildScheduler returns the
+// *scheduler.Scheduler with Fire nil; Build calls SetFire(makeFireFunc(svc))
+// after NewService, then Start. The returned close calls sched.Stop (which
+// drains in-flight fires, releases the leader lease). buildScheduler CANNOT
+// FAIL with the on-by-default posture — the former enabled-but-no-store
+// startup error is gone with the opt-in flag — so it returns no error.
+func buildScheduler(cfg Config, store port.SessionStore, sessionLease port.SessionLease, leaseOwner string) (*scheduler.Scheduler, func()) {
 	noop := func() {}
 	if !cfg.SchedulerEnabled {
-		return nil, noop, nil
+		return nil, noop
 	}
 	schedStore, ok := store.(interface{ ScheduleStore() port.ScheduleStore })
 	if !ok || schedStore.ScheduleStore() == nil {
-		return nil, nil, fmt.Errorf("scheduler: --scheduler enabled but the configured store does not expose a ScheduleStore (configure a jsonlstore (--store-dir) or redisstore (--redis-url) backend)")
+		// On-by-default reconciliation: a store with no ScheduleStore (the
+		// in-memory default) gets the byte-identical no-scheduling path — no
+		// tick goroutine, Scheduling capability false, the Schedule tool
+		// absent — NOT a startup error.
+		return nil, noop
 	}
 	scfg := scheduler.Config{
 		Store:              schedStore.ScheduleStore(),
@@ -2201,7 +2215,7 @@ func buildScheduler(cfg Config, store port.SessionStore, sessionLease port.Sessi
 	}
 	cfg.diag().Log(context.Background(), port.LevelInfo, "scheduler: enabled",
 		"tick", scfg.TickInterval, "maxConcurrentFires", scfg.MaxConcurrentFires, "owner", leaseOwner, "lease", sessionLease != nil)
-	return sched, func() { _ = sched.Stop() }, nil
+	return sched, func() { _ = sched.Stop() }
 }
 
 // startScheduler builds, wires (SetScheduler + SetFire), and starts the
@@ -2212,10 +2226,7 @@ func buildScheduler(cfg Config, store port.SessionStore, sessionLease port.Sessi
 // cyclomatic complexity under the lint cap.
 func startScheduler(ctx context.Context, cfg Config, store port.SessionStore, sessionLease port.SessionLease, leaseOwner string, svc *server.Service) (func(), error) {
 	noop := func() {}
-	sched, schedClose, err := buildScheduler(cfg, store, sessionLease, leaseOwner)
-	if err != nil {
-		return noop, err
-	}
+	sched, schedClose := buildScheduler(cfg, store, sessionLease, leaseOwner)
 	if sched == nil {
 		return noop, nil // byte-identical default
 	}
@@ -2238,6 +2249,12 @@ func startScheduler(ctx context.Context, cfg Config, store port.SessionStore, se
 	if cfg.ScheduleMetricsEmitter != nil {
 		sched.SetScheduleMetrics(cfg.ScheduleMetricsEmitter)
 	}
+	// Start is INFALLIBLE-AT-LAUNCH (ADR 0073 follow-up): a non-leader replica
+	// does NOT fail — it serves in standby and retries the leader lease in the
+	// background, taking over when the leader lapses. The pre-standby behaviour
+	// (Start returning ErrLeaseHeld → Build error → the process exits) was the
+	// multi-replica CrashLoop: in a ≥2-replica deployment every non-leader
+	// crashed on startup and never reported ready.
 	if err := sched.Start(ctx); err != nil {
 		schedClose()
 		return noop, fmt.Errorf("start scheduler: %w", err)
@@ -5878,6 +5895,41 @@ func applyPlanModePosture(pc prompt.Config, mode session.PermissionMode) prompt.
 	return pc
 }
 
+// schedulePostureNote is the system-prompt suffix a session carrying the
+// Schedule tool's Role receives (ADR 0073, the ADR-0070 model-visible
+// affordance). The tool's correct use depends on the model CALLING it — create
+// a schedule instead of promising to "remember", list before duplicating, fire
+// to verify — so the workflow is told up front, on the Role (the cache-stable
+// StablePrefix layer), exactly like the plan-mode + no-FS notes. The stable
+// "Schedule tool" + verb clauses are the test keys.
+const schedulePostureNote = "You have a Schedule tool for managing scheduled tasks (recurring or one-shot " +
+	"prompts that run unattended). Use it when the user asks to run something later, on a cadence, or " +
+	"unattended — NEVER promise to \"remember\" or improvise a wait loop. Verbs: create registers a schedule " +
+	"(name + prompt + cron or one_shot + workspace; default read-leaning — the fire runs in plan mode, pass " +
+	"mutating:true only when the fire must write); list shows every schedule (call it before creating a " +
+	"duplicate); inspect shows one schedule plus its fires; pause/resume disable/enable without deleting; " +
+	"delete removes it; fire triggers an immediate run and returns the sched-- session id + stop reason. " +
+	"In plan mode a mutating create is denied — create read-leaning schedules and present the plan instead."
+
+// applySchedulePosture appends the Schedule tool's model-visible instruction to
+// a session's Role (DefaultRole fallback first — the applyNoFSPosture idiom)
+// when the session's catalog carries the tool. hasSchedule is the SAME gate the
+// registration uses (a scheduleManagerFactory that resolves non-nil), so a
+// session whose store backs no ScheduleStore (the tool is honestly absent) is
+// NOT told about a tool it cannot call — the note mirrors the registration
+// exactly. It is the Schedule analogue of applyPlanModePosture /
+// applyNoFSPosture.
+func applySchedulePosture(pc prompt.Config, hasSchedule bool) prompt.Config {
+	if !hasSchedule {
+		return pc
+	}
+	if pc.Role == "" {
+		pc.Role = prompt.DefaultRole()
+	}
+	pc.Role += "\n\n" + schedulePostureNote
+	return pc
+}
+
 // lookupMemberDef resolves spec.AgentType against the registry, returning the def
 // and true on a hit. An empty AgentType or a miss returns false (the caller falls
 // back to the default member catalog); a miss on a NON-empty AgentType also warns,
@@ -6234,6 +6286,18 @@ func defaultRules() []governance.Rule {
 		{Scope: governance.ScopeBuiltinDefault, Tool: "InspectSubagent", Effect: governance.Allow},
 		{Scope: governance.ScopeBuiltinDefault, Tool: "InspectMember", Effect: governance.Allow},
 		{Scope: governance.ScopeBuiltinDefault, Tool: "SubagentStatus", Effect: governance.Allow},
+		// Schedule (ADR 0073): the model-facing scheduled-task management tools.
+		// Floor-scoped Allow like the memory tools — registering/pausing/firing a
+		// schedule does not itself mutate the workspace (the FIRE's posture is
+		// pinned at create-time by the Mutating/Mode invariant), so it is
+		// pre-approved but config-overridable to ask/deny in any scope. The
+		// cadence floor + the posture pin are the real guards (a later task);
+		// this floor only governs whether the tool ASKS. The surface is TWO
+		// entries over the one seam (AC1.4): the mutating Schedule tool
+		// (create/pause/resume/delete/fire) and the read-only ScheduleQuery tool
+		// (list/inspect) — both floor-scoped.
+		{Scope: governance.ScopeBuiltinDefault, Tool: agent.ScheduleToolName, Effect: governance.Allow},
+		{Scope: governance.ScopeBuiltinDefault, Tool: agent.ScheduleQueryToolName, Effect: governance.Allow},
 	}
 }
 
