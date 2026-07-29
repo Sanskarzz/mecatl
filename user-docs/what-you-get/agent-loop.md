@@ -135,7 +135,7 @@ mecatl manages the model's context window automatically. Before each turn, it es
 Two compaction strategies ship out of the box:
 
 - **Heuristic compactor** (default): preserves the goal and recently touched file paths, truncates large tool bodies, keeps the most recent messages.
-- **Cascade compactor** (`--compaction=cascade`): works in cheapest-first tiers — snip → strip tool bodies → collapse large file contents → summarize — stopping as soon as the slice fits the budget.
+- **Cascade compactor** (`--compaction=cascade`): works in cheapest-first tiers — snip → strip tool bodies → collapse large file contents → summarize — stopping as soon as the slice fits the budget. Its trigger and target use separate thresholds (hysteresis) so it doesn't thrash — compact once, then stay quiet until usage climbs back to the trigger ratio, rather than re-compacting on every turn near the edge.
 
 Both strategies guarantee:
 
@@ -144,6 +144,14 @@ Both strategies guarantee:
 - If the compacted slice is still invalid (orphaned pairs), the compactor **aborts and keeps the original history** rather than emit a broken conversation.
 
 You do not interact with compaction directly. It fires automatically and the run continues.
+
+### Where "the model's context window" comes from
+
+The 80%-of-window trigger above needs an actual number to be 80% of, and that number isn't always known up front. mecatl resolves it in this order: an explicit override, then a live provider-reported window, then the embedded model catalog, then a 128k floor for a model it's never heard of. It resolves this **live, at the point of use** — not once at session start — so a background catalog refresh that lands mid-session takes effect on the very next check without restarting anything.
+
+The operator escape hatch is `--context-window-override` (`mecated`/`mecatui`, default off): pin a specific token count when a provider under-reports its own window or sits behind a proxy that does. It moves both the compaction trigger and (in `mecatui`) the context-meter denominator together — a small override value makes the agent compact on nearly every turn, which is useful for stress-testing compaction but not much else.
+
+In `mecatui`, the context meter's denominator can briefly show as unresolved (`ctx 40K`, no bar) right after a session starts on a model whose window the live catalog hasn't reported yet. This is expected and self-heals: once the live refresh lands, the bar fills in on its own without you doing anything.
 
 ### Token budget
 
@@ -177,7 +185,7 @@ A session that ends in any terminal state can be re-entered:
 
 - **Completed** → `Reopen` moves it back to idle; you can submit a new prompt.
 - **Cancelled** → `Interrupt` closes out orphaned tool calls, then moves to idle.
-- **Failed** → `Recover` repairs the conversation and moves to idle.
+- **Failed** → `Recover` repairs the conversation and moves to idle, so a retry is *possible* — not guaranteed. If the failure had a permanent cause (a bad prompt, a persistently misconfigured provider), the retried run just fails cleanly again.
 
 The service layer handles this automatically when you submit a new prompt to a session. You do not call these methods directly in normal operation.
 

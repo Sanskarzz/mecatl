@@ -96,8 +96,18 @@ through un-clamped (the endpoint accepts `xhigh`/`max`); reasoning-replay and ph
 dropped (Chat Completions is stateless across turns), so no port/proto/engine-API change
 was needed. Live model listing rides `openCodeLister` (the `openaicompat` lister
 wrapped to stamp adapter-static text+image modalities, so a live refresh doesn't
-flip an uncatalogued model's Image capability to false). See
-[`docs/adr/0067-openai-chat-completions-adapter.md`](../adr/0067-openai-chat-completions-adapter.md).
+flip an uncatalogued model's Image capability to false).
+
+**SSE keepalive survival.** A bare SSE keepalive comment (`: ping - ...`, which
+OpenCode Go sends on long turns) used to kill the stream outright once it landed
+mid-turn — a rare event on an otherwise-healthy connection, but terminal every
+time it hit, since the no-replay rule can't retry past the first committed chunk.
+`ssefilter.go`, installed as middleware on the `openaichat.New` constructor,
+strips the keepalive line before the SDK's decoder ever sees it, bounding its own
+line buffer so it doesn't reopen the unbounded-read hazard it would otherwise sit
+in front of. Scope is the `opencode` provider slot only. See
+[`docs/adr/0067-openai-chat-completions-adapter.md`](../adr/0067-openai-chat-completions-adapter.md)
+and `docs/design/IMPLEMENTATION-NOTES.md` for the exact mechanics.
 `buildProvider` returns the registry **and** its default provider so the shared engine
 + every child/fork/team engine keep receiving the single default provider exactly as
 before (the default path is byte-identical). A composition-only `providerConstructor`

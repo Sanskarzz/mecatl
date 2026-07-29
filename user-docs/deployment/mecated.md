@@ -139,15 +139,44 @@ slow reasoning turn. Once the first chunk arrives, the timer is stopped and only
 | Flag | Default | Notes |
 |---|---|---|
 | `--model` | `""` | Model id sent to the provider; empty uses the provider-appropriate default |
-| `--default-provider` | `""` | Deployment-wide default provider (`openai`, `openrouter`, `anthropic`); validated fail-fast |
+| `--default-provider` | `""` | Deployment-wide default provider (`openai`, `openrouter`, `anthropic`, `opencode`); validated fail-fast |
 | `--default-model` | `""` | Deployment-wide default model id for the default provider; validated fail-fast |
 | `--subagent-model` | `""` | Global default model for child engines (Subagent, Parallel branches, team members) that do not pin their own |
 
 Provider credentials are read from environment variables — `OPENAI_API_KEY`,
-`OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY` — never flag values. An optional
-`auth.yaml` credentials file is also supported for operators who'd rather not
-export a key into the shell environment; see
+`OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `OPENCODE_API_KEY` — never flag
+values. `opencode` is [OpenCode Go](https://opencode.ai), a subscription LLM
+gateway reached over the OpenAI Chat Completions protocol rather than OpenAI's
+own Responses API — a separate adapter under the hood, but it configures the
+same way as any other provider here. An optional `auth.yaml` credentials file
+is also supported for operators who'd rather not export a key into the shell
+environment; see
 [`docs/usage/mecated.md`](https://github.com/stacklok/mecatl/blob/main/docs/usage/mecated.md#credentials-file-authyaml).
+
+#### The ToolHive LLM gateway (no API key needed)
+
+If you have [ToolHive](https://toolhive.dev)'s local LLM proxy running, `--toolhive-llm`
+(on by default) auto-detects it and registers it as provider id `toolhive` — no API key
+required, since ToolHive holds the credential. `/models` (or the mecatui welcome splash)
+tells you when it's available but not your default, so you can opt in with `/models` or
+`--default-provider toolhive` without unsetting whatever key-based provider you already
+have. On a host other operators also use, pass `--toolhive-llm=false` — a per-user
+ToolHive config detected by one operator's process shouldn't surprise another.
+
+Two things worth knowing before you rely on it:
+
+- **The proxy has to actually be reachable.** `/models` names the exact fix when it isn't:
+  `thv llm proxy start` if the proxy isn't running, `thv llm setup` if your credential was
+  rejected. An empty model list from a *valid* credential is an organizational problem
+  (ask your platform admin), not a local one.
+- **A model that lists fine can still fail at request time.** Some gateways expose "friendly"
+  model aliases that have no cost route configured, so a request to one 5xxs with a
+  cost-enforcement error even though `/models` reported the gateway healthy. If requests are
+  failing but the gateway looks fine, pick a fully-qualified or provider-namespaced model
+  slug instead (via `/models`, `--model`, or mecatui's `ctrl+g` global default) — or ask
+  whoever runs the gateway to add a cost route for the alias. A session created before you
+  fix this keeps failing on every turn even after the fix lands; open a fresh session rather
+  than waiting for it to self-heal.
 
 ### Posture
 

@@ -363,7 +363,7 @@ explorer set; the override runs on the def's resolved provider (cross-provider o
 stays out of scope), the model taken verbatim (no alias resolution — parity with the model-only path's opaque-string posture);
 the pre-built `agentEngines` map is never mutated (fresh engine per call); per-def limits still bind. A def with INLINE MCP
 servers is declined on the agent+model path (v1 scope limit — the inline manager's live session has no process-lifetime owner
-on a per-call engine); reference-only MCP is supported (borrows `mainMgr`). `read-write`+`agent` is SUPPORTED via `WithAgentWritableEngineFactory` (`buildAgentWritableEngineFactory`): the named specialist's scoped engine is rebuilt WRITABLE (allowMutating=true, Edit/Write survive) on the def's resolved provider/model, using the MAIN command runner (direct-write parity, ADR 0041/0058); the factory returns (nil,false) for an unknown agent or an inline-MCP def (v1 scope limit); reference-only MCP is supported. `read-write`+`agent`+`model` stays REJECTED (v1 scope limit — a writable specialist runs on its own resolved model). Reasoning-effort stays an
+on a per-call engine); reference-only MCP is supported (borrows `mainMgr`). `read-write`+`agent` is SUPPORTED via `WithAgentWritableEngineFactory` (`buildAgentWritableEngineFactory`): the named specialist's scoped engine is rebuilt WRITABLE (allowMutating=true, Edit/Write survive) on the def's resolved provider/model, using the MAIN command runner (direct-write parity, ADR 0077/0058); the factory returns (nil,false) for an unknown agent or an inline-MCP def (v1 scope limit); reference-only MCP is supported. `read-write`+`agent`+`model` stays REJECTED (v1 scope limit — a writable specialist runs on its own resolved model). Reasoning-effort stays an
 adapter-construction Option (the factory owns adapter construction), never a `subagentArgs`/`port.LLMRequest` field. Guards:
 `agent.TestSubagentPerCallModelRoutesToFactory`, `agent.TestSubagentPerCallModelUnknownErrors`,
 `agent.TestSubagentAgentAndModelTogetherSupported`, `agent.TestSubagentAgentPlusModelRunsScopedChildOnOverrideModel`,
@@ -948,7 +948,7 @@ NilMergerIsNoOp|JudgeSingleBranch)` + `forker.TestMerger(AppliesForkDiffToParent
 CleanForkIsNoOp|ConflictSurfacesError|RefusesGitattributesPatch|
 TextconvDoesNotFire)`.
 
-**Writable Subagent (`mode:"read-write"`) — DIRECT-WRITE (ADR 0041, supersedes
+**Writable Subagent (`mode:"read-write"`) — DIRECT-WRITE (ADR 0077, supersedes
 0040's writable path).** `Subagent` has a `mode` arg (closed set
 `{"","read-only","read-write"}`); a `mode:"read-write"` call runs its child
 DIRECTLY against the REAL parent workspace — NO fork, NO copy, NO merge-back. Its
@@ -2755,6 +2755,51 @@ It is now the **FALLBACK FLOOR**, not the only source — a provider with a live
 with the embedded subset shown on any
 live error/empty/offline.
 
+### `openaichat` — OpenCode Go Chat Completions adapter + SSE keepalive filter (ADR 0067)
+
+The Chat Completions sibling of the `openai` Responses adapter, same `openai-go` SDK via
+`client.Chat.Completions`, provider id `opencode` (base URL `https://opencode.ai/zen/go/v1`,
+key `OPENCODE_API_KEY`, not in the vendored `providercatalog` subset — composition carries
+an explicit `opencode` arm in `providerEnvVars`). Generic OpenAI Chat-Completions protocol
+adapter, not opencode-specific at the wire level. Reasoning-effort passes through un-clamped
+(`xhigh`/`max` included); reasoning-replay and `ProviderPhase` are dropped (Chat Completions
+is stateless across turns) — no port/proto/engine-API change. Live listing rides
+`openCodeLister` (the `openaicompat` lister wrapped to stamp adapter-static text+image
+modalities, so a live refresh can't flip an uncatalogued model's Image capability to false).
+
+**SSE keepalive filter (`ssefilter.go`, fa79f22f/a616f746).** `openai-go`'s `ssestream`
+decoder dispatches an Event on every blank line and `json.Unmarshal`s the accumulated data
+with no empty-payload check, so a bare SSE keepalive comment (`: ping - ...`, observed from
+OpenCode Go on long turns) yields `json.Unmarshal([]byte{}, ...)` → `*json.SyntaxError` → a
+latched decode error. Post-first-committing-chunk this is **terminal** under the no-replay
+rule, not retried — one rare ping killed an otherwise-healthy turn outright. The fix is a
+streaming line filter installed as the OUTERMOST `option.WithMiddleware` on `openaichat.New`
+(not `ssestream.RegisterDecoder`, which is an unsynchronized package-level map and this
+adapter is re-minted per session; middleware is also content-type-agnostic, since the SDK's
+decoder-registry lookup on the RAW header misses `text/event-stream; charset=utf-8`). It
+strips ONLY the blank line that would dispatch an empty payload plus empty-value `data:`
+lines, byte-for-byte otherwise, buffering no more than the current line so SSE arrival
+timing is preserved. Scope is the `opencode` provider slot only — `openai` (Responses),
+`openrouter`, and `anthropic` use different adapters, untouched.
+
+Sitting the filter IN FRONT OF `ssestream`'s own scanner silently removes that scanner's
+line-length bound (measured: unbounded growth to 1126 MiB buffered / 3338 MiB heap in 5s on
+a newline-less stream, `Read` never returning — an OOM lands before `llmresilience`'s idle
+watchdog would). The filter caps a single buffered line at `bufio.MaxScanTokenSize<<9` (32
+MiB, mirroring the SDK's own scanner bound so the failure point doesn't shift, same posture
+as `maxToolArgsBytes`), via an unexported testable `maxLine` field rather than a mutable
+package global. `errSSELineTooLong` is deliberately a PLAIN error — neither a
+`*json.SyntaxError` nor wrapping `io.ErrUnexpectedEOF` — so `llmresilience.DefaultClassifier`
+(which separately treats a bare `*json.SyntaxError`/wrapped `io.ErrUnexpectedEOF` as
+retryable, `bb706b23` #283, for a truncated/malformed FIRST frame pre-first-chunk) classifies
+it non-retryable: a 32 MiB unterminated line is a broken or hostile endpoint, not a transient
+truncation worth replaying. The oversized partial line is discarded before the error latches
+so `Read`'s trailing-line flush can't swallow it. Tests: an ORACLE fixture (the unfiltered
+stream must still fail with the exact original error — fails if upstream adds its own guard),
+a wiring test through the real `New` → middleware → SDK path (mutation-verified: deleting the
+`option.WithMiddleware` line reproduces the production error), and a bounds test at the
+64-byte testable cap.
+
 ### `openrouter` (LIVE model listing leaf)
 
 GETs the FIXED-host const `https://openrouter.ai/api/v1/models` over an INJECTED `*http.Client`
@@ -3248,7 +3293,7 @@ Exa-anonymous is the default while it lasts — and why graceful degradation is 
   backend-switching secrets are read from `SEARXNG_URL`/`BRAVE_API_KEY`/`EXA_API_KEY`
   (and `WEBSEARCH_API_KEY` for `--websearch-url`) — env only, never flag values.
 
-### MCP typed tool results (issue #223, ADR 0059)
+### MCP typed tool results (issue #223, ADR 0078)
 
 The MCP adapter's `flattenContent` choke point collapsed an MCP
 `CallToolResult` — a typed, audience-aware content array (`text`/`image`/
@@ -3263,7 +3308,7 @@ everything was already a flat string — so a user-audience `resource_link` the
 mcpperf server deliberately emitted for a human-facing client lost its metadata
 and handed the model a bare URI it could not resolve.
 
-The fix (ADR 0059) carries MCP typed content as **the domain's own neutral
+The fix (ADR 0078) carries MCP typed content as **the domain's own neutral
 type**, with every untrusted-server defense in composition and the adapter:
 
 - **`session.ToolResult.Parts []Content`** (`engine/session/toolcall.go`)
