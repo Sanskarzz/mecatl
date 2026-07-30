@@ -1350,7 +1350,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	svcCfg := server.Config{
 		Engine:           engine,
 		Store:            store,
-		Workspaces:       osfsWorkspaceFactory(cfg.diag(), assets.skillReadRoots),
+		Workspaces:       osfsWorkspaceFactory(cfg.diag(), assets.skillReadRoots, cfg.Posture),
 		DefaultWorkspace: cfg.Workspace, // the launch root; a session on a DIFFERENT root routes through the per-session factory (issue #102, docs/adr/0032)
 		Worktrees:        buildWorktreeLister(cfg),
 		DefaultLimits:    defaultLimits(),
@@ -2554,7 +2554,18 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 	guardrailWaiver := modelhook.NewWaiverHolder()
 	mainHooks = buildGuardrailsHooks(cfg, reg, provider, reg.Default(), cfg.Model, mainHooks, guardrailWaiver)
 
-	deps := baseEngineDeps(cfg, reg, provider, store, policy, mainHooks, mcpProvider, instructions)
+	// Path-escape posture (Scenarios 2+3): wrap the MAIN policy with the
+	// root-aware escape decision. The shared engine (below) AND every
+	// per-session engine (sessionEngineFactory, below) share this ONE wrapped
+	// policy, so a per-session engine inherits the SAME relax. Below auto it
+	// is a no-op pass-through (strict/trusted unchanged this wave). The
+	// wrapper classifies per session root from the ws the loop hands it, and
+	// the workspace factory relaxes the osfs workspace over the SAME root —
+	// the policy decision and the workspace serving can never disagree.
+	// assets.skillReadRoots feeds the per-root classifier's read-root verdict
+	// (the skills carve-out).
+	sharedPolicy := newEscapePolicy(policy, cfg.Posture, assets.skillReadRoots)
+	deps := baseEngineDeps(cfg, reg, provider, store, sharedPolicy, mainHooks, mcpProvider, instructions)
 	deps.Catalog = cat
 	// MODEL-VISIBLE Schedule affordance (ADR 0073, the ADR-0070 gate), on the
 	// SHARED engine too — the SAME wiring the per-session factory applies
@@ -2590,12 +2601,12 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 	// catalog is assembled over the SAME collaborators as the shared one. It keeps
 	// the UNWRAPPED hooks: the Phase-2b reviewer fires once per MAIN-engine Stop,
 	// not per per-session stop (one of the two sanctioned per-session deltas).
-	sessFactory := sessionEngineFactory(cfg, reg, provider, store, policy, hooks, mcpProvider, instructions, assets, guardrailWaiver)
+	sessFactory := sessionEngineFactory(cfg, reg, provider, store, sharedPolicy, hooks, mcpProvider, instructions, assets, guardrailWaiver)
 	// The build-once assets travel back to Build whole: it reads assets.skills
 	// (ListSkills snapshot), assets.userModelStore (GetUserModel lister), and
 	// assets.skillReadRoots (the workspace factory + team fork closures) off the
 	// SAME value every catalog assembly shares.
-	return agent.NewEngine(deps), assets.globalMgr, mcpProvider, mcpInventory, sessFactory, learned, policy, assets, scheduleMgr, mcpClose, nil
+	return agent.NewEngine(deps), assets.globalMgr, mcpProvider, mcpInventory, sessFactory, learned, sharedPolicy, assets, scheduleMgr, mcpClose, nil
 }
 
 // buildInstructionAssembler composes the turn-0 instruction assembler in order:
@@ -5188,6 +5199,34 @@ func buildSubagentTool(ctx context.Context, cfg Config, provReg *providerRegistr
 		taskForker := forker.New(newForkWorkspace(skillReadRoots), forker.WithDirtyOverlay())
 		opts = append(opts, agent.WithChildForker(taskForker))
 	}
+	// PATH-ESCAPE POSTURE (Scenario 5, AC5.1b): a BASE-SHARING child must never
+	// inherit the main session's relaxed workspace. Two child paths share the
+	// parent base verbatim: the SHELL-LESS read-only explorer (no sandboxed
+	// runner ⇒ no forker wired above — forkChildWorkspace returns the parent ws
+	// unchanged) and the mode:"read-write" direct-write child (ADR 0041 — it
+	// runs against the REAL parent tree by design). At auto/yolo the main
+	// session's workspace is relaxed (WithRelaxedReads/WithRelaxedWrites), so a
+	// verbatim share would hand the child the main session's out-of-root reach.
+	// Re-view the shared base through the NON-relaxed construction — the SAME
+	// root, the SAME per-skill read-only roots, NO relaxed options (the exact
+	// constructor newForkWorkspace uses) — so the child keeps the main
+	// session's containment posture without its escape reach. The FORKED child
+	// (childForker wired) never consults this — its worktree already comes from
+	// the non-relaxed newForkWorkspace. The main session's own relaxed
+	// workspace is untouched. Inert below auto (the parent ws is never relaxed
+	// there, so the re-view is a no-op). A root the constructor cannot open
+	// yields nil and the child falls back to the parent ws (fail-open to the
+	// historical shape — the constructor only fails on an unreadable root,
+	// which the parent workspace construction already surfaced).
+	if cfg.Posture >= PostureAuto {
+		opts = append(opts, agent.WithSharedChildWorkspace(func(root string) tool.Workspace {
+			ws, err := newForkWorkspace(skillReadRoots)(root)
+			if err != nil {
+				return nil
+			}
+			return ws
+		}))
+	}
 	// Per-call model override factory: mint an explorer child engine for a requested
 	// model through the SAME contamination-safe per-provider path (newChildEngineFor
 	// Provider re-derives Compactor/TokenCounter/Env.Model/ContextWindow for the
@@ -5546,7 +5585,7 @@ func buildAgentWritableEngineFactory(ctx context.Context, cfg Config, provReg *p
 // both are filesystem acts), NO shell runners, and every member gets the no-FS
 // child surface (see buildMemberEngine's noFS branch). `a` carries the catalog
 // assets the no-FS member surface registers over; it is read only when noFS.
-func buildTeamWiring(_ context.Context, cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, mainMgr *mcp.Manager, agentReg *agents.Registry, skillReadRoots []string, skillIdx skillIndex, a catalogAssets, noFS bool) (server.MemberEngineFactory, tool.WorkspaceForker, tool.WorkspaceForker, port.HookRunner) {
+func buildTeamWiring(_ context.Context, cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, mainMgr *mcp.Manager, agentReg *agents.Registry, skillReadRoots []string, skillIdx skillIndex, a catalogAssets, noFS bool) (server.MemberEngineFactory, tool.WorkspaceForker, tool.WorkspaceForker, func(string) tool.Workspace, port.HookRunner) {
 	// A single hooks runner shared by the supervisor and the member coordination
 	// tools. hookexec.New(nil) matches buildEngine's default: the configured-hook map
 	// is not yet wired from cfg anywhere, so this is an inert (no-op) runner today,
@@ -5555,9 +5594,10 @@ func buildTeamWiring(_ context.Context, cfg Config, provReg *providerRegistry, p
 	if noFS {
 		// File-less teams: no forkers (a spawned Mutating member would need a
 		// force-copy fork the supervisor cannot create — it fails that spawn
-		// loudly), no shell runners, and the no-FS member catalog for everyone.
+		// loudly), no shell runners, and the no-FS member catalog for everyone. A
+		// no-FS base can never be relaxed, so no shared-base re-view either.
 		factory := buildMemberEngine(cfg, provReg, provider, parentProviderID, parentModel, teamHooks, agentReg, skillIdx, nil, nil, false, mainMgr, a, true)
-		return factory, nil, nil, teamHooks
+		return factory, nil, nil, nil, teamHooks
 	}
 	// agentReg is the SHARED registry (Build's single resolveAgentSeam): a
 	// member whose spec.AgentType names a def adopts that def's scoped
@@ -5582,7 +5622,33 @@ func buildTeamWiring(_ context.Context, cfg Config, provReg *providerRegistry, p
 	mutatingRunner := buildForceCopyRunner(cfg)
 	roIsolationAvailable := memberRunner != nil && roFk != nil
 	factory := buildMemberEngine(cfg, provReg, provider, parentProviderID, parentModel, teamHooks, agentReg, skillIdx, memberRunner, mutatingRunner, roIsolationAvailable, mainMgr, a, false)
-	return factory, fk, roFk, teamHooks
+	// PATH-ESCAPE POSTURE (Scenario 5, AC5.1d): a BASE-SHARING (shell-less)
+	// read-only member must never inherit the main session's relaxed workspace.
+	// The supervisor's base-share fallback otherwise hands the member the team
+	// base VERBATIM — and at auto/yolo that base is the escapeWorkspace-wrapped
+	// relaxed osfs (WithRelaxedReads/WithRelaxedWrites), giving the shell-less
+	// member the main session's out-of-root reach (the same leak task 05 closed
+	// for the Subagent nil-forker path). Re-view the shared base through the
+	// NON-relaxed construction — the SAME root, the SAME per-skill read-only
+	// roots, NO relaxed options (the exact constructor newForkWorkspace uses) —
+	// so the member keeps the main session's containment posture without its
+	// escape reach. The two FORKED tiers (Mutating force-copy, read-only
+	// worktree) never consult this — their forks already come from the
+	// non-relaxed newForkWorkspace. The main session's own relaxed workspace is
+	// untouched. Inert below auto (the base is never relaxed there). A root the
+	// constructor cannot open yields nil and the supervisor falls back to the
+	// verbatim base (fail-open to the historical shape).
+	var sharedBaseWS func(string) tool.Workspace
+	if cfg.Posture >= PostureAuto {
+		sharedBaseWS = func(root string) tool.Workspace {
+			ws, err := newForkWorkspace(skillReadRoots)(root)
+			if err != nil {
+				return nil
+			}
+			return ws
+		}
+	}
+	return factory, fk, roFk, sharedBaseWS, teamHooks
 }
 
 // applyTeamConfig wires the opt-in agent-teams capability into the server.Config.
@@ -5604,10 +5670,11 @@ func applyTeamConfig(svcCfg *server.Config, cfg Config, reg *providerRegistry, p
 	// agentReg is the ONE registry Build resolved (resolveAgentSeam).
 	// The gRPC CreateTeam path is always the DEFAULT (filesystem) profile — a
 	// no-FS team exists only inside a no-fs session's in-catalog Team tool.
-	factory, fk, roFk, teamHooks := buildTeamWiring(context.Background(), cfg, reg, provider, reg.Default(), cfg.Model, mainMgr, agentReg, skillReadRoots, skillIdx, a, false)
+	factory, fk, roFk, sharedBaseWS, teamHooks := buildTeamWiring(context.Background(), cfg, reg, provider, reg.Default(), cfg.Model, mainMgr, agentReg, skillReadRoots, skillIdx, a, false)
 	svcCfg.MemberEngine = factory
 	svcCfg.Forker = fk
 	svcCfg.ReadOnlyForker = roFk
+	svcCfg.SharedBaseWorkspace = sharedBaseWS
 	svcCfg.TeamHooks = teamHooks
 	svcCfg.TeamTokenBudget = cfg.MaxTeamTokens
 	cfg.diag().Log(context.Background(), port.LevelInfo, "agent teams ENABLED (experimental; CreateTeam/SpawnTeammate/RunTeam + Team tool)")
@@ -6641,6 +6708,22 @@ func defaultLimits() session.Limits {
 // an activated skill's files by absolute path. A root that cannot be opened
 // yields a nil Workspace; tool calls against it return errors the model can read.
 //
+// PATH-ESCAPE POSTURE (docs/acceptance/path-escape-posture.md Scenarios 2+3):
+// at the auto/yolo postures the MAIN session's workspace is built
+// WithRelaxedReads AND WithRelaxedWrites (the osfs out-of-root carve-outs)
+// and wrapped with the session's escape classifier (newEscapeWorkspace), so
+// the workspace and the permission wrapper classify over the SAME root.
+// Whether a given escape actually RUNS is the POLICY's call (read: allow at
+// auto/yolo; write: allow at yolo, ask at auto) — the relaxed workspace only
+// SERVES the path the policy already authorized, and a write escape the
+// policy leaves at Ask never reaches the tool body unapproved. Below auto the
+// workspace is the ordinary deny-on-escape osfs workspace. The SAME factory
+// is the create-time AND the rehydration workspace source (the run-entry seam
+// rebuilds from the persisted root through Workspaces), so a restarted
+// relaxed session rehydrates the SAME relaxed workspace. Child engines never
+// see this factory (their workspaces come from newForkWorkspace), so the
+// relax is main-session-only by construction.
+//
 // EMPTY-ROOT CHOKEPOINT (issue #55): an empty root NEVER reaches osfs. An empty
 // persisted Session.Workspace can only be a no-fs session, and osfs.NewWorkspace("")
 // would MkdirAll/OpenRoot the server process's cwd — a filesystem escalation. The
@@ -6649,12 +6732,25 @@ func defaultLimits() session.Limits {
 // the defense a FUTURE caller cannot bypass: it serves the honest no-filesystem
 // workspace and logs loudly, because reaching it means a no-fs guard upstream
 // regressed.
-func osfsWorkspaceFactory(d port.Diagnostics, skillReadRoots []string) server.WorkspaceFactory {
+func osfsWorkspaceFactory(d port.Diagnostics, skillReadRoots []string, posture Posture) server.WorkspaceFactory {
 	return func(root string) tool.Workspace {
 		if root == "" {
 			d.Log(context.Background(), port.LevelError,
 				"workspace factory: EMPTY root reached the shared osfs factory (a no-fs session bypassed its workspace override?); serving the no-filesystem workspace instead of the process cwd")
 			return nofs.New()
+		}
+		if posture >= PostureAuto {
+			clf, cerr := newEscapeClassifier(root, skillReadRoots...)
+			if cerr != nil {
+				d.Log(context.Background(), port.LevelError, "workspace factory: cannot build the escape classifier for a relaxed workspace; serving the deny-on-escape workspace", "root", root, "err", cerr)
+			} else {
+				ws, err := osfs.NewWorkspace(root, osfs.WithReadRoots(skillReadRoots...), osfs.WithRelaxedReads(), osfs.WithRelaxedWrites())
+				if err != nil {
+					d.Log(context.Background(), port.LevelError, "workspace factory: cannot open root", "root", root, "err", err)
+					return nil
+				}
+				return newEscapeWorkspace(ws, clf)
+			}
 		}
 		ws, err := osfs.NewWorkspace(root, osfs.WithReadRoots(skillReadRoots...))
 		if err != nil {

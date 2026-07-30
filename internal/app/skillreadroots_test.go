@@ -128,7 +128,7 @@ func TestSkillReadRootsWiring(t *testing.T) {
 	ctx := context.Background()
 
 	// The per-session factory (server.Config.Workspaces).
-	factory := osfsWorkspaceFactory(Config{}.diag(), roots)
+	factory := osfsWorkspaceFactory(Config{}.diag(), roots, PostureStrict)
 	mainWS := factory(t.TempDir())
 	if mainWS == nil {
 		t.Fatal("workspace factory returned nil")
@@ -174,7 +174,7 @@ func TestSkillReadRootsThreadedThroughTeamWiring(t *testing.T) {
 
 	provider := mockllm.New(mockllm.TextTurn("ok"))
 	cfg := Config{Model: "m"}
-	_, fk, roFk, _ := buildTeamWiring(ctx, cfg, regForTest(provider, providerMock, cfg.Model),
+	_, fk, roFk, _, _ := buildTeamWiring(ctx, cfg, regForTest(provider, providerMock, cfg.Model),
 		provider, providerMock, cfg.Model, nil, agents.NewRegistry(nil), []string{skillDir}, nil, catalogAssets{}, false)
 
 	base, err := osfs.NewWorkspace(t.TempDir())
