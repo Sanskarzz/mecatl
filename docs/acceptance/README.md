@@ -65,6 +65,9 @@ when the code that satisfies the plan has landed.
   rejection by operator posture (allow at `auto`/`yolo`, ask at
   `strict`/`trusted`), keeping the untrusted-child hard-deny, the symlink
   containment, and a pseudo-fs never-relaxed rule. Status: draft.
+- [Delegation observability convergence](delegation-observability-convergence.md) —
+  bounded previews for Subagent/Parallel, converging the delegation observability
+  surface on two tiers (Team-unique structures stay Team-only). Status: landed.
 
 ## See also
 
