@@ -1,7 +1,7 @@
 # Path-escape posture relax — acceptance plan
 
 **Phase:** capability / FS-tool out-of-workspace access
-**Status:** in-progress, 2026-07-29. Design discussion (osfs containment value) settled the posture table.
+**Status:** landed, 2026-07-30. Design discussion (osfs containment value) settled the posture table.
 **Accumulator branch:** `acc/path-escape-posture` (off `main`).
 
 The smallest set of work that turns the osfs out-of-root rejection from a silent
@@ -314,7 +314,7 @@ root — [ADR-0047](../adr/0047-absolute-path-resolution.md) point 5).
 
 | Item | Defer-to | ADR / decision |
 |---|---|---|
-| Guardrail-routed escape checking (the `auto`-gated path through the modelhook checker) | v2 — needs a path-aware checker route, not a rule-syntax change | this plan names it a deferred decision |
+| Guardrail-routed escape checking (the `auto`-gated path through the modelhook checker) | ~~v2~~ **resolved** | [ADR-0080](../adr/0080-guardrail-routed-escape-checking.md): a composition-level pre-check in the escape policy, auto-only, `guardrails.escape` knob — pinned by `TestPathEscapePosture_GuardrailRoutedEscape` |
 | A managed-scope posture ceiling for escapes | future | [`internal/app/posture.go`](../../internal/app/posture.go) `postureNoCeiling` precedent |
 | Path-scoped permission **rules** (operator YAML matching on paths) | future | rules stay tool-name-scoped this plan |
 | "Allow always" persistence on an escape Ask | v2 | v1 asks are allow-once only (no learned out-of-root rule) |
@@ -365,7 +365,10 @@ guardrail routing), which may be driven as separate `/plan-orchestrate` runs.
 `TestPathEscapePosture_Scenario5_ChildReadEscapeDenied`,
 `TestPathEscapePosture_Scenario5_GlobGrepConfined`,
 `TestPathEscapePosture_Scenario5_ChildEnginesNeverRelaxed`,
-`TestPathEscapePosture_DefaultConstructionDeniesEscape`.
+`TestPathEscapePosture_DefaultConstructionDeniesEscape`,
+`TestPathEscapePosture_GuardrailRoutedEscape` (wave 2 — ADR-0080),
+`TestPathEscapePosture_EditLedgerPseudoFSGuarded` (wave 2 — AC-W2-F1),
+`TestPathEscapePosture_VetRelaxedParentSharesCanonicalize` (wave 2 — AC-W2-F2).
 
 ## Definition of done
 
@@ -384,10 +387,15 @@ guardrail routing), which may be driven as separate `/plan-orchestrate` runs.
 
 ## Deferred decisions and known risks
 
-- **Guardrail-routed escape checking.** The `auto`-gated route through the
+- **Guardrail-routed escape checking.** ~~The `auto`-gated route through the
   modelhook checker needs a path-aware checker *route* (the matcher is
   name-only); v2 decides whether that is a new checker input field or a
-  composition-level pre-check that calls `RunGuardrailCheck` directly.
+  composition-level pre-check that calls `RunGuardrailCheck` directly.~~
+  **Resolved by [ADR-0080](../adr/0080-guardrail-routed-escape-checking.md):**
+  a composition-level pre-check inside the escape policy (option b), auto-only,
+  configured by the operator-tier `guardrails.escape` knob, fail-closed to the
+  write-escape Ask on a checker error. Pinned by
+  `TestPathEscapePosture_GuardrailRoutedEscape`.
 - **Escape Ask rule persistence.** An "allow always" on an escape Ask is v2;
   v1 asks are allow-once only (no learned out-of-root rule).
 - **Edit-ledger key for out-of-root paths** must be the canonical absolute form,
@@ -402,6 +410,29 @@ guardrail routing), which may be driven as separate `/plan-orchestrate` runs.
   "reuse the existing ask spine" and is out of v1.
 
 ### Wave-1 panel-review follow-ups (deferred to Wave 2, none a gate)
+
+**Resolved in Wave 2 (task 03-panel-followups):**
+
+- AC-W2-F1: an Edit-ledger read of a pseudo-fs path cannot bypass the
+  pseudo-fs guard — the asymmetry is CLOSED: `escapeWorkspace` overrides
+  `RecordRead`/`WasReadUnchanged` with the same `refusePseudoFS` guard
+  Read/Stat/Write consult (fail-safe no-op / never-read), so the inner osfs
+  `fingerprint` read is no longer the one tool-body read site the wrapper
+  forgot.
+  - verify: `TestPathEscapePosture_EditLedgerPseudoFSGuarded`
+- AC-W2-F2: `vetRelaxedParent` delegates to `osfs.Canonicalize`
+  (canonicalize-then-compare against the verbatim cleaned prefix) — no third
+  hand-rolled ancestor walk; the existing osfs containment tests stay green.
+  - verify: `TestPathEscapePosture_VetRelaxedParentSharesCanonicalize`
+- AC-W2-F3: the `escapePolicy` classifier cache (`escapePolicy.clfs`) is
+  documented as a bounded-cardinality resource — cardinality is bounded by
+  construction by the distinct session workspace roots the process classifies
+  (live-session-cap order, values are fd-free canonicalized strings; an LRU
+  was rejected: eviction only drops a rebuildable derivation).
+  - verify: inspection — [ADR-0027](../adr/0027-cloud-native.md) List 1 row 36
+    names it.
+
+The original follow-up notes (kept for the record, all three resolved above):
 
 - **Edit-ledger `fingerprint` pseudo-fs asymmetry (Medium, defense-in-depth).**
   `osfs.Workspace.fingerprint` reads via the inner `w.fs.Read`, bypassing
