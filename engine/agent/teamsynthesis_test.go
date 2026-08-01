@@ -383,7 +383,7 @@ func TestSynthesisCancelledMidTeamFallsBackNeverStale(t *testing.T) {
 	}
 }
 
-// stopErrorTurn is a scripted turn that ends in StopError (a non-resumable failure).
+// stopErrorTurn is a scripted turn that ends in StopError (a run FAILURE).
 func stopErrorTurn() mockllm.Turn {
 	return mockllm.ChunksTurn(
 		mockllm.TextChunk("boom"),
@@ -391,28 +391,298 @@ func stopErrorTurn() mockllm.Turn {
 	)
 }
 
-// TestSynthesisFallbackWhenLeadStopped asserts the edge case: when the lead's last
-// run failed non-resumably, synthesise returns "" and the supervisor's outcome
-// Report is empty (the Team tool then renders joinTeamFallback) — never a synthesis
-// on a dead session.
-func TestSynthesisFallbackWhenLeadStopped(t *testing.T) {
+// stateRecordingStore wraps a SessionStore and records the State of every session as it
+// is saved, in order. The team supervisor persists a member right after its turn drains
+// and BEFORE recovering it, so the FIRST recorded state for a member is the terminal the
+// recovery dispatch actually saw — which a plain Load cannot show, because the later
+// synthesis save overwrites the snapshot with a completed one.
+type stateRecordingStore struct {
+	inner port.SessionStore
+	mu    sync.Mutex
+	saved map[session.SessionID][]session.State
+}
+
+func newStateRecordingStore() *stateRecordingStore {
+	return &stateRecordingStore{inner: memstore.New(), saved: map[session.SessionID][]session.State{}}
+}
+
+func (s *stateRecordingStore) Save(ctx context.Context, sess *session.Session) error {
+	s.mu.Lock()
+	s.saved[sess.ID] = append(s.saved[sess.ID], sess.State)
+	s.mu.Unlock()
+	return s.inner.Save(ctx, sess)
+}
+
+func (s *stateRecordingStore) Load(ctx context.Context, id session.SessionID) (*session.Session, error) {
+	return s.inner.Load(ctx, id)
+}
+
+// firstSavedState returns the state of the FIRST save recorded for id.
+func (s *stateRecordingStore) firstSavedState(t *testing.T, id session.SessionID) session.State {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	states := s.saved[id]
+	if len(states) == 0 {
+		t.Fatalf("no save recorded for %q (saved: %+v)", id, s.saved)
+	}
+	return states[0]
+}
+
+// TestSynthesisRunsAfterLeadRunFailed is the TEAM half of issue #318, and the inverse of
+// the empty-Report fallback this test used to pin. A lead whose working round ends in
+// StopError used to be flagged nonResumable, so synthesise refused to drive it and the
+// team's DELIVERABLE degraded to the labelled fallback — one transient provider failure
+// (the terminal stream-idle stall) cost the whole team its report. The supervisor now
+// returns the lead's session to idle through whichever seam its STATE needs, so the one
+// synthesis turn still runs.
+//
+// Both StopError SHAPES are covered, because they land in DIFFERENT states and therefore
+// exercise DIFFERENT seams — precisely why the supervisor dispatches on m.sess.State and
+// not on the stop reason:
+//
+//   - an EMPTY turn with a terminal error stop goes through the loop's terminate() →
+//     Fail() → StateFailed → Recover();
+//   - a TEXT-BEARING turn with the same stop chunk goes through terminateComplete() →
+//     Stop() → StateCompleted → Reopen() (which the old code skipped entirely for a
+//     StopError run).
+//
+// In both cases the member is still reported stopped/error: `stopped` (descheduled, tasks
+// released, honest "stopped before finishing" signal to the lead) is deliberately
+// unchanged — only `nonResumable` (can this session be driven at all?) moved.
+func TestSynthesisRunsAfterLeadRunFailed(t *testing.T) {
+	tests := []struct {
+		name   string
+		round0 mockllm.Turn
+		// wantState is the state the failed round leaves behind — i.e. WHICH recovery
+		// seam this case exercises. Asserting it is what stops a case from silently
+		// drifting into the other seam and leaving the one under test uncovered.
+		wantState session.State
+	}{
+		{
+			name:      "empty error turn leaves the session failed (Recover)",
+			round0:    mockllm.EmptyTurnWithStop(session.StopError),
+			wantState: session.StateFailed,
+		},
+		{
+			name:      "text-bearing error turn leaves the session completed (Reopen)",
+			round0:    stopErrorTurn(),
+			wantState: session.StateCompleted,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newStateRecordingStore()
+			tm := team.New("demo")
+			rec := newPromptRecorder()
+			scripts := map[string][]mockllm.Turn{
+				"lead": {
+					tc.round0, // round 0 fails
+					mockllm.TextTurn("RECOVERED REPORT despite fail"), // synthesis still runs
+				},
+			}
+			sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"),
+				recordingFactory(t, tm, rec, scripts),
+				agent.WithTeamGoal("goal"),
+				agent.WithMaxRounds(3),
+				// Retry DISABLED so this test keeps pinning exactly what it claims: the
+				// SYNTHESIS rescue, on a lead that was benched by its errored round. With the
+				// default cap the lead would also be RETRIED for a working round (issue #318's
+				// second half, covered by TestSupervisorRetriedMemberContributesInLaterRound),
+				// which would consume the scripted synthesis turn and make the assertion below
+				// about a working round rather than the synthesis one.
+				agent.WithMemberErrorRetries(0),
+				agent.WithMemberStore(store),
+				agent.WithMemberSessionPrefix("team-demo"))
+			mustAdd(t, sup, agent.MemberSpec{Name: "lead", Lead: true, InitialPrompt: "go"})
+			out := sup.Run(context.Background(), nil)
+
+			if got := store.firstSavedState(t, agent.MemberSessionID("demo", "lead")); got != tc.wantState {
+				t.Fatalf("the failed round left state %q, want %q — this case would not exercise its recovery seam",
+					got, tc.wantState)
+			}
+
+			if !strings.Contains(out.Report, "RECOVERED REPORT despite fail") {
+				t.Errorf("a lead whose round FAILED must still be recovered for the synthesis turn (issue #318); Report = %q", out.Report)
+			}
+			if len(out.Members) != 1 {
+				t.Fatalf("want 1 member, got %+v", out.Members)
+			}
+			// The honest terminal signal is unchanged: the round DID fail. With retry
+			// disabled the errored round is terminal, so the member is stopped/error — and
+			// ErrorRounds still counts it, which is what stops a benched member from being
+			// distinguishable only by the (retry-dependent) Stopped flag.
+			if !out.Members[0].Stopped || out.Members[0].Reason != agent.StopReasonError {
+				t.Fatalf("the failed lead must still report stopped/error, got %+v", out.Members[0])
+			}
+			if out.Members[0].ErrorRounds != 1 {
+				t.Errorf("the failed round must be counted: ErrorRounds = %d, want 1", out.Members[0].ErrorRounds)
+			}
+		})
+	}
+}
+
+// TestSynthesisAfterRecoveredLeadReplaysPairedHistory is the TEAM analogue of
+// TestSubagentResumeFailedRepairsOrphanedToolCall: making a failed lead resumable is only
+// useful if what it REPLAYS is provider-valid. TestSynthesisRunsAfterLeadRunFailed proves
+// the recovery happens, but both its scripted rounds end with no tool call at all, so
+// nothing there ever put a tool_use/tool_result pair through the recovered replay.
+//
+// Here the lead's round 0 records a REAL tool call + result (RecordFinding) and only THEN
+// fails, so the synthesis turn's request replays a history that actually contains a pair,
+// and session.ValidateToolPairing — the domain's own bidirectional validator, not a
+// hand-rolled approximation — is run over exactly the messages the provider would receive.
+// The "a pair is present" precondition is asserted explicitly: ValidateToolPairing passes
+// trivially on a pair-free history, which would make the oracle vacuous.
+//
+// Honest scope note: unlike the Subagent test this does NOT seed an ORPHANED call, because
+// a member round cannot produce one — the loop never reaches RecordAssistant on the stream
+// error path, and the supervisor builds member sessions internally (WithMemberStore is
+// save-only), so there is no seam to seed through. Recover's closeOutInterruptedTurn is
+// therefore a no-op here; what this pins is that the recovered lead is driven at all and
+// that its replay stays provider-valid with real pairs in it.
+func TestSynthesisAfterRecoveredLeadReplaysPairedHistory(t *testing.T) {
+	store := newStateRecordingStore()
 	tm := team.New("demo")
 	rec := newPromptRecorder()
-	scripts := map[string][]mockllm.Turn{
-		"lead": {stopErrorTurn()}, // round 0 fails → non-resumable
+
+	var mu sync.Mutex
+	var requests [][]session.Message
+	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
+	factory := func(spec agent.MemberSpec, _ string) agent.MemberBuild {
+		cat := tool.NewCatalog()
+		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
+			cat.MustRegister(tl)
+		}
+		name := spec.Name
+		prov := mockllm.NewWith([]mockllm.Option{
+			mockllm.WithRequestObserver(func(req port.LLMRequest) {
+				rec.record(name, req)
+				mu.Lock()
+				requests = append(requests, append([]session.Message(nil), req.Messages...))
+				mu.Unlock()
+			}),
+		},
+			// Round 0, turn 1: a real tool call, so a tool_use/tool_result PAIR enters the
+			// lead's history before anything fails.
+			mockllm.ToolCallTurn(session.NewToolCall("f1", "RecordFinding",
+				json.RawMessage(`{"title":"a finding","body":"details"}`))),
+			// Round 0, turn 2: an EMPTY turn carrying a terminal error stop → terminate() →
+			// Fail() → StateFailed, the state only Recover can return to idle.
+			mockllm.EmptyTurnWithStop(session.StopError),
+			// The synthesis turn the recovered lead must still be able to drive.
+			mockllm.TextTurn("PAIRED REPORT AFTER RECOVERY"),
+		)
+		return agent.MemberBuild{Engine: agent.NewEngine(agent.Deps{
+			LLM: prov, Catalog: cat, Policy: allow, Hooks: noopHooks{}, Model: "mock",
+		})}
 	}
-	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"),
-		recordingFactory(t, tm, rec, scripts),
-		agent.WithTeamGoal("goal"),
-		agent.WithMaxRounds(3))
+
+	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"), factory,
+		agent.WithTeamGoal("goal"), agent.WithMaxRounds(3),
+		// Retry disabled for the same reason as TestSynthesisRunsAfterLeadRunFailed: the
+		// subject here is what the SYNTHESIS turn replays, and the default retry would
+		// spend the scripted synthesis turn on a retried working round first.
+		agent.WithMemberErrorRetries(0),
+		agent.WithMemberStore(store), agent.WithMemberSessionPrefix("team-demo"))
 	mustAdd(t, sup, agent.MemberSpec{Name: "lead", Lead: true, InitialPrompt: "go"})
 	out := sup.Run(context.Background(), nil)
 
+	// Precondition: the failed round really left the session FAILED, i.e. this case
+	// exercises the Recover seam and not Reopen.
+	if got := store.firstSavedState(t, agent.MemberSessionID("demo", "lead")); got != session.StateFailed {
+		t.Fatalf("the failed round left state %q, want %q — this case would not exercise Recover", got, session.StateFailed)
+	}
+	if !strings.Contains(out.Report, "PAIRED REPORT AFTER RECOVERY") {
+		t.Fatalf("the recovered lead must still produce the synthesis deliverable; Report = %q", out.Report)
+	}
+
+	mu.Lock()
+	reqs := append([][]session.Message(nil), requests...)
+	mu.Unlock()
+	if len(reqs) < 3 {
+		t.Fatalf("want at least 3 provider requests (2 working turns + synthesis), got %d", len(reqs))
+	}
+	synth := reqs[len(reqs)-1]
+
+	// The precondition that keeps the validator from passing vacuously.
+	var toolResults, toolCalls int
+	for _, m := range synth {
+		if m.Role == session.RoleTool && m.ToolResult != nil {
+			toolResults++
+		}
+		toolCalls += len(m.ToolCalls)
+	}
+	if toolCalls == 0 || toolResults == 0 {
+		t.Fatalf("the replayed synthesis history must actually CONTAIN a tool_use/tool_result pair, else the pairing check is vacuous (calls=%d results=%d)", toolCalls, toolResults)
+	}
+	if err := session.ValidateToolPairing(synth); err != nil {
+		t.Fatalf("a recovered lead replays an unpaired history (a provider 400): %v", err)
+	}
+}
+
+// TestSynthesisSkippedWhenLeadCannotReturnToIdle is the INVERSE of the test above and the
+// only remaining guard on synthesise's nonResumable gate. Issue #318 deliberately NARROWED
+// what nonResumable means — it used to latch on any errored round, it now latches ONLY when
+// the recovery transition ITSELF failed — so this is the one case that still has to keep a
+// dead session out of the deliverable path, and the case the rewritten
+// TestSynthesisRunsAfterLeadRunFailed no longer reaches.
+//
+// The reachable shape: a lead CANCELLED MID-ROUND ends in StateCancelled. The supervisor's
+// recovery dispatch sends every non-failed state to Reopen, which is completed-only, so it
+// fails and nonResumable latches. synthesise must then return ("", false) — the Team tool
+// renders the labelled joinTeamFallback — and, because ran==false, the phantom synthesis
+// must NOT be counted as a round either.
+//
+// TestSynthesisCancelledMidTeamFallsBackNeverStale does NOT cover this: it cancels BEFORE
+// Run, so the scheduling loop breaks immediately, the lead never runs a round, and
+// nonResumable stays false.
+func TestSynthesisSkippedWhenLeadCannotReturnToIdle(t *testing.T) {
+	tm := team.New("demo")
+	ctx, cancel := context.WithCancel(context.Background())
+	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
+	// Cancel the run as soon as the lead's round-0 turn reaches the provider, so its
+	// in-flight run observes the cancellation and the session lands in StateCancelled —
+	// the state whose Reopen fails. A SECOND scripted turn is present so a bypassed gate
+	// would have something to drive (and so this test cannot pass merely because the
+	// script ran dry).
+	factory := func(spec agent.MemberSpec, _ string) agent.MemberBuild {
+		cat := tool.NewCatalog()
+		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
+			cat.MustRegister(tl)
+		}
+		prov := mockllm.NewWith(
+			[]mockllm.Option{mockllm.WithRequestObserver(func(port.LLMRequest) { cancel() })},
+			mockllm.TextTurn("never reached cleanly"),
+			mockllm.TextTurn("PHANTOM SYNTHESIS ON A DEAD SESSION"),
+		)
+		return agent.MemberBuild{Engine: agent.NewEngine(agent.Deps{
+			LLM: prov, Catalog: cat, Policy: allow, Hooks: noopHooks{}, Model: "mock",
+		})}
+	}
+	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"), factory,
+		agent.WithTeamGoal("goal"), agent.WithMaxRounds(5))
+	mustAdd(t, sup, agent.MemberSpec{Name: "lead", Lead: true, InitialPrompt: "go"})
+	out := sup.Run(ctx, nil)
+
+	// Precondition: the lead really was cancelled mid-round (not stopped some other way),
+	// which is what makes its recovery seam fail.
+	if len(out.Members) != 1 {
+		t.Fatalf("want 1 member, got %+v", out.Members)
+	}
+	if out.Members[0].Disposition != agent.DispositionStopped || out.Members[0].Reason != agent.StopReasonCancelled {
+		t.Fatalf("precondition: the lead must be stopped/cancelled (the state whose Reopen fails), got %+v", out.Members[0])
+	}
+	// (a) No synthesis text: the deliverable degrades to the labelled fallback rather than
+	//     a synthesis turn driven on an undrivable session.
 	if out.Report != "" {
 		t.Errorf("a non-resumable lead must yield an empty Report (fallback), got %q", out.Report)
 	}
-	if len(out.Members) != 1 || !out.Members[0].Stopped {
-		t.Fatalf("lead should be stopped: %+v", out.Members)
+	// (b) …and no phantom round is counted. This is the assertion with teeth: bypassing the
+	//     gate makes synthesise return ran=true even when the drive yields no text, so
+	//     Rounds would tick to 2 while a Report-only oracle stayed green.
+	if out.Rounds != 1 {
+		t.Errorf("only the one scheduled round may count; a skipped synthesis must not tick Rounds, got %d", out.Rounds)
 	}
 }
 

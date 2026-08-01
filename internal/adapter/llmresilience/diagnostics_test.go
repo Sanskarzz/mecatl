@@ -143,7 +143,7 @@ func TestResilienceLogsIdleStall(t *testing.T) {
 	}
 	done := make(chan outcome, 1)
 	go func() {
-		seq, err := p.Stream(context.Background(), port.LLMRequest{})
+		seq, err := p.Stream(context.Background(), port.LLMRequest{Model: "glm-5.2"})
 		if err != nil {
 			done <- outcome{err: err}
 			return
@@ -171,6 +171,128 @@ func TestResilienceLogsIdleStall(t *testing.T) {
 	}
 	if got := argValue(rec[0].args, "idle"); got != 50*time.Millisecond {
 		t.Errorf("idle-stall idle arg = %v, want 50ms", got)
+	}
+	// The CORRELATION arg. The stated contract is that every way a turn dies carries the
+	// model, so an operator who has learned to grep the log by model gets all of them, not
+	// some of them — and this is the line for the most-reported symptom ("thinking, then
+	// nothing"). It is one entry in a varargs Log call, i.e. exactly the shape a refactor
+	// drops silently, so it needs its own oracle.
+	if got := argValue(rec[0].args, "model"); got != "glm-5.2" {
+		t.Errorf("idle-stall model arg = %v, want the request's model (operator correlation)", got)
+	}
+}
+
+// TestResilienceLogsPermanentError asserts the FIRST of the two paths that end a turn
+// TERMINALLY — a permanent, non-retryable establishment error — emits exactly one INFO
+// carrying the attempt and a clamped err. Before issue #319 the recoverable lifecycle
+// (retry / exhaustion / idle stall / breaker) was fully observable while both fatal paths
+// logged at NO level, so an operator reading mecatui.log could not distinguish a
+// permanent 4xx from a run that never called the provider at all.
+func TestResilienceLogsPermanentError(t *testing.T) {
+	diag := &recordingDiag{}
+	f := &fakeProvider{steps: []step{{outerErr: apiErr(400)}}}
+	cfg := tinyBackoffCfg(3)
+	cfg.Diagnostics = diag
+	p := Wrap(f, cfg)
+
+	if _, err := p.Stream(context.Background(), port.LLMRequest{Model: "gpt-5.5-mini"}); err == nil {
+		t.Fatal("Stream must surface the permanent error")
+	}
+
+	rec := diag.find("non-retryable")
+	if len(rec) != 1 {
+		t.Fatalf("non-retryable lines = %d, want 1 (%+v)", len(rec), diag.records)
+	}
+	if rec[0].level != port.LevelInfo {
+		t.Errorf("non-retryable line level = %v, want LevelInfo", rec[0].level)
+	}
+	if got := argValue(rec[0].args, "attempt"); got != 1 {
+		t.Errorf("non-retryable attempt arg = %v, want 1", got)
+	}
+	if got, _ := argValue(rec[0].args, "err").(string); got == "" {
+		t.Errorf("non-retryable line must carry the clamped err, got %q", got)
+	}
+	// CORRELATION (issue #319's other half): without the model an operator reading a
+	// busy server's log learns that A turn died, not whose. It is the finest correlation
+	// this decorator can reach — it sees no session/run identity, and port.LLMRequest
+	// must stay provider-neutral.
+	if got, _ := argValue(rec[0].args, "model").(string); got != "gpt-5.5-mini" {
+		t.Errorf("non-retryable line model arg = %q, want the request's model", got)
+	}
+	// A permanent error is NOT retried, so no retry line may accompany it.
+	if n := len(diag.find("retrying")); n != 0 {
+		t.Errorf("a permanent error must not be retried, got %d retry lines", n)
+	}
+}
+
+// TestResilienceLogsMidStreamError asserts the SECOND terminal path — an error chunk
+// yielded AFTER the first committing chunk, which the no-replay rule makes unretryable —
+// emits exactly one INFO. It runs BOTH restSeq variants (idle-bounded and not): the
+// production wiring sets StreamIdleTimeout, but ≤0 disables the watchdog, and the blind
+// spot must not silently re-open on that path.
+func TestResilienceLogsMidStreamError(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		idle time.Duration
+	}{
+		{"idle watchdog on (the production wiring)", 5 * time.Second},
+		{"idle watchdog off", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			diag := &recordingDiag{}
+			f := &fakeProvider{steps: []step{
+				{chunks: []port.Chunk{{Kind: port.ChunkText, Text: "partial"}}, midErr: errors.New("upstream 502 mid-stream")},
+			}}
+			cfg := Config{MaxAttempts: 1, StreamIdleTimeout: tc.idle, Diagnostics: diag}
+			p := Wrap(f, cfg)
+
+			seq, err := p.Stream(context.Background(), port.LLMRequest{Model: "claude-opus-5"})
+			if err != nil {
+				t.Fatalf("Stream error: %v", err)
+			}
+			if _, derr := drain(t, seq); derr == nil {
+				t.Fatal("drain must surface the mid-stream error")
+			}
+
+			rec := diag.find("mid-stream")
+			if len(rec) != 1 {
+				t.Fatalf("mid-stream lines = %d, want 1 (%+v)", len(rec), diag.records)
+			}
+			if rec[0].level != port.LevelInfo {
+				t.Errorf("mid-stream line level = %v, want LevelInfo", rec[0].level)
+			}
+			if got, _ := argValue(rec[0].args, "err").(string); !strings.Contains(got, "502") {
+				t.Errorf("mid-stream line must carry the clamped err, got %q", got)
+			}
+			// CORRELATION: the model is threaded Stream -> establish -> pullToCommit ->
+			// restSeq for this line specifically (the mid-stream site had no request in
+			// scope), so BOTH restSeq variants must carry it — a thread that reached only
+			// the idle-bounded path would leave the disable-the-watchdog wiring blind.
+			if got, _ := argValue(rec[0].args, "model").(string); got != "claude-opus-5" {
+				t.Errorf("mid-stream line model arg = %q, want the request's model", got)
+			}
+		})
+	}
+}
+
+// TestResilienceCleanStreamLogsNoTerminalLine is the negative guard for both new lines: a
+// stream that establishes and completes cleanly must emit neither, so a non-empty match
+// genuinely means "this turn died".
+func TestResilienceCleanStreamLogsNoTerminalLine(t *testing.T) {
+	diag := &recordingDiag{}
+	f := &fakeProvider{steps: []step{{chunks: textTurn("ok")}}}
+	cfg := Config{MaxAttempts: 1, StreamIdleTimeout: 5 * time.Second, Diagnostics: diag}
+	p := Wrap(f, cfg)
+
+	seq, err := p.Stream(context.Background(), port.LLMRequest{})
+	if err != nil {
+		t.Fatalf("Stream error: %v", err)
+	}
+	if _, derr := drain(t, seq); derr != nil {
+		t.Fatalf("drain error: %v", derr)
+	}
+	if n := len(diag.find("mid-stream")) + len(diag.find("non-retryable")); n != 0 {
+		t.Fatalf("a clean stream must emit no terminal-failure line, got %d (%+v)", n, diag.records)
 	}
 }
 
@@ -353,7 +475,7 @@ func TestResilienceLogsExhaustion(t *testing.T) {
 	cfg.Diagnostics = diag
 	p := Wrap(f, cfg)
 
-	if _, err := p.Stream(context.Background(), port.LLMRequest{}); err == nil {
+	if _, err := p.Stream(context.Background(), port.LLMRequest{Model: "claude-haiku-5"}); err == nil {
 		t.Fatal("Stream should have failed after exhausting attempts")
 	}
 
@@ -366,6 +488,17 @@ func TestResilienceLogsExhaustion(t *testing.T) {
 	}
 	if got := argValue(rec[0].args, "attempts"); got != 3 {
 		t.Errorf("exhaustion attempts arg = %v, want 3", got)
+	}
+	// The two args this line was RETROFITTED with, neither of which had an oracle: `model`
+	// for the same correlation reason as its three sibling terminals, and `err` — the last
+	// attempt's error, which is the only clue to WHY establishment never succeeded. The old
+	// test could not even express the model assertion: it passed an empty LLMRequest, so the
+	// value was "" whether the arg was wired or not.
+	if got := argValue(rec[0].args, "model"); got != "claude-haiku-5" {
+		t.Errorf("exhaustion model arg = %v, want the request's model (operator correlation)", got)
+	}
+	if got, _ := argValue(rec[0].args, "err").(string); got == "" || !strings.Contains(got, "refused") {
+		t.Errorf("exhaustion err arg = %q, want the last attempt's clamped error", got)
 	}
 }
 
@@ -427,3 +560,137 @@ var (
 	_ port.Diagnostics = (*recordingDiag)(nil)
 	_ port.Diagnostics = (*boundDiag)(nil)
 )
+
+// TestResilienceLogsMidStreamCancellationAsACancellation pins the ACCURACY of the
+// mid-stream line on the single most common way a turn ends early: an operator ctrl+c (or a
+// client disconnect) surfaces as a mid-stream context.Canceled.
+//
+// The line still fires — the line's job is "this turn ended here", and a cancelled turn
+// ended just as terminally as a 502 — but it must not say the stream FAILED. Reporting a
+// user's own cancellation as a fault is the same accuracy defect as the "denied by user"
+// message that was never a user's decision, and it is the one an operator is most likely to
+// meet: a log full of "llm stream failed mid-stream" after a deliberate cancel sends them
+// hunting a provider problem that never existed.
+//
+// The err= arg is deliberately ABSENT on this arm: "context canceled" adds nothing the
+// message does not already say, and its presence is what made the old wording look like a
+// diagnosable fault.
+func TestResilienceLogsMidStreamCancellationAsACancellation(t *testing.T) {
+	diag := &recordingDiag{}
+	f := &fakeProvider{steps: []step{
+		{chunks: []port.Chunk{{Kind: port.ChunkText, Text: "partial"}}, midErr: context.Canceled},
+	}}
+	cfg := Config{MaxAttempts: 1, StreamIdleTimeout: 5 * time.Second, Diagnostics: diag}
+	p := Wrap(f, cfg)
+
+	seq, err := p.Stream(context.Background(), port.LLMRequest{Model: "m-1"})
+	if err != nil {
+		t.Fatalf("Stream error: %v", err)
+	}
+	if _, derr := drain(t, seq); derr == nil {
+		t.Fatal("drain must surface the cancellation")
+	}
+
+	rec := diag.find("mid-stream")
+	if len(rec) != 1 {
+		t.Fatalf("a mid-stream cancellation must emit exactly one line (the turn DID end there); got %d (%+v)", len(rec), diag.records)
+	}
+	if rec[0].level != port.LevelInfo {
+		t.Errorf("mid-stream cancellation line level = %v, want LevelInfo", rec[0].level)
+	}
+	// The message names it a CANCELLATION, not a failure.
+	if !strings.Contains(rec[0].msg, "cancelled mid-stream") {
+		t.Errorf("a cancellation must be logged as a cancellation, got %q", rec[0].msg)
+	}
+	if strings.Contains(rec[0].msg, "failed") {
+		t.Errorf("an operator cancel must not be reported as a stream FAILURE, got %q", rec[0].msg)
+	}
+	// The correlation arg still rides it, so grepping by model still finds this terminal.
+	if got := argValue(rec[0].args, "model"); got != "m-1" {
+		t.Errorf("model arg = %v, want m-1 (correlation must ride every terminal line)", got)
+	}
+
+	// And the FAULT wording is still used for a genuine provider fault — without this the
+	// assertions above would pass on a build that logged every terminal as a cancellation.
+	faultDiag := &recordingDiag{}
+	fault := &fakeProvider{steps: []step{
+		{chunks: []port.Chunk{{Kind: port.ChunkText, Text: "partial"}}, midErr: errors.New("upstream 502")},
+	}}
+	fp := Wrap(fault, Config{MaxAttempts: 1, StreamIdleTimeout: 5 * time.Second, Diagnostics: faultDiag})
+	fseq, err := fp.Stream(context.Background(), port.LLMRequest{Model: "m-1"})
+	if err != nil {
+		t.Fatalf("Stream error: %v", err)
+	}
+	if _, derr := drain(t, fseq); derr == nil {
+		t.Fatal("drain must surface the provider fault")
+	}
+	frec := faultDiag.find("mid-stream")
+	if len(frec) != 1 {
+		t.Fatalf("a mid-stream provider fault must emit exactly one line; got %d (%+v)", len(frec), faultDiag.records)
+	}
+	if !strings.Contains(frec[0].msg, "failed mid-stream") {
+		t.Errorf("a genuine provider fault must still be logged as a FAILURE, got %q", frec[0].msg)
+	}
+	if got, _ := argValue(frec[0].args, "err").(string); !strings.Contains(got, "upstream 502") {
+		t.Errorf("a provider fault must still carry err=, got %q", got)
+	}
+}
+
+// TestResilienceLogsBreakerRejection is the C1 oracle: an OPEN circuit breaker rejects the
+// request before the provider is ever called, which ends the turn terminally — and it was
+// the third such path to log at NO level, so an operator saw a turn die with nothing in the
+// log at all. #319's acceptance is that no terminal stream failure ends a turn without at
+// least one Info-level diagnostic; this is that line, with the same `model` correlation its
+// three siblings carry.
+func TestResilienceLogsBreakerRejection(t *testing.T) {
+	conn := &net.OpError{Op: "dial", Err: errors.New("refused")}
+	clk := &manualClock{t: time.Unix(4000, 0)}
+	diag := &recordingDiag{}
+	// One step, reused: every establish fails with the transient conn error, so two
+	// consecutive calls open the breaker.
+	f := &fakeProvider{steps: []step{{outerErr: conn}}}
+	cfg := Config{
+		MaxAttempts:      1,
+		BaseBackoff:      time.Nanosecond,
+		MaxBackoff:       time.Nanosecond,
+		BreakerThreshold: 2,
+		BreakerCooldown:  10 * time.Second,
+		Clock:            clk.Now,
+		Diagnostics:      diag,
+	}
+	p := Wrap(f, cfg)
+
+	for i := 0; i < 2; i++ {
+		if _, err := p.Stream(context.Background(), port.LLMRequest{Model: "m-1"}); err == nil {
+			t.Fatalf("call %d must fail (it is what opens the breaker)", i+1)
+		}
+	}
+	if got := len(diag.find("open circuit breaker")); got != 0 {
+		t.Fatalf("no call has been REJECTED yet, but %d rejection lines were emitted (%+v)", got, diag.records)
+	}
+	callsBefore := f.Calls()
+
+	// Still within the cooldown: this one is rejected by allow() before the provider is
+	// ever reached — a turn that dies with no provider interaction at all.
+	if _, err := p.Stream(context.Background(), port.LLMRequest{Model: "m-1"}); err == nil {
+		t.Fatal("a call inside the cooldown must be rejected by the open breaker")
+	}
+	rec := diag.find("open circuit breaker")
+	if len(rec) != 1 {
+		t.Fatalf("a breaker rejection must emit exactly one Info line; got %d (%+v)", len(rec), diag.records)
+	}
+	if rec[0].level != port.LevelInfo {
+		t.Errorf("breaker-rejection line level = %v, want LevelInfo", rec[0].level)
+	}
+	if got := argValue(rec[0].args, "model"); got != "m-1" {
+		t.Errorf("model arg = %v, want m-1 (correlation must ride every terminal line)", got)
+	}
+	if got, _ := argValue(rec[0].args, "err").(string); !strings.Contains(got, "circuit breaker open") {
+		t.Errorf("the line must carry the breaker error (it names the cooldown), got %q", got)
+	}
+	// The rejected call never reached the provider — that is what makes the missing line
+	// invisible without this fix.
+	if n := f.Calls(); n != callsBefore {
+		t.Errorf("provider Stream calls grew from %d to %d; a rejected call must never reach it", callsBefore, n)
+	}
+}

@@ -2,6 +2,7 @@ package agent_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -783,5 +784,112 @@ func TestSubagentBackgroundWithoutRegistryErrors(t *testing.T) {
 	}
 	if !res.IsError || !strings.Contains(res.Content, "background") {
 		t.Fatalf("background without a registry must be a model-addressable error, got %+v", res)
+	}
+}
+
+// TestBackgroundSubagentFailureCarriesCause is the BACKGROUND half of issue #319, and the
+// path the field exists for. A background child's failure never reaches an inline Subagent
+// card — its Subagent call already returned the started-result — so subagent.end's Cause is
+// the ONLY channel a client has for "why did it fail", and the SubagentStatus-collected
+// body is the only channel the MODEL has. Both are asserted here: without them the
+// background emit could be mutated to Cause:"" and the whole suite would stay green.
+func TestBackgroundSubagentFailureCarriesCause(t *testing.T) {
+	const chatter = "Now let me check the tests."
+	// MULTI-LINE on purpose: the subagent.end Cause is a LINE-ORIENTED field and this is
+	// emit site 2 of 3. Site 1 (the foreground terminal) was the only one whose
+	// normalisation was asserted, while the delta simultaneously removed the ACP
+	// projector's and mecademo's own collapses — so a regression here would reach both
+	// consumers as a multi-row status line with nothing firing.
+	const causeText = "upstream 503:\n  model overloaded"
+	const collapsedCause = "upstream 503: model overloaded"
+	// The child says something chatty, calls a tool, then breaks mid-stream — the exact
+	// shape whose last chat line used to be reported AS the failure reason.
+	task := agent.NewSubagentTool(childEngineWith(
+		chattyThenBrokenChild(chatter, errors.New(causeText)),
+		catalogWith(t, failureCauseReadTool())))
+
+	parentLLM := mockllm.New(
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"investigate","background":true}`)),
+		mockllm.ToolCallTurn(toolCall("p2", "SubagentStatus", `{"agent_id":"subagent-p1","wait_ms":30000}`)),
+		mockllm.TextTurn("parent done"),
+	)
+	e := newEngine(agent.Deps{LLM: parentLLM, Catalog: catalogWith(t, task, agent.NewSubagentStatusTool())})
+	r := e.Run(context.Background(), newSession(t, session.Limits{}), memfs.NewWorkspace("/ws"), "go")
+	evs := drainObserving(t, r, nil)
+
+	// (a) The OBSERVABILITY channel: exactly one subagent.end, carrying the stop AND the why.
+	var ends int
+	var end *session.SubagentPayload
+	for i := range evs {
+		if evs[i].Type == session.EvSubagentEnd && evs[i].Subagent != nil {
+			ends++
+			end = evs[i].Subagent
+		}
+	}
+	if ends != 1 || end == nil {
+		t.Fatalf("want exactly 1 subagent.end for the background child, got %d", ends)
+	}
+	if end.Stop != session.StopError {
+		t.Fatalf("the background child must end StopError (the precondition for a cause), got %q", end.Stop)
+	}
+	if !strings.Contains(end.Cause, collapsedCause) {
+		t.Fatalf("a BACKGROUND child's subagent.end must carry the failure cause — it is the only channel there (issue #319); got %q", end.Cause)
+	}
+	if strings.ContainsAny(end.Cause, "\n\r\t") {
+		t.Fatalf("the background emit site must normalise the cause to ONE line through subagentCausePayload like the foreground one, got %q", end.Cause)
+	}
+
+	// (b) The MODEL channel: the SubagentStatus-collected body leads with the cause, and
+	//     never presents the child's chat line as the failure reason.
+	collected := resultByCallID(evs)["p2"]
+	if collected == nil {
+		t.Fatalf("SubagentStatus produced no result: %v", typesOf(evs))
+	}
+	if !strings.Contains(collected.Content, causeText) {
+		t.Fatalf("the collected background body must carry the provider cause, got:\n%s", collected.Content)
+	}
+	if strings.Contains(collected.Content, chatter) && !strings.Contains(collected.Content, "Last activity before the failure: "+chatter) {
+		t.Fatalf("the child's last chat line may only appear as labelled context, got:\n%s", collected.Content)
+	}
+}
+
+// TestBackgroundSubagentFailureAdvertisesResume is the DISCOVERABILITY half on the
+// background path. A background child's failure reaches the model ONLY through the
+// SubagentStatus-collected body, so if that body omits the resume hint the model never
+// learns the child is recoverable — and a background child is exactly the kind that has
+// already done expensive work. The store is wired deliberately: it is validateResume's
+// first precondition, so this is the configuration in which the advertised action can
+// actually succeed.
+func TestBackgroundSubagentFailureAdvertisesResume(t *testing.T) {
+	const causeText = "upstream 503: model overloaded"
+	task := agent.NewSubagentTool(
+		childEngineWith(mockllm.New(mockllm.ErrorTurn(errors.New(causeText), mockllm.TextChunk("x"))), catalogWith(t)),
+		agent.WithSubagentStore(memstore.New()))
+
+	parentLLM := mockllm.New(
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"investigate","background":true}`)),
+		mockllm.ToolCallTurn(toolCall("p2", "SubagentStatus", `{"agent_id":"subagent-p1","wait_ms":30000}`)),
+		mockllm.TextTurn("parent done"),
+	)
+	e := newEngine(agent.Deps{LLM: parentLLM, Catalog: catalogWith(t, task, agent.NewSubagentStatusTool())})
+	r := e.Run(context.Background(), newSession(t, session.Limits{}), memfs.NewWorkspace("/ws"), "go")
+	evs := drainObserving(t, r, nil)
+
+	collected := resultByCallID(evs)["p2"]
+	if collected == nil {
+		t.Fatalf("SubagentStatus produced no result: %v", typesOf(evs))
+	}
+	body := collected.Content
+	if !strings.Contains(body, "resume it with the agentId above to continue") {
+		t.Fatalf("a failed BACKGROUND delegation must advertise the resume path (issue #318), got:\n%s", body)
+	}
+	// The ordering the hint's own wording depends on.
+	idAt := strings.Index(body, "agentId: ")
+	hintAt := strings.Index(body, "resume it with the agentId above")
+	if idAt < 0 {
+		t.Fatalf("the collected error body must keep the agentId trailer, got:\n%s", body)
+	}
+	if hintAt < idAt {
+		t.Fatalf("the hint says \"the agentId above\" but the agentId line comes after it:\n%s", body)
 	}
 }

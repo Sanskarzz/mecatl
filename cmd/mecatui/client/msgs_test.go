@@ -117,6 +117,16 @@ func TestEventToMsg(t *testing.T) {
 				Stop: "max_tool_calls", DurationMs: 1234, Usage: Usage{InputTokens: 90, OutputTokens: 12}},
 		},
 		{
+			// Issue #319: a failed child's cause must survive the proto→msg relay, or the
+			// fleet pane can only ever show "stop:error" with no WHY.
+			"subagent.end carries the failure cause",
+			&mecatlv1.Event{Type: "subagent.end", Subagent: &mecatlv1.Subagent{
+				ParentCallId: "p1", ChildId: "subagent-p1", Stop: "error",
+				Cause: "upstream 503: model overloaded"}},
+			SubagentMsg{Kind: SubagentEnd, ParentCallID: "p1", ChildID: "subagent-p1",
+				Stop: "error", Cause: "upstream 503: model overloaded"},
+		},
+		{
 			"parallel.start",
 			&mecatlv1.Event{Type: "parallel.start", Parallel: &mecatlv1.Parallel{
 				ParentCallId: "p1", Join: "judge", BranchCount: 3}},
@@ -301,6 +311,10 @@ func TestEventToMsgTeam(t *testing.T) {
 					{Name: "scout", Stopped: true, Reason: mecatlv1.TeamMemberStopReason_TEAM_MEMBER_STOP_REASON_BUDGET},
 					{Name: "fixer", Stopped: true, Reason: mecatlv1.TeamMemberStopReason_TEAM_MEMBER_STOP_REASON_ERROR},
 					{Name: "probe", Stopped: true, Reason: mecatlv1.TeamMemberStopReason_TEAM_MEMBER_STOP_REASON_CANCELLED},
+					// Retried-then-finished (issue #318): not stopped, no reason, so
+					// error_rounds is the only field that says the run was not clean —
+					// dropping it here would make the lane render a bare "done".
+					{Name: "medic", ErrorRounds: 1},
 				}}},
 			TeamMsg{Kind: TeamEnd, ParentCallID: "t1", TeamID: "team-t1", Rounds: 2, Stop: "end_turn",
 				Dispositions: []TeamMemberDisposition{
@@ -308,6 +322,7 @@ func TestEventToMsgTeam(t *testing.T) {
 					{Name: "scout", Stopped: true, Reason: "budget"},
 					{Name: "fixer", Stopped: true, Reason: "error"},
 					{Name: "probe", Stopped: true, Reason: "cancelled"},
+					{Name: "medic", ErrorRounds: 1},
 				}},
 		},
 	}

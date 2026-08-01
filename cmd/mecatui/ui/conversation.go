@@ -142,6 +142,11 @@ type teamLane struct {
 	// blanket "✓ done". Empty stopReason / stopped=false on a clean member.
 	stopped    bool
 	stopReason string
+	// errorRounds is how many of this member's rounds ended in a run-level error, also
+	// applied at team.end. A bounded retry (issue #318) means a member can fail a round
+	// and still finish, so a lane with errorRounds > 0 and stopped == false renders
+	// "done (retried)" — never a bare "done", which would contradict the supervisor.
+	errorRounds int
 
 	// ctxUsed / ctxWindow back the per-member context meter in the ctrl+a agents
 	// overlay. ctxUsed is the CURRENT context occupancy — the most recent turn's
@@ -329,7 +334,14 @@ type subagentLane struct {
 	isError        bool // the most-recent child tool errored (transient)
 	done           bool
 	stop           string
-	durationMs     int64
+	// cause is the child's FAILURE DETAIL on an errored terminal (subagent.end's
+	// Cause; empty otherwise) — the harness/provider error, not child-authored
+	// output, so gauntlet #7 holds (issue #319). It is the ONLY place the fleet
+	// surfaces WHY a child failed: a roster/focus row otherwise shows just
+	// "stop:error", and a BACKGROUND child's failure never reaches an inline card
+	// at all (its Subagent call already returned the started-result).
+	cause      string
+	durationMs int64
 }
 
 // conversation is the ordered scrollback. It owns block creation/mutation so the
@@ -647,7 +659,7 @@ func (c *conversation) fleetTool(msg client.SubagentMsg) {
 
 // fleetEnd records the resolved end stats on the fleet lane (done gates them), so the
 // footer count and the Subagents-tab glyph flip to terminal.
-func (c *conversation) fleetEnd(childID string, usage client.Usage, toolCount int, stop string, durationMs int64) {
+func (c *conversation) fleetEnd(childID string, usage client.Usage, toolCount int, stop, cause string, durationMs int64) {
 	if childID == "" {
 		return
 	}
@@ -656,6 +668,7 @@ func (c *conversation) fleetEnd(childID string, usage client.Usage, toolCount in
 	ln.usage = usage
 	ln.toolCount = toolCount
 	ln.stop = stop
+	ln.cause = cause
 	ln.durationMs = durationMs
 }
 
@@ -1053,6 +1066,7 @@ func (c *conversation) setTeamEnd(parentCallID, teamID string, rounds int, stop 
 		ln := b.lane(d.Name)
 		ln.stopped = d.Stopped
 		ln.stopReason = d.Reason
+		ln.errorRounds = d.ErrorRounds
 	}
 	return true
 }

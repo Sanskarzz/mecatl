@@ -228,6 +228,51 @@ func (p *resilientProvider) diag() port.Diagnostics {
 	return p.cfg.Diagnostics
 }
 
+// logMidStreamError records the OTHER path that ends a turn terminally: an error
+// chunk yielded AFTER the first committing chunk. It is never retried (the
+// no-replay-after-first-chunk rule), so it is the end of the turn — and, like the
+// non-retryable establishment error above, it previously logged at NO level (issue #319 /
+// #318 diagnosis).
+//
+// The blind spot was exactly THREE emissions wide, and this comment used to describe it
+// loosely enough to contradict its sibling 180 lines below. What WAS already observable
+// pre-#319: the per-attempt retry (Debug), exhausted attempts (Info), the idle stall (Info)
+// and the breaker's own state TRANSITIONS (Info). What was silent: this mid-stream error,
+// the non-retryable establishment error, and the breaker REJECTION — the three paths that
+// actually kill a turn. All three log at Info now.
+//
+// It is called from BOTH restSeq variants (idle-bounded and not) so disabling
+// StreamIdleTimeout cannot silently re-open the blind spot.
+//
+// The ctx is deliberately context.Background(), mirroring the sibling idle-stall site:
+// the request ctx may already be done by the time a mid-stream error surfaces, and a
+// slog handler that honours ctx cancellation would drop the line.
+//
+// The model is CORRELATION, not decoration: on a busy server "llm stream failed
+// mid-stream" alone tells an operator that *a* turn died, not whose — half of what issue
+// #319 asked for. It is threaded down from establish's port.LLMRequest (Stream → establish
+// → pullToCommit → restSeq) rather than read off a wider port: LLMRequest.Model is a bare
+// opaque string and must stay so, and the wrapper deliberately sees no session/run
+// identity at all (it is a provider decorator, not a run-scoped sink), so the model id is
+// the finest correlation reachable here without widening port.LLMRequest.
+// A CALLER CANCEL is not a failure and must not be logged as one. An operator pressing
+// ctrl+c (or a client disconnecting) surfaces here as context.Canceled, and reporting
+// "llm stream failed mid-stream" for it mislabels the single most common way a turn ends
+// early — the same accuracy defect as the "denied by user" message that was never a user's
+// decision. It is still logged, because "the turn ended and nothing else will arrive" is
+// worth one line either way; only the wording (and the absence of an err= arg, which would
+// just read "context canceled") changes.
+func (p *resilientProvider) logMidStreamError(model string, err error) {
+	if errors.Is(err, context.Canceled) {
+		p.diag().Log(context.Background(), port.LevelInfo, "llm stream cancelled mid-stream; ending turn",
+			"model", model)
+		return
+	}
+	p.diag().Log(context.Background(), port.LevelInfo, "llm stream failed mid-stream; ending turn",
+		"model", model,
+		"err", clampErr(err))
+}
+
 // clampErr renders an error to a length-bounded string for a diagnostics arg.
 // The wrapper sees only port.LLMRequest + errors, never prompt text, but a
 // provider error body can still be large — clamp it so a single log line stays
@@ -373,7 +418,21 @@ func (p *resilientProvider) Stream(ctx context.Context, req port.LLMRequest) (it
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		// The THIRD of the five paths that end a turn terminally (and one of the two where the
+		// provider is never called at all): the shared breaker is OPEN, so the request is
+		// rejected outright. It logged at NO level, so an operator reading the log saw a turn
+		// die with nothing at all in it — the exact blind spot issue #319 is about, whose
+		// acceptance is that no terminal stream failure ends a turn without at least one
+		// Info-level diagnostic. It was one of exactly THREE silent emissions, with the
+		// non-retryable establishment error and the mid-stream error below; exhausted
+		// attempts, the idle stall and the breaker's own state transitions were already
+		// observable (see logMidStreamError for the full pre-#319 ledger). It carries the
+		// model for the same correlation reason, and the error names the cooldown.
 		if err := p.allow(p.cfg.Clock()); err != nil {
+			p.diag().Log(ctx, port.LevelInfo, "llm stream rejected by the open circuit breaker; ending turn",
+				"model", req.Model,
+				"attempt", attempt+1,
+				"err", clampErr(err))
 			return nil, err
 		}
 
@@ -406,8 +465,23 @@ func (p *resilientProvider) Stream(ctx context.Context, req port.LLMRequest) (it
 				"attempt", attempt+1,
 				"max_attempts", p.cfg.MaxAttempts)
 		}
-		// Permanent (non-retryable) errors are surfaced verbatim, not retried.
+		// Permanent (non-retryable) errors are surfaced verbatim, not retried. This
+		// TERMINALLY ends the turn, so it is logged at Info: the recoverable lifecycle
+		// (retry, exhaustion, idle stall, breaker transitions) was already observable
+		// while this — one of the THREE silent paths that actually kill a turn, with the
+		// mid-stream error and the breaker rejection — logged at NO level, so an operator
+		// reading mecatui.log could not tell a permanent 4xx from a run that never called
+		// the provider at all (issue #319 / #318 diagnosis).
+		//
+		// It carries the model for the same correlation reason logMidStreamError does:
+		// on a busy server the bare message identifies that A turn died, not whose, and
+		// the model id is the finest correlation this decorator can reach without
+		// widening port.LLMRequest (which must stay provider-neutral).
 		if !p.cfg.Classifier(err) {
+			p.diag().Log(ctx, port.LevelInfo, "llm stream failed with a non-retryable provider error; ending turn",
+				"model", req.Model,
+				"attempt", attempt+1,
+				"err", clampErr(err))
 			return nil, err
 		}
 		// Backoff before the next attempt, unless this was the last one.
@@ -423,8 +497,16 @@ func (p *resilientProvider) Stream(ctx context.Context, req port.LLMRequest) (it
 			}
 		}
 	}
+	// The FOURTH of the FIVE terminal paths (the fifth is the post-first-chunk idle stall in
+	// the stream watchdog below — a distinct emission on a distinct code path, and the shape
+	// operators actually report as "thinking, then nothing"). It carries model + err for the
+	// same correlation reason as its siblings: an operator who has learned to grep the log by
+	// model must get every way a turn dies, not some of them, and the last attempt's error is
+	// the only clue to WHY establishment never succeeded.
 	p.diag().Log(ctx, port.LevelInfo, "llm stream not established after all attempts",
-		"attempts", p.cfg.MaxAttempts)
+		"model", req.Model,
+		"attempts", p.cfg.MaxAttempts,
+		"err", clampErr(lastErr))
 	return nil, &ExhaustedError{Attempts: p.cfg.MaxAttempts, Err: lastErr, PerAttempt: p.cfg.PerAttemptTimeout}
 }
 
@@ -533,7 +615,7 @@ func (p *resilientProvider) establish(ctx context.Context, req port.LLMRequest) 
 	// Pull chunks until the first COMMITTING chunk is in hand. Non-committing
 	// chunks (ChunkReasoning, ChunkReasoningItem) are buffered. The establishment
 	// timer stays live through the reasoning prefix.
-	return p.pullToCommit(ctx, seq, stopEstTimer, cancel, establishmentFailure)
+	return p.pullToCommit(ctx, req.Model, seq, stopEstTimer, cancel, establishmentFailure)
 }
 
 // pullToCommit drives the pull iterator from seq until the first COMMITTING chunk
@@ -541,6 +623,7 @@ func (p *resilientProvider) establish(ctx context.Context, req port.LLMRequest) 
 // to keep establish's cyclomatic complexity within the lint budget.
 func (p *resilientProvider) pullToCommit(
 	ctx context.Context,
+	model string,
 	seq iter.Seq2[port.Chunk, error],
 	stopEstTimer func() bool,
 	cancel context.CancelFunc,
@@ -601,7 +684,7 @@ func (p *resilientProvider) pullToCommit(
 			}
 			return nil, attemptError(context.DeadlineExceeded, errFirstChunkTimeout)
 		}
-		rest := p.restSeq(next, stop, cancel)
+		rest := p.restSeq(model, next, stop, cancel)
 		return &firstChunk{chunk: chunk, preCommit: preCommit, restSeq: rest}, nil
 	}
 }
@@ -617,7 +700,7 @@ func (p *resilientProvider) pullToCommit(
 // cancels the per-attempt context (unblocking the inner stream.Next()) and yields
 // a terminal *StreamIdleError. The helper goroutine is always drained after a
 // cancel so it cannot leak.
-func (p *resilientProvider) restSeq(next func() (port.Chunk, error, bool), stop func(), cancel context.CancelFunc) iter.Seq2[port.Chunk, error] {
+func (p *resilientProvider) restSeq(model string, next func() (port.Chunk, error, bool), stop func(), cancel context.CancelFunc) iter.Seq2[port.Chunk, error] {
 	if p.cfg.StreamIdleTimeout <= 0 {
 		return func(yield func(port.Chunk, error) bool) {
 			defer stop()
@@ -628,6 +711,12 @@ func (p *resilientProvider) restSeq(next func() (port.Chunk, error, bool), stop 
 				c, e, ok := next()
 				if !ok {
 					return
+				}
+				if e != nil {
+					// Logged BEFORE the yield: an ordinary consumer BREAKS its range loop on
+					// the error, which makes yield return false — so a log placed after the
+					// yield-false return is unreachable on the very path that matters.
+					p.logMidStreamError(model, e)
 				}
 				if !yield(c, e) {
 					return
@@ -678,6 +767,11 @@ func (p *resilientProvider) restSeq(next func() (port.Chunk, error, bool), stop 
 				if !r.ok {
 					return
 				}
+				if r.e != nil {
+					// See the non-idle variant above: logged BEFORE the yield because a
+					// consumer that breaks on the error makes yield return false.
+					p.logMidStreamError(model, r.e)
+				}
 				if !yield(r.c, r.e) {
 					return
 				}
@@ -699,6 +793,7 @@ func (p *resilientProvider) restSeq(next func() (port.Chunk, error, bool), stop 
 				// have completed first.
 				<-results
 				p.diag().Log(context.Background(), port.LevelInfo, "llm stream stalled (idle timeout); ending turn",
+					"model", model,
 					"idle", p.cfg.StreamIdleTimeout)
 				yield(port.Chunk{}, &StreamIdleError{Idle: p.cfg.StreamIdleTimeout})
 				return

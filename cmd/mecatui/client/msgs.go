@@ -222,6 +222,12 @@ type SubagentMsg struct {
 	Usage      Usage
 	Stop       string
 	DurationMs int64
+	// Cause is the child run's FAILURE DETAIL on subagent.end when Stop is "error"
+	// (empty otherwise): the harness/provider error the server recorded on the
+	// terminal result (issue #319). It is METADATA about how the delegation failed —
+	// a transport/loop error string, never child-authored output — so gauntlet #7
+	// holds. Server-clamped; an older server yields "".
+	Cause string
 }
 
 // TeamKind discriminates the three team.* event kinds carried by a TeamMsg, so
@@ -269,11 +275,14 @@ type TeamFinding struct {
 // Mirrors mecatlv1.TeamMemberDisposition; closed-enum supervisor verdicts only, never
 // member content. Stopped distinguishes a non-resumable/budget-exhausted member from a
 // clean one; Reason refines a stop ("error"/"cancelled"/"budget"; empty when not
-// stopped).
+// stopped). ErrorRounds counts the member's run-level failures, which a bounded retry
+// can leave behind on a member that FINISHED (issue #318) — so it is the only signal
+// that a not-stopped member's run was not clean.
 type TeamMemberDisposition struct {
-	Name    string
-	Stopped bool
-	Reason  string
+	Name        string
+	Stopped     bool
+	Reason      string
+	ErrorRounds int
 }
 
 // TeamMemberSpec is one roster entry forwarded on team.start, as plain data.
@@ -732,6 +741,7 @@ func subagentMsg(kind SubagentKind, s *mecatlv1.Subagent) SubagentMsg {
 		ToolCount:      int(s.GetToolCount()),
 		Usage:          usageFrom(s.GetUsage()),
 		Stop:           s.GetStop(),
+		Cause:          s.GetCause(),
 		DurationMs:     s.GetDurationMs(),
 	}
 }
@@ -830,9 +840,10 @@ func teamMsg(kind TeamKind, t *mecatlv1.Team) TeamMsg {
 	}
 	for _, d := range t.GetDispositions() {
 		msg.Dispositions = append(msg.Dispositions, TeamMemberDisposition{
-			Name:    d.GetName(),
-			Stopped: d.GetStopped(),
-			Reason:  reasonString(d.GetReason()),
+			Name:        d.GetName(),
+			Stopped:     d.GetStopped(),
+			Reason:      reasonString(d.GetReason()),
+			ErrorRounds: int(d.GetErrorRounds()),
 		})
 	}
 	return msg

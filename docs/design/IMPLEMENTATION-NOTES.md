@@ -57,10 +57,11 @@ on a reused session at the run-entry funnel (`loadAndReopen`):
   failure (an upstream 5xx that exhausted the resilience retries) degrades to
   "retryable" instead of permanently bricking the session. Recovery makes retry
   POSSIBLE, not guaranteed — a permanent-cause failure (auth/config) simply
-  fails again with the conversation context intact, and the user can clear. The
-  subagent `resume:` policy is deliberately NOT changed (see the Subagent
-  resume note below): a failed child is still not resumable — re-delegate
-  instead.
+  fails again with the conversation context intact, and the user can clear. Since
+  ADR 0077 (issue #318) the subagent `resume:` path uses this seam too: a failed
+  CHILD recovers exactly like a main session (see the Subagent resume note
+  below), because a long-running direct-write child's accumulated cost includes
+  mutations already applied to the real tree.
 
 The service's `loadAndReopen` (shared by `LoadSession`/`LoadSessionWithMCP`, and
 upstream of every `StartRunContent` run-entry) branches on state: `completed →
@@ -832,8 +833,57 @@ layers Edit/Write). The team-member catalog is DELIBERATELY NOT built from it (i
 differs: `spec.Mutating || roIsolationAvailable` + the `isolateReadOnly` side-effect). Guard:
 `app.TestExplorerPromptInstructsReferences`.
 
+**A failed delegation's CAUSE crosses to the model and the log (issue #319).** The loop already put a
+failed run's real failure detail on `session.ResultPayload.Error` (`engine/agent/loop.go`,
+`terminate`), and every delegation path then DROPPED it: `handleChildEvent` returned only
+text+stop, so `drainChildObserved`/`driveChild` never saw it, and the `StopError` render used the
+child's last assistant TEXT as the error body. The model-facing "error" was therefore the child's
+last chat line ("Now let me check the tests.") — or, when the child had said nothing, an opaque
+no-summary floor. The cause is now threaded as a fourth/third return
+value through `handleChildEvent` → `drainChildObserved` → `driveChild` (last drive wins, mirroring
+`finalText`/`stop`; `drainChild` KEEPS its 2-value signature — its five callers do not want the
+cause) and composed at ONE chokepoint, `subagentErrorBody(cause, final)`: the cause LEADS (it is the
+actionable half), the child's last text follows as `Last activity before the failure: ` +
+`clampRunes(final, maxTeamPreview)` when present, and the empty-cause rows preserve the pre-#319
+shape so non-loop `StopError` terminals do not regress. Three deliberate properties of that helper:
+its parameters are ordered as they RENDER (both are `string` and adjacent, so a positional swap
+compiles — and would silently reproduce the very bug #319 fixed); it clamps BOTH halves, because the
+composed body is recorded into the PARENT's conversation and persisted, so an unbounded provider
+error body would become permanent context the parent re-pays for on every turn; and its floor
+wording is caller-NEUTRAL (`failed without producing a summary`), since the Subagent path prefixes
+`Subagent: ` while the Parallel path renders it under a `=== branch-N [FAILED] ===` header.
+`renderSubagentResult`,
+`renderWritableSubagentResult` and the `parallel.go` branch-failure arm (`res.failReason`) ALL go
+through that one helper — no second policy. `salvageEmptyStop` is untouched (`isEmptyTerminalStop`
+EXCLUDES `StopError`, so a crashed child is never re-driven). The observability half is
+`session.SubagentPayload.Cause`, set on `EvSubagentEnd` ONLY and clamped at ALL THREE emit sites
+(the foreground terminal, the background terminal, and `driveBackground`'s pre-run `endOnError` —
+a fork / session-build failure is a `StopError` terminal too, and for a background child the event
+is the ONLY channel, since its Subagent call already returned the started-result) to
+`maxSubagentCausePreview` = 400 runes — larger than `maxTeamPreview`
+because a truncated provider error is unactionable, still bounded so a pathological body cannot dump
+onto the event stream. It is harness/provider metadata, never child-authored output, so gauntlet #7
+holds; it rides `Subagent.cause` (proto field 17) → `toProtoSubagent` → `client.SubagentMsg.Cause` →
+the mecatui fleet lane, and the SAME payload field is appended to the ACP `subagent finished:` line
+(`internal/adapter/acp/projector.go`, `projectSubagent`) so the two projections of one event agree.
+`ParallelPayload` deliberately gains NO proto field: a branch failure already
+reaches the model through the `Parallel` ToolResult text, which is what `failReason` feeds. In
+mecatui the inline Subagent card needs no new slot (the server-composed error body already carries
+the cause and the card renders it in its result slot); the ctrl+a fleet FOCUS pane gains a
+`failed: <cause>` block (`subagentFailureLine`) — rune-clamped for HEIGHT and word-wrapped to
+`cardTextWidth(width)` via the same `indentWrap` pair the /skills + /agents inventory panels use, because
+`renderSubagentFocus`'s widest line directly sets the overlay card's width and `centerCard`/
+`lipgloss.Place` cannot shrink it (so `width` is now threaded `renderAgentsOverlay` →
+`renderSubagentTab` → `renderSubagentFocus`; an ordinary ~95-char gateway error would otherwise mangle
+the card border at 80/100 columns). It is the only channel there
+— a roster row otherwise shows just `stop:error`, and a BACKGROUND child's failure never reaches an
+inline card at all (its Subagent call already returned the started-result). `cmd/mecademo` prints
+`cause=…` on `EvSubagentEnd` when set, so the field is discoverable from the runnable example.
+
 **Subagent typed result taxonomy + agentId trailer (`renderSubagentResult`/`renderSubagentTrailer`).** The Subagent
-RESULT is now LABELLED by terminal stop reason: `StopError` → tool error; `StopStructuredOutput` →
+RESULT is now LABELLED by terminal stop reason: `StopError` → tool error whose body is composed by
+`subagentErrorBody` (cause first, child text as clamped context — see the #319 note above);
+`StopStructuredOutput` →
 tool error carrying the last validation failure; `StopMaxTurns`/`StopMaxToolCalls`/`StopBudget` →
 success-with-note (`[subagent stopped: …]` prefix); `StopNoProgress` → success-with-note
 `[subagent stopped: ended without a final summary]` (issue #152 — a reasoning-only / empty-turn end
@@ -853,13 +903,16 @@ child's last non-empty `RoleAssistant` text walked backwards out of its own hist
 not a peer preview) and framed by `recoveredDigestPrefix`. Only when BOTH stages are empty does the
 floor `(subagent produced no summary …)` stand — and even then the stop-reason note names WHY, so the
 result is never opaque. **Framing discipline (UX): the stop reason is stated in exactly ONE place.**
-The `StopNoProgress` note (`renderSubagentResult`) owns the canonical "why" (`ended without a final
-summary`) and the next-action hint (`treat as partial; resume it with the agentId above to
-continue`); `recoveredDigestPrefix` states ONLY provenance + partial-ness + the resume hint (it
-does NOT restate the stop reason), so the note + prefix never double-state it, and the prefix still
-reads coherently standalone on the note-less empty-`StopEndTurn` path. The floor placeholder + the
-note both carry the resume hint, so the result is never a dead end (the `agentId` trailer is already
-on it). (Note: the loop's own `lastText` machinery already carries ANY text-bearing turn's text into
+The `StopNoProgress` note (`renderSubagentResult`) owns BOTH the canonical "why" (`ended without a
+final summary`) AND the next action (`treat as partial; resume it with the agentId above to
+continue`); `recoveredDigestPrefix` states ONLY provenance + partial-ness, restating NEITHER. The two
+are rendered one after the other on that terminal, and the prefix used to duplicate the whole
+`treat as partial; resume …` clause BYTE-FOR-BYTE — a model reading the same imperative twice, in two
+framings, cannot tell one instruction from two, so the one-place rule generalises from the stop reason
+to the next action. The prefix still reads coherently standalone on the note-less empty-`StopEndTurn`
+path: that terminal is a BENIGN clean end, so provenance + partial-ness is all it owes, and the
+`agentId` trailer is on the result regardless — resuming stays available where it is not advertised.
+The floor placeholder + the note both carry the resume hint, so the result is never a dead end. (Note: the loop's own `lastText` machinery already carries ANY text-bearing turn's text into
 a `StopNoProgress`/limit result — every text turn sets `lastText`, so for the salvage to run the
 original drive must have produced no assistant text at all, and then there is none for the digest to
 find either. The digest is therefore genuine belt-and-suspenders that the live loop provably cannot
@@ -1015,9 +1068,13 @@ team-member transcript (`team-<teamID>-<member>`) cannot be resumed through Suba
 via `InspectMember`) — the same gate `InspectSubagent` uses. The child is reloaded and its terminal
 state recovered at the AGENT layer (the `loadAndReopen` discipline): `StateCompleted` → `Reopen()`,
 `StateCancelled` → `Interrupt()` (history-repair, no dangling tool_use), `StateIdle` → run as-is,
-`StateFailed` → NOT resumable (start fresh), any other state → not-in-a-resumable-state. The load +
-recovery + limits-tighten run BEFORE the workspace fork, so the common error cases (unknown id, failed
-state, broken store) FAIL FAST without paying a fork/unfork round-trip; AFTER the fork the recovered
+`StateFailed` → `Recover()` (history-repair with the FAILURE-accurate close-out wording — ADR 0077,
+issue #318; it used to be refused on the premise that "a failed child carries no accumulated-user-context
+cost", which a 50+-turn direct-write child with mutations already applied to the real tree falsifies),
+any other state (e.g. a snapshot still recorded `running` — a process that died mid-turn) →
+not-in-a-resumable-state. The load + recovery + limits-tighten run BEFORE the workspace fork, so the
+common error cases (unknown id, non-resumable state, broken store) FAIL FAST without paying a fork/unfork
+round-trip; AFTER the fork the recovered
 session is re-homed onto the fresh root via the new domain method `session.Session.Rehome` (legal only
 from `StateIdle`) — a FIELD-CONSISTENCY repair: it keeps the persisted session's recorded workspace
 consistent with where the resumed run actually executes (the original worktree is torn down; without
@@ -1025,11 +1082,62 @@ it the re-persisted snapshot would record a dead path). NOTE: the child's prompt
 sourced from the engine's `PromptConfig` and is NOT affected by this field (the loop's
 `sess.Workspace` fallback only fires when the configured prompt `Env.Cwd` is empty, and composition
 pre-populates it). The effective prompt is prefixed
-with the verbatim `resumeStalenessNote` (the conversation survives but file changes/build state/running
-processes do NOT — re-run/re-read before trusting earlier observations), computed BEFORE the
-structured-output wrap so a resumed structured-output child sees the note inside the wrap. The LOADED
+with a verbatim harness resume note, computed BEFORE the structured-output wrap so a resumed
+structured-output child sees the note inside the wrap. WHICH note is `resumePosture.note()`'s
+THREE-cell decision over TWO INDEPENDENT axes — WHERE the child runs (THIS call's `mode`) and WHAT the
+earlier run left behind (`editsSurvived`). `!writable` → `resumeStalenessNote` (fresh throwaway
+checkout; file changes/build state/running processes are GONE, so re-run/re-read before trusting
+earlier observations). `writable && editsSurvived` → `resumeWritableNote` (it NEVER forked, ADR 0041,
+so its earlier edits are still sitting in the real tree — telling it they were "GONE" would be false in
+exactly the direction that defeats ADR 0077: a recovered direct-write child must build ON its partial
+edits). `writable && !editsSurvived` → `resumeWritableFreshNote`, which states BOTH facts: real
+workspace, earlier work gone.
+The edits axis is `prepareChildSession`'s `editsSurvived`, **not** the current call's
+`writable` flag: `validateMode` deliberately lets `mode` COMPOSE with `resume`, so "the read-only
+investigator stalled, resume it with write access to apply the fix" is legal — and that child's prior
+worktree is gone. `editsSurvived` is `writable && the resumed snapshot's persisted Workspace == the
+real parent root` (captured BEFORE `buildChildSession`'s `Rehome` overwrites it, so no new persisted
+field is needed). The INVERSE falsehood
+is the worse one: a read-only child has no Edit/Write but DOES have Bash in that worktree, so it may
+genuinely have applied edits, and a child that trusts absent edits builds on nothing. The third cell
+exists because keying only on the edits axis handed that same call `resumeStalenessNote` — "you are
+running in a FRESH workspace checkout" — while it held Edit/Write on the operator's REAL repository
+(a writable call passes `forker = nil`), and a child that believes it is in a scratch checkout may
+delete or rewrite files to "start clean". `TestResumeNoteMatrixCoversBothAxes` asserts the full
+cartesian product per axis, so a fourth cell or a third axis fails rather than falling through.
+A FAILED child's error result additionally carries `subagentErrorResumeHint` after the agentId trailer, so
+the model can DISCOVER the recovery path (ADR 0070). That hint lives in `renderSubagentResult`, NOT in the
+`subagentErrorBody` helper shared with Parallel: a `parallel-<callID>-<n>` branch id fails the resume
+prefix gate, so advertising resume there would instruct the model to take an action that cannot succeed. For
+the SAME reason the hint has ONE gate, `subagentResumeHint(resumable)`, with two silent
+cases. (1) No wired store (`t.store == nil`, `validateResume`'s first precondition): a `SubagentTool`
+built without `WithSubagentStore` — a supported construction for an engine-module consumer — would
+otherwise advertise a `resume:` it then refuses with "not supported in this deployment". (2) The
+WRITABLE arm: `renderWritableSubagentResult` owns a SINGLE combined next-action for a failed
+direct-write child (`writableSubagentFailedNote` — resume on top of the partial edits, OR discard them
+with git, "Do not do both"), because the generic hint plus the partial-edits note are two independent
+imperatives and a model can follow BOTH: discard the edits, then resume a child `resumeWritableNote`
+greets with "the file edits you already made are STILL IN PLACE", which the discard just falsified.
+A store-less writable failure keeps the plain `writableSubagentPartialNote` (review-or-undo only).
+The hint's WORDING is mode-accurate in the same spirit: it says the conversation is preserved but the
+WORKSPACE does not carry over (the child ran in a throwaway checkout, so any files it wrote are GONE),
+because the earlier "continue where it left off" over-promised — `resumeStalenessNote` greets the
+resumed child with exactly the opposite, and a parent told only "where it left off" can re-delegate a
+follow-up that assumes half-written files survived. The claim is about the FAILED child's dead
+worktree, so it holds whether the resume comes back read-only (a fresh fork) or is upgraded to
+`mode:"read-write"` (the real parent tree — still not the dead worktree).
+The PER-CALL TIME-BUDGET terminal has the same shape, via its own `subagentTimeoutNote(writable,
+resumable)` gate mirroring `subagentResumeHint`'s four cells (`subagentTimeoutResumeHint` /
+`writableSubagentTimeoutNote` / `writableSubagentPartialNote` / silence). It was the LAST failure path
+with no next action at all — a timed-out child lands `StateCancelled`, which `resolveResumeSession` has
+always recovered, so the silence read as "this delegation is dead" once every neighbouring terminal
+named a recovery. Its wording is its own rather than a reuse of the `StopError` notes for two reasons:
+the child ran out of CLOCK, not out of competence (so "if the failure looks transient" would
+misdescribe it), and the fix has a nameable knob — a larger `timeout_ms` on the resuming call. Both
+call sites (foreground `finishForegroundRun` and background `driveBackground`) go through the one
+gate. The LOADED
 session keeps its STORED Limits; the per-call `max_turns`/`max_tool_calls` only TIGHTEN them (Reopen/
-Interrupt already reset Counters, so each bound applies afresh); the per-call token budget (`max_run_tokens`,
+Interrupt/Recover all reset Counters via `resetToIdle`, so each bound applies afresh); the per-call token budget (`max_run_tokens`,
 the preferred arg; `max_tokens` the deprecated alias for the same budget — `resolveMaxRunTokens` folds the
 two and REJECTS differing positive values with a model-visible error, accepts same-value) rides the same
 `RunOptions.MaxRunTokensOverride`. An IN-FLIGHT GUARD (`tryAcquireChildID`/`releaseChildID` over a
@@ -1040,7 +1148,13 @@ and waiting would park a dispatcher goroutine + a gate slot (liveness). Everythi
 unchanged: the persist re-saves the SAME id (the grown conversation), the trailer carries the SAME id,
 the structured-output retry and `driveChild` work identically, and no-nesting holds by construction.
 Guards: `agent.TestParentResumesSubagentByTrailerID` (model-facing e2e), `TestSubagentResumeContinuesPriorConversation`,
-`TestSubagentResumeAfterMaxTurns`, `TestSubagentResumeCancelledInterrupts`, `TestSubagentResumeFailedRejected`,
+`TestSubagentResumeAfterMaxTurns`, `TestSubagentResumeCancelledInterrupts`, `TestSubagentResumeFailedRecovers`,
+`TestSubagentResumeFailedTightensLimits`, `TestSubagentResumeFailedRepairsOrphanedToolCall` (adversarial —
+the recovered replay satisfies `session.ValidateToolPairing` and the synthetic close-out carries the
+FAILURE wording, never the cancellation wording), `TestSubagentFailedResultAdvertisesResume` +
+`TestParallelBranchFailureDoesNotAdvertiseResume` (the hint lands, and only where it is true),
+`TestParentResumesFailedSubagentByTrailerID`, `TestWritableResumeNoteSaysEditsSurvive` +
+`TestReadOnlyResumeNoteKeepsFreshCheckoutWording`, `TestSynthesisRunsAfterLeadRunFailed` (the team half),
 `TestSubagentResumeWithAgentRejected`/`TestSubagentResumeWithModelRejected`, `TestSubagentResumeUnknownIDErrors`,
 `TestSubagentResumeNoStoreRejected`, `TestSubagentConcurrentResumeGuard`, `TestSubagentResumeBudgetTightenOnly`,
 `TestSubagentResumeStructuredOutput`, `TestSubagentResumeTeamMemberIDRejected` (adversarial),
@@ -1800,10 +1914,42 @@ mutating-tool backstop because `MemberToolNames()` derives from `MemberTools`); 
 **LastText/completed-task digest** for members that recorded NO finding (rescues a limit-cut-off
 member whose `LastText` is otherwise the only trace); (3) the **lead's drained inbox**.
 `neutraliseFraming`'s header list is extended for every new synthesis/round-0 section header so
-an injected body cannot forge one. A lead stopped purely by its lifetime turn budget is still
-*resumable* (`memberRT.nonResumable` is set ONLY on `StopError`/`Reopen`-fail, NOT on budget), so
-the ONE synthesis turn runs even then (§5 special-case); a genuinely non-resumable lead yields an
-empty `Report` → the structured fallback.
+an injected body cannot forge one. A lead stopped by its lifetime turn budget — or, since ADR 0077,
+by one round that ended in `StopError` — is still *resumable*, so the ONE synthesis turn runs even
+then (§5 special-case). `runTurn` picks the recovery seam from the session's STATE
+(`StateFailed → Recover`, else `Reopen`) rather than from `stop`, because `terminateComplete` lands a
+text-bearing `StopError` turn in `StateCompleted`; `memberRT.nonResumable` is now set ONLY when that
+transition itself fails (in practice: a CANCELLED member, whose `Reopen` is illegal by design), and
+that is the one case that still yields an empty `Report` → the structured fallback.
+
+**Bounded member retry (ADR 0077, the last #318 acceptance bullet).** Recovering the
+session made the member drivable, but `stopped` still descheduled it, so a member that hit ONE
+transient stall was benched for the rest of the run. `runTurn` now leaves an errored member
+SCHEDULABLE while it is under `Supervisor.memberErrorRetries` (`agent.WithMemberErrorRetries`, default
+`defaultMemberErrorRetries` = **1**; 0 restores the previous release's bench-on-first-error behaviour
+byte-for-byte). Three shapes are NEVER retried: a failed RECOVERY (`nonResumable` — undrivable), a
+CANCELLED member (not a transient failure; D5's disposition must hold), and a member that exhausted its
+LIFETIME TURN BUDGET. TERMINATION comes from `memberRT.errorRounds` being MONOTONIC (counted on every
+`StopError` round, never reset): a permanently-failing member runs exactly `cap+1` rounds and is then
+benched with its original disposition — `stopped` + `StopReasonError` + `team.ReleaseTasks` +
+`finishChildRun`, all unchanged — so the round loop reaches quiescence far short of `WithMaxRounds`.
+A retried member RELEASES its in-progress claim (`ReleaseTasks`) and returns to `team.MemberIdle`,
+because `InProgressFor` short-circuits `planRound`'s auto-claim and a kept claim would strand the work
+behind the member that just failed at it. `planRound` also FORCE-SCHEDULES it for exactly one turn
+(`memberRT.retryPending`, cleared on schedule): "not stopped" is not enough to be rescheduled — the
+ordinary gate plans only a member with a drained message or a claimed task, and the commonest stall
+shape (dying on the first exploration turn, before any task exists) has neither. That turn carries
+`retryTurnNote` — harness metadata (previous turn failed mid-flight, continue from your own transcript
+above, your claim was released), rendered TRUSTED like the roster, quoting nothing from the failed turn.
+DISPOSITION HONESTY is an additive COUNT, never a new `MemberDisposition` value (that enum is closed and
+mirrored on the wire): `MemberOutcome.ErrorRounds` → `session.TeamMemberDisposition.ErrorRounds` →
+proto `TeamMemberDisposition.error_rounds` (field 4) → `cmd/mecatui`'s `done (retried)` lane label, so a
+retried-then-finished member is not byte-identical on the wire to one that never failed. The LEAD is
+told through the EXISTING trusted status section, `writeTeamStatus` (renamed from
+`writeStoppedMemberStatus`), which names the retried members and their failed-round counts alongside the
+stopped ones — a silently-retried member is a coordination lie in the opposite direction from the one
+the stopped line closes, since the lead re-plans and reports on what it believes members did. The line
+is supervisor-authored and carries only a count, so the gauntlet-#7 footing is identical.
 
 **The deliverable chain — never a bare refusal or empty (`teamtool.go`).** `synthesise` is a
 pure PRODUCER; the QUALITY gate lives in `deliverable(TeamOutcome)`, three tiers: **(1)** the
@@ -3173,6 +3319,43 @@ breaker is untouched (a mid-stream error structurally never reaches the establis
 `recordFailure` lives). When `StreamIdleTimeout <= 0` the loop is the plain pull (no goroutine, no
 behaviour change). A package-level `goleak` gate (`leakmain_test.go`) proves the watchdog goroutine
 unwinds on every path.
+
+**Both TERMINAL paths log at Info (issue #319).** The RECOVERABLE stream lifecycle was already fully
+observable — breaker transitions, retry-exhaustion, the idle stall above (all Info) plus the
+per-attempt-timeout / retry-with-backoff detail (Debug) — while the two paths that actually END a
+turn logged at NO level: a permanent, non-retryable establishment error (the `!Classifier(err)`
+return in `Stream`) and a mid-stream error chunk after the first committing chunk (`restSeq`). An
+operator reading `mecatui.log` therefore could not distinguish a fatal 4xx from a run that never
+called the provider at all, which is exactly the elimination the #318/#319 diagnosis needed. Both now
+emit ONE Info line with a `clampErr`'d `err`. Two placement rules, both load-bearing: (1) the
+mid-stream line is emitted from `logMidStreamError`, called from BOTH `restSeq` variants (idle-bounded
+and plain) so setting `StreamIdleTimeout <= 0` cannot silently re-open the blind spot; (2) it is
+logged BEFORE the `yield` — an ordinary consumer BREAKS its range loop on the error, which makes
+`yield` return false, so a log placed after the `if !yield(...) { return }` is unreachable on the very
+path that matters. Its ctx is `context.Background()`, mirroring the sibling idle-stall site (the
+request ctx may already be done). Per `Config.Diagnostics`' own contract this is an ADAPTER seam, NOT
+the loop's run-scoped sink, so the loop's three-line budget (ADR 0020) is untouched.
+
+**The Debug retry lines stay Debug, and there is deliberately NO operator severity knob.** Promoting
+them to Info was rejected (retries are routine; the line is spam there), and a knob to lower the sink
+floor and REACH them was considered and rejected too. It is not needed for #319/#318: the diagnosis
+those issues asked for is "why did this turn die", which the two Info terminals above answer at the
+DEFAULT floor in every binary. The Debug lines answer a DIFFERENT question — a slow or retrying
+provider — so reaching them is a properly-scoped change of its own, with its own justification, if it
+is ever wanted. Against that, such a knob is permanent operator surface at every composition root
+(help text, docs, tests, support) and carries a real privacy hazard: lowering the floor also admits any
+third-party dependency's debug output into mecatui's plaintext 0700 log file, so it would ship owing a
+disclosure for a problem it introduced. The repo's own preference settles it — the cheapest abstraction
+is the one you don't write yet. Every diagnostics sink is therefore hardcoded at its
+Info/`port.LevelInfo` floor (`cmd/mecatui/diaglog.go`, `cmd/mecatui/main.go`, `cmd/mecated/main.go`).
+
+Both Info lines also carry `"model"` (from the request). Without it an operator on a busy `mecated`
+learns that *a* turn died, not whose — half of what #319 asked for. The model id is the finest
+correlation this decorator can reach: it is a provider DECORATOR and sees no session/run identity at
+all, and `port.LLMRequest` must stay provider-neutral, so widening it for a session id is not on the
+table. The mid-stream site had no request in scope, so the model is threaded `Stream` ->
+`establish` -> `pullToCommit` -> `restSeq` -> `logMidStreamError` as a plain string; both `restSeq`
+variants carry it, so disabling the idle watchdog cannot leave that path uncorrelated.
 
 ### `WebSearch` core tool + `search` adapters (issue #26 — source discovery before WebFetch)
 

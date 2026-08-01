@@ -57,6 +57,77 @@ The covered surface is the seven core packages (`session`, `governance`, `tool`,
   tasks 01–02)
  (chore(engine): api snapshot + CHANGELOG for the ADR-0079 payload widening)
 
+- **`agent.WithMemberErrorRetries` + `agent.MemberOutcome.ErrorRounds` +
+  `session.TeamMemberDisposition.ErrorRounds`** (issue #318, ADR 0077) —
+  the bounded MEMBER RETRY that closes #318's last acceptance bullet ("a team
+  member that hits one transient stall still participates in later rounds").
+  ADR 0077 made a failed member's session RECOVERABLE, which rescued the lead's
+  synthesis turn but still descheduled the member for the rest of the run.
+  `WithMemberErrorRetries(n)` is a new `SupervisorOption` (default **1**) capping
+  how many `StopError` rounds a member is retried through before it is benched with
+  the same disposition it received before this release (`stopped` +
+  `StopReasonError`, tasks released). `WithMemberErrorRetries(0)` restores
+  bench-on-the-first-errored-round — the SCHEDULING half only. It does NOT restore
+  the pre-ADR-0077 behaviour of the same round: a member whose round ends in
+  `StopError` still has its session RECOVERED (`session.Session.Recover`) rather than
+  latched `nonResumable`, so a failed LEAD still runs its synthesis turn either way.
+  That half has no knob — see the "A FAILED delegated child is now resumable" entry
+  under **Changed** for the one lever (`agent.WithSubagentStore`) and its scope.
+  `MemberOutcome.ErrorRounds`
+  and its `session.TeamMemberDisposition.ErrorRounds` mirror are new `int` COUNTS of
+  a member's run-level failed rounds — the disposition-honesty signal, since a
+  retried-then-finished member is `DispositionDone` with no `Reason` and would
+  otherwise be indistinguishable from one that never failed. No enum gained a value
+  (`MemberDisposition` is closed and mirrored on the proto wire) and no exported
+  signature changed. Classified Added per COMPATIBILITY.md (a new option constructor
+  plus two struct fields are a minor bump).
+
+  **BEHAVIOUR CHANGE for library consumers on the default configuration:** a team
+  member whose round ends in `session.StopError` is no longer benched on the first
+  failure. It stays schedulable, its in-progress task claim is RELEASED back to
+  pending (so it or a peer can re-claim), it is force-scheduled for one retry turn
+  carrying a supervisor-authored retry note, and it is benched only once its errored
+  rounds EXCEED the cap. The counter is per-member and NEVER reset, so at the default
+  cap of 1 the exposure is exactly **one extra scheduled round per member over the whole
+  team run** — not one per failure: a permanently-failing member runs `cap+1` = 2 rounds
+  in total instead of 1, which is what bounds it and the reason the default is 1.
+  A failed RECOVERY (`nonResumable`), a CANCELLED member, and a turn-budget-exhausted
+  member are never retried. Pin `WithMemberErrorRetries(0)` to restore the previous
+  release's SCHEDULING behaviour (see the scope note above — the session recovery is
+  not covered by it).
+
+  **OPERATORS of `mecated`/`mecatui`/`mecak8s` cannot reach `WithMemberErrorRetries`, and
+  that is deliberate.** There is no `--max-member-error-retries` flag and no
+  `app.Config` field: this is a per-member BEHAVIOURAL bound, and the repo's line is that
+  those stay engine-only defaults while team-wide RESOURCE ceilings get flags. The
+  precedent is the sibling `WithMemberTurnBudget` (default 200 turns per member), which is
+  likewise engine-only with no operator flag — not `WithTeamTokenBudget`, which is
+  team-wide and is wired to `--max-team-tokens`. An operator's control over the extra spend
+  is therefore the existing token ceilings: `--max-team-tokens` (team-wide, summed across
+  all members and rounds) and `--max-run-tokens` (per run, inherited by every member
+  drive), on top of the built-in round cap and per-member turn budget. A LIBRARY consumer
+  that wants fail-fast passes `WithMemberErrorRetries(0)`. (issue #318)
+
+- **`session.SubagentPayload.Cause`** (issue #319) — a new `string` field on the
+  redacted `subagent.*` observability projection carrying the child run's FAILURE
+  DETAIL (the loop's `session.ResultPayload.Error`) when `Stop` is `StopError`;
+  empty on every other terminal, and set on `EvSubagentEnd` ONLY. It is
+  harness/provider metadata (a transport or loop error string), never
+  child-authored model output, so it is gauntlet-#7 safe on the same footing as
+  `Stop`/`Usage`. It is LINE-ORIENTED by contract — normalised at the emit site
+  (whitespace collapsed to single spaces, then rune-clamped), so a consumer renders
+  it as-is rather than re-deriving the collapse for its own single-line surface. It
+  rides the proto/client wire end-to-end (`Subagent.cause` = field 17). Classified
+  Added per COMPATIBILITY.md (a new struct field on an existing payload is a minor
+  bump). Behaviour note for library consumers: the model-facing `Subagent` tool result
+  on a `StopError` terminal now LEADS with this cause and demotes the child's last
+  assistant text to clamped "Last activity before the failure" context — the same
+  change applies to a failed `Parallel` branch's reported reason. Both halves of that
+  body are framing-NEUTRALISED (`agent.NeutraliseFraming`) before composition, since
+  neither is harness-authored: a provider error string or a child's prose could
+  otherwise forge the `agentId:` trailer or a bracketed harness note it is composed
+  next to. No exported signature changed. (issue #319)
+
 - **`agent.SessionOriginScheduleManager` + `agent.NewSessionOriginScheduleManager` +
   `agent.OriginBinder` + `agent.Deps.OriginBinder`** (ADR 0075,
   fire-result-delivery task 02) — a new `port.ScheduleManager` wrapper that
@@ -115,6 +186,72 @@ The covered surface is the seven core packages (`session`, `governance`, `tool`,
   task 06 repair)
 
 ### Changed
+
+- **A text-bearing `StopError` turn now carries a terminal CAUSE** (issue #319
+  review-audit follow-up) — BEHAVIOUR only; no exported signature moved and
+  `engine/api/*.txt` is unaffected. `Engine.terminateComplete` gains an internal
+  `errMsg` parameter (it is unexported), and the loop's `finishTurnNoTools`
+  synthesises the cause for a text-bearing turn that ended on a terminal stop
+  CHUNK (`max_tokens` / `refusal` / `incomplete` / `failed` → `StopError`,
+  relayed by both adapters' `mapStop` on the `ChunkDone` stop, NOT as a Go
+  error) via the new unexported `stopTerminalCause`. Before this, such a turn
+  emitted an EMPTY `session.ResultPayload.Error`, so a delegation's
+  `subagentErrorBody` rendered the child's truncated/refused text AS the failure
+  — the exact #319 presentation on the `terminateComplete` path (the empty-turn
+  shape already routed through `terminate` with a cause). The synthesised cause
+  is harness-authored metadata (a stop label + a "TRUNCATED or refused" shape
+  note), never model text, so it is gauntlet-#7 safe, and it is `StopError`-only
+  (a clean limit / cancellation keeps an empty cause, honouring the
+  `SubagentPayload.Cause` "empty on every other terminal" contract). Consumers
+  asserting that a text-bearing `StopError` delegation result led with the
+  child's last text must adjust. No new exported symbol.
+
+- **Model-facing next-action wording on the Subagent failure terminals** (issue #319 /
+  #318 review round) — BEHAVIOUR/COPY only; no exported signature moved and
+  `engine/api/*.txt` is unaffected. Three strings a consumer might be matching on
+  changed, all in the same direction (the harness must not assert something the next
+  turn contradicts):
+  1. The `StopError` resume hint no longer says "continue where it left off" — it now
+     states that the CONVERSATION is preserved but the WORKSPACE is not (the failed
+     child ran in a throwaway checkout, so files it wrote are gone), which is what
+     `resumeStalenessNote` tells the resumed child.
+  2. The PER-CALL TIME-BUDGET terminal (`timeout_ms`) now carries a next action — a
+     timed-out child lands `StateCancelled` and has always been resumable, but the
+     terminal named no recovery, and a `mode:"read-write"` timeout gets the single
+     combined resume-or-discard decision instead of a bare partial-edits warning.
+  3. The last-resort recovered-digest prefix no longer restates the stop-reason note's
+     next action; it states provenance + partial-ness only (the two rendered
+     back-to-back and duplicated the clause byte-for-byte).
+  Consumers asserting on the old copy must adjust. No new exported symbol.
+
+- **A FAILED delegated child is now resumable** (ADR 0077, issue #318) — a
+  BEHAVIOUR change with NO exported signature change, so it is classified Changed
+  (behaviour only; `engine/api/*.txt` is unaffected). The `Subagent` tool's
+  `resume: <agentId>` used to hard-refuse a child persisted in
+  `session.StateFailed` ("ended in a failed state and is not resumable"); it now
+  recovers it through the existing exported `session.Session.Recover`, matching the
+  service layer's `loadAndReopen` discipline (all three terminals recover). A
+  genuinely non-resumable state — e.g. a snapshot still recorded `running` — is
+  still a model-addressable tool error. Two model-facing strings changed with it: a
+  `StopError` Subagent result now carries a resume hint after its `agentId:`
+  trailer, and a resumed `mode:"read-write"` child is told its earlier edits SURVIVED
+  (it never forked) instead of receiving the read-only fresh-checkout staleness note.
+  In `agent.Supervisor`, a team member whose round left its session failed is
+  likewise recovered rather than benched, so a failed LEAD still reaches its final
+  synthesis. `MemberOutcome.Stopped`/`Reason` for a failed round changed too — see
+  the `agent.WithMemberErrorRetries` entry under **Added**: on the default
+  configuration a member whose round ends in `StopError` is now retried, so it
+  finishes `Stopped == false` / `DispositionDone` / `Reason == ""` rather than
+  `stopped`/`error`. Read the two entries together; the disposition a consumer sees
+  is the retry entry's, not this one's. Consumers relying on a failed child being permanently
+  unresumable — or matching on the old refusal copy — must adjust. There is no knob
+  that restores the old refusal; the ONE lever is the precondition `resume` has always
+  had — it requires a wired session store, so a consumer that must forbid resuming a
+  failed child does not pass `agent.WithSubagentStore` (which disables `resume:`
+  wholesale, not just for the failed state, and also stops `InspectSubagent` from
+  loading persisted child transcripts). A `StopError` result built without a store
+  correspondingly omits the resume hint, so the model is never told about a path that
+  deployment cannot serve. (issue #318)
 
 - **`agent.NewPlanAwareScheduleTool(base tool.Tool, mgr port.ScheduleManager)`**
   — the AC4.3 plan-mode gate now also denies the `fire` of a MUTATING schedule

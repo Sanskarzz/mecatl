@@ -121,6 +121,36 @@ const defaultTeamConcurrency = 8
 // WithMemberTurnBudget; 0 disables it.
 const defaultMemberTurnBudget = 200
 
+// defaultMemberErrorRetries is how many times a member whose round ended in
+// StopError — and whose session the supervisor then RECOVERED successfully — is left
+// SCHEDULABLE instead of benched (ADR 0077, issue #318). One retry is the
+// default because the failure this closes is a TRANSIENT one (the terminal 180s
+// stream-idle stall): a single re-drive is enough to survive a network hiccup, while
+// keeping the wasted provider spend of a permanently-failing member to one extra
+// round. A member that errors more rounds than this is benched exactly as it was
+// in the previous release (stopped + StopReasonError + tasks released), which is also
+// what WithMemberErrorRetries(0) restores. It bounds the retry, so a member that
+// always fails always terminates.
+const defaultMemberErrorRetries = 1
+
+// retryTurnNote is the supervisor-authored line a RETRY turn carries (issue #318): the
+// member's previous round died mid-flight, the harness recovered its session, and this
+// turn is the retry. It is harness metadata — a stop-reason classification, nothing
+// quoted from the failed turn — so it renders TRUSTED, outside any fence.
+//
+// It exists because the alternative is a lie by omission: without it the member sees a
+// fresh turn prompt on top of a transcript that stops mid-thought, with no way to tell a
+// crash from its own decision to stop, and would plausibly start over (re-doing work) or
+// assume the work landed (skipping it). Any task the member had claimed was released, so
+// the note does not promise the claim survived; planRound re-claims it (or a peer does)
+// and the ordinary claimed-task section then states it.
+const retryTurnNote = "\nNOTE FROM THE HARNESS: your previous turn in this team run FAILED before it " +
+	"finished (a run-level error — for example a provider stall), and the harness recovered your " +
+	"session so you can carry on. Your own work up to that point is in the conversation above: " +
+	"continue from there rather than starting over, and re-do only what the failed turn left " +
+	"unfinished. Any task you had claimed was released back to the team, so check the task list " +
+	"before assuming you still hold it.\n"
+
 // TeamEvent tags a member session Event with the member that produced it, for the
 // multiplexed team event stream the caller observes.
 type TeamEvent struct {
@@ -271,6 +301,13 @@ type Supervisor struct {
 	maxRounds   int
 	concurrency int
 	turnBudget  int
+	// memberErrorRetries is how many StopError rounds a member may be RETRIED through
+	// before it is benched (default defaultMemberErrorRetries; 0 disables retry and
+	// restores the previous release's "bench on the first errored round" behaviour).
+	// WithMemberErrorRetries is the sole writer. It bounds the retry loop: errorRounds
+	// only ever grows, so a permanently-failing member benches after this many extra
+	// rounds and the scheduling loop still reaches quiescence.
+	memberErrorRetries int
 	// tokenBudget is the TEAM-WIDE cumulative token ceiling (input+output,
 	// session.Usage.TotalTokens) summed across ALL members and ALL rounds, the lead's
 	// synthesis turn included in the final accounting. 0 (the default, no nonzero
@@ -364,17 +401,38 @@ type memberRT struct {
 	// single-goroutine happens-before discipline as turnsUsed.
 	ran     bool
 	stopped bool
-	// nonResumable is true when the member's session can NO LONGER be driven — its
-	// last run failed (StopError) or Reopen failed. It is DISTINCT from stopped: a
-	// member stopped purely by its lifetime turn budget is non-schedulable but its
-	// session is still resumable, so the lead-synthesis special-case (§5) may drive it
-	// ONE last time. synthesise skips a lead only when nonResumable is set.
+	// nonResumable is true when the member's session can NO LONGER be driven: the
+	// recovery seam its terminal state requires (Reopen for a clean/limit end, Recover
+	// for a StopError one — issue #318) itself FAILED. It is DISTINCT from stopped: a
+	// member stopped by its lifetime turn budget, or by one errored round it was
+	// recovered from, is non-schedulable but its session is still drivable, so the
+	// lead-synthesis special-case (§5) may drive it ONE last time. synthesise skips a
+	// lead only when nonResumable is set.
 	nonResumable bool
 	// stopReason is the closed-enum cause when this member is stopped (set in runTurn's
 	// stop branch alongside stopped). Empty for a member that finished cleanly. Touched
 	// only where stopped is, so the same single-goroutine ownership rule holds.
 	stopReason MemberStopReason
-	lastText   string
+	// errorRounds counts the rounds this member ended in session.StopError, across its
+	// whole life. It is the RETRY BOUND's counter (compared against
+	// s.memberErrorRetries in runTurn) AND the disposition-honesty signal
+	// (MemberOutcome.ErrorRounds → session.TeamMemberDisposition.ErrorRounds → the
+	// team.end wire frame), so a member that failed a round and then finished never
+	// reports as silently clean. MONOTONIC — never reset — which is what makes the
+	// retry provably terminating. It counts StopError ONLY: a cancelled member's
+	// failing Reopen is classified StopReasonCancelled and is not an error round.
+	// Same single-goroutine ownership as turnsUsed.
+	errorRounds int
+	// retryPending is set by runTurn when an errored round was RECOVERED and the member
+	// is under the retry cap, and cleared by planRound when it schedules the retry turn.
+	// It exists because "not stopped" is NOT sufficient to be rescheduled: planRound
+	// only plans a member that drained a message or claimed a task, and the commonest
+	// stall shape (a member dying on its first long exploration turn, before any task
+	// exists) leaves it with neither — so without this one-shot force-schedule the
+	// retry would be a silent no-op. Cleared on schedule, so one errored round buys
+	// exactly one forced turn. Same single-goroutine ownership as turnsUsed.
+	retryPending bool
+	lastText     string
 	// turnsUsed is the cumulative number of turns this member has spent across all
 	// rounds. It is captured from sess.Counters.Turns at the end of each run, BEFORE
 	// Reopen zeroes the per-round counters, so the running total survives the reset
@@ -496,6 +554,28 @@ func WithMemberTurnBudget(n int) SupervisorOption {
 	}
 }
 
+// WithMemberErrorRetries sets how many times a member whose round ended in
+// session.StopError — and whose session the supervisor then RECOVERED successfully —
+// is left SCHEDULABLE for a later round instead of being benched (default
+// defaultMemberErrorRetries = 1; ADR 0077, issue #318). A retried member
+// releases its in-progress task claim (so it, or a peer, can re-claim the work) and is
+// force-scheduled for exactly one turn even when it holds no message and no claimable
+// task. Once its errored-round count EXCEEDS this cap it is benched exactly as before
+// this: stopped, MemberStopReason StopReasonError, tasks released, registry
+// entry closed. 0 disables retry entirely (the previous release's behaviour); a negative
+// value is ignored.
+//
+// A member whose RECOVERY itself failed (memberRT.nonResumable) is NEVER retried
+// regardless of this cap — its session cannot be driven at all — and neither is a
+// cancelled or turn-budget-exhausted member (those are not transient failures).
+func WithMemberErrorRetries(n int) SupervisorOption {
+	return func(s *Supervisor) {
+		if n >= 0 {
+			s.memberErrorRetries = n
+		}
+	}
+}
+
 // WithTeamTokenBudget sets the TEAM-WIDE cumulative token budget (input+output,
 // session.Usage.TotalTokens) summed across ALL members and ALL rounds, including
 // the lead's synthesis turn in the final accounting. It is checked at the ROUND
@@ -596,8 +676,11 @@ func NewSupervisor(t *team.Team, base tool.Workspace, factory MemberEngine, opts
 		maxRounds:   defaultMaxRounds,
 		concurrency: defaultTeamConcurrency,
 		turnBudget:  defaultMemberTurnBudget,
-		idPrefix:    strings.TrimSuffix(TeamSessionPrefix, "-"), // the exported convention is the source
-		members:     make(map[string]*memberRT),
+		// The retry cap is a NONZERO default, so a caller that never sets an option still
+		// survives one transient member failure (ADR 0077).
+		memberErrorRetries: defaultMemberErrorRetries,
+		idPrefix:           strings.TrimSuffix(TeamSessionPrefix, "-"), // the exported convention is the source
+		members:            make(map[string]*memberRT),
 	}
 	for _, o := range opts {
 		o(s)
@@ -933,7 +1016,9 @@ type MemberStopReason string
 
 const (
 	// StopReasonError is a run that failed (StopError) or a session that could not be
-	// re-opened — both internal-fault, non-resumable class.
+	// returned to idle — both the internal-fault class. A failed run is RECOVERED
+	// (issue #318), so this reason no longer implies the session is undrivable; only
+	// memberRT.nonResumable says that.
 	StopReasonError MemberStopReason = "error"
 	// StopReasonCancelled is a member ended by ctx cancellation.
 	StopReasonCancelled MemberStopReason = "cancelled"
@@ -948,8 +1033,9 @@ type MemberOutcome struct {
 	Name string
 	// LastText is the member's most recent terminal assistant text.
 	LastText string
-	// Stopped reports whether the member ended in a non-resumable state (its last
-	// run failed or was cancelled, so it could not be re-opened for another round).
+	// Stopped reports whether the supervisor descheduled the member before the team
+	// finished (its last run failed or was cancelled, or it exhausted its lifetime turn
+	// budget), so it ran no further rounds.
 	Stopped bool
 	// Disposition is the member's TERMINAL disposition (done / stopped). It is the
 	// closed-enum form of Stopped: Disposition == DispositionStopped iff Stopped.
@@ -957,6 +1043,24 @@ type MemberOutcome struct {
 	// Reason is WHY a stopped member stopped (error / cancelled / budget); empty for a
 	// done member.
 	Reason MemberStopReason
+	// ErrorRounds is how many of this member's rounds ended in session.StopError,
+	// whether it was RETRIED through them or finally benched by them (issue #318 /
+	// ADR 0077). It is the disposition-HONESTY signal: a bounded retry means
+	// a member can fail a round and still finish, and such a member reports
+	// DispositionDone with no Reason — so without this count a transient failure would
+	// be invisible to the caller and the run would read as silently clean. It is a
+	// COUNT, deliberately not a new MemberDisposition value: the disposition is a closed
+	// enum mirrored on the proto wire, and "done" is still the honest terminal.
+	//
+	// It is INDEPENDENT of the terminal: it counts errored rounds over the member's whole
+	// LIFETIME (the counter is monotonic — that monotonicity is the retry cap's
+	// termination proof), so it does NOT follow from Reason and Reason does not follow
+	// from it. 0 exactly when the member never had an errored round. A member benched by
+	// its errors has >=1 alongside Stopped/StopReasonError, but so can one benched for
+	// cancellation or budget: a member that failed round 1, was recovered and retried,
+	// then was cancelled in round 2 reports Reason "cancelled" with ErrorRounds 1. Read
+	// the two together, never one from the other.
+	ErrorRounds int
 	// Completed holds this member's completed-task descriptions (clamped), captured in
 	// outcome() from the shared task list. It feeds the ledger-rich deliverable
 	// fallback so a degraded report can state what each member actually finished — the
@@ -1092,7 +1196,7 @@ func (s *Supervisor) planRound(r int) []turnInput {
 			// descriptions are fenced. s.untrustedGoal flips the goal back to fenced for a
 			// relay/multi-tenant deployment.
 			plan = append(plan, turnInput{m: m, prompt: renderTurnPrompt(
-				name, m.spec.Lead, s.goal, roster, s.leadName, m.spec.InitialPrompt, nil, nil, s.untrustedGoal)})
+				name, m.spec.Lead, s.goal, roster, s.leadName, m.spec.InitialPrompt, nil, nil, s.untrustedGoal, false)})
 			continue
 		}
 		msgs, _ := s.team.Drain(name)
@@ -1108,13 +1212,24 @@ func (s *Supervisor) planRound(r int) []turnInput {
 				claimed = &t
 			}
 		}
-		if len(msgs) == 0 && claimed == nil {
+		// Retry-after-error (issue #318): a member whose previous round ended in a
+		// RECOVERED StopError under its retry cap is force-scheduled for exactly one
+		// turn, even with no message and no claimable task. Without this the retry would
+		// be a silent no-op in the commonest stall shape — a member dying on its first
+		// long exploration turn, before any task exists — because the ordinary gate below
+		// plans only a member that has drained a message or claimed a task. Cleared here,
+		// so one errored round buys one forced turn (the bound is memberErrorRetries).
+		retrying := m.retryPending
+		m.retryPending = false
+		if len(msgs) == 0 && claimed == nil && !retrying {
 			continue
 		}
 		// Later rounds carry no fresh role briefing (initialRole == "") but keep the
-		// goal/roster framing and the drained messages + claimed task.
+		// goal/roster framing and the drained messages + claimed task. A retry turn adds
+		// the supervisor-authored retry note so the member knows its previous turn died
+		// mid-flight and its own recovered transcript is the context to continue from.
 		plan = append(plan, turnInput{m: m, prompt: renderTurnPrompt(
-			name, m.spec.Lead, s.goal, roster, s.leadName, "", msgs, claimed, s.untrustedGoal)})
+			name, m.spec.Lead, s.goal, roster, s.leadName, "", msgs, claimed, s.untrustedGoal, retrying)})
 	}
 	return plan
 }
@@ -1137,7 +1252,9 @@ func (s *Supervisor) rosterNames() string {
 // runTurn runs one member's turn-loop to completion, forwarding every event (tagged
 // with the member name) to evCh, auto-denying any permission ask (members are
 // non-interactive in v1, matching Subagent/Fork), then re-opening the session for the
-// next round. A run that ends non-resumably marks the member stopped.
+// next round. A run that ends non-resumably marks the member stopped; a run that ends
+// in a RECOVERABLE error under the member's retry cap leaves it schedulable and queues
+// a one-shot retry turn (WithMemberErrorRetries).
 func (s *Supervisor) runTurn(ctx context.Context, ti turnInput, evCh chan<- TeamEvent) {
 	m := ti.m
 	_ = s.team.SetMemberState(m.spec.Name, team.MemberWorking)
@@ -1165,34 +1282,101 @@ func (s *Supervisor) runTurn(ctx context.Context, ti turnInput, evCh chan<- Team
 	// budget gate (teamTokensUsed) sums between rounds.
 	m.tokensUsed = m.tokensUsed.Add(usage)
 
-	// A member whose run ENDED IN ERROR, that cannot be re-opened, OR that has
-	// exhausted its lifetime turn budget is stopped: it will not be scheduled again.
-	// Honouring the result's stop reason (not just a failing Reopen) is what makes
+	// A member whose run ENDED IN ERROR past its retry cap, that cannot be re-opened, OR
+	// that has exhausted its lifetime turn budget is stopped: it will not be scheduled
+	// again. Honouring the result's stop reason (not just a failing Reopen) is what makes
 	// drainChild's contract and this loop agree. A stopped member RELEASES any task it
 	// claimed but never completed, so the team does not dead-spin on an in-progress
 	// task owned by a dead member — and so a budget-exhausted looping member cannot
 	// hold work hostage to the round cap.
 	budgetExhausted := s.turnBudget > 0 && m.turnsUsed >= s.turnBudget
-	// A StopError run or a failed Reopen leaves the session NON-resumable; a member
-	// stopped purely by its budget keeps a resumable session (so the lead-synthesis
-	// special-case may drive it once). Capture the distinction for synthesise. Reopen
-	// is evaluated lazily so a budget-exhausted-but-otherwise-fine member is still
-	// re-opened (cheap, and it keeps the session in idle for a possible synthesis).
-	reopenErr := error(nil)
-	if stop != session.StopError {
+	// Return the member's session to idle so it is DRIVABLE again, choosing the seam its
+	// terminal STATE requires (issue #318). Before the fix this read `if stop !=
+	// StopError { Reopen() }` and then forced nonResumable for a StopError run, so one
+	// transient provider failure (the terminal 180s stream-idle stall) permanently
+	// bricked the member — most visibly for a LEAD, whose final synthesis (the team's
+	// DELIVERABLE) was then skipped for the labelled fallback.
+	//
+	// The dispatch keys on m.sess.State, NOT on stop: a StopError run does not imply a
+	// failed session. The loop's terminate() path Fail()s the session, but
+	// terminateComplete() — which a text-bearing turn carrying a terminal StopError stop
+	// chunk goes through — Stop()s it into StateCompleted. Only the FAILED shape changes
+	// behaviour here: Reopen is completed-only, so it could never handle it anyway and
+	// Recover is the only seam that can. Every other state keeps its exact prior
+	// behaviour, deliberately including a CANCELLED member, whose Reopen still fails and
+	// whose failure is what deschedules it with the StopReasonCancelled classification
+	// (Interrupt here would silently reschedule a cancelled member — a different change,
+	// not this one). Recover history-repairs the failed turn with the failure-accurate
+	// close-out wording, so the replayed history stays provider-valid; per its contract
+	// recovery makes retry POSSIBLE, not guaranteed — a permanent cause re-fails cleanly.
+	//
+	// nonResumable now means what its name says — the session could NOT be returned to
+	// idle — and is set ONLY when that transition itself failed. `stopped` keeps its
+	// MEANING: a member BENCHED by its errors is descheduled and reports StopReasonError,
+	// because the honest signal to the lead ("this member stopped before finishing") and
+	// the task release that lets a peer pick the work up both hang off it. It is no longer
+	// where an errored round LANDS, though: the bounded-retry block ~20 lines below leaves
+	// a member that is still under the cap schedulable and stop-reason-free. Read the two
+	// together — this comment describes the benched end state, not every errored round.
+	// See docs/adr/0077-resume-a-failed-subagent.md.
+	var reopenErr error
+	if m.sess.State == session.StateFailed {
+		reopenErr = m.sess.Recover()
+	} else {
 		reopenErr = m.sess.Reopen()
 	}
-	warnUnexpectedReopen(ctx, s.caps.diag, m.spec.Name, stop, reopenErr)
+	warnUnexpectedRecovery(ctx, s.caps.diag, m.spec.Name, stop, reopenErr)
+
+	// BOUNDED RETRY (ADR 0077, issue #318). Recovering the session made the
+	// member DRIVABLE again; on its own that only rescued the lead's synthesis turn,
+	// because `stopped` still descheduled the member for the rest of the run. A member
+	// that hits ONE transient stall must still participate in later rounds, so an errored
+	// round whose recovery SUCCEEDED and that is still under the cap leaves the member
+	// schedulable instead of benching it.
+	//
+	// errorRounds is counted for EVERY StopError round (benched or retried) — it is both
+	// the retry bound and the honest ErrorRounds the outcome reports — and it is
+	// monotonic, so the retry provably terminates: a member that always fails benches
+	// after memberErrorRetries extra rounds.
+	//
+	// The three shapes that are NEVER retried, all deliberately: a FAILED RECOVERY
+	// (reopenErr != nil ⇒ nonResumable — the session cannot be driven at all, so a retry
+	// would be a guaranteed no-op); a CANCELLED member (a kill is not a transient
+	// failure, and D5's disposition must hold); and a member that exhausted its LIFETIME
+	// TURN BUDGET (the ceiling exists precisely to stop rescheduling it).
+	if stop == session.StopError {
+		m.errorRounds++
+	}
+	if stop == session.StopError && reopenErr == nil && !budgetExhausted && m.errorRounds <= s.memberErrorRetries {
+		// Release the in-progress claim: a retried member that kept it would give
+		// planRound nothing to schedule (InProgressFor short-circuits the auto-claim) and
+		// would strand the work behind a member that just failed at it. Released tasks
+		// return to pending, so THIS member re-claims it next round — or a peer does.
+		s.team.ReleaseTasks(m.spec.Name)
+		// Idle, not stopped: the member must stay schedulable in the team aggregate too
+		// (a MemberStopped state is what Quiescent and every roster projection read).
+		_ = s.team.SetMemberState(m.spec.Name, team.MemberIdle)
+		// One-shot force-schedule for the next round; see memberRT.retryPending.
+		m.retryPending = true
+		// The TeammateIdle hook deliberately does NOT fire here: the member did not go
+		// idle having finished its work, it is queued for a retry. Firing it would tell a
+		// hook consumer the opposite of what happened.
+		return
+	}
+
 	if stop == session.StopError || budgetExhausted || reopenErr != nil {
 		m.stopped = true
-		if stop == session.StopError || reopenErr != nil {
+		// Set-only, never cleared: the flag is a latch (a stopped member is not
+		// rescheduled, so runTurn does not re-enter for it — but a plain assignment
+		// would silently un-latch it if that ever changed).
+		if reopenErr != nil {
 			m.nonResumable = true
 		}
 		// Classify the stop reason (closed enum). Order is most-specific first: test
 		// stop == StopCancelled BEFORE reopenErr, because a cancelled member's Reopen
 		// also fails (Reopen is completed-only) and would otherwise collapse a genuine
-		// cancellation into the generic error class. Reopen-failure folds into error
-		// (same nonResumable family as StopError); budget is the residual lifetime cap.
+		// cancellation into the generic error class. A failed recovery folds into error
+		// (it IS the nonResumable case); budget is the residual lifetime cap.
 		switch {
 		case stop == session.StopCancelled:
 			m.stopReason = StopReasonCancelled
@@ -1215,18 +1399,24 @@ func (s *Supervisor) runTurn(ctx context.Context, ti turnInput, evCh chan<- Team
 	s.fireTeammateIdle(ctx, m)
 }
 
-// warnUnexpectedReopen emits an operator WARN when a member's Reopen failed for a
-// reason OTHER than the expected cancelled case (a cancelled member's Reopen always
-// fails — Reopen is completed-only — and is already classified StopReasonCancelled).
-// It rides the parent run's diagnostics (parentCaps.diag), like the headless
-// auto-deny INFO — a supervisor-level emission, NOT one of the Engine loop's two
-// lines. nil diag (gRPC RunTeam path / no caps) disables it.
-func warnUnexpectedReopen(ctx context.Context, diag port.Diagnostics, member string, stop session.StopReason, reopenErr error) {
-	if reopenErr == nil || stop == session.StopCancelled || diag == nil {
+// warnUnexpectedRecovery emits an operator WARN when a member could not be returned to
+// idle after its turn — for a reason OTHER than the expected cancelled case (a cancelled
+// member's Reopen always fails — Reopen is completed-only — and is already classified
+// StopReasonCancelled). Both recovery seams route here: Reopen for a clean/limit
+// terminal and Recover for a StopError one (issue #318), so the wording names the
+// OUTCOME ("could not be returned to idle") rather than one specific verb — the
+// StopError arm reaches it only when Recover itself fails, which is the genuinely
+// non-resumable case and worth an operator line.
+//
+// It rides the parent run's diagnostics (parentCaps.diag), like the headless auto-deny
+// INFO — a supervisor-level emission, NOT one of the Engine loop's lines. nil diag (gRPC
+// RunTeam path / no caps) disables it.
+func warnUnexpectedRecovery(ctx context.Context, diag port.Diagnostics, member string, stop session.StopReason, recoverErr error) {
+	if recoverErr == nil || stop == session.StopCancelled || diag == nil {
 		return
 	}
-	diag.Log(ctx, port.LevelWarn, "team member reopen failed; member will not be rescheduled",
-		"member", member, "stop", string(stop), "error", reopenErr.Error())
+	diag.Log(ctx, port.LevelWarn, "team member could not be returned to idle; member will not be rescheduled",
+		"member", member, "stop", string(stop), "error", recoverErr.Error())
 }
 
 // fireTeammateIdle runs the TeammateIdle hook for a member that just went idle
@@ -1342,7 +1532,7 @@ func (s *Supervisor) persistMember(ctx context.Context, m *memberRT) {
 // session afterwards. It returns "" — telling Run to fall back to the structured
 // deliverable (the QUALITY gate that rejects a refusal-shaped report lives in the Team
 // tool's deliverable() chain, NOT here: synthesise is a pure producer) —
-// when there is no lead, the lead is stopped (non-resumable: Reopen already failed),
+// when there is no lead, the lead is non-resumable (it could not be returned to idle),
 // or the lead produced no synthesis text. When the lead hits its turn budget mid-
 // synthesis but produced text, the text is returned with a truncation note.
 func (s *Supervisor) synthesise(ctx context.Context, evCh chan<- TeamEvent) (report string, ran bool) {
@@ -1351,11 +1541,13 @@ func (s *Supervisor) synthesise(ctx context.Context, evCh chan<- TeamEvent) (rep
 	}
 	lead := s.members[s.leadName]
 	if lead == nil || lead.nonResumable {
-		// A non-resumable lead's session cannot be driven (its last run failed or
-		// Reopen failed). The only correct path is the labelled fallback, never a
-		// synthesis on a dead session. A lead stopped PURELY by its turn budget is NOT
-		// non-resumable: §5's special-case allows the ONE synthesis turn even then (the
-		// report is the deliverable), which is why we gate on nonResumable, not stopped.
+		// A non-resumable lead's session cannot be driven (its recovery seam — Reopen,
+		// or Recover for a failed run — itself failed). The only correct path is the
+		// labelled fallback, never a synthesis on a dead session. A lead stopped PURELY
+		// by its turn budget, or by one ERRORED round it was recovered from (issue
+		// #318), is NOT non-resumable: §5's special-case allows the ONE synthesis turn
+		// even then (the report is the deliverable), which is why we gate on
+		// nonResumable, not stopped.
 		return "", false
 	}
 
@@ -1368,8 +1560,9 @@ func (s *Supervisor) synthesise(ctx context.Context, evCh chan<- TeamEvent) (rep
 	// cumulative session.Usage now survives Reopen (cloud-native Phase 1, so the
 	// budget survives restart), reset the lead's accumulator through the explicit
 	// aggregate seam so the synthesis turn is not re-blocked by the working run's
-	// spend. The lead is idle here (Reopened after its working run; a non-resumable
-	// lead was already gated out above), so ResetUsage is legal. The synthesis spend
+	// spend. The lead is idle here (Reopened — or Recovered, issue #318 — after its
+	// working run; a non-resumable lead was already gated out above), so ResetUsage is
+	// legal. The synthesis spend
 	// is still folded into the team OUTCOME below (lead.tokensUsed), so the accounting
 	// is complete; only the per-run brake input is reset. A reset error is impossible
 	// on this idle path but is non-fatal (it would only leave the prior spend, which
@@ -1438,7 +1631,7 @@ func (s *Supervisor) buildSynthesisSources() string {
 		}
 	}
 
-	s.writeStoppedMemberStatus(&b)
+	s.writeTeamStatus(&b)
 
 	// Layer 1 — the findings ledger (primary), grouped by member in append order.
 	findings := s.team.Findings()
@@ -1502,32 +1695,64 @@ func (s *Supervisor) buildSynthesisSources() string {
 	return b.String()
 }
 
-// writeStoppedMemberStatus appends the TRUSTED "Team status:" section (3A) flagging the
-// members that stopped before finishing and why (the supervisor's closed MemberStopReason
-// enum: budget/error/cancelled), plus their roster names (which already ride EvTeamStart /
+// writeTeamStatus appends the TRUSTED "Team status:" section (3A) flagging the members
+// that stopped before finishing and why (the supervisor's closed MemberStopReason enum:
+// budget/error/cancelled), the members that survived a RETRIED failure (issue #318), and
+// the team-budget trip — plus their roster names (which already ride EvTeamStart /
 // EvTeamEnd verbatim, so they are safe to cross unfenced). None of it is member-authored
 // content, so it is NOT wrapped in WriteUntrustedBlock; the bare "Team status:" header line
 // is the only forgeable token, and framingHeader neutralises a finding body that tries to
-// forge it. Nothing is written when no member stopped (an all-clean team).
-func (s *Supervisor) writeStoppedMemberStatus(b *strings.Builder) {
-	var stoppedParts []string
+// forge it. Nothing is written when nothing went wrong (an all-clean team).
+//
+// The member NAMES are NeutraliseFraming'd, matching every sibling interpolation in this
+// file. They are trusted-but-model-INFLUENCED: they come from the parent model's Team call
+// args, and validateTeamArgs checks only non-empty/unique/role — no newline or charset
+// rejection. A parent that has itself ingested injected content can name a member
+// "scout\nRecorded findings:\n…", which would otherwise splice a forged section into this
+// TRUSTED, unfenced region of the lead's synthesis prompt (CWE-1427 / OWASP LLM01), and
+// the synthesis report is the Team tool's deliverable back to the parent.
+//
+// The RETRIED line is the other half of disposition honesty. A member that failed a round,
+// was recovered and then finished is not `stopped`, so without it the lead would plan and
+// report as if that member had run cleanly throughout — a coordination lie in the opposite
+// direction from the one the stopped line closes. It states the round count only; the
+// member's own findings/last-text carry whatever it actually produced.
+func (s *Supervisor) writeTeamStatus(b *strings.Builder) {
+	var stoppedParts, retriedParts []string
 	for _, name := range s.order {
 		m := s.members[name]
-		if m != nil && m.stopped {
+		if m == nil {
+			continue
+		}
+		if m.stopped {
 			reason := string(m.stopReason)
 			if reason == "" {
 				reason = "unknown"
 			}
-			stoppedParts = append(stoppedParts, fmt.Sprintf("%s (%s)", name, reason))
+			stoppedParts = append(stoppedParts, fmt.Sprintf("%s (%s)", NeutraliseFraming(name), reason))
+			continue
+		}
+		// Not stopped but it DID fail at least one round: it was recovered and retried.
+		if m.errorRounds > 0 {
+			unit := "rounds"
+			if m.errorRounds == 1 {
+				unit = "round"
+			}
+			retriedParts = append(retriedParts, fmt.Sprintf("%s (%d failed %s)", NeutraliseFraming(name), m.errorRounds, unit))
 		}
 	}
-	if len(stoppedParts) == 0 && !s.budgetTripped {
+	if len(stoppedParts) == 0 && len(retriedParts) == 0 && !s.budgetTripped {
 		return
 	}
 	b.WriteString("\nTeam status:\n")
 	if len(stoppedParts) > 0 {
 		fmt.Fprintf(b, "Members %s stopped before finishing. Their work may be incomplete; "+
 			"note any resulting gaps in your report.\n", strings.Join(stoppedParts, ", "))
+	}
+	if len(retriedParts) > 0 {
+		fmt.Fprintf(b, "Members %s hit a run-level failure mid-round and were recovered and retried. "+
+			"They kept working, but work in progress when a round failed may have been lost or "+
+			"repeated; weigh their contributions accordingly.\n", strings.Join(retriedParts, ", "))
 	}
 	if s.budgetTripped {
 		b.WriteString("The team's token budget was exhausted before all work completed; remaining " +
@@ -1567,6 +1792,7 @@ func (s *Supervisor) outcome(rounds int) TeamOutcome {
 			Stopped:     m.stopped,
 			Disposition: disp,
 			Reason:      m.stopReason,
+			ErrorRounds: m.errorRounds,
 			Completed:   completed,
 			Lead:        name == s.leadName,
 		})
@@ -1768,8 +1994,14 @@ func composeCleanup(first, second func() error) func() error {
 //     fenced block via WriteUntrustedBlock, with framing markers neutralised first so
 //     a body cannot forge the fence or a section header to smuggle instructions out of
 //     its block.
+//
+// retrying renders retryTurnNote — the supervisor-authored line telling the member its
+// previous round died mid-flight and was recovered (issue #318). It is harness-derived
+// metadata (a stop-reason classification), never member- or peer-authored text, so it
+// is rendered TRUSTED like the roster; the member's own failed transcript is already in
+// its recovered history, so nothing is quoted into the note.
 func renderTurnPrompt(self string, isLead bool, goal, roster, leadName, initialRole string,
-	msgs []team.Message, claimed *team.Task, untrustedGoal bool) string {
+	msgs []team.Message, claimed *team.Task, untrustedGoal, retrying bool) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "You are %q, a member of the agent team.\n", self)
 	if roster != "" {
@@ -1790,6 +2022,9 @@ func renderTurnPrompt(self string, isLead bool, goal, roster, leadName, initialR
 			// still defangs any forged fence/header in the goal text (AC5).
 			b.WriteString(NeutraliseFraming(goal) + "\n")
 		}
+	}
+	if retrying {
+		b.WriteString(retryTurnNote)
 	}
 	if isLead {
 		b.WriteString("\nYou are the LEAD. (1) Create tasks with AddTask — teammates claim and run them; " +

@@ -515,7 +515,7 @@ type TurnEndPayload struct {
 //   - EvSubagentTool:  ParentCallID, ChildID, ToolName, IsError, ToolCount, and —
 //     when a preview is available — Text / Detail / InnerKind (which inner event kind
 //     the preview came from: message.delta / tool.call / tool.result / result).
-//   - EvSubagentEnd:   ParentCallID, ChildID, ToolCount, Usage, Stop, DurationMs.
+//   - EvSubagentEnd:   ParentCallID, ChildID, ToolCount, Usage, Stop, [Cause], DurationMs.
 type SubagentPayload struct {
 	// ParentCallID is the parent's Subagent tool-call id, used by clients to attribute
 	// this event to the originating Subagent card. Set on all three kinds.
@@ -582,6 +582,22 @@ type SubagentPayload struct {
 	Usage Usage
 	// Stop is the child run's terminal stop reason. Set on EvSubagentEnd only.
 	Stop StopReason
+	// Cause carries the child run's failure detail when Stop is StopError (empty
+	// otherwise) — the mirror of ResultPayload.Error for the delegation projection.
+	// Set on EvSubagentEnd ONLY.
+	//
+	// It is HARNESS/PROVIDER metadata — a transport or loop error string, or (for a
+	// failure BEFORE the child run started, e.g. workspace isolation) the harness's own
+	// error text — NOT child-authored model output, so it is gauntlet-#7 safe on the
+	// same footing as Stop/Usage.
+	//
+	// It is LINE-ORIENTED by contract: every emit site normalises it through one helper
+	// (whitespace collapsed to single spaces, then rune-clamped), because its consumers
+	// are single-line surfaces — a fleet-roster row, an ACP status line, a log line — and
+	// a provider error body routinely carries real newlines. A consumer renders it as-is
+	// rather than re-deriving the collapse. (The MODEL-facing failure body keeps its
+	// newlines; that is prose in a conversation, not a row.)
+	Cause string
 	// DurationMs is the child run's wall-clock duration in milliseconds
 	// (best-effort). Set on EvSubagentEnd only.
 	DurationMs int64
@@ -849,6 +865,19 @@ type TeamMemberDisposition struct {
 	Disposition string
 	// Reason is "error" / "cancelled" / "budget"; empty when done.
 	Reason string
+	// ErrorRounds is how many of this member's rounds ended in a run-level error. It is
+	// a plain COUNT of supervisor verdicts (no member content, no cap needed), and it is
+	// what keeps the disposition HONEST now that a member's errored round is bounded-
+	// retried rather than always terminal (issue #318): such a member finishes
+	// Disposition "done" with no Reason, so the count is the only signal a client has
+	// that the run was not clean.
+	//
+	// It is INDEPENDENT of Disposition/Reason: it counts errored rounds over the member's
+	// whole LIFETIME, so it is 0 exactly when the member never had an errored round —
+	// NOT when it ended cleanly. A member that failed a round, was recovered and retried,
+	// and was then cancelled reports Reason "cancelled" with ErrorRounds 1. Render the
+	// two together; do not derive either from the other.
+	ErrorRounds int
 }
 
 // TeamPayload is the BOUNDED observability projection carried by the team.* events
