@@ -2,6 +2,12 @@
 
 > Part of the [mecatl architecture guide](../architecture.md).
 
+**What this covers:** the `tool.Catalog` registration seam, MCP client (streaming-HTTP only), progressive tool disclosure (`Disclosable` + `ToolSearch`), skills (progressive-disclosure instruction units), the self-improving skill loop (`SkillDraft`), slash commands, the engine-as-library module contract, and the seam summary table.
+
+**Prerequisites:** [the ports](ports.md) — the `tool.Workspace`/`tool.Catalog` seams and the tool contract.
+
+**Follow-on:** [the API surface](api-surface.md) and [subagents & teams](subagents-and-teams.md) — the MCP/inventory endpoints and delegation families that consume the catalog.
+
 The `tool.Catalog` is the single registration seam, so every tool — core, remote,
 or generated — is one uniform `tool.Tool`.
 
@@ -140,7 +146,8 @@ The extensibility story is not only "swap an adapter inside mecatl" — `engine/
 is **its own Go module** (`github.com/stacklok/mecatl/engine`), so an external
 consumer can import the loop, the domain, and the ports directly without pulling
 in mecatl's full dependency cone. The engine module's standalone closure is
-deliberately tiny — `doublestar` + `x/sync` (+ test-only `goleak`) — versus the
+deliberately tiny — `doublestar` + `robfig/cron` + `go.yaml.in/yaml/v3` +
+`x/sync` (+ test-only `goleak`) — versus the
 toolhive/k8s/OTel/gRPC cone the root module carries; an embedding host brings its
 own adapters. The exported identifiers of the **seven core packages** (`session`,
 `governance`, `tool`, `prompt`, `port`, `team`, `agent`) are the engine's STABLE
@@ -188,11 +195,18 @@ exist as progressive-disclosure instruction units (see above), with bundled
 served through the skill read-root allowlist. The guiding restraint still holds: build the shape, instrument it,
 and resist features before the loop, tools, permissions, hooks, and cache all work.
 
+## Prerequisites
+
+- [The ports](ports.md) — the `tool.Workspace`/`tool.Catalog` seams.
+
+## Follow-on reading
+
+- [The API surface](api-surface.md) — the MCP passthrough RPCs.
+- [Subagents & teams](subagents-and-teams.md) — delegation families that consume the catalog.
+
 ## Related
 
 - [The agent loop that runs the tools](agent-loop.md)
-- [The API surface](api-surface.md)
-- [Subagents & teams](subagents-and-teams.md)
 
 ---
 

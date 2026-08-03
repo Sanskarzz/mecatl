@@ -16,8 +16,7 @@ ships as a client of the same API.
 
 > *A decent model with a great harness beats a great model with a bad harness.* The
 > leverage is in the harness. mecatl is a small, strict, well-tested implementation of
-> that idea, built from the research corpus in [`docs/harnesses/`](./docs/harnesses/).
-> Live-validated continuously by the BDD e2e suite in [`e2e/`](./e2e/) (nightly CI against
+> that idea, continuously validated by the BDD e2e suite in [`e2e/`](./e2e/) (nightly CI against
 > real models via OpenRouter).
 
 ## Features
@@ -160,6 +159,7 @@ the composition layer (`internal/app`, called from the `cmd/` mains).
 
 - **[Architecture guide](./docs/architecture.md)** — the system in depth: layers, the loop, ports, sequence diagrams, extension points.
 - **[Usage & operator guide](./docs/usage.md)** — build/run, the demo, `mecated` flags, the gRPC + HTTP/SSE APIs with examples, permissions, hooks, troubleshooting.
+- **[Documentation index](./docs/README.md)** — a short front door routing each audience (contributor, operator, library consumer, researcher) to the right living guide.
 - **[`docs/design/PRODUCTION-READINESS.md`](./docs/design/PRODUCTION-READINESS.md)** — the live status tracker (what's done, what's deferred).
 - **[mecatui terminal-UI guide](./docs/tui.md)** — the optional `mecatui` terminal client.
 - **[`docs/design/README.md`](./docs/design/README.md)** — the indexed catalog of design rationale per feature (`MULTI-PROVIDER.md`, `AGENT-TEAMS-SPIKE.md`, `DIAGNOSTICS.md`, `DRIVERS.md`, `BACKGROUND-SUBAGENTS.md`, `MECATEQUI.md`, the dense per-subsystem `IMPLEMENTATION-NOTES.md`, and the historical spikes).
@@ -204,10 +204,7 @@ The harness is **effectively production-ready bar one deliberately-deferred item
 OS-level process sandbox). The loop, the tools, permissions, hooks, subagents, the API,
 auth, resilience, observability, memory, context management, MCP, and a signed release
 pipeline are all built, green under tests and `-race` lint, and the build is
-continuously live-validated against real frontier models by the e2e suite. The closing
-10-point "gauntlet" in
-[`docs/harnesses/08-design-considerations.md`](./docs/harnesses/08-design-considerations.md)
-each maps to a passing test. See
+continuously live-validated against real frontier models by the e2e suite. See
 [`docs/design/PRODUCTION-READINESS.md`](./docs/design/PRODUCTION-READINESS.md) for the
 itemized status.
 
@@ -235,20 +232,3 @@ plus the `GOWORK=off` standalone hygiene proof.
 Tests are offline by design (a scripted mock provider + an in-memory filesystem); CI never
 needs a live model or network. Changed any Markdown? Run `task docs` before committing — the
 generated `llms.txt` and the doc-link gate will otherwise fail CI.
-
----
-
-## Research corpus
-
-This repository also holds the research corpus the harness was designed from — a working
-reference on agentic coding-harness design in 2026 (patterns, architectures, recreations,
-and design decisions).
-
-- **[Research-corpus master index](./docs/harnesses/INDEX.md)** — the master router (start here if you're an agent or hunting for something specific).
-- **[`docs/harnesses/README.md`](./docs/harnesses/README.md)** — the human narrative onramp and reading orders.
-- **[corpus conventions](./docs/harnesses/README.md#contributing-to-this-corpus)** — conventions for the corpus.
-
-Nine files (~37K words) cover framing and glossary, the 12 Claude Code patterns, a Claude
-Code architecture deep-dive, recreations, a comparative survey, cross-cutting architecture
-patterns, context engineering + MCP, and the opinionated build roadmap that this harness
-follows. Captured 2026-05-18; the patterns are durable, time-bound facts drift.
