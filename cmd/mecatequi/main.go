@@ -62,7 +62,6 @@ func realMain(argv []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "mecatequi: %v\n", err)
 		return 2
 	}
-
 	diag := newDiagnostics()
 
 	// Validate the workspace is a git repository AND its top level BEFORE building —

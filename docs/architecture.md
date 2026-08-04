@@ -126,7 +126,7 @@ flowchart LR
     app["internal/app (app.Build: shared engine+service assembly)"]
     mecated["cmd/mecated/main.go (flags, serve, TLS/auth)"]
     demo["cmd/mecademo"]
-    tui["cmd/mecatui (gRPC client TUI; embeds app.Build when no --server)"]
+    tui["cmd/mecatui (gRPC client TUI; embeds app.Build by default)"]
     mq["cmd/mecatequi (single-shot headless; one prompt → patch + summary + exit code)"]
     k8s["cmd/mecak8s (storage-free k8s-native agent; Redis store + k8s lease, ADR 0048)"]
     mecated --> app
@@ -214,9 +214,10 @@ the `HarnessService`, creates a session, opens the bidi `Converse` stream, and
 renders the streamed `Event` envelopes (glamour markdown for assistant text,
 themed lipgloss cards for user prompts and tool I/O), resolving permission asks
 inline by sending `ResumeApproval` on the same stream. The server it talks to is
-either an external `mecated` (`--server`) or one it **hosts in-process** over a
-UNIX socket (`cmd/mecatui/embed` → `app.Build`) when none is given — so a single
-binary works with no daemon. The render packages stay pure: they render **purely
+either one it **hosts in-process** over a UNIX socket (`cmd/mecatui/embed` →
+`app.Build`, the default — bare `mecatui` always embeds, never probes) or an
+external `mecated` it dials via `mecatui connect ADDRESS` — so a single binary
+works with no daemon. The render packages stay pure: they render **purely
 from proto `Event`s** and are bound by the inward-only layering rule. The
 `contracts/gen` + grpc + `internal/app` surface lives only in `cmd/mecatui/client`,
 `cmd/mecatui/embed`, and the `cmd/mecatui` main; the `ui` (Bubble Tea
@@ -287,6 +288,16 @@ Two deliberate cycle-breaks worth noting, documented in code:
 - `governance` does **not** import `session` (so `session` can import
   `governance` without a cycle); the `Evaluator` works on primitive args, and
   the `permpolicy` adapter bridges `session` types into it.
+
+**Default prompt behavior.** `engine/prompt/builder.go` (`defaultTone`) owns one
+cache-stable default tone. Its concise-delivery guidance is explicitly scoped away
+from investigation and reasoning depth, while the minimum-change ladder,
+read-before-edit discipline, trust-boundary validation, and safety carveouts remain
+always on. There is no output-economy surface at all: the former `terse` delta and its
+public flag/config surface were removed by [ADR 0086](adr/0086-remove-output-economy-control.md),
+and the one-release parse-compat shim was deleted by [ADR 0089](adr/0089-cli-clean-break-grammar.md) —
+a legacy `--output-economy` is now an unknown-flag error, and a top-level `output-economy:`
+settings.yaml key is a named unknown-key rejection.
 
 **Typed tool results.** A `session.ToolResult` may carry typed content blocks on
 `ToolResult.Parts` (`[]session.Content`, additive — a zero-value `Parts` is the

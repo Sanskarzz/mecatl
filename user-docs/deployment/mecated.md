@@ -21,12 +21,18 @@ default and is purpose-built for no-PVC pod deployments.
 
 ## Quick start
 
-The minimal invocation starts the server on loopback with an in-memory session
-store. No persistence, no auth — the single-user localhost trust model:
+The canonical invocation is `mecated serve`:
 
 ```sh
-mecated
+mecated serve
 ```
+
+A command word is required: `mecated serve` for the network daemon, `mecated
+acp` for the ACP stdio mode. Bare `mecated` prints the command help and exits
+with a usage error.
+
+The minimal invocation starts the server on loopback with an in-memory session
+store. No persistence, no auth — the single-user localhost trust model.
 
 Default addresses:
 
@@ -39,7 +45,7 @@ Default addresses:
 A slightly more configured invocation for unattended local operation:
 
 ```sh
-mecated \
+mecated serve \
   --store-dir ~/.local/share/mecatl/sessions \
   --auth-token "$(cat ~/.mecatl/token)" \
   --posture auto
@@ -82,7 +88,7 @@ through `app.Config` into `Build`.
 
 Flags are grouped by area. All have zero-value defaults that produce a working
 loopback-only server. Flags not covered here are advanced operator tuning; run
-`mecated --help` for the full list.
+`mecated serve --help` for common flags grouped by task, or `mecated serve --help-all` for the exhaustive reference.
 
 ### Server
 
@@ -97,6 +103,35 @@ loopback-only server. Flags not covered here are advanced operator tuning; run
 | `--client-ca` | `""` | PEM client-CA bundle; enables mTLS (requires `--tls-cert`/`--tls-key`) |
 | `--rate-limit` | `0` (off) | Sustained per-client request rate in req/s |
 | `--rate-burst` | `0` (derived) | Token-bucket burst; zero derives a sane default from `--rate-limit` |
+
+#### Daemon config file (`daemon.yaml`)
+
+The listener topology above (gRPC/HTTP/metrics addresses, TLS cert/key/CA,
+rate-limit/burst) can live in a small, strict, versioned YAML file instead of
+repeated flags. The file is a **distinct** file from `settings.yaml` (which is
+**policy**: permissions, posture, guardrails, models) and is loaded ONLY when you
+start with `mecated serve --config PATH` — there is **no conventional
+auto-load**. Scaffold and validate it offline:
+
+```sh
+mecated config daemon init                          # write the conventional skeleton
+mecated config daemon init --print                  # print it to stdout, no file
+mecated config daemon validate                      # validate the conventional path
+mecated config daemon validate --file /etc/mecatl/daemon.yaml
+mecated serve --config ~/.config/mecatl/daemon.yaml # start with it
+```
+
+The v1 fields are `version` (required, `v1`), `grpc_addr`, `http_addr`,
+`metrics_addr`, `tls_cert`, `tls_key`, `client_ca`, `rate_limit`, `rate_burst`.
+The schema is strict (unknown keys are rejected). Precedence is
+**defaults < file < explicit CLI** — an explicit flag overrides the file,
+including an explicit empty/zero.
+
+**Security:** the API bearer **token is NOT accepted in `daemon.yaml`** — keep
+using `MECATL_AUTH_TOKEN` / `--auth-token`. A **non-loopback** bind still
+requires auth/TLS (it logs a prominent WARNING otherwise); `daemon.yaml`
+changes topology, not the trust model. `config daemon validate` never prints
+secrets or raw file content. See [ADR 0088](https://github.com/stacklok/mecatl/blob/main/docs/adr/0088-daemon-config-file.md) for the rationale.
 
 ### Session state
 
@@ -271,7 +306,7 @@ development and single-shot clients.
 Enable JSONL persistence by pointing `--store-dir` at a directory:
 
 ```sh
-mecated --store-dir /var/lib/mecatl/sessions
+mecated serve --store-dir /var/lib/mecatl/sessions
 ```
 
 The store writes one JSONL file per session as a snapshot, plus a `.events.jsonl`
@@ -337,14 +372,35 @@ and cancel the session.
 
 ## Operator subcommands
 
-`mecated` ships three one-shot offline subcommands that do not start the daemon:
+`mecated` ships several subcommands. Two start the daemon, the rest are
+one-shot offline actions:
 
 ```sh
+# Start the network daemon (gRPC + HTTP/SSE) — canonical
+mecated serve [flags]
+
+# Serve the Agent Client Protocol over stdio (JSON-RPC 2.0) for an editor
+mecated acp [flags]
+
 # Write the operator settings.yaml skeleton to ~/.config/mecatl/settings.yaml
+# (POLICY: permissions, posture, guardrails, models)
 mecated config init
 
-# Print the skeleton to stdout without writing (paste-ready reference)
+# Print the settings.yaml skeleton to stdout without writing (paste-ready reference)
 mecated config init --print
+
+# Write the daemon.yaml listener-topology skeleton to
+# ~/.config/mecatl/daemon.yaml (loopback defaults + commented TLS/rate examples).
+# It is NOT auto-loaded; start with `mecated serve --config <path>` to use it.
+mecated config daemon init
+
+# Print the daemon.yaml skeleton to stdout without writing
+mecated config daemon init --print
+
+# Strictly validate a daemon.yaml (default: the conventional path). Never
+# starts the server; never prints secrets/raw file content.
+mecated config daemon validate
+mecated config daemon validate --file /etc/mecatl/daemon.yaml
 
 # Promote a model-authored candidate skill out of quarantine
 mecated skills promote \

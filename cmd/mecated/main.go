@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -45,6 +46,7 @@ import (
 	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/internal/adapter/agents"
+	"github.com/stacklok/mecatl/internal/adapter/daemonconfig"
 	"github.com/stacklok/mecatl/internal/adapter/mcpperf"
 	"github.com/stacklok/mecatl/internal/adapter/server"
 	"github.com/stacklok/mecatl/internal/adapter/skills"
@@ -406,6 +408,10 @@ type config struct {
 	// that spawned it as a subprocess; the normal network daemon path is skipped.
 	acp bool
 
+	// helpAll is true when --help-all was passed; it requests exhaustive flag listing
+	// and exits 0 before the daemon starts.
+	helpAll bool
+
 	// ToolHive: discover MCP servers from the running ToolHive workloads (the
 	// embedded ToolHive library lists already-running workloads and reads their
 	// HTTP proxy URLs — mecatl never spawns a workload). Default ON; it fails soft
@@ -439,16 +445,6 @@ type config struct {
 	// postureFlagSet is true when --posture was passed explicitly (set after parse via
 	// fs.Visit), so composition lets CLI out-rank the settings.yaml posture: key.
 	postureFlagSet bool
-	// outputEconomy is the operator-tier output-economy token (ADR 0041): "" (unset
-	// → the default tone already carries the economy contract), "normal" (explicit
-	// no-op), or "terse" (adds the answer-length clause for explanatory turns). An
-	// unknown value fail-softs to "" with a WARN. Operator-tier only: the
-	// operator-global settings.yaml output-economy: key folds in, a project-tier key
-	// is WARN-ignored.
-	outputEconomy string
-	// outputEconomyFlagSet is true when --output-economy was passed explicitly, so
-	// composition lets CLI out-rank the settings.yaml output-economy: key.
-	outputEconomyFlagSet bool
 	// reasoningEffort is the operator-tier reasoning-effort default (ADR 0055): ""
 	// or "auto" (unset → the provider default) or low/medium/high/xhigh/max.
 	// Operator-tier only: the operator-global settings.yaml reasoning-effort: key
@@ -466,6 +462,17 @@ type config struct {
 	// headless (--headless); an interactive deployment surfaces the plan to the
 	// human instead.
 	planModeAutoApprove bool
+
+	// configPath is the explicit --config PATH selecting a daemon config file (issue
+	// #338). Empty = no file loaded; the daemon runs from flags+env as before. It
+	// is accepted only for serve/legacy; `mecated acp --config` is rejected.
+	configPath string
+	// configPathFlagSet is true when --config was passed explicitly (set after parse
+	// via fs.Visit), so we can reject it in ACP mode and log the selected path.
+	configPathFlagSet bool
+	// cliExplicit tracks which migrated flags (now also settable via daemon config)
+	// were set explicitly on the CLI. Keyed by flag name, populated via fs.Visit.
+	cliExplicit map[string]bool
 }
 
 // stringList is a repeatable string flag.Value, preserving order across multiple
@@ -481,73 +488,45 @@ func (l *stringList) Set(v string) error {
 }
 
 func main() {
-	if handled := dispatchSubcommand(); handled {
+	res := resolveCommand(os.Args)
+
+	// A usage error (unknown command / unknown-or-missing subcommand) fails
+	// closed BEFORE the daemon boots: print the actionable error and exit
+	// non-zero without constructing any listener. A bare/leading-flag
+	// invocation additionally prints the top-level help (the operator needs the
+	// command list, not just the error line).
+	if res.err != nil {
+		fmt.Fprintln(os.Stderr, "mecated:", res.err)
+		if errors.Is(res.err, errBareInvocation) {
+			fmt.Fprintln(os.Stderr)
+			writeTopLevelHelp(os.Stderr)
+		}
+		os.Exit(2)
+	}
+
+	// A fully-handled one-shot offline subcommand: run it against the real
+	// streams and exit with its error. --help from a subcommand is a successful
+	// action (flag.ErrHelp): usage already printed, exit 0.
+	if res.handled {
+		if err := res.run(os.Stdin, os.Stdout, os.Stderr); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return
+			}
+			slog.Error("mecated subcommand failed", "err", err)
+			os.Exit(1)
+		}
 		return
 	}
-	if err := run(); err != nil {
+
+	// Daemon path: thread the resolved mode + remaining argv into run() explicitly.
+	if err := run(res.mode, res.remaining); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			// --help already printed usage; exit success.
+			return
+		}
 		slog.Error("mecated exited with error", "err", err)
 		os.Exit(1)
 	}
-}
-
-// dispatchSubcommand inspects os.Args for an offline CLI subcommand (skills
-// promote / perf-mcp print-config / config) and runs it, returning
-// true when it handled the invocation (so main skips booting the daemon). A
-// subcommand parse error or a usage error exits the process directly from here.
-// It is split out of main so main's cyclomatic complexity stays bounded.
-func dispatchSubcommand() bool {
-	// Subcommand dispatch: `mecated skills promote ...` is the OPERATOR gate that
-	// moves a model-authored candidate skill out of quarantine into an active
-	// skills dir. It is a one-shot offline CLI action (no daemon), kept here so it
-	// shares the binary and the skills adapter.
-	if len(os.Args) >= 3 && os.Args[1] == "skills" && os.Args[2] == "promote" {
-		if err := runSkillsPromote(os.Args[3:], os.Stdin, os.Stderr); err != nil {
-			slog.Error("skills promote failed", "err", err)
-			os.Exit(1)
-		}
-		return true
-	}
-	// `mecated perf-mcp print-config` prints a paste-ready client .mcp.json snippet
-	// for the loopback perf MCP server. Loopback + no auth (decision 6), so the
-	// snippet carries NO Authorization header. One-shot offline CLI action.
-	if len(os.Args) >= 3 && os.Args[1] == "perf-mcp" && os.Args[2] == "print-config" {
-		if err := runPerfMCPPrintConfig(os.Args[3:], os.Stdout); err != nil {
-			slog.Error("perf-mcp print-config failed", "err", err)
-			os.Exit(1)
-		}
-		return true
-	}
-	// `mecated config ...` is the config-management subcommand group. The ONLY
-	// subcommand is `config init` (issue #140), which writes/prints a fully-commented
-	// operator settings.yaml skeleton (the embedded generated artifact — no go/ast in
-	// this binary). A bare `config` or an UNKNOWN `config <x>` must NOT fall through to
-	// run() and boot the daemon (a typo starting an unauthenticated server is a nasty
-	// surprise): it prints the available subcommand and exits non-zero.
-	if len(os.Args) >= 2 && os.Args[1] == "config" {
-		if len(os.Args) >= 3 && os.Args[2] == "init" {
-			if err := runConfigInit(os.Args[3:], os.Stdout); err != nil {
-				if errors.Is(err, flag.ErrHelp) {
-					return true // --help is a successful action: usage already printed, exit 0
-				}
-				slog.Error("config init failed", "err", err)
-				os.Exit(1)
-			}
-			return true
-		}
-		sub := ""
-		if len(os.Args) >= 3 {
-			sub = os.Args[2]
-		}
-		if sub == "" {
-			fmt.Fprintln(os.Stderr, "mecated config: missing subcommand")
-		} else {
-			fmt.Fprintf(os.Stderr, "mecated config: unknown subcommand %q\n", sub)
-		}
-		fmt.Fprintln(os.Stderr, "available subcommands:")
-		fmt.Fprintln(os.Stderr, "  config init    write/print the operator settings.yaml skeleton (--print, --force)")
-		os.Exit(2)
-	}
-	return false
 }
 
 // runConfigInit implements `mecated config init [--print] [--force]`: it writes the
@@ -595,6 +574,100 @@ func runConfigInit(argv []string, out io.Writer) error {
 	}
 	_, _ = fmt.Fprintf(out, "wrote operator settings skeleton to %s\n", path)
 	_, _ = fmt.Fprintf(out, "edit it, then (re)start mecated. See docs/configuration-reference.md for the full key reference.\n")
+	return nil
+}
+
+// runConfigDaemonInit implements `mecated config daemon init [--print] [--force]`:
+// it scaffolds a minimal, commented v1 daemon.yaml (issue #338, ADR 0088) at the
+// documented conventional path <XDG_CONFIG_HOME>/mecatl/daemon.yaml. It does NOT
+// cause automatic loading — the file is loaded ONLY when `mecated serve --config
+// PATH` is supplied explicitly. --print emits the skeleton to out and writes
+// NOTHING; without --force it REFUSES to overwrite an existing file (the error
+// names the path); --force overwrites. It reuses the daemonconfig schema (the
+// embedded skeleton) and the SAME xdgconfig resolution as config init, so the
+// write path equals the conventional path `config daemon validate` defaults to.
+// `config init` keeps ownership of settings.yaml; this owns daemon topology only.
+func runConfigDaemonInit(argv []string, out io.Writer) error {
+	fs := flag.NewFlagSet("mecated config daemon init", flag.ContinueOnError)
+	fs.SetOutput(out)
+	var printOnly, force bool
+	fs.BoolVar(&printOnly, "print", false, "print the daemon.yaml skeleton to stdout and write NO file (a paste-ready reference)")
+	fs.BoolVar(&force, "force", false, "overwrite an existing daemon.yaml (default: refuse, naming the path)")
+	if err := fs.Parse(argv); err != nil {
+		return err
+	}
+
+	skeleton := daemonconfig.Skeleton()
+	if printOnly {
+		_, err := io.WriteString(out, skeleton)
+		return err
+	}
+
+	cfgDir := xdgconfig.UserConfigDir(xdgconfig.OSEnv)
+	if cfgDir == "" {
+		return fmt.Errorf("cannot resolve the user config directory (set $XDG_CONFIG_HOME or $HOME); use --print to emit the skeleton to stdout instead")
+	}
+	path := filepath.Join(cfgDir, daemonconfig.DaemonConfigRelPath)
+
+	if !force {
+		if _, err := os.Stat(path); err == nil {
+			return fmt.Errorf("%s already exists; pass --force to overwrite it (or --print to emit to stdout without writing)", path)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("checking %s: %w", path, err)
+		}
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("creating config directory %s: %w", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(skeleton), 0o644); err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	_, _ = fmt.Fprintf(out, "wrote daemon config skeleton to %s\n", path)
+	_, _ = fmt.Fprintf(out, "it is NOT auto-loaded; start the server with 'mecated serve --config %s' to use it.\n", path)
+	_, _ = fmt.Fprintf(out, "validate it with 'mecated config daemon validate'. See docs/usage/mecated.md for the full reference.\n")
+	return nil
+}
+
+// runConfigDaemonValidate implements `mecated config daemon validate [--file
+// PATH]`: it strictly parses and validates a daemon.yaml file (schema + the
+// effective semantic validation possible WITHOUT starting/binding). --file
+// selects the file (default: the conventional <XDG_CONFIG_HOME>/mecatl/daemon.yaml
+// for convenience). On success it names the file + version and reminds how to use
+// it; on failure it reports the schema/semantic error. It NEVER prints secrets or
+// raw file content — the daemon config carries no token value, and the success
+// line carries only the path + version. It reuses daemonconfig.Load (strict parse)
+// + daemonconfig.Validate (rate-limit/burst bounds), the SAME schema/runtime
+// validation the serve path applies, so a validated file provably loads.
+func runConfigDaemonValidate(argv []string, out io.Writer) error {
+	fs := flag.NewFlagSet("mecated config daemon validate", flag.ContinueOnError)
+	fs.SetOutput(out)
+	var file string
+	fs.StringVar(&file, "file", "", "path to the daemon.yaml to validate (default: the conventional $XDG_CONFIG_HOME/mecatl/daemon.yaml)")
+	if err := fs.Parse(argv); err != nil {
+		return err
+	}
+
+	path := file
+	if path == "" {
+		// Default to the conventional path for convenience (NOT auto-load — this
+		// is a validate action, not a serve path).
+		cfgDir := xdgconfig.UserConfigDir(xdgconfig.OSEnv)
+		if cfgDir == "" {
+			return fmt.Errorf("cannot resolve the user config directory (set $XDG_CONFIG_HOME or $HOME); pass --file PATH to name the daemon.yaml to validate")
+		}
+		path = filepath.Join(cfgDir, daemonconfig.DaemonConfigRelPath)
+	}
+
+	cfg, err := daemonconfig.Load(path)
+	if err != nil {
+		return err
+	}
+	if err := daemonconfig.Validate(cfg); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(out, "%s: valid daemon config (version %s)\n", path, cfg.Version)
+	_, _ = fmt.Fprintf(out, "start the server with 'mecated serve --config %s' to use it.\n", path)
 	return nil
 }
 
@@ -683,11 +756,35 @@ func runPerfMCPPrintConfig(argv []string, out io.Writer) error {
 }
 
 // run parses flags, builds the engine/service via internal/app, and serves until a
-// termination signal arrives. It is separated from main so it can return errors
-// cleanly.
-func run() error {
-	cfg, err := parseFlags(os.Args[1:])
+// termination signal arrives. mode is the resolved canonical command word
+// ("serve" or "acp") and remaining is the flag tail (argv with the command word
+// already stripped). It is separated from main so it can return errors cleanly.
+func run(mode commandMode, remaining []string) error {
+	cfg, err := parseFlagsMode(mode, remaining)
 	if err != nil {
+		return err
+	}
+
+	// The canonical command word selects the mode: `mecated acp` runs the ACP
+	// stdio surface; `mecated serve` runs the network daemon.
+	cfg.acp = mode == modeACP
+
+	// Daemon config file (issue #338): load ONLY when --config is explicitly
+	// supplied (no auto-load). Rejected for ACP mode (listener topology does not
+	// apply). Loaded AFTER flag parse and BEFORE effective-value validation /
+	// TLS / logging, so a malformed or unknown-key file fails before app.Build /
+	// listener creation. The load/merge step is a testable helper with an injected
+	// loader (review fix #2); effective-value cross-validation runs AFTER the
+	// merge so a file-supplied value cannot bypass the guards (review fix #1).
+	if err := loadAndMergeDaemonConfig(&cfg, cfg.acp, daemonconfig.Load); err != nil {
+		return err
+	}
+	// Effective-value validation (perf-MCP loopback/empty-metrics + rate-limit
+	// sanity) runs on the POST-merge config, before app.Build / listener binding.
+	// This is the pure helper that closes the file-source bypass: validating in
+	// parseFlagsMode (CLI-only values) left metrics_addr: 0.0.0.0:9090 + --perf-mcp
+	// able to slip through via the file (review fix #1).
+	if err := validateEffectiveConfig(cfg); err != nil {
 		return err
 	}
 
@@ -706,6 +803,13 @@ func run() error {
 	// rather than slog.Default().
 	diag := slogdiag.NewFromLogger(logger)
 
+	// Log the selected daemon config path when one was loaded (issue #338).
+	// The path was validated during merge; log it so operators can confirm
+	// which file was read.
+	if cfg.configPathFlagSet {
+		slog.Info("daemon config loaded", "path", cfg.configPath)
+	}
+
 	// Operator posture: print/refuse/WARN for the AUTHORITATIVE composed tier (the
 	// --posture flag + --yolo/--trust-project aliases + the operator-global
 	// settings.yaml posture: key — the SAME tier app.Build resolves). Checked AFTER the
@@ -720,11 +824,99 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Observability: install the OTel metrics pipeline (always on) + the OTLP
-	// trace exporter/global TracerProvider (when --otlp-endpoint is set) BEFORE
-	// building the sinks below. Setup returns the meter provider feeding the
-	// domain instruments, the prometheus registry to serve at /metrics, the
-	// tracer provider, and a combined shutdown that flushes both.
+	// Observability: install the OTel metrics + tracing pipeline, the process
+	// gauges, the runtime profiling knobs, the flight recorder, and the goroutine-
+	// leak watchdog. Extracted into one helper so run()'s cyclomatic complexity
+	// stays under the lint gate; the helper owns the setup branches and returns
+	// the handles run() threads into app.Build and serve(). run() owns the
+	// shutdown defers (telemetry flush + flight-recorder stop) so they unwind on
+	// the daemon's exit, not the helper's.
+	obs, err := setupObservability(ctx, cfg, diag)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if serr := obs.providers.Shutdown(shutdownCtx); serr != nil {
+			slog.Warn("telemetry shutdown", "err", serr)
+		}
+	}()
+	if obs.recorder != nil {
+		defer obs.recorder.Stop()
+	}
+
+	tracing := telemetry.NewTracing(otel.GetTracerProvider())
+
+	// Role-scoped main pair (issue #47): the MAIN engine records through the
+	// role="main" view so EVERY series carries the role label uniformly —
+	// children get their own bounded-family views via the scoper below.
+	mainScoped := obs.metrics.WithRole(telemetry.RoleMain)
+
+	// Slow-turn ring buffer: when the perf MCP server is mounted it observes
+	// EvTurnEnd as one more EventSink fanned out alongside metrics/tracing, so its
+	// list_slow_turns tool sees the SAME TurnEndPayload the latency histograms do.
+	// It stores scalars only (redaction by shape) and spawns no goroutine. Built
+	// only when --perf-mcp is set so a bare daemon carries no extra sink. Main
+	// turns enter it with role="main"; child turns ride the scoper's fan-out.
+	var slowTurns *telemetry.SlowTurnBuffer
+	sinks := []port.EventSink{mainScoped, tracing}
+	if cfg.perfMCP {
+		slowTurns = telemetry.NewSlowTurnBuffer(telemetry.DefaultSlowTurnCapacity, time.Now)
+		sinks = append(sinks, slowTurns.WithRole(telemetry.RoleMain))
+	}
+	sink := telemetry.NewSink(sinks...)
+
+	// Child role scoper (issue #47): the composition hands each CHILD engine a
+	// role-scoped (EventSink, ToolCallRecorder) pair keyed on the BOUNDED family
+	// label internal/app's roleFamily already resolved ("subagent"/"member"/…).
+	// The returned sink ALSO fans into the shared slow-turn ring buffer (when
+	// mounted) so child turns appear in list_slow_turns carrying their role.
+	roleScoper := func(familyRole string) (port.EventSink, port.ToolCallRecorder) {
+		scoped := obs.metrics.WithRole(familyRole)
+		childSinks := []port.EventSink{scoped}
+		if slowTurns != nil {
+			childSinks = append(childSinks, slowTurns.WithRole(familyRole))
+		}
+		return telemetry.NewSink(childSinks...), scoped
+	}
+
+	built, err := app.Build(ctx, appConfig(cfg, sink, mainScoped, roleScoper, obs.metrics, diag))
+	if err != nil {
+		return err
+	}
+	defer built.Close()
+
+	// ACP mode: serve the Agent Client Protocol over stdio instead of the network
+	// daemon. The same engine/service assembly (app.Build) backs it; only the wire
+	// surface differs. No TLS/auth/rate-limit — stdio is a local parent-process
+	// boundary. Logs still go to stderr (set above), keeping stdout pure JSON-RPC.
+	if cfg.acp {
+		// session/load (resume) is offered only when a durable session store is
+		// configured: the in-memory store would lose snapshots across a restart, so
+		// loadSession stays false there. A remote session-store driver is durable
+		// (it replaces the JSONL dir), so it qualifies too.
+		return serveACP(ctx, built.Service, cfg.storeDir != "" || cfg.sessionStoreURL != "", diag)
+	}
+
+	return serve(ctx, cfg, built.Service, obs.providers.Registry, obs.recorder, slowTurns)
+}
+
+// observability holds the handles setupObservability returns and run() threads
+// into app.Build / serve / serveACP.
+type observability struct {
+	providers telemetry.Providers
+	metrics   *telemetry.Metrics
+	recorder  *telemetry.FlightRecorder
+}
+
+// setupObservability installs the OTel metrics pipeline (always on) + the OTLP
+// trace exporter (when --otlp-endpoint is set), the process gauges, the runtime
+// profiling knobs, the FlightRecorder, and the goroutine-leak watchdog. It
+// returns the handles run() needs; the caller owns the providers.Shutdown and
+// recorder.Stop defers (so shutdown winds down on the daemon's exit, not here).
+// Extracted from run() to keep its cyclomatic complexity under the lint gate.
+func setupObservability(ctx context.Context, cfg config, diag port.Diagnostics) (observability, error) {
 	providers, err := telemetry.Setup(ctx, telemetry.OTLPConfig{
 		Endpoint:    cfg.otlpEndpoint,
 		Protocol:    cfg.otlpProtocol,
@@ -732,33 +924,24 @@ func run() error {
 		ServiceName: "mecatl",
 	})
 	if err != nil {
-		return fmt.Errorf("setup telemetry: %w", err)
+		return observability{}, fmt.Errorf("setup telemetry: %w", err)
 	}
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if serr := providers.Shutdown(shutdownCtx); serr != nil {
-			slog.Warn("telemetry shutdown", "err", serr)
-		}
-	}()
 	if cfg.otlpEndpoint == "" {
 		slog.Info("tracing disabled (--otlp-endpoint empty); metrics + runtime collector active")
 	} else {
 		slog.Info("tracing enabled (OTLP exporter installed)", "endpoint", cfg.otlpEndpoint, "protocol", cfg.otlpProtocol, "insecure", cfg.otlpInsecure)
 	}
 
-	// Observability: the OTel meter provider feeds the EventSink/Logger adapter;
-	// its prometheus exporter renders those series on providers.Registry, served
-	// by the /metrics handler. Tracing uses the global OTel TracerProvider
-	// installed by telemetry.Setup above (a no-op when tracing is disabled).
+	// The OTel meter provider feeds the EventSink/Logger adapter; its prometheus
+	// exporter renders those series on providers.Registry, served by /metrics.
 	metrics, err := telemetry.NewMetrics(providers.Meter)
 	if err != nil {
-		return fmt.Errorf("setup metrics: %w", err)
+		return observability{}, fmt.Errorf("setup metrics: %w", err)
 	}
 	// Process-RSS gauge (mecatl.process.rss): Linux-only, no-op elsewhere. It
 	// rides the same MeterProvider so it renders on /metrics (decision 9).
 	if rerr := telemetry.RegisterProcessGauges(providers.Meter, diag); rerr != nil {
-		return fmt.Errorf("setup process gauges: %w", rerr)
+		return observability{}, fmt.Errorf("setup process gauges: %w", rerr)
 	}
 
 	// Runtime profiling knobs: arm mutex/block sampling only when explicitly
@@ -792,7 +975,6 @@ func run() error {
 		default:
 			recorder = rec
 			slog.Info("flight recorder armed (loopback /debug/flightrecorder)")
-			defer recorder.Stop()
 		}
 	}
 
@@ -805,61 +987,7 @@ func run() error {
 		telemetry.StartGoroutineWatchdog(ctx, cfg.goroutineWarnThreshold, cfg.goroutineWarnInterval, runtime.NumGoroutine, slog.Default())
 		slog.Info("goroutine-leak watchdog armed", "threshold", cfg.goroutineWarnThreshold, "interval", cfg.goroutineWarnInterval)
 	}
-
-	tracing := telemetry.NewTracing(otel.GetTracerProvider())
-
-	// Role-scoped main pair (issue #47): the MAIN engine records through the
-	// role="main" view so EVERY series carries the role label uniformly —
-	// children get their own bounded-family views via the scoper below.
-	mainScoped := metrics.WithRole(telemetry.RoleMain)
-
-	// Slow-turn ring buffer: when the perf MCP server is mounted it observes
-	// EvTurnEnd as one more EventSink fanned out alongside metrics/tracing, so its
-	// list_slow_turns tool sees the SAME TurnEndPayload the latency histograms do.
-	// It stores scalars only (redaction by shape) and spawns no goroutine. Built
-	// only when --perf-mcp is set so a bare daemon carries no extra sink. Main
-	// turns enter it with role="main"; child turns ride the scoper's fan-out.
-	var slowTurns *telemetry.SlowTurnBuffer
-	sinks := []port.EventSink{mainScoped, tracing}
-	if cfg.perfMCP {
-		slowTurns = telemetry.NewSlowTurnBuffer(telemetry.DefaultSlowTurnCapacity, time.Now)
-		sinks = append(sinks, slowTurns.WithRole(telemetry.RoleMain))
-	}
-	sink := telemetry.NewSink(sinks...)
-
-	// Child role scoper (issue #47): the composition hands each CHILD engine a
-	// role-scoped (EventSink, ToolCallRecorder) pair keyed on the BOUNDED family
-	// label internal/app's roleFamily already resolved ("subagent"/"member"/…).
-	// The returned sink ALSO fans into the shared slow-turn ring buffer (when
-	// mounted) so child turns appear in list_slow_turns carrying their role.
-	roleScoper := func(familyRole string) (port.EventSink, port.ToolCallRecorder) {
-		scoped := metrics.WithRole(familyRole)
-		childSinks := []port.EventSink{scoped}
-		if slowTurns != nil {
-			childSinks = append(childSinks, slowTurns.WithRole(familyRole))
-		}
-		return telemetry.NewSink(childSinks...), scoped
-	}
-
-	built, err := app.Build(ctx, appConfig(cfg, sink, mainScoped, roleScoper, metrics, diag))
-	if err != nil {
-		return err
-	}
-	defer built.Close()
-
-	// ACP mode: serve the Agent Client Protocol over stdio instead of the network
-	// daemon. The same engine/service assembly (app.Build) backs it; only the wire
-	// surface differs. No TLS/auth/rate-limit — stdio is a local parent-process
-	// boundary. Logs still go to stderr (set above), keeping stdout pure JSON-RPC.
-	if cfg.acp {
-		// session/load (resume) is offered only when a durable session store is
-		// configured: the in-memory store would lose snapshots across a restart, so
-		// loadSession stays false there. A remote session-store driver is durable
-		// (it replaces the JSONL dir), so it qualifies too.
-		return serveACP(ctx, built.Service, cfg.storeDir != "" || cfg.sessionStoreURL != "", diag)
-	}
-
-	return serve(ctx, cfg, built.Service, providers.Registry, recorder, slowTurns)
+	return observability{providers: providers, metrics: metrics, recorder: recorder}, nil
 }
 
 // appConfig maps the CLI/env config onto the shared app.Config build contract,
@@ -984,10 +1112,6 @@ func appConfig(cfg config, sink port.EventSink, recorder port.ToolCallRecorder, 
 		// YAML-only allow-all tier cannot escape it.
 		Posture:        app.ParsePosture(cfg.posture),
 		PostureFlagSet: cfg.postureFlagSet,
-		// Output-economy tier (ADR 0041): operator-tier only; outputEconomyFlagSet
-		// lets CLI out-rank the operator-global settings.yaml output-economy: key.
-		OutputEconomy:        cfg.outputEconomy,
-		OutputEconomyFlagSet: cfg.outputEconomyFlagSet,
 		// Reasoning-effort tier (ADR 0055): operator-tier only; reasoningEffortFlagSet
 		// lets CLI out-rank the operator-global settings.yaml reasoning-effort: key.
 		ReasoningEffort:        cfg.reasoningEffort,
@@ -1108,9 +1232,136 @@ func renderPostureReport(p app.Posture) string {
 	return b.String()
 }
 
-// parseFlags turns argv into a config, resolving env-derived defaults.
+// mergeDaemonConfig folds the daemon config file (loaded only when --config is
+// explicitly supplied) into the parsed CLI config. For each migrated field, the
+// config file value is applied IFF the corresponding CLI flag was NOT explicitly
+// set (tracked in cfg.cliExplicit). An explicit CLI empty/zero overrides the file
+// value. Built-in defaults < config file < explicit CLI. The daemon config's RAW
+// content and any secret-bearing fields are never logged; effective security-
+// POSTURE values (addresses, TLS presence, rate-limit) may be — see the
+// daemonconfig package doc. Extracted from run() to keep cyclomatic complexity
+// under the lint gate.
+func mergeDaemonConfig(cfg *config, dc *daemonconfig.Config) {
+	if cfg.cliExplicit == nil {
+		cfg.cliExplicit = make(map[string]bool)
+	}
+	if !cfg.cliExplicit["grpc-addr"] && dc.GRPCAddr != nil {
+		cfg.grpcAddr = *dc.GRPCAddr
+	}
+	if !cfg.cliExplicit["http-addr"] && dc.HTTPAddr != nil {
+		cfg.httpAddr = *dc.HTTPAddr
+	}
+	if !cfg.cliExplicit["metrics-addr"] && dc.MetricsAddr != nil {
+		cfg.metricsAddr = *dc.MetricsAddr
+	}
+	if !cfg.cliExplicit["tls-cert"] && dc.TLSCert != nil {
+		cfg.tlsCert = *dc.TLSCert
+	}
+	if !cfg.cliExplicit["tls-key"] && dc.TLSKey != nil {
+		cfg.tlsKey = *dc.TLSKey
+	}
+	if !cfg.cliExplicit["client-ca"] && dc.ClientCA != nil {
+		cfg.clientCA = *dc.ClientCA
+	}
+	if !cfg.cliExplicit["rate-limit"] && dc.RateLimit != nil {
+		cfg.rateLimit = *dc.RateLimit
+	}
+	if !cfg.cliExplicit["rate-burst"] && dc.RateBurst != nil {
+		cfg.rateBurst = *dc.RateBurst
+	}
+}
+
+// configLoader is the daemon config file-loading seam. The production caller
+// passes daemonconfig.Load; tests inject a stub to prove the --config path is
+// rejected in ACP, never auto-loaded when --config is absent, and merged on
+// success — without touching the filesystem.
+type configLoader func(path string) (*daemonconfig.Config, error)
+
+// loadAndMergeDaemonConfig is the explicit-config load/reject/merge step,
+// extracted from run() so it is unit-testable with an injected loader. It loads
+// the daemon config file ONLY when --config was supplied explicitly, rejects it
+// in ACP mode (listener topology does not apply to stdio), and folds the file
+// into cfg. When --config is absent it is a no-op (no conventional auto-load),
+// preserving byte-identical zero-config behaviour. It runs BEFORE
+// validateEffectiveConfig so a malformed/unknown-key file fails before any
+// effective-value validation, TLS build, or listener binding.
+func loadAndMergeDaemonConfig(cfg *config, acp bool, load configLoader) error {
+	if !cfg.configPathFlagSet {
+		return nil // no --config ⇒ no auto-load, byte-identical to pre-config behaviour
+	}
+	if acp {
+		return fmt.Errorf("--config is not supported in ACP mode (listener topology does not apply to stdio)")
+	}
+	dc, err := load(cfg.configPath)
+	if err != nil {
+		return err
+	}
+	mergeDaemonConfig(cfg, dc)
+	return nil
+}
+
+// validateEffectiveConfig runs the EFFECTIVE-value cross-validation that must
+// see the post-merge config: the perf-MCP loopback/empty-metrics guard and the
+// rate-limit/rate-burst sanity bounds. It is a PURE helper (no I/O, no side
+// effects) called in run() AFTER loadAndMergeDaemonConfig and BEFORE app.Build /
+// listener binding, so a file-supplied metrics_addr or rate_limit that bypassed
+// the earlier CLI-only guard is still caught (review fix #1). The rate_limit=0
+// and rate_burst=0 meanings (disable / derive) are preserved: only negative and
+// non-finite (NaN/Inf) values are rejected (review fix #5).
+func validateEffectiveConfig(cfg config) error {
+	// --perf-mcp rides the admin listener, so it is meaningless without one.
+	if cfg.perfMCP && cfg.metricsAddr == "" {
+		return errors.New("--perf-mcp requires --metrics-addr (the loopback admin listener it mounts /mcp on)")
+	}
+	// FAIL CLOSED on a non-loopback --metrics-addr with --perf-mcp set, BEFORE
+	// serve() binds any listener, so the refusal is a pure config error with no
+	// side effects (matching the embed path). The /mcp surface is UNAUTHENTICATED
+	// and can embed goroutine-derived function names and timing (decision 6 + the
+	// security review's CWE-306 Low finding), so it must never be reachable off
+	// loopback — including via a file-supplied metrics_addr.
+	if cfg.perfMCP && !isLoopbackHostPort(cfg.metricsAddr) {
+		return fmt.Errorf("--perf-mcp refuses a non-loopback --metrics-addr=%s: it exposes unauthenticated runtime data; bind loopback or add auth (future work)", cfg.metricsAddr)
+	}
+	// Rate-limit/burst sanity: 0 is meaningful (disable / derive), but a negative
+	// or non-finite value is an operator misconfiguration. Reject before the
+	// server is constructed so a malformed file or CLI value never reaches the
+	// rate limiter.
+	if cfg.rateLimit < 0 || math.IsNaN(cfg.rateLimit) || math.IsInf(cfg.rateLimit, 0) {
+		return fmt.Errorf("rate_limit %v is invalid: must be >= 0 and finite (0 disables rate limiting)", cfg.rateLimit)
+	}
+	if cfg.rateBurst < 0 {
+		return fmt.Errorf("rate_burst %d is invalid: must be >= 0 (0 derives a sane default from rate_limit)", cfg.rateBurst)
+	}
+	return nil
+}
+
+// parseFlags turns argv into a config, resolving env-derived defaults. It is
+// the serve-mode test seam: it parses exactly as `mecated serve` would (the
+// serve --help hook renders the serve common help). Existing callers that
+// exercise the flag-parsing logic (not the help-renderer selection) use this
+// entry point.
 func parseFlags(argv []string) (config, error) {
+	return parseFlagsMode(modeServe, argv)
+}
+
+// parseFlagsMode is parseFlags with an explicit command mode, selecting which
+// help renderer the --help hook invokes. run() calls it with the resolved mode.
+func parseFlagsMode(mode commandMode, argv []string) (config, error) {
+	_, cfg, err := parseFlagsModeOut(mode, argv, os.Stderr)
+	return cfg, err
+}
+
+// parseFlagsModeOut is parseFlagsMode with an injected output writer. It returns
+// the built *flag.FlagSet alongside the config so progressive-help tests can run
+// the validateFlagMeta completeness invariant over the FULL real FlagSet (every
+// flag parseFlagsMode registers) instead of a synthetic subset. It is the small
+// test seam: tests capture the REAL Usage / --help / --help-all render output
+// (produced by the production renderers over that full FlagSet) into a
+// strings.Builder, and inspect the FlagSet, without copying the registration
+// block. Production calls it with os.Stderr and discards the returned FlagSet.
+func parseFlagsModeOut(mode commandMode, argv []string, out io.Writer) (*flag.FlagSet, config, error) {
 	fs := flag.NewFlagSet("mecated", flag.ContinueOnError)
+	fs.SetOutput(out)
 	var cfg config
 
 	cwd, _ := os.Getwd()
@@ -1263,13 +1514,8 @@ func parseFlags(argv []string) (config, error) {
 		"OPERATOR POSTURE LADDER (strict < trusted < auto < yolo): strict (default) prompts every mutate; trusted honours a project's ALLOW rules (= --trust-project); auto adds allow-all + main substitution loosening (recommended UNATTENDED default, child injection-defense ON); yolo additionally auto-runs $()/backtick/heredoc in CHILDREN (injection-defense OFF, isolated single-tenant only). --yolo/--trust-project are aliases. auto/yolo are refused as root outside MECATL_SANDBOX. An unknown value fails closed to strict with a WARN.")
 	fs.BoolVar(&cfg.printPosture, "print-posture", false, "print the resolved operator posture tier and a plain-English line per defense, then exit (does not start the server)")
 
-	fs.StringVar(&cfg.outputEconomy, "output-economy", "",
-		"OPERATOR OUTPUT-ECONOMY TIER (ADR 0041): normal (default — the system prompt already carries the prose-economy + minimum-code ladder + safety carveout) or terse (additionally caps purely-explanatory answers to a few sentences, offering to elaborate rather than elaborating unprompted — the most over-steer-prone rule, so opt-in). Empty = unset (honours the operator-global settings.yaml output-economy: key if present). Operator-tier only; a project-tier output-economy: key is ignored with a WARN. An unknown value fail-softs to the default with a WARN.")
-
 	fs.StringVar(&cfg.reasoningEffort, "reasoning-effort", "",
 		"OPERATOR REASONING-EFFORT TIER (ADR 0055): auto (default — unset, the provider's own default applies) or low/medium/high/xhigh/max. OpenAI supports low/medium/high only, so xhigh/max are clamped down to high (with a WARN); Anthropic maps all five. Empty = unset (honours the operator-global settings.yaml reasoning-effort: key if present). A per-session CreateSession reasoning_effort out-ranks this default. A model with no reasoning support drops it. Operator-tier only; a project-tier reasoning-effort: key is ignored with a WARN. An unknown value fail-softs to unset with a WARN.")
-
-	fs.BoolVar(&cfg.acp, "acp", false, "serve the Agent Client Protocol (ACP) over stdio for an editor that spawned mecated as a subprocess (JSON-RPC 2.0 on stdin/stdout). Skips the TCP/HTTP listeners; the single session workspace is the editor-provided cwd. No TLS/auth/rate-limit (stdio is a local, parent-process trust boundary)")
 
 	fs.StringVar(&cfg.authToken, "auth-token", "", "bearer token required on every gRPC/HTTP request (or MECATL_AUTH_TOKEN; empty disables auth)")
 	fs.StringVar(&cfg.tlsCert, "tls-cert", "", "PEM server certificate; with --tls-key enables TLS on the gRPC + HTTP servers")
@@ -1278,50 +1524,49 @@ func parseFlags(argv []string) (config, error) {
 	fs.Float64Var(&cfg.rateLimit, "rate-limit", 0, "sustained per-client request rate in req/s (0 disables rate limiting)")
 	fs.IntVar(&cfg.rateBurst, "rate-burst", 0, "rate-limit token-bucket burst size (0 derives a sane default from --rate-limit)")
 
-	// Top-level --help lists the subcommands too, so the offline CLI actions (config
-	// init / skills promote / perf-mcp print-config) are discoverable from --help, not
-	// only from the docs (issue #140: config init is invisible to operators otherwise).
+	// --help-all requests exhaustive flag listing and exits 0 before the daemon
+	// starts; it is a real flag so it parses normally and is checked post-parse.
+	fs.BoolVar(&cfg.helpAll, "help-all", false,
+		"show the exhaustive flag reference (every registered flag) and exit")
+
+	// Daemon config (issue #338): explicit operator-selected config file.
+	// Only accepted for serve/legacy; ACP mode rejects it.
+	fs.StringVar(&cfg.configPath, "config", "", "path to a daemon config YAML file (v1 schema: grpc_addr, http_addr, metrics_addr, tls_cert, tls_key, client_ca, rate_limit, rate_burst). Explicit CLI flags override file values; auth TOKEN is not accepted in YAML")
+
+	// `mecated serve --help` / `mecated acp --help` show progressive task-oriented
+	// common help.  --help-all (above) shows the exhaustive reference.  The
+	// renderers are package-local functions shared with the tests.
 	fs.Usage = func() {
 		out := fs.Output()
-		_, _ = fmt.Fprintf(out, "Usage: mecated [flags]\n       mecated <command> [args]\n\n")
-		_, _ = fmt.Fprintf(out, "Commands:\n")
-		_, _ = fmt.Fprintf(out, "  config init             write/print the operator settings.yaml skeleton (--print, --force)\n")
-		_, _ = fmt.Fprintf(out, "  skills promote          promote a model-authored candidate skill out of quarantine\n")
-		_, _ = fmt.Fprintf(out, "  perf-mcp print-config   print a paste-ready client .mcp.json for the perf MCP server\n\n")
-		_, _ = fmt.Fprintf(out, "Flags:\n")
-		fs.PrintDefaults()
+		if mode == modeACP {
+			writeAcpCommonHelp(out, fs)
+			return
+		}
+		writeServeCommonHelp(out, fs)
 	}
 
 	if err := fs.Parse(argv); err != nil {
-		return config{}, err
+		// Return the fully-registered FlagSet even on a parse/help error so the
+		// progressive-help completeness invariant (validateFlagMeta) can run over
+		// the full real registration path via the --help-triggered ErrHelp path.
+		return fs, config{}, err
+	}
+
+	// --help-all was parsed as a normal flag; render and return ErrHelp (exit 0).
+	if cfg.helpAll {
+		out := fs.Output()
+		if mode == modeACP {
+			writeAcpHelpAll(out, fs)
+		} else {
+			writeServeHelpAll(out, fs)
+		}
+		return nil, config{}, flag.ErrHelp
 	}
 
 	// Record whether --posture was set EXPLICITLY (vs left at its empty default) so
 	// composition can let CLI out-rank the operator-global settings.yaml posture: key
 	// and WARN if an alias raised above an explicit lower --posture.
-	fs.Visit(func(f *flag.Flag) {
-		switch f.Name {
-		case "posture":
-			cfg.postureFlagSet = true
-		case "subagent-model-router":
-			// Tri-state (ADR 0042): record that the kill-switch flag was given so
-			// appConfig can distinguish "unset" (router governed by the taxonomy) from
-			// "=false" (kill-switch); "=true/bare" is inert (the taxonomy still governs).
-			cfg.subagentModelRouterSet = true
-		}
-		if f.Name == "output-economy" {
-			cfg.outputEconomyFlagSet = true
-		}
-		if f.Name == "reasoning-effort" {
-			cfg.reasoningEffortFlagSet = true
-		}
-		if f.Name == "schedule-fire-retention" {
-			cfg.scheduleFireRetentionSet = true
-		}
-		if f.Name == "default-provider" {
-			cfg.defaultProviderFlagSet = true
-		}
-	})
+	recordExplicitFlags(fs, &cfg)
 
 	// Default the schedule-fire retention to 7d when the operator did not set it
 	// explicitly (ADR 0059 decision #7 Phase-2, ADR 0073): the scheduler is ON by
@@ -1331,20 +1576,11 @@ func parseFlags(argv []string) (config, error) {
 	// disabled).
 	applyScheduleFireRetentionDefault(&cfg)
 
-	// --perf-mcp rides the admin listener, so it is meaningless without one.
-	if cfg.perfMCP && cfg.metricsAddr == "" {
-		return config{}, errors.New("--perf-mcp requires --metrics-addr (the loopback admin listener it mounts /mcp on)")
-	}
-	// FAIL CLOSED on a non-loopback --metrics-addr with --perf-mcp set, here in
-	// config validation — BEFORE serve() binds any listener — so the refusal is a
-	// pure config error with no side effects (matching the embed path, which
-	// validates before arming any telemetry/listener). The /mcp surface is
-	// UNAUTHENTICATED and can embed goroutine-derived function names and timing
-	// (decision 6 + the security review's CWE-306 Low finding), so it must never
-	// be reachable off loopback.
-	if cfg.perfMCP && !isLoopbackHostPort(cfg.metricsAddr) {
-		return config{}, fmt.Errorf("--perf-mcp refuses a non-loopback --metrics-addr=%s: it exposes unauthenticated runtime data; bind loopback or add auth (future work)", cfg.metricsAddr)
-	}
+	// --perf-mcp / --metrics-addr effective-value cross-validation (loopback,
+	// non-empty) is deferred to validateEffectiveConfig, called in run() AFTER
+	// the daemon config merge so a file-supplied metrics_addr: 0.0.0.0:9090 with
+	// --perf-mcp cannot bypass the loopback guard. Validating here (on CLI-only
+	// values) would leave the file-source bypass open — see review fix #1.
 
 	// The three provider credentials (OPENAI/OPENROUTER/ANTHROPIC_API_KEY) are read by
 	// cliconfig.ProviderFlags.Apply (called from appConfig), keeping the env reads +
@@ -1376,7 +1612,7 @@ func parseFlags(argv []string) (config, error) {
 	// failing fast on an unreadable path (loud-misconfig posture).
 	policy, err := readAskReviewerPolicy(cfg.subagentAskReviewerPolicyFile)
 	if err != nil {
-		return config{}, err
+		return nil, config{}, err
 	}
 	cfg.subagentAskReviewerPolicy = policy
 	// Guardrails master switch: only `--guardrails=off` is meaningful (the kill-switch
@@ -1390,7 +1626,7 @@ func parseFlags(argv []string) (config, error) {
 	case "off":
 		cfg.guardrailsOff = true
 	default:
-		return config{}, fmt.Errorf("--guardrails %q: only \"off\" is accepted (the kill-switch); to ENABLE guardrails set --guardrails-model OR bind the `guardrail` model slot (--model-slot guardrail=… / models.slots.guardrail) — configuring a checker model is the enable (ADR 0046). Leave --guardrails unset to keep guardrails governed by the model/slot config", cfg.guardrailsMode)
+		return nil, config{}, fmt.Errorf("--guardrails %q: only \"off\" is accepted (the kill-switch); to ENABLE guardrails set --guardrails-model OR bind the `guardrail` model slot (--model-slot guardrail=… / models.slots.guardrail) — configuring a checker model is the enable (ADR 0046). Leave --guardrails unset to keep guardrails governed by the model/slot config", cfg.guardrailsMode)
 	}
 	// WebSearch master switch (issue #26): only `--websearch=off` is meaningful (the
 	// kill switch — it forces web search off regardless of the backend ladder). An
@@ -1402,9 +1638,40 @@ func parseFlags(argv []string) (config, error) {
 	case "off":
 		cfg.websearchOff = true
 	default:
-		return config{}, fmt.Errorf("--websearch %q: only \"off\" is accepted (the kill switch); web search is ON by default (Exa anonymous tier). Set SEARXNG_URL or BRAVE_API_KEY to switch backends, or --websearch-url for an explicit endpoint. Leave --websearch unset to keep web search enabled", cfg.websearchMode)
+		return nil, config{}, fmt.Errorf("--websearch %q: only \"off\" is accepted (the kill switch); web search is ON by default (Exa anonymous tier). Set SEARXNG_URL or BRAVE_API_KEY to switch backends, or --websearch-url for an explicit endpoint. Leave --websearch unset to keep web search enabled", cfg.websearchMode)
 	}
-	return cfg, nil
+	return fs, cfg, nil
+}
+
+// recordExplicitFlags walks the parsed FlagSet and records which operator-knob
+// flags were set EXPLICITLY (vs left at their empty default), so composition can
+// let the CLI out-rank the operator-global settings.yaml keys. Extracted from
+// parseFlagsMode to keep its cyclomatic complexity under the lint gate.
+func recordExplicitFlags(fs *flag.FlagSet, cfg *config) {
+	cfg.cliExplicit = make(map[string]bool)
+	fs.Visit(func(f *flag.Flag) {
+		cfg.cliExplicit[f.Name] = true
+		switch f.Name {
+		case "posture":
+			cfg.postureFlagSet = true
+		case "subagent-model-router":
+			// Tri-state (ADR 0042): record that the kill-switch flag was given so
+			// appConfig can distinguish "unset" (router governed by the taxonomy) from
+			// "=false" (kill-switch); "=true/bare" is inert (the taxonomy still governs).
+			cfg.subagentModelRouterSet = true
+		case "config":
+			cfg.configPathFlagSet = true
+		}
+		if f.Name == "reasoning-effort" {
+			cfg.reasoningEffortFlagSet = true
+		}
+		if f.Name == "schedule-fire-retention" {
+			cfg.scheduleFireRetentionSet = true
+		}
+		if f.Name == "default-provider" {
+			cfg.defaultProviderFlagSet = true
+		}
+	})
 }
 
 // applyScheduleFireRetentionDefault sets the schedule-fire retention to 7 days

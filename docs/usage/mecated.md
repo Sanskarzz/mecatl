@@ -10,8 +10,30 @@ and serves the resulting `HarnessService` over gRPC and HTTP/SSE concurrently.
 
 ```console
 $ export OPENAI_API_KEY=sk-...
-$ go run ./cmd/mecated --openai --workspace "$PWD"
+$ go run ./cmd/mecated serve --openai --workspace "$PWD"
 ```
+
+### Getting help
+
+`mecated` provides progressive, mode-specific help:
+
+- Bare `mecated` with no command word prints the top-level help to stderr and
+  exits 2 (usage error); a leading `--help`/`--help-all` prints help and
+  exits 0.
+- `mecated serve --help` — task-oriented common flags (~20 most-used flags)
+  grouped by user task (workspace & session, provider, permissions, tools,
+  MCP, etc.).  Includes a pointer to `--help-all` for the full reference.
+- `mecated serve --help-all` — exhaustive reference listing every registered
+  public flag with its registered name, default, and description.  Exits 0; does
+  not start a listener.
+- `mecated acp --help` — ACP-specific common flags only (no server-boundary
+  listener/TLS/rate-limit/metrics/OTLP/driver flags).
+- `mecated acp --help-all` — full ACP flag reference (excludes server-boundary
+  flags, which the `acp` command does not serve).
+- `mecated --help` — concise command entry page listing available subcommands.
+- `mecated --help-all` — the exhaustive serve-compatible flag reference (every
+  public flag a `mecated serve` invocation accepts), plus a note pointing to
+  `mecated acp --help-all` for the ACP-scoped subset.
 
 ### Flags
 
@@ -85,7 +107,6 @@ $ go run ./cmd/mecated --openai --workspace "$PWD"
 | `--permission-config` | `""` | path to a YAML permission-config file loaded at the **user (fully-trusted) scope** (**repeatable**). Always loaded regardless of `--permissions-conventional`. |
 | `--posture` | `strict` | **OPERATOR POSTURE LADDER.** One ordered tier governs the whole prompt/trust posture: `strict` (default, fail-closed: prompt for the mutate-ask floor, no project trust) → `trusted` (honour the project authority set; still prompts) → `auto` (allow-all main + children, but the **child prompt-injection defence stays ON** — the recommended **unattended** default) → `yolo` (everything `auto` does **plus** the child substitution floor loosened — defence OFF). `--yolo` and `--trust-project` are **aliases** (for `yolo` and `trusted`); when both a `--posture` value and an alias are given the **higher tier wins** (with a `WARN`). An unknown `--posture` value fails closed to `strict` with a `WARN`. CLI out-ranks the user-global `posture:` setting. **See the allow-all/posture note below.** |
 | `--print-posture` | `false` | (mecated) print the resolved posture tier and the per-defence breakdown (allow-all, main/child substitution loosening, project-trust floor) to stdout and exit, without starting the server. Useful for confirming what a given flag/env/settings combination resolves to. |
-| `--output-economy` | `normal` | **OPERATOR OUTPUT-ECONOMY TIER** (ADR 0041). `normal` (default): the system prompt already carries the prose-economy scope, the minimum-code ladder, and the safety carveout. `terse`: additionally caps purely-explanatory answers to a few sentences, offering to elaborate rather than elaborating unprompted — the most over-steer-prone rule, so opt-in. Empty = unset (honours the operator-global `output-economy:` setting if present). Operator-tier only: a project-tier `output-economy:` key is ignored with a `WARN` (a project can still influence prose style via `AGENTS.md`). CLI out-ranks the user-global setting. An unknown value fail-softs to the default with a `WARN`. |
 | `--reasoning-effort` | `auto` | **OPERATOR REASONING-EFFORT TIER** ([ADR 0055](../adr/0055-reasoning-effort.md)). The default reasoning depth for every session: `auto` (default — unset; do **not** send a reasoning-effort field, so the provider's own default applies) or one of `low`/`medium`/`high`/`xhigh`/`max`. **OpenAI** supports `low`/`medium`/`high` only, so `xhigh`/`max` are **clamped down to `high`** (with a `WARN` naming the requested and clamped-to values); **Anthropic** maps all five. Empty = unset (honours the operator-global `reasoning-effort:` setting if present). A per-session `CreateSession.reasoning_effort` **out-ranks** this default. A model the catalog/live source says has **no** reasoning support drops the effort (with a `WARN`); an unknown model fails open (sends it). Operator-tier only: a project-tier `reasoning-effort:` key is ignored with a `WARN` (a project cannot raise the model's reasoning spend). CLI out-ranks the user-global setting. An unknown value fail-softs to unset with a `WARN`. It binds the agent and its subagents, never the harness's internal classifier calls. **Mid-conversation change:** a running session's effort is changed by *forking* it — `ForkSession` with a `reasoning_effort` override (ADR 0068) creates a peer session on the new tier that **keeps the transcript** (the mecatui `/effort` picker does this; provider/model always inherit). |
 | `--yolo` | `false` | **Alias for `--posture yolo`** (the top tier). **OPERATOR POSTURE (dangerous).** Suppress permission prompts for the built-in mutate-ask floor (`Bash`/`Edit`/`Write`/`Team`/`SkillDraft`) **server-wide**, for the main agent **and** its children (subagents/team members/parallel branches) — for ephemeral, isolated, single-tenant deployments only. **Behaviour change (see the posture note):** `--yolo` now **also waives the child substitution floor** — a subagent/team-member/parallel-branch `$(...)`/backtick/heredoc command **auto-runs** (the child prompt-injection defence is **OFF**). For allow-all with the child defence kept **ON**, use `--posture auto` instead. A `Deny` in **any** scope and any **deliberately configured** `Ask` (managed/project/user) still apply at every tier. **Refused when running as root** (euid 0) unless `MECATL_SANDBOX=1` (or `IS_SANDBOX=1`) is set. **See the allow-all/posture note below.** |
 | `--metrics-addr` | `127.0.0.1:9090` | loopback **admin/observability** listener (empty disables). Serves `/metrics` and the runtime-introspection endpoints — **see the observability note below**. |
@@ -98,7 +119,6 @@ $ go run ./cmd/mecated --openai --workspace "$PWD"
 | `--goroutine-warn-threshold` | `0` | live goroutine-leak alarm: log a `WARN` whenever `runtime.NumGoroutine()` exceeds this count. `0` disables the alarm (the goroutine-count `/metrics` series is exported regardless); pick a high ceiling (e.g. `10000`) so it fires only on a genuine leak. |
 | `--goroutine-warn-interval` | `30s` | how often the goroutine-leak watchdog samples `runtime.NumGoroutine()`. Only consulted when `--goroutine-warn-threshold` > 0. |
 | `--perf-mcp` | `false` | mount the **read-only perf MCP server** at `/mcp` on the admin listener (see the observability note). Requires `--metrics-addr`, and that address **must be loopback** — a non-loopback `--metrics-addr` with `--perf-mcp` is **refused** (fail-closed). |
-| `--acp` | `false` | serve the **Agent Client Protocol** over stdio (JSON-RPC 2.0 on stdin/stdout) for an editor that spawned `mecated` as a subprocess; the TCP/HTTP listeners are skipped. **See the ACP subsection in §10.** |
 
 #### Delegation & sub-agents
 
@@ -125,8 +145,8 @@ mailbox). See the delegation-capabilities note below.
 | `--enable-teams` | `true` | register the experimental **agent-teams** capability (`CreateTeam`/`SpawnTeammate`/`RunTeam` + the in-loop `Team` tool). On by default and **inert** until a client drives a team; `=false` disables it. |
 | `--subagent-model` | `""` | global default model for every Subagent / Parallel-branch / team-member child that does not pin its own model (via an agent definition `model:` or a per-call override) — the analogue of `CLAUDE_CODE_SUBAGENT_MODEL`. The Parallel judge stays on the session model. A concrete id or a `--model-alias`; same provider as the session. Empty inherits the parent `--model`; a non-empty value that does not resolve to a usable model id (unknown alias, or an alias meaning *inherit* — the built-in `sonnet`/`opus`/`haiku` unless overridden) **fails startup**. `mecatui` accepts the same flag for its embedded server. |
 | `--headless` | `false` | run **non-interactive**: declare that clients drive sessions but never answer permission prompts (autonomous / CI). A **child** (subagent/member/branch) unresolved permission ask is then **not surfaced** to the client (nobody would answer it — it would park until run-end) but resolved by the auto-deny path / the opt-in `--subagent-ask-reviewer`. **Caveat — this gates only CHILD asks: a MAIN-session ask still surfaces and, headless, parks unanswered forever.** Pair `--headless` with permission `allow` rules (or `--yolo`) covering the main agent's tool use, or those asks will hang. Default off: a normal mecated serving an interactive client (mecatui, an IDE) surfaces asks for a human. **`--subagent-ask-reviewer` only engages under `--headless`** — setting it on an interactive server is inert (a startup WARNING says so). |
-| `--subagent-ask-reviewer` | `""` | **OPT-IN headless ask reviewer**: model id or `--model-alias` of a tool-less ONE-TURN reviewer that adjudicates a **headless** subagent/member/branch permission ask the 4-step model would otherwise blanket auto-deny. **Requires `--headless`** (on an interactive server — including the `mecatui` embedded server — it is inert: asks surface to the client/modal instead). An allow approves **this call only** (never learned); a deny — or any reviewer error/timeout/ambiguity — keeps the call denied (**fail-safe**); each adjudication is **one extra LLM call** on the reviewer model. Configured `deny`/`ask` rules always win. The gRPC `RunTeam`-direct path is **excluded** (it runs zero-caps — no reviewer). Resolved on the **session's provider** (same-provider only). Empty (default) disables it; an unusable model id **fails startup** (validated even when inert). Deliberately a **server flag, not a permission-config key** — see the permissions section. A configured `ask-reviewer` **model slot** (`--model-slot ask-reviewer=…`) **supersedes** this flag's model, but the flag stays the on/off gate. `mecatui` accepts the same flag for its embedded server but it is inert there (the embedded server is interactive). |
-| `--plan-mode-auto-approve` | `false` | **OPT-IN autonomous plan approval** ([ADR 0069](../adr/0069-plan-approval-gate.md), issue #206): when a plan-mode run ends HEADLESS (no human to review a presented plan), auto-approve the plan via `ApprovePlan(ModeDefault)` instead of leaving it parked. This is a deliberate **autonomous-approval capability** — an operator deployment decision, **NEVER load-bearing for safety** (the engine still gates the `PresentPlan` call; this only resolves the parked ask). It does **NOT** fire when interactive (a human can approve), NOT in non-plan modes, NOT for non-plan asks (a policy/hook ask is still the human's/auto-deny's responsibility). **DEFAULT OFF**: a headless plan ask is auto-denied (the model iterates). Requires `--headless` to engage (an interactive deployment surfaces the plan to the human). **OPERATOR-TIER ONLY** — the YAML twin is the user-global `settings.yaml` `plan-mode-auto-approve:` key; a project-tier block is ignored with a WARN (an autonomous-approval grant is an operator decision, not delegable to a project repo). A **LOUD** startup diagnostic (`plan_mode_auto_approve: ON (NO HUMAN REVIEW)`) is emitted when on, and a per-approval `WARN` names the session + ask id. `mecatui` accepts the same flag for its embedded server but it is inert there (the embedded server is interactive). |
+| `--subagent-ask-reviewer` | `""` | **OPT-IN headless ask reviewer**: model id or `--model-alias` of a tool-less ONE-TURN reviewer that adjudicates a **headless** subagent/member/branch permission ask the 4-step model would otherwise blanket auto-deny. **Requires `--headless`** (on an interactive server — including the `mecatui` embedded server — it is inert: asks surface to the client/modal instead). An allow approves **this call only** (never learned); a deny — or any reviewer error/timeout/ambiguity — keeps the call denied (**fail-safe**); each adjudication is **one extra LLM call** on the reviewer model. Configured `deny`/`ask` rules always win. The gRPC `RunTeam`-direct path is **excluded** (it runs zero-caps — no reviewer). Resolved on the **session's provider** (same-provider only). Empty (default) disables it; an unusable model id **fails startup** (validated even when inert). Deliberately a **server flag, not a permission-config key** — see the permissions section. A configured `ask-reviewer` **model slot** (`--model-slot ask-reviewer=…`) **supersedes** this flag's model, but the flag stays the on/off gate. `mecatui` does NOT accept this flag — it was inert there (mecatui runs interactive, so a child ask surfaces to the modal, not the reviewer) and has been removed (ADR 0089); run a headless `mecated serve --headless --subagent-ask-reviewer …` and point `mecatui connect` at it instead. |
+| `--plan-mode-auto-approve` | `false` | **OPT-IN autonomous plan approval** ([ADR 0069](../adr/0069-plan-approval-gate.md), issue #206): when a plan-mode run ends HEADLESS (no human to review a presented plan), auto-approve the plan via `ApprovePlan(ModeDefault)` instead of leaving it parked. This is a deliberate **autonomous-approval capability** — an operator deployment decision, **NEVER load-bearing for safety** (the engine still gates the `PresentPlan` call; this only resolves the parked ask). It does **NOT** fire when interactive (a human can approve), NOT in non-plan modes, NOT for non-plan asks (a policy/hook ask is still the human's/auto-deny's responsibility). **DEFAULT OFF**: a headless plan ask is auto-denied (the model iterates). Requires `--headless` to engage (an interactive deployment surfaces the plan to the human). **OPERATOR-TIER ONLY** — the YAML twin is the user-global `settings.yaml` `plan-mode-auto-approve:` key; a project-tier block is ignored with a WARN (an autonomous-approval grant is an operator decision, not delegable to a project repo). A **LOUD** startup diagnostic (`plan_mode_auto_approve: ON (NO HUMAN REVIEW)`) is emitted when on, and a per-approval `WARN` names the session + ask id. `mecatui` does NOT accept this flag (mecatui runs interactive, so a plan ask surfaces to the human); run a headless `mecated serve --headless --plan-mode-auto-approve …` and point `mecatui connect` at it instead. |
 | `--subagent-ask-reviewer-max-denies` | `3` | circuit breaker for the reviewer: after this many **consecutive** non-allow reviewer outcomes (denies/failures/timeouts) within one run, further asks skip the reviewer and fall through to the plain auto-deny; an allow resets the count. |
 | `--subagent-ask-reviewer-policy` | `""` | path to a **TRUSTED** policy rubric file; its content replaces the built-in rubric the reviewer applies. The built-in rubric (allow only clearly read-only or standard build/vet/test commands; deny anything that mutates shared state, touches the network/credentials, or whose effect is unclear) lives in `defaultAskReviewPolicy` (`engine/agent/askadjudicator.go`); a custom file is **plain prose** in the same style. Read once at startup; an unreadable file **fails startup**. |
 | `--subagent-model-router` | _(kill-switch)_ | **Semantic model router KILL-SWITCH** ([ADR 0042](../adr/0042-taxonomy-gated-model-router.md), superseding [ADR 0031](../adr/0031-subagent-model-router.md)'s enable model; extended to team members + Parallel branches by [ADR 0034](../adr/0034-team-parallel-model-routing.md)). The router is **enabled by configuring** a `models.router:` category taxonomy in the **operator-tier** `settings.yaml` (the guardrails-parity model — configure = enable), **not** by this flag. Pass **`--subagent-model-router=false`** to force the router OFF despite a taxonomy (the kill-switch; equivalently `models.router.disabled: true` in YAML — the two combine). A **bare `--subagent-model-router` / `=true`** is a harmless no-op: it still parses but neither enables nor disables (the router stays governed by the taxonomy). When enabled, a tiny one-turn classifier (on the `router` model slot) reads a delegation's task prompt and the operator's category taxonomy and picks which model the child runs on — for a **plain** `Subagent` delegation, for each **plain undefined agent-team member** (classified once at enrolment off its role briefing; a member with an agent def pins its own model), and for each **Parallel branch**. It fires **before** the child is minted (decide-once, commit-for-lifetime, same-provider) and **only** to fill the gap — an explicit per-call `model`/`agent`, a `fork`, a `resume`, or a member's agent def already pins the engine (precedence: per-call `model` > agent-def `Model` > fork/resume > router > inherited default). **Fail-soft**: any classifier failure, an unknown category, an unresolvable target, or a per-run circuit breaker (3 consecutive misses, **shared** across all three families) → the inherited default model. Runs in **both** interactive and headless deployments; the gRPC `RunTeam` direct path is zero-caps and never routes. No taxonomy (default) = **OFF, byte-identical** to no router. `mecatui` accepts the same flag for its embedded server (a taxonomy in the operator-global `settings.yaml` enables it for every binary, no per-binary flag needed), and honours `--subagent-model-router=false` for the embedded server too, for parity. |
@@ -223,7 +243,7 @@ The key is **never logged**.
 
 ```sh
 export BRAVE_API_KEY=…      # the secret; sent in a header, never the query string
-mecated                     # …plus your usual flags — Brave is now the backend
+mecated serve               # …plus your usual flags — Brave is now the backend
 ```
 
 **Switching to SearXNG (no API key):** [SearXNG](https://docs.searxng.org/)
@@ -248,7 +268,7 @@ docker run --rm -d -p 8080:8080 -v "$PWD/searxng:/etc/searxng" searxng/searxng
 
 # 3. point mecated at it (env tier — wins over the Exa default)
 export SEARXNG_URL=http://localhost:8080/search
-mecated                                                # …plus your usual flags
+mecated serve                                          # …plus your usual flags
 ```
 
 **A generic / commercial search API (explicit override):** `--websearch-url` speaks a
@@ -259,7 +279,7 @@ flag — it's a secret); tune the header and query parameter for the endpoint:
 
 ```sh
 export WEBSEARCH_API_KEY=…          # the secret; sent in a header, never in the URL/query
-mecated --websearch-url https://api.search.brave.com/res/v1/web/search \
+mecated serve --websearch-url https://api.search.brave.com/res/v1/web/search \
         --websearch-auth-header X-Subscription-Token \   # default "Authorization" (Bearer); set this for a raw-key header
         --websearch-query-param q                        # default "q"
 ```
@@ -496,6 +516,85 @@ yourself. This is also the anticipated future home for OAuth-based provider
 auth (an access/refresh token pair per provider), which is why it's a
 dedicated file with room to grow rather than a flat per-provider flag.
 
+### Daemon config file (`daemon.yaml`)
+
+The serve-time LISTENER TOPOLOGY — gRPC/HTTP/metrics listen addresses, TLS
+cert/key/CA paths, and rate-limit/burst — is a small, versioned slice you can
+put in a file instead of repeating on every invocation. The file is a DISTINCT
+file from `settings.yaml` (which is POLICY/TRUST — permissions, posture,
+guardrails, model taxonomy) and is loaded ONLY when you start the server with an
+explicit `--config PATH`. There is **no conventional auto-load**: a `daemon.yaml`
+at the conventional path is inert until `--config` names it.
+
+**Scaffold and validate offline** (never starts the server):
+
+```sh
+# Write a minimal, commented v1 skeleton at the conventional path
+# $XDG_CONFIG_HOME/mecatl/daemon.yaml (default ~/.config/mecatl/daemon.yaml)
+mecated config daemon init
+
+# Print the skeleton to stdout without writing (paste-ready reference)
+mecated config daemon init --print
+
+# Strictly validate a file (default: the conventional path)
+mecated config daemon validate
+mecated config daemon validate --file /etc/mecatl/daemon.yaml
+```
+
+`config init` still owns the operator `settings.yaml` (POLICY); `config daemon`
+owns `daemon.yaml` (TOPOLOGY). The help distinguishes the two surfaces.
+
+**Start with it:**
+
+```sh
+mecated serve --config ~/.config/mecatl/daemon.yaml
+```
+
+#### v1 fields
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `version` | _(required)_ | the schema version; must be exactly `v1`. Any other value or a missing key is a parse error. |
+| `grpc_addr` | `127.0.0.1:8080` | gRPC listen address (host:port). |
+| `http_addr` | `127.0.0.1:8081` | HTTP/SSE listen address (host:port). |
+| `metrics_addr` | `127.0.0.1:9090` | metrics/admin listen address (host:port). An explicit empty string (`""`) DISABLES the metrics endpoint. |
+| `tls_cert` | `""` | PEM server certificate; with `tls_key` enables TLS on gRPC + HTTP. |
+| `tls_key` | `""` | PEM server private key (paired with `tls_cert`). |
+| `client_ca` | `""` | PEM client-CA bundle; enables mutual TLS (require + verify client certs). Requires `tls_cert`/`tls_key`. |
+| `rate_limit` | `0` | sustained per-client request rate (req/s); `0` disables rate limiting. |
+| `rate_burst` | `0` | token-bucket burst size; `0` derives a sane default from `rate_limit`. |
+
+The schema is **strict**: an unknown top-level key is a parse error (not a
+silently-ignored typo), a multi-document file is refused, and a missing or
+unsupported `version` is rejected. `config daemon validate` runs the strict
+parse plus the effective semantic validation possible without
+starting/binding (rate-limit/burst bounds).
+
+#### Precedence: defaults < file < explicit CLI
+
+- A field **absent** from the file keeps the built-in default (the loopback
+  addresses above).
+- A field **present** in the file overrides the built-in default.
+- An **explicit CLI flag** overrides the file value, including an explicit
+  empty/zero — so `mecated serve --config daemon.yaml --metrics-addr ""` disables
+  metrics even if the file sets `metrics_addr`, and `--grpc-addr 0.0.0.0:8080`
+  overrides a file `grpc_addr`.
+
+#### Security
+
+- The API bearer **token is NOT accepted in `daemon.yaml`**. Set it via
+  `export MECATL_AUTH_TOKEN=...` or `--auth-token` — the same env/CLI sources as
+  without a config file. There is no `token:`/`password:` key in the v1 schema.
+- A **non-loopback** bind without authentication/TLS still exposes
+  UNAUTHENTICATED command/file execution to the network and logs a prominent
+  WARNING. `daemon.yaml` changes topology, not the trust model — enable auth
+  (`MECATL_AUTH_TOKEN`/`--auth-token`) and/or TLS (`tls_cert`/`tls_key`) before
+  binding a non-loopback address.
+- `config daemon validate` never prints secrets or raw file content; the success
+  line carries only the file path and version.
+
+See [ADR 0088](../adr/0088-daemon-config-file.md) for the rationale.
+
 ### Provider selection
 
 A provider is **required** — the server has nothing to do without one. The server
@@ -606,7 +705,7 @@ the rejected model, never a silent downgrade; the state file is not rewritten.
 > **`--model` vs the picker.** For the embedded `mecatui` server, `--model` is the
 > server's **default** model (what it resolves when the client sends no `model_id`);
 > the `/models` picker is the **client's** per-session selector layered on top. For an
-> external `--server`, the server owns its provider config — `--model` is only a header
+> external server (`mecatui connect`), the server owns its provider config — `--model` is only a header
 > display hint, and the picker's selection rides the wire as `provider_id`/`model_id`.
 
 ### The loopback / unauthenticated trust note

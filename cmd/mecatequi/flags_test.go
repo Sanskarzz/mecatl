@@ -10,6 +10,19 @@ import (
 	"github.com/stacklok/mecatl/internal/app"
 )
 
+func TestOutputEconomyFlagIsUnknownFlag(t *testing.T) {
+	// The --output-economy compatibility flag is DELETED (ADR 0041, superseded;
+	// clean break): it now fails at flag-parse time with the standard unknown-flag
+	// error instead of parsing as a no-op.
+	_, err := parseFlags([]string{"--prompt", "hi", "--output-economy", "terse"})
+	if err == nil {
+		t.Fatal("parseFlags(--output-economy terse) = nil error; want 'flag provided but not defined'")
+	}
+	if !strings.Contains(err.Error(), "flag provided but not defined") {
+		t.Errorf("parseFlags(--output-economy terse) err = %q, want 'flag provided but not defined'", err)
+	}
+}
+
 // TestParseFlagsPromptInputs covers the prompt-input validation matrix: a literal
 // prompt, a prompt file, both, neither (error), and an unreadable file (error).
 func TestParseFlagsPromptInputs(t *testing.T) {

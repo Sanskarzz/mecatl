@@ -184,6 +184,18 @@ through it; the compaction summarizer (`engine/agent/cascade.go`) builds its own
 `prompt.Layered{StablePrefix: summarizerSystemPrompt}` directly and is explicitly NOT routed
 through the host builder (the summarizer's structured-output contract is host-independent).
 
+**One default tone; no output-economy surface at all (issue #337, ADR 0086 + the
+clean-break follow-up).** `engine/prompt/builder.go` (`defaultTone`) remains byte-for-byte
+unchanged: concise final delivery is separated from investigation/reasoning depth, and the
+minimum-change, read-before-edit, trust-boundary-validation, and safety clauses remain
+always on. The former composition-only `terse` delta, app config fields/fold, and dedicated
+perf scenario are gone — and so is the one-release parse-compat shim: `--output-economy` is
+now a stdlib unknown-flag error in all three binaries, and a top-level `output-economy:` key
+in settings.yaml is a TARGETED unknown-key rejection in `internal/adapter/permconfig/permconfig.go`
+(`parseYAML` + `rejectRemovedTopLevelKeys`) riding the existing invalid-file WARN+skip path
+(the top-level decode stays deliberately lenient otherwise). Generated config artifacts omit
+the key.
+
 ## Port — `engine/port/`
 
 The PORT interfaces the loop consumes (`LLMProvider`, `SessionStore`, `HookRunner`,
@@ -2489,6 +2501,62 @@ llms.txt generate→commit→CI-diff-guard pattern; the docs job fails on drift)
 write path (`config init`) and the read path (the resolver's `loadUserRules`) share the
 ONE relative-path const (`permconfig.UserSettingsRelPath`, re-exported as
 `configgen.SettingsRelPath`), so they provably resolve the same file.
+
+### `daemonconfig` (explicit daemon.yaml — issue #338, ADR 0088)
+
+`internal/adapter/daemonconfig` is the strict, versioned, operator-selected
+daemon config file loaded ONLY when `mecated serve --config PATH` is supplied. It is a DISTINCT file from
+`settings.yaml` (POLICY/trust) and carries NO auth token value (the bearer
+token stays `MECATL_AUTH_TOKEN`/`--auth-token`). Schema v1 is the small
+API-edge slice — `version` (required, `v1`), `grpc_addr`, `http_addr`,
+`metrics_addr`, `tls_cert`, `tls_key`, `client_ca`, `rate_limit`, `rate_burst`
+— parsed strictly (`KnownFields(true)`; unknown keys, missing/unsupported
+version, multi-document all rejected). Pointer fields distinguish absent
+(`nil`) from explicit zero/empty, so precedence is exact: **defaults < file <
+explicit CLI** (`mergeDaemonConfig` in `cmd/mecated/main.go` folds the file
+into the cmd-mecated serve-time fields; `cliExplicit` tracks explicit flags —
+NO `app.Config` widening). There is **no conventional auto-load** — a
+`daemon.yaml` at the conventional path is inert until `--config` names it.
+
+The UX/docs half (task B): `mecated config daemon init [--print] [--force]`
+scaffolds the embedded commented skeleton
+(`internal/adapter/daemonconfig/daemon.skeleton.yaml`, `//go:embed`-ed) at the
+documented conventional path `<XDG_CONFIG_HOME>/mecatl/daemon.yaml`
+(`DaemonConfigRelPath`), reusing the SAME `xdgconfig` resolution as `config
+init`; it does NOT cause loading. `mecated config daemon validate [--file
+PATH]` strictly parses + semantically validates (`daemonconfig.Validate`:
+rate-limit/burst bounds, the SAME bound the serve path's
+`validateEffectiveConfig` applies) and never prints secrets/raw content.
+`config daemon` extends the `config` namespace (no top-level `daemon`
+command); `config init` keeps ownership of `settings.yaml`. Command resolution
+fails closed for a missing/unknown `config daemon` subcommand — it never
+reaches `run()`/listeners. `--config` stays an advanced serve-only, explicit
+flag; ACP help excludes it. See ADR 0088.
+
+### CLI transport grammar (ADR 0089 — the clean break)
+
+One canonical spelling per action, no aliases/shims. **mecatui** (`cmd/mecatui/command.go`
+`resolveTransportMode`): bare `mecatui [flags]` (incl. a leading flag) ALWAYS hosts the
+embedded mecated (never probes loopback — the AUTO probe is deleted); `mecatui connect
+ADDRESS [flags]` ALWAYS dials (never embeds; ADDRESS must immediately follow `connect` — a
+missing/flag-first token fails closed, the one exception being the help meta-flags, so
+`connect --help` renders help with no ADDRESS). The ADR-0087 `local` subcommand and the
+`--server` flag are DELETED (unknown command / unknown-flag errors). Mode-keyed flag
+applicability (`flagApplicabilityByFlag`, `rejectInapplicableFlags`) rejects embedded-only
+flags in connect mode and remote-only flags (`--auth-token`/`--tls*`/`--insecure`) in the
+bare mode, fail-closed on unknown metadata. A leading-word usage error rides
+`usageErrorTrailer` so main prints the top-level command summary beneath the error (the
+resolver itself stays pure). **mecated** (`cmd/mecated/command.go` `resolveCommand`): the
+network daemon REQUIRES `mecated serve`, ACP stdio REQUIRES `mecated acp`; a bare or other
+leading-flag invocation is `errBareInvocation` (error + top-level help, exit 2) with ONE
+carve-out — a leading `-h`/`--help`/`--help-all` resolves to a HANDLED help intent (top-level
+page / exhaustive reference via `writeTopLevelHelpAll` over the real serve FlagSet, exit 0,
+no error line). The `--acp` flag is DELETED. **output-economy**: the flag is unregistered
+everywhere and the top-level `output-economy:` settings.yaml key gets a targeted named
+rejection (`rejectRemovedTopLevelKeys`, a one-field flat-struct probe — a NESTED
+`output-economy:` can never trip it) because the real decode is deliberately lenient.
+Progressive help is metadata-driven per binary (`validateFlagMeta` / `validateFlagApplicability`
+over the FULL real FlagSet — a registration/metadata drift fails the invariant test).
 
 ### `modelhook` (guardrails — LLM-backed tool-content checker, issue #27 — see `GUARDRAILS.md`)
 

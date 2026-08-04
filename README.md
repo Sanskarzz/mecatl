@@ -11,7 +11,7 @@ production plumbing around them (auth, resilience, observability). It speaks the
 **Responses API** and the native **Anthropic Messages API** (plus OpenRouter, and
 OpenCode Go over the **Chat Completions API**) behind a
 provider-agnostic port, and is driven over a gRPC + HTTP/SSE API — or over stdio via the
-Agent Client Protocol (`--acp`) for editors. An optional terminal UI, **`mecatui`**,
+Agent Client Protocol (`mecated acp`) for editors. An optional terminal UI, **`mecatui`**,
 ships as a client of the same API.
 
 > *A decent model with a great harness beats a great model with a bad harness.* The
@@ -44,7 +44,7 @@ ships as a client of the same API.
 - **MCP client** — connect to MCP servers over **streaming-HTTP transport only** (stdio is not supported); their tools register namespaced `mcp__server__tool`.
 
 **Interfaces & operations**
-- **Three API surfaces, one event model** — a bidi gRPC `Converse` stream, an HTTP/SSE mirror, and ACP over stdio for editors (`--acp`), all over the same domain `Event`.
+- **Three API surfaces, one event model** — a bidi gRPC `Converse` stream, an HTTP/SSE mirror, and ACP over stdio for editors (`mecated acp`), all over the same domain `Event`.
 - **Single-shot CI runner & a GitHub Action that implements issues** — `mecatequi` is a headless, forge-agnostic binary: one prompt against the same engine → a git-diff patch + a machine-readable summary + an exit code. A reusable `workflow_call` workflow (a ~15-line caller) — backed by composite actions, with a hand-rolled split-privilege workflow as the escape hatch — turns an issue (label `mecatequi` / comment `@mecatequi`) into a pull request; the agent job holds only the rotatable LLM key and **no** write token, while a separate, agent-code-free job applies the patch as data and opens the PR. See [`docs/adr/0028-mecatequi.md`](docs/adr/0028-mecatequi.md).
 - **Auth & limits** — bearer token + optional TLS/mTLS, per-client + global rate limiting, `/healthz`+`/readyz` + gRPC health, graceful shutdown, session auto-resume from a store.
 - **Observability** — Prometheus metrics (`/metrics`), OpenTelemetry spans with an OTLP exporter, per-tool-call logging, and an append-only JSONL replay store.
@@ -106,14 +106,14 @@ subagent** demo (detach, harness notice at the turn boundary, collect via
 
 ```sh
 export OPENAI_API_KEY=sk-...
-go run ./cmd/mecated --openai           # gRPC on 127.0.0.1:8080, HTTP/SSE on 127.0.0.1:8081
+go run ./cmd/mecated serve --openai     # gRPC on 127.0.0.1:8080, HTTP/SSE on 127.0.0.1:8081
 ```
 
 The server binds loopback by default and is unauthenticated unless you turn auth on.
 Common flags (full list in the [`mecated` flag reference](./docs/usage.md)):
 
 ```sh
-go run ./cmd/mecated --openai \
+go run ./cmd/mecated serve --openai \
   --openai-base-url https://openrouter.ai/api/v1 --model anthropic/claude-sonnet-4.5 \
   --auth-token "$TOKEN" \                 # bearer auth; --tls-cert/--tls-key/--client-ca for (m)TLS
   --rate-limit 10 \                       # per-client + global token bucket
@@ -133,8 +133,8 @@ examples for the HTTP/SSE routes.
 ### Run the TUI
 
 ```sh
-ANTHROPIC_API_KEY=... go run ./cmd/mecatui    # hosts an embedded mecated in-process
-go run ./cmd/mecatui --server 127.0.0.1:8080  # or point it at a running server
+ANTHROPIC_API_KEY=... go run ./cmd/mecatui     # hosts an embedded mecated in-process
+go run ./cmd/mecatui connect 127.0.0.1:8080  # or point it at a running server
 ```
 
 See the [mecatui terminal-UI guide](./docs/tui.md) for keybindings, slash commands, and themes.

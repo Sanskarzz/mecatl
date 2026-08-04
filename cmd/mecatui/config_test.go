@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,33 +66,6 @@ func TestEmbeddedConfigMapsSubagentModel(t *testing.T) {
 	}
 }
 
-// TestEmbeddedConfigMapsAskReviewer asserts the issue-#31 headless ask-reviewer
-// mirrors flow through to app.Config (model, breaker threshold, and the policy
-// CONTENT — read from the file by parseFlags, threaded as a string).
-func TestEmbeddedConfigMapsAskReviewer(t *testing.T) {
-	ac := embeddedConfig(config{
-		workspace:                    "/ws",
-		model:                        "m",
-		mock:                         true,
-		subagentAskReviewer:          "gpt-5-mini",
-		subagentAskReviewerMaxDenies: 5,
-		subagentAskReviewerPolicy:    "ALLOW read-only only.",
-	}, port.NopDiagnostics{})
-	if ac.SubagentAskReviewerModel != "gpt-5-mini" {
-		t.Errorf("SubagentAskReviewerModel = %q, want gpt-5-mini", ac.SubagentAskReviewerModel)
-	}
-	if ac.SubagentAskReviewerMaxDenies != 5 {
-		t.Errorf("SubagentAskReviewerMaxDenies = %d, want 5", ac.SubagentAskReviewerMaxDenies)
-	}
-	if ac.SubagentAskReviewerPolicy != "ALLOW read-only only." {
-		t.Errorf("SubagentAskReviewerPolicy = %q", ac.SubagentAskReviewerPolicy)
-	}
-	off := embeddedConfig(config{workspace: "/ws", model: "m", mock: true}, port.NopDiagnostics{})
-	if off.SubagentAskReviewerModel != "" {
-		t.Errorf("SubagentAskReviewerModel default = %q, want empty (reviewer off)", off.SubagentAskReviewerModel)
-	}
-}
-
 // TestEmbeddedConfigInteractive is the mecatui-embedded coherence fix (issue #31):
 // mecatui IS the interactive client (a human sits at the approval modal), so the
 // embedded server must run INTERACTIVE — a subagent/team-member/branch child's
@@ -102,32 +76,6 @@ func TestEmbeddedConfigInteractive(t *testing.T) {
 	ac := embeddedConfig(config{workspace: "/ws", model: "m", mock: true}, port.NopDiagnostics{})
 	if !ac.Interactive {
 		t.Fatalf("embeddedConfig.Interactive = false, want true (mecatui is the interactive client; child asks must surface to the modal, not auto-deny)")
-	}
-}
-
-// TestParseFlagsReadsAskReviewerPolicyFile asserts parseFlags reads the rubric
-// FILE into the config string (and fails fast on an unreadable path).
-func TestParseFlagsReadsAskReviewerPolicyFile(t *testing.T) {
-	policyFile := filepath.Join(t.TempDir(), "rubric.txt")
-	if err := os.WriteFile(policyFile, []byte("ALLOW read-only only."), 0o600); err != nil {
-		t.Fatalf("write rubric: %v", err)
-	}
-	cfg, err := parseFlags([]string{"--workspace", "/ws", "--mock",
-		"--subagent-ask-reviewer", "gpt-5-mini",
-		"--subagent-ask-reviewer-policy", policyFile,
-	})
-	if err != nil {
-		t.Fatalf("parseFlags: %v", err)
-	}
-	if cfg.subagentAskReviewerPolicy != "ALLOW read-only only." {
-		t.Errorf("policy content = %q, want the file's content", cfg.subagentAskReviewerPolicy)
-	}
-	if cfg.subagentAskReviewerMaxDenies != 3 {
-		t.Errorf("subagentAskReviewerMaxDenies default = %d, want 3", cfg.subagentAskReviewerMaxDenies)
-	}
-	if _, err := parseFlags([]string{"--workspace", "/ws", "--mock",
-		"--subagent-ask-reviewer-policy", filepath.Join(t.TempDir(), "absent.txt")}); err == nil {
-		t.Errorf("an unreadable --subagent-ask-reviewer-policy must fail parseFlags")
 	}
 }
 
@@ -182,15 +130,12 @@ func TestParseFlagsTrustProject(t *testing.T) {
 	}
 }
 
-// TestParseFlagsDefaults asserts --server defaults to empty (AUTO: probe-then-embed)
-// and that an empty workspace resolves to an absolute path (cwd).
+// TestParseFlagsDefaults asserts an empty workspace resolves to an absolute path
+// (cwd).
 func TestParseFlagsDefaults(t *testing.T) {
 	cfg, err := parseFlags(nil)
 	if err != nil {
 		t.Fatalf("parseFlags: %v", err)
-	}
-	if cfg.server != "" {
-		t.Errorf("server = %q, want \"\" (auto)", cfg.server)
 	}
 	if !filepath.IsAbs(cfg.workspace) {
 		t.Errorf("workspace = %q, want absolute", cfg.workspace)
@@ -763,13 +708,28 @@ func TestResolveMemoryDirPrecedence(t *testing.T) {
 	}
 }
 
+// TestConnectExplicitAuthTokenParses is the by-name connect-side counterpart of
+// TestRejectRemoteOnlyFlagsInBare: an EXPLICIT --auth-token in connect mode
+// parses successfully and lands on the config — an accidental applicability
+// flip (connect rejecting --auth-token) would stay green without it.
+func TestConnectExplicitAuthTokenParses(t *testing.T) {
+	_, cfg, err := parseTransportFlags(modeConnect, &bytes.Buffer{},
+		[]string{"--auth-token", "explicit-tok", "--workspace", "/abs"})
+	if err != nil {
+		t.Fatalf("parseTransportFlags(connect, --auth-token explicit-tok): %v", err)
+	}
+	if cfg.authToken != "explicit-tok" {
+		t.Errorf("authToken = %q, want explicit-tok", cfg.authToken)
+	}
+}
+
 // TestParseFlagsAuthEnv asserts MECATL_AUTH_TOKEN is picked up when the flag is
-// unset.
+// unset. --auth-token is a remote-only flag, so the test parses in connect mode.
 func TestParseFlagsAuthEnv(t *testing.T) {
 	t.Setenv("MECATL_AUTH_TOKEN", "tok-123")
-	cfg, err := parseFlags(nil)
+	_, cfg, err := parseTransportFlags(modeConnect, &bytes.Buffer{}, nil)
 	if err != nil {
-		t.Fatalf("parseFlags: %v", err)
+		t.Fatalf("parseTransportFlags(connect): %v", err)
 	}
 	if cfg.authToken != "tok-123" {
 		t.Errorf("authToken = %q, want tok-123", cfg.authToken)
@@ -803,21 +763,21 @@ func TestValidateWorkspaceRequired(t *testing.T) {
 	}
 }
 
-// TestValidateEmbeddedProviderRequired asserts that with no external --server the
-// embedded path needs a resolvable provider (OpenAI key or --mock), and that an
-// external server or a provider satisfies the check.
+// TestValidateEmbeddedProviderRequired asserts that the bare (embedded) path
+// needs a resolvable provider (OpenAI key or --mock), and that connect mode or a
+// provider satisfies the check.
 func TestValidateEmbeddedProviderRequired(t *testing.T) {
-	// No server, no key, no mock -> error (cannot host an embedded server). The copy
+	// Bare mode, no key, no mock -> error (cannot host an embedded server). The copy
 	// must be self-explanatory: every accepted key, the endpoint base-URL overrides,
-	// the --mock + --server escape hatches, and the docs pointer.
-	if err := (config{workspace: "/abs", mode: "default"}).validate(); err == nil {
+	// the --mock + 'mecatui connect' escape hatches, and the docs pointer.
+	if err := (config{workspace: "/abs", mode: "default", transportMode: modeLocal}).validate(); err == nil {
 		t.Error("expected an error when embedding with no provider")
 	} else {
 		msg := err.Error()
 		for _, want := range []string{
 			"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "OPENCODE_API_KEY",
 			"--openai-base-url", "--anthropic-base-url", "--openrouter-base-url", "--opencode-base-url",
-			"--mock", "--server", "docs/usage.md",
+			"--mock", "mecatui connect ADDRESS", "docs/usage.md",
 		} {
 			if !strings.Contains(msg, want) {
 				t.Errorf("validate() error %q does not mention %q", msg, want)
@@ -825,16 +785,16 @@ func TestValidateEmbeddedProviderRequired(t *testing.T) {
 		}
 	}
 	// --mock resolves the provider.
-	if err := (config{workspace: "/abs", mode: "default", mock: true}).validate(); err != nil {
+	if err := (config{workspace: "/abs", mode: "default", transportMode: modeLocal, mock: true}).validate(); err != nil {
 		t.Errorf("--mock should satisfy the provider check: %v", err)
 	}
 	// An OpenAI key resolves the provider.
-	if err := (config{workspace: "/abs", mode: "default", openAIKey: "sk-x"}).validate(); err != nil {
+	if err := (config{workspace: "/abs", mode: "default", transportMode: modeLocal, openAIKey: "sk-x"}).validate(); err != nil {
 		t.Errorf("OPENAI_API_KEY should satisfy the provider check: %v", err)
 	}
-	// An external server means no embedded provider is needed.
-	if err := (config{workspace: "/abs", mode: "default", server: "127.0.0.1:8080"}).validate(); err != nil {
-		t.Errorf("an external --server should not require a provider: %v", err)
+	// connect mode means no embedded provider is needed.
+	if err := (config{workspace: "/abs", mode: "default", transportMode: modeConnect, connectAddress: "127.0.0.1:8080"}).validate(); err != nil {
+		t.Errorf("mecatui connect should not require a provider: %v", err)
 	}
 }
 
@@ -994,21 +954,21 @@ func TestPostureRefusalReason(t *testing.T) {
 	}
 }
 
-// TestValidateAllowAllServerGuard asserts validate()'s `server == ""` guard: an
-// external server skips the allow-all root refusal entirely (on any euid), while
-// the embedded path with a declared sandbox is permitted. The root-refused branch
+// TestValidateAllowAllConnectGuard asserts validate()'s mayEmbed guard: connect
+// mode skips the allow-all root refusal entirely (on any euid), while the
+// embedded path with a declared sandbox is permitted. The root-refused branch
 // reads the real os.Geteuid(), so it is only assertable when actually running as
 // root.
-func TestValidateAllowAllServerGuard(t *testing.T) {
-	// External server: allow-all never trips the refusal regardless of euid.
-	ext := config{server: "127.0.0.1:8080", workspace: "/abs", mode: "default", allowAllTools: true}
+func TestValidateAllowAllConnectGuard(t *testing.T) {
+	// connect: allow-all never trips the refusal regardless of euid.
+	ext := config{transportMode: modeConnect, connectAddress: "127.0.0.1:8080", workspace: "/abs", mode: "default", allowAllTools: true}
 	if err := ext.validate(); err != nil {
-		t.Errorf("external server + allow-all should skip the refusal, got %v", err)
+		t.Errorf("connect + allow-all should skip the refusal, got %v", err)
 	}
 
 	// Embedded + declared sandbox: permitted on any euid.
 	t.Setenv("MECATL_SANDBOX", "1")
-	emb := config{workspace: "/abs", mode: "default", mock: true, allowAllTools: true}
+	emb := config{transportMode: modeLocal, workspace: "/abs", mode: "default", mock: true, allowAllTools: true}
 	if err := emb.validate(); err != nil {
 		t.Errorf("embedded + allow-all + MECATL_SANDBOX=1 should validate, got %v", err)
 	}
@@ -1017,7 +977,7 @@ func TestValidateAllowAllServerGuard(t *testing.T) {
 	t.Setenv("MECATL_SANDBOX", "")
 	t.Setenv("IS_SANDBOX", "")
 	if os.Geteuid() == 0 {
-		refused := config{workspace: "/abs", mode: "default", mock: true, allowAllTools: true}
+		refused := config{transportMode: modeLocal, workspace: "/abs", mode: "default", mock: true, allowAllTools: true}
 		if err := refused.validate(); err == nil {
 			t.Error("embedded + allow-all as root without a sandbox should be refused")
 		}

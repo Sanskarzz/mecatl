@@ -4,22 +4,29 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
 
-	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/internal/app"
 	"github.com/stacklok/mecatl/internal/cliconfig"
 )
 
 // config is the resolved CLI/env configuration for mecatui.
 type config struct {
-	keymap *cliconfig.KeyValueList
-	// server is the external mecated gRPC address (host:port). Empty means AUTO:
-	// probe the loopback default and, if nothing answers, host an embedded server
-	// in-process over a UNIX socket (see cmd/mecatui/embed).
-	server     string
+	// transportMode is the resolved canonical transport mode (local/connect)
+	// threaded explicitly from resolveTransportMode through parse and validate.
+	// It drives the transport path (no-probe/no-embed) and the
+	// trust/provider/posture validation gating (ADR 0087).
+	transportMode transportMode
+	// connectAddress is the dial target for `mecatui connect ADDRESS` ("" for the
+	// bare/local mode). Set by resolveTransportMode; consumed by resolveTransport.
+	connectAddress string
+	// helpAll is true when --help-all was passed; it requests the exhaustive
+	// flag listing and exits 0 before transport resolution.
+	helpAll    bool
+	keymap     *cliconfig.KeyValueList
 	workspace  string
 	mode       string
 	theme      string
@@ -80,23 +87,14 @@ type config struct {
 	defaultProviderFlagSet bool
 	// modelAliases / modelSlots mirror the mecated flags for the embedded server
 	// (ADR 0030): modelAliases maps a short alias to a concrete id; modelSlots binds
-	// an internal lightweight call (compaction/ask-reviewer/guardrail) or a tier
-	// (cheap/fast/reasoning) to a selector resolved THROUGH modelAliases. INERT when
-	// dialling an external server. The *cliconfig.KeyValueList pointers are the
-	// flag bindings returned by cliconfig.RegisterModelFlags (issue #93: the type
-	// lives in cliconfig so the two mains cannot drift).
+	// an internal lightweight call (compaction/guardrail; the ask-reviewer slot is
+	// inert here — mecatui runs interactive, so the headless child-ask reviewer never
+	// engages) or a tier (cheap/fast/reasoning) to a selector resolved THROUGH
+	// modelAliases. INERT when dialling an external server. The *cliconfig.KeyValueList
+	// pointers are the flag bindings returned by cliconfig.RegisterModelFlags (issue
+	// #93: the type lives in cliconfig so the two mains cannot drift).
 	modelAliases *cliconfig.KeyValueList
 	modelSlots   *cliconfig.KeyValueList
-	// Headless ask reviewer (issue #31, embedded server only): the mecated flag
-	// mirrors. subagentAskReviewer names the reviewer model (empty = off);
-	// subagentAskReviewerMaxDenies is the per-run consecutive-deny breaker;
-	// subagentAskReviewerPolicyFile points at a TRUSTED rubric file whose CONTENT
-	// (read once in parseFlags) travels on subagentAskReviewerPolicy into
-	// app.Config.SubagentAskReviewerPolicy.
-	subagentAskReviewer           string
-	subagentAskReviewerMaxDenies  int
-	subagentAskReviewerPolicyFile string
-	subagentAskReviewerPolicy     string
 	// Subagent model router (ADR 0031; enable model per ADR 0042, embedded server
 	// only): the router is ENABLED by an operator-tier models.router: taxonomy in the
 	// user-global settings.yaml (the guardrails-parity enable model). The
@@ -104,9 +102,8 @@ type config struct {
 	// and subagentModelRouterSet records whether it was given. =false sets
 	// app.Config.RouterDisabled (forces the router OFF despite a taxonomy); a bare flag /
 	// =true is a harmless no-op (the router stays governed by the taxonomy); unset leaves
-	// routing governed by taxonomy presence. UNLIKE the ask-reviewer, the router is
-	// MEANINGFUL under mecatui — it picks the child's model before it runs, in both
-	// interactive and headless modes.
+	// routing governed by taxonomy presence. The router IS meaningful under mecatui —
+	// it picks the child's model before it runs, in both interactive and headless modes.
 	subagentModelRouter    bool
 	subagentModelRouterSet bool
 	// providerFlags holds the shared provider base-URL flags (cliconfig), applied onto
@@ -125,7 +122,7 @@ type config struct {
 	noBash           bool
 
 	// Embedded-server LLM resilience timeouts (used only when hosting an
-	// in-process server; ignored when dialling an external --server). They mirror
+	// in-process server; ignored under `mecatui connect`). They mirror
 	// mecated's --llm-per-attempt-timeout / --llm-stream-idle-timeout and are
 	// mapped onto app.Config.LLMPerAttemptTimeout / app.Config.LLMStreamIdleTimeout
 	// in main.go. llmPerAttemptTimeout bounds ESTABLISHMENT (connect + first chunk)
@@ -136,7 +133,7 @@ type config struct {
 
 	// trustProject controls whether a discovered PROJECT's permission ALLOW rules
 	// and its project-scoped soul (.mecatl/soul.md) are honoured for the EMBEDDED
-	// server only (ignored when dialling an external --server). DEFAULT FALSE — the
+	// server only (ignored under `mecatui connect`). DEFAULT FALSE — the
 	// safe stance, unified with mecated's --trust-project. A project's deny/ask rules
 	// are ALWAYS honoured regardless; only its ALLOW grants and project soul are
 	// gated. Pass --trust-project for a repo you trust. Mapped onto
@@ -144,7 +141,7 @@ type config struct {
 	trustProject bool
 
 	// allowAllTools is the operator allow-all posture for the EMBEDDED server only
-	// (ignored when dialling an external --server). When set it injects a single
+	// (ignored under `mecatui connect`). When set it injects a single
 	// ScopeCLI allow-all rule that suppresses the built-in mutate-ask floor; a Deny
 	// in any scope and any deliberately configured Ask still apply. Refused as root
 	// outside a declared sandbox (see validate). See docs/adr/0022-allow-all-posture.md.
@@ -158,12 +155,6 @@ type config struct {
 	// key. Mapped onto app.Config.Posture/PostureFlagSet in embeddedConfig.
 	posture        string
 	postureFlagSet bool
-	// outputEconomy is the operator-tier output-economy token (ADR 0041) for the
-	// EMBEDDED server. outputEconomyFlagSet records an explicit --output-economy so
-	// CLI out-ranks the operator-global settings.yaml output-economy: key. Mapped
-	// onto app.Config.OutputEconomy/OutputEconomyFlagSet in embeddedConfig.
-	outputEconomy        string
-	outputEconomyFlagSet bool
 	// reasoningEffort is the operator-tier reasoning-effort default (ADR 0055) for
 	// the EMBEDDED server. reasoningEffortFlagSet records an explicit
 	// --reasoning-effort so CLI out-ranks the operator-global settings.yaml
@@ -269,18 +260,33 @@ type config struct {
 	perfMCP bool
 }
 
-// defaultProbeAddr is mecated's historical default loopback gRPC address. In AUTO
-// mode (no --server) mecatui probes this; if a server is already serving there it
-// connects, otherwise it hosts an embedded server instead.
-const defaultProbeAddr = "127.0.0.1:8080"
-
-// parseFlags parses argv into a config, applying env fallbacks. The workspace is
-// resolved to an absolute path (the server requires absolute). args excludes the
-// program name.
+// parseFlags is the bare-mode test seam: it parses argv (excluding the program
+// name) as a bare (embedded/local) invocation. Existing tests that exercise the
+// flag-parsing logic (not the mode-specific transport/help behaviour) use this
+// entry point. Production goes through parseTransportFlags via
+// resolveTransportMode.
 func parseFlags(args []string) (config, error) {
+	_, cfg, err := parseTransportFlags(modeLocal, os.Stderr, args)
+	return cfg, err
+}
+
+// parseTransportFlags is parseFlags with an explicit transport mode and an
+// injected output writer, selecting which help renderer the --help hook invokes
+// and which applicability policy governs explicit flags. It returns the built
+// *flag.FlagSet alongside the config so progressive-help tests can run the
+// validateFlagApplicability completeness invariant over the FULL real FlagSet
+// (every flag parseTransportFlags registers) instead of a synthetic subset. It
+// is the small test seam: tests capture the REAL Usage / --help / --help-all
+// render output into a strings.Builder and inspect the FlagSet, without copying
+// the registration block. Production calls it with os.Stderr and discards the
+// returned FlagSet. mode is the resolved canonical transport mode; out is where
+// --help / parse errors are written; args excludes the program name (and, for
+// local/connect, the command word / ADDRESS — resolveTransportMode strips them).
+func parseTransportFlags(mode transportMode, out io.Writer, args []string) (*flag.FlagSet, config, error) {
 	var cfg config
+	cfg.transportMode = mode
 	fs := flag.NewFlagSet("mecatui", flag.ContinueOnError)
-	fs.StringVar(&cfg.server, "server", "", "external mecated gRPC address (host:port); empty = auto: reuse a server already running on "+defaultProbeAddr+", else host an embedded one over a UNIX socket")
+	fs.SetOutput(out)
 	fs.StringVar(&cfg.workspace, "workspace", "", "absolute workspace root for the session (default: cwd)")
 	fs.StringVar(&cfg.mode, "mode", "default", "permission mode: default | plan | accept-edits")
 	fs.StringVar(&cfg.theme, "theme", "", "theme name (default: aztec)")
@@ -307,12 +313,9 @@ func parseFlags(args []string) (config, error) {
 	// Shared model alias/slot flags (cliconfig); mecatui keeps its own help wording.
 	cfg.modelAliases, cfg.modelSlots = cliconfig.RegisterModelFlags(fs, cliconfig.ModelFlagHelp{
 		ModelAlias: "embedded server only: model alias mapping as name=model-id (repeatable), e.g. --model-alias cheap=gpt-4o-mini. Aliases are resolved in the composition layer; a --model-slot selector and an agent def's `model: <alias>` resolve through this map",
-		ModelSlot:  "embedded server only: per-slot model binding as slot=selector (repeatable), e.g. --model-slot compaction=cheap (ADR 0030). A SLOT routes an internal lightweight LLM call (`compaction`/`ask-reviewer`/`guardrail`) to its own model; a TIER key (`cheap`/`fast`/`reasoning`) gives a default a slot falls through to (each routed slot defaults to `cheap`). The selector is an alias (--model-alias / built-ins) or a concrete id. Empty keeps every call on the session model. FAIL-SOFT on a typo/inherit. Operator-tier only",
+		ModelSlot:  "embedded server only: per-slot model binding as slot=selector (repeatable), e.g. --model-slot compaction=cheap (ADR 0030). A SLOT routes an internal lightweight LLM call to its own model: under mecatui the wired slots are `compaction` (the compaction summary call) and `guardrail` (the content checker); the `ask-reviewer` slot is INERT here (mecatui runs INTERACTIVE, so the headless child-ask reviewer never engages — that slot only routes on a headless `mecated --headless`). A TIER key (`cheap`/`fast`/`reasoning`) gives a default a slot falls through to (each routed slot defaults to `cheap`). The selector is an alias (--model-alias / built-ins) or a concrete id. Empty keeps every call on the session model. FAIL-SOFT on a typo/inherit. Operator-tier only",
 	})
-	fs.StringVar(&cfg.subagentAskReviewer, "subagent-ask-reviewer", "", "embedded server only: OPT-IN headless ask reviewer (issue #31), accepted for symmetry with mecated but INERT under mecatui — mecatui runs INTERACTIVE (a human sits at the approval modal), so a subagent/member/branch permission ask SURFACES to that modal, never reaching the reviewer (which only fires on a headless server with no human). Model id of a tool-less ONE-TURN reviewer; empty (default) disables it; an unusable model id FAILS STARTUP. To actually use the reviewer, run a headless `mecated --headless --subagent-ask-reviewer ...` and point mecatui at it with --server")
-	fs.IntVar(&cfg.subagentAskReviewerMaxDenies, "subagent-ask-reviewer-max-denies", agent.DefaultAskReviewMaxDenies, "embedded server only: circuit breaker for --subagent-ask-reviewer (INERT under mecatui — see that flag). <=0 uses the default (3)")
-	fs.StringVar(&cfg.subagentAskReviewerPolicyFile, "subagent-ask-reviewer-policy", "", "embedded server only: path to a TRUSTED policy rubric file for --subagent-ask-reviewer (INERT under mecatui — see that flag). Empty keeps the built-in rubric. Read once at startup; an unreadable file FAILS STARTUP")
-	fs.BoolVar(&cfg.subagentModelRouter, "subagent-model-router", false, "embedded server only: Semantic model router KILL-SWITCH (ADR 0042, superseding 0031's enable model): the router is ENABLED by an operator-tier models.router: category taxonomy in the user-global settings.yaml (configure = enable, guardrails-parity), NOT by this flag. Pass --subagent-model-router=false to force it OFF despite a taxonomy (also models.router.disabled: true in YAML). When enabled, a tiny classifier on the `router` slot picks the child model per plain Subagent delegation before the child is minted (decide-once, same-provider); fail-soft to the inherited model on any miss. UNLIKE --subagent-ask-reviewer, the router IS meaningful under mecatui (it picks a model before the child runs, interactive and headless alike)")
+	fs.BoolVar(&cfg.subagentModelRouter, "subagent-model-router", false, "embedded server only: Semantic model router KILL-SWITCH (ADR 0042, superseding 0031's enable model): the router is ENABLED by an operator-tier models.router: category taxonomy in the user-global settings.yaml (configure = enable, guardrails-parity), NOT by this flag. Pass --subagent-model-router=false to force it OFF despite a taxonomy (also models.router.disabled: true in YAML). When enabled, a tiny classifier on the `router` slot picks the child model per plain Subagent delegation before the child is minted (decide-once, same-provider); fail-soft to the inherited model on any miss. The router IS meaningful under mecatui — it picks a child's model before the child runs, in both interactive and headless modes")
 	// Shared provider base-URL flags (cliconfig); mecatui keeps its own help wording.
 	cfg.providerFlags = cliconfig.RegisterProviderFlags(fs, cliconfig.ProviderFlagHelp{
 		OpenAIBaseURL:     "override the OpenAI API base URL for the embedded server (compatible endpoints)",
@@ -335,8 +338,6 @@ func parseFlags(args []string) (config, error) {
 		"embedded server only; ALIAS for --posture yolo (dangerous): allow-all AND loosen the CHILD substitution floor (a subagent's $()/backtick/heredoc AUTO-RUNS — prompt-injection defense OFF). Deny in any scope and configured Ask still apply. Isolated/single-tenant ONLY. Refused as root unless MECATL_SANDBOX=1 (or IS_SANDBOX=1).")
 	fs.StringVar(&cfg.posture, "posture", "",
 		"embedded server only: OPERATOR POSTURE LADDER (strict < trusted < auto < yolo): strict (default) prompts every mutate; trusted = --trust-project; auto adds allow-all + main substitution loosening (child injection-defense ON); yolo additionally auto-runs $()/backtick/heredoc in CHILDREN (injection-defense OFF). --yolo/--trust-project are aliases. auto/yolo refused as root outside MECATL_SANDBOX. Unknown value fails closed to strict.")
-	fs.StringVar(&cfg.outputEconomy, "output-economy", "",
-		"embedded server only: OPERATOR OUTPUT-ECONOMY TIER (ADR 0041): normal (default — the system prompt already carries the prose-economy + minimum-code ladder + safety carveout) or terse (additionally caps purely-explanatory answers to a few sentences, offering to elaborate rather than elaborating unprompted). Empty = unset (honours the operator-global settings.yaml output-economy: key if present). Operator-tier only; a project-tier key is ignored with a WARN. An unknown value fail-softs to the default with a WARN.")
 	fs.StringVar(&cfg.reasoningEffort, "reasoning-effort", "",
 		"embedded server only: OPERATOR REASONING-EFFORT TIER (ADR 0055): auto (default — unset, the provider default applies) or low/medium/high/xhigh/max. OpenAI supports low/medium/high only (xhigh/max clamp to high); Anthropic maps all five. Empty = unset (honours the operator-global settings.yaml reasoning-effort: key). A per-session /effort out-ranks it. Operator-tier only; a project-tier key is ignored with a WARN. An unknown value fail-softs to unset with a WARN.")
 	fs.BoolVar(&cfg.quiet, "quiet", false,
@@ -362,11 +363,49 @@ func parseFlags(args []string) (config, error) {
 	fs.StringVar(&cfg.perfAddr, "perf-addr", "", "embedded server only: loopback listen address for the --perf admin surface (empty = the fixed default 127.0.0.1:9099, predictable so an MCP-client config can hardcode the /mcp URL; distinct from mecated's :9090). Pass another host:port, or 127.0.0.1:0 for an ephemeral port. On a port clash, start FAILS with guidance. Only consulted with --perf")
 	fs.IntVar(&cfg.perfGoroutineWarnThreshold, "perf-goroutine-warn-threshold", 0, "embedded server only: arm the live goroutine-leak watchdog — log a Warn whenever runtime.NumGoroutine() exceeds this count (decision 10). 0 (default) disables the alarm; the /metrics goroutine-count series is exported regardless. Only consulted with --perf")
 	fs.BoolVar(&cfg.perfMCP, "perf-mcp", false, "embedded server only: mount the read-only perf MCP server at /mcp on the --perf admin surface, so an agent can introspect THIS process's runtime/latency/profile state over MCP (list_slow_turns, runtime/heap/CPU profiles, FlightRecorder). Only meaningful with --perf. SECURITY: loopback-bound, UNAUTHENTICATED (decision 6) — embed REFUSES a non-loopback --perf-addr with this set")
+	fs.BoolVar(&cfg.helpAll, "help-all", false, "print the exhaustive flag reference for this command and exit (the common --help lists only the task-oriented subset)")
+
+	fs.Usage = transportUsage(fs, mode)
 
 	if err := fs.Parse(args); err != nil {
-		return config{}, err
+		// Return the fully-registered FlagSet even on a parse/help error so the
+		// progressive-help completeness invariant (validateFlagApplicability) can
+		// run over the full real registration path via the --help-triggered ErrHelp
+		// path.
+		return fs, config{}, err
 	}
 
+	// --help-all was parsed as a normal flag; render and return ErrHelp (exit 0).
+	if cfg.helpAll {
+		out := fs.Output()
+		switch mode {
+		case modeConnect:
+			writeConnectHelpAll(out, fs)
+		default:
+			writeBareHelpAll(out, fs)
+		}
+		return nil, config{}, flag.ErrHelp
+	}
+
+	// By-name applicability rejection (ADR 0087): connect rejects embedded-only
+	// flags; the bare/local mode rejects remote-only flags.
+	if err := rejectInapplicableFlags(fs, mode); err != nil {
+		return fs, config{}, err
+	}
+
+	if err := finalizeParsedConfig(fs, &cfg); err != nil {
+		return fs, config{}, err
+	}
+	return fs, cfg, nil
+}
+
+// finalizeParsedConfig applies the post-parse env fallbacks, records which flags
+// were set explicitly (so composition can let CLI out-rank operator-YAML keys),
+// validates --terminal-title, reads provider credentials, and resolves the
+// workspace to an absolute path. It is extracted from parseTransportFlags to
+// keep parseTransportFlags' cyclomatic complexity under the lint gate; the
+// helper owns the post-parse branches.
+func finalizeParsedConfig(fs *flag.FlagSet, cfg *config) error {
 	// Record an explicit --posture so CLI out-ranks the operator-global settings.yaml
 	// posture: key (mirrors mecated).
 	fs.Visit(func(f *flag.Flag) {
@@ -378,9 +417,6 @@ func parseFlags(args []string) (config, error) {
 			// distinguish unset (router governed by the taxonomy) from =false (kill-switch)
 			// and =true/bare (a harmless no-op, the router stays governed by the taxonomy).
 			cfg.subagentModelRouterSet = true
-		}
-		if f.Name == "output-economy" {
-			cfg.outputEconomyFlagSet = true
 		}
 		if f.Name == "reasoning-effort" {
 			cfg.reasoningEffortFlagSet = true
@@ -409,16 +445,15 @@ func parseFlags(args []string) (config, error) {
 	}
 	// Validate --terminal-title and resolve it onto terminalTitleOff. Accepted
 	// values: on/true/1/"" → on (the default); off/false/0 → off; anything else
-	// fails fast (match the validated-string convention posture/output-economy
-	// use, but those fail-soft — a title toggle is binary, so an unknown value is
-	// a genuine config error, not a soft-degrade case).
+	// fails fast (unlike posture's fail-soft behavior, a title toggle is binary, so
+	// an unknown value is a genuine config error, not a soft-degrade case).
 	switch cfg.terminalTitle {
 	case "on", "true", "1", "":
 		cfg.terminalTitleOff = false
 	case "off", "false", "0":
 		cfg.terminalTitleOff = true
 	default:
-		return config{}, fmt.Errorf("invalid --terminal-title %q (want on|off|true|false|1|0)", cfg.terminalTitle)
+		return fmt.Errorf("invalid --terminal-title %q (want on|off|true|false|1|0)", cfg.terminalTitle)
 	}
 	// Env fallback: --terminal-title wins if passed; otherwise
 	// MECATUI_NO_TERMINAL_TITLE=1/true turns the dynamic title off (set-and-forget
@@ -442,34 +477,27 @@ func parseFlags(args []string) (config, error) {
 	if !cfg.listThemes {
 		ws, err := resolveWorkspace(cfg.workspace)
 		if err != nil {
-			return config{}, err
+			return err
 		}
 		cfg.workspace = ws
 	}
-	// The ask-reviewer policy rubric travels as a STRING into app.Config (the
-	// composition layer never touches os); the cmd main reads the file here, once,
-	// failing fast on an unreadable path (the mecated posture).
-	policy, err := readAskReviewerPolicy(cfg.subagentAskReviewerPolicyFile)
-	if err != nil {
-		return config{}, err
-	}
-	cfg.subagentAskReviewerPolicy = policy
-	return cfg, nil
+	return nil
 }
 
-// readAskReviewerPolicy reads the --subagent-ask-reviewer-policy rubric file and
-// returns its content as a string. An empty path returns "" (the built-in rubric
-// stands); an unreadable file is a config error (fail-fast — a silently dropped
-// operator rubric would leave the reviewer on a policy the operator did not set).
-func readAskReviewerPolicy(path string) (string, error) {
-	if path == "" {
-		return "", nil
+// transportUsage returns the fs.Usage closure for the resolved transport mode:
+// the bare form prints the bare-mode common help; `connect` prints its
+// mode-specific common help. Callers that want to assert the banner is the real
+// one (not a dead copy) wire this helper rather than duplicating the closure.
+func transportUsage(fs *flag.FlagSet, mode transportMode) func() {
+	return func() {
+		out := fs.Output()
+		switch mode {
+		case modeConnect:
+			writeConnectCommonHelp(out, fs)
+		default:
+			writeBareCommonHelp(out, fs)
+		}
 	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("--subagent-ask-reviewer-policy %q: %w", path, err)
-	}
-	return string(b), nil
 }
 
 // resolveWorkspace defaults an empty workspace to the cwd and makes it absolute.
@@ -507,37 +535,48 @@ func (c config) validate() error {
 	default:
 		return fmt.Errorf("invalid --mode %q (want default|plan|accept-edits)", c.mode)
 	}
-	// When hosting an embedded server (no external --server) the provider must be
-	// resolvable: an OpenAI, Anthropic, or OpenRouter key in the environment, the
-	// offline mock, or an auto-detected/explicit ToolHive LLM gateway proxy
-	// (--toolhive-llm, default on) — the same detection app.Build runs, so this
-	// pre-check agrees with what the embedded server will actually resolve.
-	if c.server == "" && c.openAIKey == "" && c.openRouterKey == "" && c.anthropicKey == "" && c.openCodeKey == "" && !c.mock {
+	// Provider/posture checks apply ONLY to paths that may embed (ADR 0087 Phase
+	// 1); the predicate + its rationale live once on config.mayEmbed.
+	mayEmbed := c.mayEmbed()
+	// When hosting an embedded server the provider must be resolvable: an OpenAI,
+	// Anthropic, or OpenRouter key in the environment, the offline mock, or an
+	// auto-detected/explicit ToolHive LLM gateway proxy (--toolhive-llm, default
+	// on) — the same detection app.Build runs, so this pre-check agrees with what
+	// the embedded server will actually resolve.
+	if mayEmbed && c.openAIKey == "" && c.openRouterKey == "" && c.anthropicKey == "" && c.openCodeKey == "" && !c.mock {
 		var probe app.Config
 		c.toolhiveLLMFlags.Apply(&probe)
 		if !app.ToolhiveAvailable(probe) {
-			return errors.New("no LLM provider configured and no external --server given — mecatui has nothing to talk to: " +
+			return errors.New("no LLM provider configured — mecatui has nothing to talk to: " +
 				"to host an embedded server set one of ANTHROPIC_API_KEY (Claude), OPENAI_API_KEY, " +
 				"OPENROUTER_API_KEY (one key, many models — a good first choice), or OPENCODE_API_KEY (OpenCode Go); " +
 				"for a compatible/proxy endpoint add " +
 				"--openai-base-url / --anthropic-base-url / --openrouter-base-url / --opencode-base-url with the matching key; " +
 				"for a ToolHive LLM gateway proxy make sure it is running (or pass --toolhive-llm-base-url); " +
-				"to try it offline with no key pass --mock; or point --server at an already-running mecated; " +
+				"to try it offline with no key pass --mock; or run 'mecatui connect ADDRESS' against an already-running mecated; " +
 				"see docs/usage.md for provider setup")
 		}
 	}
-	// Operator posture: only meaningful for the embedded server; refuse an allow-all
-	// tier (auto or yolo) when running privileged outside a declared sandbox. Dialling
-	// an external server never embeds, so it must not trip the refusal. The tier is the
-	// AUTHORITATIVE one (incl. the operator-global settings.yaml posture: key), so a
-	// YAML-only allow-all tier cannot escape the refusal — and app.Build re-checks it as
+	// Operator posture: refuse an allow-all tier (auto or yolo) when running
+	// privileged outside a declared sandbox. The tier is the AUTHORITATIVE one
+	// (incl. the operator-global settings.yaml posture: key), so a YAML-only
+	// allow-all tier cannot escape the refusal — and app.Build re-checks it as
 	// the fail-closed backstop.
-	if c.server == "" {
+	if mayEmbed {
 		if err := app.PostureRefusalReason(embeddedAuthoritativePosture(c), embeddedPrivileged()); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// mayEmbed reports whether this run may host an embedded server, and so is
+// subject to the provider/posture checks in validate() and the pre-TUI posture
+// WARN in run(). The bare/local mode always embeds; `connect` never embeds, so
+// it skips those checks (ADR 0087). It is the single predicate both guards key
+// on, so the gating rationale lives in one place.
+func (c config) mayEmbed() bool {
+	return c.transportMode == modeLocal
 }
 
 // embeddedAuthoritativePosture resolves the SAME posture tier app.Build resolves for
