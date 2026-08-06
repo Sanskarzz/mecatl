@@ -3954,13 +3954,26 @@ verbatim, and protobuf REJECTS invalid UTF-8 at marshal time (`codes.Internal`),
 after which the relay cancels the run. The confirmed producer was a Bash call
 (`sed … | cat -t`): BSD `cat -t` renders a valid em dash's continuation bytes as
 ASCII while retaining the `\xe2` lead byte, leaving an orphaned lead byte. The
-byte path is `internal/adapter/osfs/osfs.go` (`cappedBuffer`, a hard byte cap
-with no rune awareness) → `engine/adapter/fstools` (`truncate` only avoids
-*introducing* a mid-rune split on VALID input; it does not repair pre-existing
-invalid bytes) → `session.NewToolResult` → `engine/agent` `execute` →
+byte path is `internal/adapter/osfs/osfs.go` (`cappedBuffer`) →
+`engine/adapter/fstools` (`truncate` only avoids *introducing* a mid-rune split
+on VALID input; it does not repair pre-existing invalid bytes) →
+`session.NewToolResult` → `engine/agent` `execute` →
 `internal/adapter/server/mapper.go` (`toProtoToolResult`). The durable JSON event
 log survives because `encoding/json` already substitutes U+FFFD on marshal —
 which is why replay/persistence can look healthy while the live stream dies.
+
+`cappedBuffer` was ALSO a producer in its own right, not just a conduit: its cap
+is a BYTE cap, so a cut landed mid-rune for two of every three offsets in
+3-byte-rune output, manufacturing invalid UTF-8 from a command whose own output
+was well-formed (`maxCommandOutput` is 1 MiB, and `1048576 mod 3 == 1`, so a CJK
+or emoji stream really does split there). It now cuts on a rune boundary in the
+truncating branch — the tail past the cap is discarded anyway, so the partial
+rune's lead bytes cost nothing — mirroring `engine/adapter/fstools` `truncate`,
+which already cut this way. The trim is CAP-ONLY: output that fits crosses
+byte-for-byte even when already malformed, because bounding and sanitizing are
+different jobs and the loop's choke point owns the second. Pinned by
+`internal/adapter/osfs/cappedbuffer_utf8_test.go` (every cap offset across
+several runes, plus the under-cap byte-exactness case).
 
 The fix is defense in depth, two layers (both consume `engine/session`, the
 stdlib-only domain leaf, so the inward-only layering rule holds):
