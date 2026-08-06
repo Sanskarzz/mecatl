@@ -50,6 +50,17 @@ The covered surface is the seven core packages (`session`, `governance`, `tool`,
   `SubagentPayload.Cause`/`TeamPayload.Cause` on the wire. Classified Added
   (minor) per COMPATIBILITY.md.
 
+- **`session.Message.ReasoningItemID` + `port.Chunk.ReasoningItemID`** (Responses
+  replay fix) — the fourth neutral reasoning carrier (joining `Message.Reasoning`
+  / `Message.ProviderPhase` / `ToolCall.ItemID`): a single opaque string field per
+  message, replayed verbatim, never interpreted or validated, structure neutral /
+  contents provider-private. Fixes the Responses-API item misattribution where a
+  reasoning summary for item `rs_*` could be attributed to a message item `msg_*`
+  because the item id was dropped at the SSE boundary; the openai adapter now
+  stamps `Chunk.ReasoningItemID` from the reasoning item's own `item_id` and
+  replays it as `id` on rebuild. `session.StripProviderState` clears it alongside
+  the other three carriers. Added (minor).
+
 - **`engine/adapter/search` graduated** (#363) — the WebSearch tool body
   (`WebSearchTool` / `NewWebSearchTool`), the Exa/HTTP/SearXNG search providers
   (`ExaProvider` / `HTTPProvider` / `BackendDown`), and the offline `Fake` /

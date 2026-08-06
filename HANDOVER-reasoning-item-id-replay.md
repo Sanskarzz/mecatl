@@ -1,8 +1,8 @@
 # Handover: reasoning-item `id:""` breaks Responses replay against strict gateways
 
-**Status:** diagnosed, root-caused, reproduced against a live gateway. NOT yet implemented.
+**Status:** IMPLEMENTED + GATED. All 13 steps landed on this branch (uncommitted). Remaining: commit + PR.
 **Branch/worktree:** `worktree-fix-reasoning-item-id-replay` (this worktree).
-**Owner of next step:** implement the fix (TDD) + api-compat bump. Details below.
+**Done:** fix implemented TDD across `engine/{session,port,agent,adapter/{sessnap,mockllm,eventsource}}`, `provider/openai` (stream capture + request replay), `provider/anthropic` (no-op parity test), `internal/adapter/server` (carryover assertions); invariant pinned in `engine/port/llm_neutral_test.go`; cold reproducer at `provider/openai/reasoning_item_id_fixture_test.go` + `testdata/reasoning_item_id_mixed.sse`; `engine/api/{port,session}.txt` regenerated + `engine/CHANGELOG.md` entry (Added = minor). Gates: `task lint` green; `task test` green except a PRE-EXISTING `TestMatchReadRoot_Lexical` macOS `/var`→`/private/var` flake in `internal/adapter/osfs` (fails on clean HEAD too, unrelated).
 
 ---
 

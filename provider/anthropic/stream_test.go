@@ -60,6 +60,15 @@ func assertChunks(t *testing.T, got, want []port.Chunk) {
 		if got[i].Stop != want[i].Stop {
 			t.Errorf("chunk[%d].Stop = %v, want %v", i, got[i].Stop, want[i].Stop)
 		}
+		// ReasoningItemID is the OpenAI Responses per-reasoning-item id; Anthropic
+		// has no such concept (it packs its (thinking,signature) replay token into
+		// one ChunkReasoningItem at message_stop), so every chunk must leave it
+		// empty. Asserted field-wise (mirrors the openai adapter's assertChunks) so
+		// a future change that accidentally stamps an id fails loudly. Non-regression
+		// pin for the reasoning-item-id replay fix (Step 9).
+		if got[i].ReasoningItemID != want[i].ReasoningItemID {
+			t.Errorf("chunk[%d].ReasoningItemID = %q, want %q", i, got[i].ReasoningItemID, want[i].ReasoningItemID)
+		}
 	}
 }
 
@@ -240,6 +249,37 @@ func TestTranslateRedactedThinkingTurn(t *testing.T) {
 	}
 	if blocks[0].Data != "REDACTED-OPAQUE-DATA==" {
 		t.Errorf("packed redacted data = %q", blocks[0].Data)
+	}
+}
+
+// TestReasoningItemChunkHasNoItemID is the Step 9 non-regression pin for the
+// reasoning-item-id replay fix: the Anthropic adapter packs its (thinking,
+// signature) replay token into ONE ChunkReasoningItem at message_stop, but
+// Anthropic's Messages API has NO per-reasoning-item id concept (unlike OpenAI
+// Responses' "rs_…" ids). So the emitted ChunkReasoningItem MUST carry the
+// packed blob in Text (non-empty) and leave ReasoningItemID EMPTY — otherwise
+// the loop would stamp a bogus id onto Message.ReasoningItemID and the openai
+// adapter's replay path would be fed provider-private data it can't interpret.
+// Driven through the same fixture + decodeSSE path as the thinking-tool turn so
+// it exercises the real message_stop packing in stream.go.
+func TestReasoningItemChunkHasNoItemID(t *testing.T) {
+	got := decodeFixture(t, "thinking_tool_turn.sse")
+	var item *port.Chunk
+	for i := range got {
+		if got[i].Kind == port.ChunkReasoningItem {
+			item = &got[i]
+			break
+		}
+	}
+	if item == nil {
+		t.Fatal("no ChunkReasoningItem emitted; the thinking-tool turn must pack one at message_stop")
+	}
+	if item.Text == "" {
+		t.Fatal("ChunkReasoningItem.Text is empty; the packed (thinking,signature) replay blob must be non-empty")
+	}
+	if item.ReasoningItemID != "" {
+		t.Fatalf("ChunkReasoningItem.ReasoningItemID = %q, want empty (Anthropic has no per-reasoning-item id; only OpenAI Responses sets it)",
+			item.ReasoningItemID)
 	}
 }
 

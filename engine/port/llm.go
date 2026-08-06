@@ -59,7 +59,10 @@ const (
 	// assembled. The Text field holds the opaque blob, which the loop stores on
 	// Message.Reasoning and the adapter sends back verbatim on subsequent stateless
 	// calls. It is never displayed or interpreted — the contents are provider-
-	// private; only the STRUCTURE (one opaque blob per message) is neutral.
+	// private; only the STRUCTURE (one opaque blob per message) is neutral. The
+	// item's provider id rides ReasoningItemID alongside it (stored on
+	// Message.ReasoningItemID); a provider with no per-item id (Anthropic) leaves
+	// it empty.
 	ChunkReasoningItem
 	// ChunkToolCall is a fully-assembled tool call, emitted once complete.
 	ChunkToolCall
@@ -94,6 +97,17 @@ type Chunk struct {
 	// (thinking,signature); never displayed), and the provider's opaque phase
 	// marker on ChunkPhase (stored on Message.Phase, replayed verbatim).
 	Text string
+	// ReasoningItemID is set on ChunkReasoningItem. It carries the provider's
+	// opaque reasoning ITEM id (e.g. OpenAI's "rs_…" id on a reasoning output
+	// item), which the loop stores on Message.ReasoningItemID and the adapter
+	// stamps back verbatim on subsequent stateless calls: the OpenAI Responses
+	// reasoning item's id field is api:"required" with no omitzero, so a replay
+	// without the captured id serialises "id":"" and strict OpenAI-compatible
+	// gateways reject it (HTTP 400). Like the Text blob it accompanies, it is
+	// never displayed, interpreted, or validated — the STRUCTURE is neutral
+	// (one opaque id per reasoning item), the CONTENTS are provider-private.
+	// Same discipline as ToolCall.ItemID and the ChunkPhase carrier.
+	ReasoningItemID string
 	// ToolCall is set on ChunkToolCall.
 	ToolCall *session.ToolCall
 	// Usage is set on ChunkUsage.

@@ -250,11 +250,11 @@ func TestFoldContractDocMatchesSessionFields(t *testing.T) {
 	// Every EXPORTED field of session.Message the fold reconstructs or documents as a
 	// limitation:
 	//   reconstructed: Role, Text, ToolCalls, ToolResult, Parts
-	//   documented limitation (NOT event-carried): Reasoning, ProviderPhase
+	//   documented limitation (NOT event-carried): Reasoning, ProviderPhase, ReasoningItemID
 	//   (ToolCall.ItemID is on ToolCall, asserted separately below)
 	wantMessageFields := map[string]struct{}{
 		"Role": {}, "Text": {}, "ToolCalls": {}, "ToolResult": {},
-		"Reasoning": {}, "ProviderPhase": {}, "Parts": {},
+		"Reasoning": {}, "ProviderPhase": {}, "ReasoningItemID": {}, "Parts": {},
 	}
 	assertExportedFields(t, reflect.TypeOf(session.Message{}), wantMessageFields,
 		"session.Message — classify the new field in COMPATIBILITY.md's reconstruction contract")

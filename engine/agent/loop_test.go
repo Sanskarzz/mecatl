@@ -482,6 +482,48 @@ func TestPhaseThreadedOntoAssistantMessage(t *testing.T) {
 	}
 }
 
+// TestReasoningItemIDThreadedOntoAssistantMessage proves the loop THREADS the
+// OpenAI Responses reasoning-item id (a ChunkReasoningItem.ReasoningItemID) onto
+// the recorded assistant Message.ReasoningItemID — last-non-empty-wins, like the
+// phase marker, but DISTINCT from the additive reasoning blob. It drives one turn
+// streaming a reasoning-item chunk carrying id "rs_1" followed by a second
+// reasoning-item chunk carrying NO id (ReasoningItemChunk leaves the field ""),
+// then asserts: (1) the recorded Message.ReasoningItemID is still "rs_1" (the empty
+// second chunk must NOT clobber it), and (2) Message.Reasoning == "b1b2" (the blob
+// is additive across both chunks). This pins the divergence between the id's
+// last-non-empty-wins semantics and the blob's concatenation.
+func TestReasoningItemIDThreadedOntoAssistantMessage(t *testing.T) {
+	llm := mockllm.New(
+		mockllm.ChunksTurn(
+			mockllm.ReasoningItemChunkWithID("b1", "rs_1"),
+			mockllm.ReasoningItemChunk("b2"),
+			mockllm.UsageChunk(session.Usage{InputTokens: 12, OutputTokens: 4}),
+			mockllm.DoneChunk(session.StopEndTurn),
+		),
+	)
+	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t)})
+	sess := newSession(t, session.Limits{})
+	r := e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), "go")
+	_ = drain(r)
+
+	var asst *session.Message
+	for i := range sess.Conversation.Messages {
+		if sess.Conversation.Messages[i].Role == session.RoleAssistant {
+			asst = &sess.Conversation.Messages[i]
+			break
+		}
+	}
+	if asst == nil {
+		t.Fatalf("no assistant message recorded")
+	}
+	if asst.ReasoningItemID != "rs_1" {
+		t.Fatalf("Message.ReasoningItemID = %q, want the verbatim threaded id %q (empty second chunk must not clobber)", asst.ReasoningItemID, "rs_1")
+	}
+	if asst.Reasoning != "b1b2" {
+		t.Fatalf("Message.Reasoning = %q, want %q (the blob is additive across chunks)", asst.Reasoning, "b1b2")
+	}
+}
+
 // TestTurnEndNoClock asserts turn.end is still emitted without a Clock, with a
 // zero duration (the no-timing degradation).
 func TestTurnEndNoClock(t *testing.T) {

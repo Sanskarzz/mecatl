@@ -64,11 +64,12 @@ func persistBlobsSource(t *testing.T, store *memstore.Store, id session.SessionI
 		ItemID: "fc_item_1",
 	}
 	if err := sess.RecordAssistant(session.Message{
-		Role:          session.RoleAssistant,
-		Text:          "reading f.go",
-		Reasoning:     "ENCRYPTED-REASONING-BLOB",
-		ProviderPhase: "commentary",
-		ToolCalls:     []session.ToolCall{call},
+		Role:            session.RoleAssistant,
+		Text:            "reading f.go",
+		Reasoning:       "ENCRYPTED-REASONING-BLOB",
+		ReasoningItemID: "rs_src_item_1",
+		ProviderPhase:   "commentary",
+		ToolCalls:       []session.ToolCall{call},
 	}); err != nil {
 		t.Fatalf("RecordAssistant: %v", err)
 	}
@@ -157,6 +158,9 @@ func TestCarryoverSeedsHistory(t *testing.T) {
 		if nm.Reasoning != sm.Reasoning {
 			t.Fatalf("msg %d: Reasoning = %q, want source's %q (same-provider must carry verbatim)", i, nm.Reasoning, sm.Reasoning)
 		}
+		if nm.ReasoningItemID != sm.ReasoningItemID {
+			t.Fatalf("msg %d: ReasoningItemID = %q, want source's %q (same-provider must carry verbatim)", i, nm.ReasoningItemID, sm.ReasoningItemID)
+		}
 		if nm.ProviderPhase != sm.ProviderPhase {
 			t.Fatalf("msg %d: ProviderPhase = %q, want source's %q (same-provider must carry verbatim)", i, nm.ProviderPhase, sm.ProviderPhase)
 		}
@@ -174,10 +178,13 @@ func TestCarryoverSeedsHistory(t *testing.T) {
 		}
 	}
 	// Specifically pin the assistant turn carried its blobs.
-	var sawReasoning, sawPhase, sawItemID bool
+	var sawReasoning, sawReasoningItemID, sawPhase, sawItemID bool
 	for _, m := range newSnap.Conversation.Messages {
 		if m.Role == session.RoleAssistant && m.Reasoning == "ENCRYPTED-REASONING-BLOB" {
 			sawReasoning = true
+		}
+		if m.Role == session.RoleAssistant && m.ReasoningItemID == "rs_src_item_1" {
+			sawReasoningItemID = true
 		}
 		if m.Role == session.RoleAssistant && m.ProviderPhase == "commentary" {
 			sawPhase = true
@@ -186,8 +193,8 @@ func TestCarryoverSeedsHistory(t *testing.T) {
 			sawItemID = true
 		}
 	}
-	if !sawReasoning || !sawPhase || !sawItemID {
-		t.Fatalf("same-provider carryover lost a blob (reasoning=%v phase=%v itemID=%v)", sawReasoning, sawPhase, sawItemID)
+	if !sawReasoning || !sawReasoningItemID || !sawPhase || !sawItemID {
+		t.Fatalf("same-provider carryover lost a blob (reasoning=%v reasoningItemID=%v phase=%v itemID=%v)", sawReasoning, sawReasoningItemID, sawPhase, sawItemID)
 	}
 
 	// Seeded history is tool-pairing-valid (no orphaned tool result → no provider 400).
@@ -317,6 +324,9 @@ func TestCarryoverCrossProviderStripsBlobs(t *testing.T) {
 		if nm.Reasoning != "" {
 			t.Fatalf("msg %d: Reasoning = %q, want cleared (cross-provider must strip)", i, nm.Reasoning)
 		}
+		if nm.ReasoningItemID != "" {
+			t.Fatalf("msg %d: ReasoningItemID = %q, want cleared (cross-provider must strip)", i, nm.ReasoningItemID)
+		}
 		if nm.ProviderPhase != "" {
 			t.Fatalf("msg %d: ProviderPhase = %q, want cleared (cross-provider must strip)", i, nm.ProviderPhase)
 		}
@@ -336,7 +346,7 @@ func TestCarryoverCrossProviderStripsBlobs(t *testing.T) {
 
 	// The assistant turn specifically: the blobs the source carried are gone, but
 	// the text and the tool call (ID/Name/Args) survived.
-	var sawAssistantText, sawToolCall, sawReasoning, sawPhase, sawItemID bool
+	var sawAssistantText, sawToolCall, sawReasoning, sawReasoningItemID, sawPhase, sawItemID bool
 	for _, m := range newSnap.Conversation.Messages {
 		if m.Role == session.RoleAssistant {
 			if m.Text == "reading f.go" {
@@ -347,6 +357,9 @@ func TestCarryoverCrossProviderStripsBlobs(t *testing.T) {
 			}
 			if m.Reasoning != "" {
 				sawReasoning = true
+			}
+			if m.ReasoningItemID != "" {
+				sawReasoningItemID = true
 			}
 			if m.ProviderPhase != "" {
 				sawPhase = true
@@ -361,8 +374,8 @@ func TestCarryoverCrossProviderStripsBlobs(t *testing.T) {
 	if !sawAssistantText || !sawToolCall {
 		t.Fatalf("stripped history lost provider-neutral content (assistantText=%v toolCall=%v)", sawAssistantText, sawToolCall)
 	}
-	if sawReasoning || sawPhase || sawItemID {
-		t.Fatalf("stripped history kept a provider-private blob (reasoning=%v phase=%v itemID=%v)", sawReasoning, sawPhase, sawItemID)
+	if sawReasoning || sawReasoningItemID || sawPhase || sawItemID {
+		t.Fatalf("stripped history kept a provider-private blob (reasoning=%v reasoningItemID=%v phase=%v itemID=%v)", sawReasoning, sawReasoningItemID, sawPhase, sawItemID)
 	}
 
 	// Seeded history is tool-pairing-valid (the strip preserves pairing —
@@ -452,9 +465,12 @@ func TestCarryoverCrossProviderToOpenAISynthesizesItemIDs(t *testing.T) {
 				t.Fatalf("msg %d: ToolResult drifted", i)
 			}
 		}
-		// Reasoning/ProviderPhase are STRIPPED (cross-provider).
+		// Reasoning/ProviderPhase/ReasoningItemID are STRIPPED (cross-provider).
 		if nm.Reasoning != "" {
 			t.Fatalf("msg %d: Reasoning = %q, want cleared", i, nm.Reasoning)
+		}
+		if nm.ReasoningItemID != "" {
+			t.Fatalf("msg %d: ReasoningItemID = %q, want cleared", i, nm.ReasoningItemID)
 		}
 		if nm.ProviderPhase != "" {
 			t.Fatalf("msg %d: ProviderPhase = %q, want cleared", i, nm.ProviderPhase)

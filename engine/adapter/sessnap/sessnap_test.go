@@ -304,6 +304,57 @@ func TestSnapshotRoundTripsPhase(t *testing.T) {
 	}
 }
 
+// TestSnapshotRoundTripsReasoningItemID asserts the OpenAI Responses
+// reasoning-item id (Message.ReasoningItemID) survives Marshal -> Unmarshal so a
+// restarted process can replay the provider-assigned reasoning-item id on
+// subsequent stateless turns (prevents the "id":"""" -> 400 replay bug). The DTO
+// field is omitempty, so an empty id is wire-omitted and an old snapshot still
+// decodes. Mirrors TestSnapshotRoundTripsPhase's shape.
+func TestSnapshotRoundTripsReasoningItemID(t *testing.T) {
+	const id = "rs_x"
+	s := session.New("rid1", session.ModeDefault, "/ws", session.Limits{}, time.Unix(1700000000, 0).UTC())
+	if err := s.BeginTurn(); err != nil {
+		t.Fatalf("BeginTurn: %v", err)
+	}
+	m := session.NewAssistantMessage("thinking blob", "rsn", nil)
+	m.ReasoningItemID = id
+	if err := s.RecordAssistant(m); err != nil {
+		t.Fatalf("RecordAssistant: %v", err)
+	}
+
+	line, err := sessnap.Marshal(s)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(line), `"reasoning_item_id":"`+id+`"`) {
+		t.Fatalf("snapshot JSON missing reasoning_item_id key with value %q; got:\n%s", id, line)
+	}
+	got, err := sessnap.Unmarshal(line)
+	if err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	gm := got.Conversation.Messages[0]
+	if gm.ReasoningItemID != id {
+		t.Fatalf("restored ReasoningItemID = %q, want %q", gm.ReasoningItemID, id)
+	}
+
+	// An empty ReasoningItemID assistant message must wire-omit the key (additive, no bump).
+	s2 := session.New("rid2", session.ModeDefault, "/ws", session.Limits{}, time.Unix(1700000000, 0).UTC())
+	if err := s2.BeginTurn(); err != nil {
+		t.Fatalf("BeginTurn: %v", err)
+	}
+	if err := s2.RecordAssistant(session.NewAssistantMessage("plain", "rsn", nil)); err != nil {
+		t.Fatalf("RecordAssistant: %v", err)
+	}
+	line2, err := sessnap.Marshal(s2)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(line2), `"reasoning_item_id"`) {
+		t.Fatalf("empty-id snapshot must omit the reasoning_item_id key; got:\n%s", line2)
+	}
+}
+
 // TestSnapshotRoundTripsItemID asserts that a ToolCall carrying a non-empty
 // ItemID survives a Marshal -> Unmarshal round-trip with the value intact, and
 // that the wire JSON contains the "item_id" key (not a vacuous no-op).

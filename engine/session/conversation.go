@@ -53,6 +53,18 @@ type Message struct {
 	// Phase, to disambiguate from the governance/hook-lifecycle Phase concept, which
 	// is interpreted — the opposite contract.)
 	ProviderPhase string
+	// ReasoningItemID is the OpenAI Responses API's opaque reasoning-item id
+	// (the "rs_…" id on the item whose encrypted_content rides Message.Reasoning),
+	// replayed back verbatim on subsequent stateless (store:false) calls and never
+	// interpreted or displayed by the harness. For store:false manual-replay apps
+	// the SDK serialises the assistant reasoning item with its id, and a strict
+	// gateway rejects an empty-string id ("id":""), so the id must be preserved
+	// alongside the blob or the replay 400s. The STRUCTURE is provider-neutral (one
+	// opaque id per message); the CONTENTS are provider-private (the harness never
+	// branches on or validates the value — do NOT widen it). Empty string means
+	// "no id captured" (e.g. Anthropic, or a pre-fix session). Same discipline as
+	// Reasoning/ProviderPhase.
+	ReasoningItemID string
 	// Parts carries non-text media (image/audio) on a USER message; it is nil for
 	// assistant/tool/system messages. Text remains the flattened text body
 	// (embedded-text resources collapse into it); Parts carries only the binary or
@@ -230,8 +242,9 @@ func ForkSnapshot(c *Conversation) []Message {
 }
 
 // StripProviderState returns a copy of messages with every provider-private
-// replay blob cleared (Message.Reasoning, Message.ProviderPhase, and each
-// ToolCall.ItemID), yielding a provider-neutral history: the roles, text,
+// replay blob cleared (Message.Reasoning, Message.ReasoningItemID,
+// Message.ProviderPhase, and each ToolCall.ItemID), yielding a
+// provider-neutral history: the roles, text,
 // tool calls (ID/Name/Args), tool results, and media parts are preserved
 // verbatim. Both the OpenAI and Anthropic adapters treat an EMPTY blob as
 // "no blob" and omit it on the wire, so a stripped history replays safely
@@ -253,6 +266,7 @@ func StripProviderState(messages []Message) []Message {
 	out := make([]Message, len(messages))
 	for i, m := range messages {
 		m.Reasoning = ""
+		m.ReasoningItemID = ""
 		m.ProviderPhase = ""
 		if len(m.ToolCalls) > 0 {
 			// Copy the ToolCalls backing array BEFORE zeroing ItemID: the
