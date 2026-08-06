@@ -709,20 +709,22 @@ type CompactionArchiveMsg struct {
 // one immutable entry in the model-visible conversation history. It mirrors the
 // session.Message value object — Role + Text + the assistant's ToolCalls + an
 // optional tool-role ToolResult + the opaque provider replay blobs (Reasoning /
-// ProviderPhase) + the user-role media Parts. The ToolCalls/ToolResult fields
-// use the dedicated ConvToolCall/ConvToolResult structs below (NOT the event-msg
-// types ToolCallMsg/ToolResultMsg — those are EVENTS, not message PARTS: a
-// tool.call event is a transient status line, a ConvToolCall is the persisted
-// assistant message part; overloading them would conflate the two lifecycles).
-// If the Phase-3 ui only renders Role+Text, the extra fields are unused-but-cheap.
+// ProviderPhase / ReasoningItemID) + the user-role media Parts. The
+// ToolCalls/ToolResult fields use the dedicated ConvToolCall/ConvToolResult
+// structs below (NOT the event-msg types ToolCallMsg/ToolResultMsg — those are
+// EVENTS, not message PARTS: a tool.call event is a transient status line, a
+// ConvToolCall is the persisted assistant message part; overloading them would
+// conflate the two lifecycles). If the Phase-3 ui only renders Role+Text, the
+// extra fields are unused-but-cheap.
 type ConversationMessage struct {
-	Role          string
-	Text          string
-	ToolCalls     []ConvToolCall
-	ToolResult    *ConvToolResult
-	Reasoning     string
-	ProviderPhase string
-	Parts         []ContentBlock
+	Role            string
+	Text            string
+	ToolCalls       []ConvToolCall
+	ToolResult      *ConvToolResult
+	Reasoning       string
+	ProviderPhase   string
+	ReasoningItemID string
+	Parts           []ContentBlock
 }
 
 // ConvToolCall is the proto-free mirror of one assistant-message tool invocation
@@ -1159,11 +1161,12 @@ func conversationMessagesFromProto(in []*mecatlv1.ConversationMessage) []Convers
 	out := make([]ConversationMessage, 0, len(in))
 	for _, m := range in {
 		msg := ConversationMessage{
-			Role:          m.GetRole(),
-			Text:          m.GetText(),
-			Reasoning:     m.GetReasoning(),
-			ProviderPhase: m.GetProviderPhase(),
-			Parts:         contentPartsFromProto(m.GetParts()),
+			Role:            m.GetRole(),
+			Text:            m.GetText(),
+			Reasoning:       m.GetReasoning(),
+			ProviderPhase:   m.GetProviderPhase(),
+			ReasoningItemID: m.GetReasoningItemId(),
+			Parts:           contentPartsFromProto(m.GetParts()),
 		}
 		for _, tc := range m.GetToolCalls() {
 			msg.ToolCalls = append(msg.ToolCalls, ConvToolCall{

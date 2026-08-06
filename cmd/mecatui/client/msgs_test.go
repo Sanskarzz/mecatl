@@ -363,15 +363,17 @@ func TestEventToMsgTeam(t *testing.T) {
 
 // TestConversationMessagesFromProto covers the ConversationMessage projection
 // beyond the simple single-field table cases: an assistant message carrying
-// ToolCalls + a tool-role ToolResult + the opaque replay blobs, and a user
-// message carrying media Parts. Nil-safe (nil slice → nil; nil entries → zero).
+// ToolCalls + a tool-role ToolResult + the opaque replay blobs (Reasoning /
+// ProviderPhase / ReasoningItemID), and a user message carrying media Parts.
+// Nil-safe (nil slice → nil; nil entries → zero).
 func TestConversationMessagesFromProto(t *testing.T) {
 	in := []*mecatlv1.ConversationMessage{
 		{
-			Role:          "assistant",
-			Text:          "I'll read x then write y.",
-			Reasoning:     "<reasoning blob>",
-			ProviderPhase: "commentary",
+			Role:            "assistant",
+			Text:            "I'll read x then write y.",
+			Reasoning:       "<reasoning blob>",
+			ProviderPhase:   "commentary",
+			ReasoningItemId: "rs_1",
 			ToolCalls: []*mecatlv1.ToolCall{
 				{Id: "c1", Name: "Read", Args: `{"path":"x"}`},
 				{Id: "c2", Name: "Write", Args: `{"path":"y"}`},
@@ -398,7 +400,7 @@ func TestConversationMessagesFromProto(t *testing.T) {
 
 	// Assistant message: ToolCalls + ToolResult + blobs.
 	a := got[0]
-	if a.Role != "assistant" || a.Text != "I'll read x then write y." || a.Reasoning != "<reasoning blob>" || a.ProviderPhase != "commentary" {
+	if a.Role != "assistant" || a.Text != "I'll read x then write y." || a.Reasoning != "<reasoning blob>" || a.ProviderPhase != "commentary" || a.ReasoningItemID != "rs_1" {
 		t.Errorf("assistant base = %#v", a)
 	}
 	if len(a.ToolCalls) != 2 || a.ToolCalls[0] != (ConvToolCall{ID: "c1", Name: "Read", Args: `{"path":"x"}`}) {

@@ -484,19 +484,21 @@ func TestPhaseThreadedOntoAssistantMessage(t *testing.T) {
 
 // TestReasoningItemIDThreadedOntoAssistantMessage proves the loop THREADS the
 // OpenAI Responses reasoning-item id (a ChunkReasoningItem.ReasoningItemID) onto
-// the recorded assistant Message.ReasoningItemID — last-non-empty-wins, like the
+// the recorded assistant Message.ReasoningItemID — LAST-non-empty-wins, like the
 // phase marker, but DISTINCT from the additive reasoning blob. It drives one turn
-// streaming a reasoning-item chunk carrying id "rs_1" followed by a second
-// reasoning-item chunk carrying NO id (ReasoningItemChunk leaves the field ""),
-// then asserts: (1) the recorded Message.ReasoningItemID is still "rs_1" (the empty
-// second chunk must NOT clobber it), and (2) Message.Reasoning == "b1b2" (the blob
-// is additive across both chunks). This pins the divergence between the id's
-// last-non-empty-wins semantics and the blob's concatenation.
+// streaming three reasoning-item chunks: "rs_1", then "rs_2", then NO id
+// (ReasoningItemChunk leaves the field ""). Two distinct non-empty ids is the
+// discriminator: if the loop were first-wins instead, this would still see
+// "rs_1" pass; only last-non-empty-wins produces "rs_2". Asserts: (1) the
+// recorded Message.ReasoningItemID is "rs_2" (last non-empty, not first, and not
+// clobbered by the trailing empty-id chunk), and (2) Message.Reasoning ==
+// "b1b2b3" (the blob is additive across all three chunks).
 func TestReasoningItemIDThreadedOntoAssistantMessage(t *testing.T) {
 	llm := mockllm.New(
 		mockllm.ChunksTurn(
 			mockllm.ReasoningItemChunkWithID("b1", "rs_1"),
-			mockllm.ReasoningItemChunk("b2"),
+			mockllm.ReasoningItemChunkWithID("b2", "rs_2"),
+			mockllm.ReasoningItemChunk("b3"),
 			mockllm.UsageChunk(session.Usage{InputTokens: 12, OutputTokens: 4}),
 			mockllm.DoneChunk(session.StopEndTurn),
 		),
@@ -516,11 +518,11 @@ func TestReasoningItemIDThreadedOntoAssistantMessage(t *testing.T) {
 	if asst == nil {
 		t.Fatalf("no assistant message recorded")
 	}
-	if asst.ReasoningItemID != "rs_1" {
-		t.Fatalf("Message.ReasoningItemID = %q, want the verbatim threaded id %q (empty second chunk must not clobber)", asst.ReasoningItemID, "rs_1")
+	if asst.ReasoningItemID != "rs_2" {
+		t.Fatalf("Message.ReasoningItemID = %q, want the last non-empty id %q (last-wins, not first-wins, and the trailing empty chunk must not clobber it)", asst.ReasoningItemID, "rs_2")
 	}
-	if asst.Reasoning != "b1b2" {
-		t.Fatalf("Message.Reasoning = %q, want %q (the blob is additive across chunks)", asst.Reasoning, "b1b2")
+	if asst.Reasoning != "b1b2b3" {
+		t.Fatalf("Message.Reasoning = %q, want %q (the blob is additive across chunks)", asst.Reasoning, "b1b2b3")
 	}
 }
 

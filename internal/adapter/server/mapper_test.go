@@ -786,7 +786,7 @@ func TestToProtoNoSubmessages(t *testing.T) {
 // askID+call id+allow-always (never args); UserPrompt carries Text+media Parts;
 // CompactionArchive carries the parent's OWN pre-compaction message slice via the
 // new ConversationMessage projection (Role/Text/ToolCalls/ToolResult/Reasoning/
-// ProviderPhase/Parts).
+// ProviderPhase/ReasoningItemID/Parts).
 func TestToProtoLogOnlyPayloads(t *testing.T) {
 	// Approval.
 	apr := toProto(session.Event{
@@ -830,14 +830,16 @@ func TestToProtoLogOnlyPayloads(t *testing.T) {
 	// CompactionArchive with a full message slice (assistant w/ tool calls, tool-role
 	// w/ result, user w/ media).
 	tr := session.NewToolResult("c1", "ok")
+	assistantMsg := session.NewAssistantMessage("calling", "reason", []session.ToolCall{
+		session.NewToolCall("c1", "Bash", json.RawMessage(`{"cmd":"ls"}`)),
+	})
+	assistantMsg.ReasoningItemID = "rs_1"
 	arch := toProto(session.Event{
 		Type: session.EvCompactionArchive,
 		CompactionArchive: &session.CompactionArchivePayload{
 			Replaced: []session.Message{
 				session.NewUserMessageWithParts("hi", []session.Content{img}),
-				session.NewAssistantMessage("calling", "reason", []session.ToolCall{
-					session.NewToolCall("c1", "Bash", json.RawMessage(`{"cmd":"ls"}`)),
-				}),
+				assistantMsg,
 				session.NewToolMessage(tr),
 			},
 		},
@@ -856,6 +858,9 @@ func TestToProtoLogOnlyPayloads(t *testing.T) {
 	}
 	if arch.GetReplaced()[1].GetRole() != "assistant" || arch.GetReplaced()[1].GetReasoning() != "reason" {
 		t.Errorf("replaced[1] wrong: %+v", arch.GetReplaced()[1])
+	}
+	if arch.GetReplaced()[1].GetReasoningItemId() != "rs_1" {
+		t.Errorf("replaced[1].ReasoningItemId = %q, want rs_1 (the reasoning-item id must project alongside Reasoning/ProviderPhase)", arch.GetReplaced()[1].GetReasoningItemId())
 	}
 	if len(arch.GetReplaced()[1].GetToolCalls()) != 1 ||
 		arch.GetReplaced()[1].GetToolCalls()[0].GetName() != "Bash" {
