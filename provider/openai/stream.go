@@ -127,7 +127,7 @@ func translate(event responses.ResponseStreamEventUnion, st *streamState) ([]por
 			if item.EncryptedContent == "" {
 				return nil, nil
 			}
-			return []port.Chunk{{Kind: port.ChunkReasoningItem, Text: item.EncryptedContent}}, nil
+			return []port.Chunk{{Kind: port.ChunkReasoningItem, Text: item.EncryptedContent, ReasoningItemID: item.ID}}, nil
 		case "message":
 			// The assembled assistant message item carries an opaque PHASE marker
 			// ("commentary" / "final_answer") that store:false manual-replay apps must

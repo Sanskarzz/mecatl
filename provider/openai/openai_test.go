@@ -129,7 +129,9 @@ func TestTranslateReasoningTurnWithCachedTokens(t *testing.T) {
 		{Kind: port.ChunkReasoning, Text: "Let me think"},
 		{Kind: port.ChunkReasoning, Text: " about this."},
 		// The assembled reasoning item's encrypted_content: the opaque REPLAY blob.
-		{Kind: port.ChunkReasoningItem, Text: "ENCRYPTED_BLOB"},
+		// The chunk carries the provider's per-item id (item.ID, e.g. "rs_1") so
+		// the loop can stamp it onto Message.ReasoningItemID for verbatim replay.
+		{Kind: port.ChunkReasoningItem, Text: "ENCRYPTED_BLOB", ReasoningItemID: "rs_1"},
 		{Kind: port.ChunkText, Text: "Answer."},
 		{Kind: port.ChunkUsage, Usage: &session.Usage{InputTokens: 100, OutputTokens: 50, CacheReadTokens: 80, ReasoningTokens: 40}},
 		{Kind: port.ChunkDone, Stop: session.StopEndTurn},
@@ -853,6 +855,9 @@ func assertChunks(t *testing.T, got, want []port.Chunk) {
 		} else if w.Usage != nil && *g.Usage != *w.Usage {
 			t.Errorf("chunk %d usage = %+v, want %+v", i, *g.Usage, *w.Usage)
 		}
+		if g.ReasoningItemID != w.ReasoningItemID {
+			t.Errorf("chunk %d reasoning_item_id = %q, want %q", i, g.ReasoningItemID, w.ReasoningItemID)
+		}
 	}
 }
 
@@ -866,9 +871,16 @@ func TestBuildParams(t *testing.T) {
 		},
 		Messages: []session.Message{
 			session.NewUserMessage("open main.go"),
-			session.NewAssistantMessage("", "REASONING_BLOB", []session.ToolCall{
-				session.NewToolCall("call_1", "read_file", json.RawMessage(`{"path":"main.go"}`)),
-			}),
+			func() session.Message {
+				m := session.NewAssistantMessage("", "REASONING_BLOB", []session.ToolCall{
+					session.NewToolCall("call_1", "read_file", json.RawMessage(`{"path":"main.go"}`)),
+				})
+				// The reasoning item is only emitted when a provider reasoning-item
+				// id was captured (Message.ReasoningItemID); without it the adapter
+				// drops the item rather than send `"id":""` (D1a).
+				m.ReasoningItemID = "rs_1"
+				return m
+			}(),
 			session.NewToolMessage(session.NewToolResult("call_1", "package main")),
 			session.NewAssistantMessage("done", "", nil),
 		},
@@ -1294,5 +1306,88 @@ func TestResponseStreamErrorErrorMessageUnchanged(t *testing.T) {
 	e := &responseStreamError{msg: "response failed: rate_limit_exceeded: Too Many Requests", status: 429}
 	if got := e.Error(); got != "response failed: rate_limit_exceeded: Too Many Requests" {
 		t.Errorf("Error() = %q, want unchanged message", got)
+	}
+}
+
+// TestReasoningItemIDStamped asserts that a session.Message carrying both a
+// reasoning blob and a captured OpenAI Responses reasoning-item id
+// (Message.ReasoningItemID) produces a reasoning input item whose wire JSON
+// "id" field is that verbatim id. The SDK's ResponseReasoningItemParam.ID is a
+// PLAIN string tagged `json:"id" api:"required"` with no omitzero, so an unset
+// id serialises as `"id":""` — strict OpenAI-compatible gateways (Azure
+// GPT-5.x) 400 the turn-2+ request on it. The adapter must stamp the id when
+// known.
+func TestReasoningItemIDStamped(t *testing.T) {
+	m := session.NewAssistantMessage("", "REASONING_BLOB", nil)
+	m.ReasoningItemID = "rs_x"
+	req := port.LLMRequest{
+		Model: "gpt-5.2",
+		Messages: []session.Message{
+			session.NewUserMessage("hi"),
+			m,
+		},
+	}
+	params, err := buildParams(req)
+	if err != nil {
+		t.Fatalf("buildParams: %v", err)
+	}
+	raw, err := json.Marshal(params.Input.OfInputItemList)
+	if err != nil {
+		t.Fatalf("marshal input: %v", err)
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(raw, &items); err != nil {
+		t.Fatalf("unmarshal input: %v", err)
+	}
+	var reasoning map[string]any
+	for _, it := range items {
+		if it["type"] == "reasoning" {
+			reasoning = it
+			break
+		}
+	}
+	if reasoning == nil {
+		t.Fatalf("no reasoning item in:\n%s", raw)
+	}
+	if got, ok := reasoning["id"].(string); !ok || got != "rs_x" {
+		t.Errorf("reasoning item[id] = %v, want %q (ReasoningItemID must be forwarded as id)\n%s", reasoning["id"], "rs_x", raw)
+	}
+	if got := reasoning["encrypted_content"]; got != "REASONING_BLOB" {
+		t.Errorf("reasoning item[encrypted_content] = %v, want REASONING_BLOB", got)
+	}
+}
+
+// TestReasoningItemDroppedWhenIDEmpty is the REGRESSION TRIPWIRE for D1a: a
+// message with a reasoning blob but an EMPTY ReasoningItemID must produce NO
+// reasoning input item at all. The SDK serialises ResponseReasoningItemParam.ID
+// unconditionally (json:"id" api:"required", no omitzero), so emitting the item
+// without a real id sends `"id":""` on the wire, which strict OpenAI-compatible
+// gateways reject with HTTP 400 on turn 2+. Only item-absence proves the fix —
+// asserting a field value would pass against `"id":""` and miss the bug.
+func TestReasoningItemDroppedWhenIDEmpty(t *testing.T) {
+	m := session.NewAssistantMessage("", "REASONING_BLOB", nil) // ReasoningItemID stays ""
+	req := port.LLMRequest{
+		Model: "gpt-5.2",
+		Messages: []session.Message{
+			session.NewUserMessage("hi"),
+			m,
+		},
+	}
+	params, err := buildParams(req)
+	if err != nil {
+		t.Fatalf("buildParams: %v", err)
+	}
+	raw, err := json.Marshal(params.Input.OfInputItemList)
+	if err != nil {
+		t.Fatalf("marshal input: %v", err)
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(raw, &items); err != nil {
+		t.Fatalf("unmarshal input: %v", err)
+	}
+	for _, it := range items {
+		if it["type"] == "reasoning" {
+			t.Errorf("reasoning item must be DROPPED when ReasoningItemID is empty (would serialise id:\"\"), but found: %v\n%s", it, raw)
+		}
 	}
 }

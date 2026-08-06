@@ -337,8 +337,18 @@ func dataURL(mime string, data []byte) string {
 // validated against the enum (forward-compat).
 func assistantItems(m session.Message) []responses.ResponseInputItemUnionParam {
 	out := make([]responses.ResponseInputItemUnionParam, 0, len(m.ToolCalls)+2)
-	if m.Reasoning != "" {
+	if m.Reasoning != "" && m.ReasoningItemID != "" {
+		// The SDK's ResponseReasoningItemParam.ID is a PLAIN string tagged
+		// `json:"id" api:"required"` with NO omitzero, so an unset id
+		// serialises unconditionally as `"id":""`. Strict OpenAI-compatible
+		// gateways (Azure GPT-5.x) reject that with HTTP 400 on turn 2+ during
+		// store:false stateless replay. Therefore the reasoning item is only
+		// emitted when we captured a real provider reasoning-item id
+		// (Message.ReasoningItemID); when Reasoning is present but no id was
+		// captured, DROP the item entirely (D1a: lose that turn's reasoning
+		// continuity, never 400) rather than emit an id-less one.
 		reasoning := responses.ResponseReasoningItemParam{
+			ID:               m.ReasoningItemID,
 			Summary:          []responses.ResponseReasoningItemSummaryParam{},
 			EncryptedContent: oai.String(m.Reasoning),
 		}

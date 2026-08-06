@@ -4,7 +4,7 @@ go 1.26.5
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.47.0
-	github.com/stacklok/mecatl/engine v0.8.0
+	github.com/stacklok/mecatl/engine v0.9.0
 	go.uber.org/goleak v1.3.0
 )
 

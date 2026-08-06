@@ -277,6 +277,12 @@ func ReasoningItemChunk(blob string) port.Chunk {
 	return port.Chunk{Kind: port.ChunkReasoningItem, Text: blob}
 }
 
+// ReasoningItemChunkWithID builds a ChunkReasoningItem carrying both the REPLAY
+// blob and the provider's per-item id (stored on Message.ReasoningItemID).
+func ReasoningItemChunkWithID(blob, id string) port.Chunk {
+	return port.Chunk{Kind: port.ChunkReasoningItem, Text: blob, ReasoningItemID: id}
+}
+
 // PhaseChunk builds a ChunkPhase carrying the opaque phase marker (the analogue
 // of OpenAI's assistant-message phase, "commentary"/"final_answer"). The value
 // is passed through verbatim — the harness never interprets it — so a test can

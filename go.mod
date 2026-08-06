@@ -26,7 +26,7 @@ require (
 	github.com/prometheus/client_model v0.6.2
 	github.com/prometheus/procfs v0.20.1
 	github.com/redis/go-redis/v9 v9.21.0
-	github.com/stacklok/mecatl/engine v0.8.0
+	github.com/stacklok/mecatl/engine v0.9.0
 	github.com/stacklok/mecatl/provider/anthropic v0.0.0-00010101000000-000000000000
 	github.com/stacklok/mecatl/provider/openai v0.0.0-00010101000000-000000000000
 	github.com/stacklok/mecatl/provider/openaichat v0.0.0-00010101000000-000000000000

@@ -1766,6 +1766,12 @@ func (e *Engine) runTurn(ctx context.Context, r *Run, sess *session.Session, ws 
 	// on Message.Reasoning); it is distinct from the human-readable reasoning
 	// summary, which only drives display-only reasoning.delta events.
 	var text, reasoningBlob string
+	// reasoningItemID is the provider's per-item id carried alongside the
+	// ChunkReasoningItem replay blob (the OpenAI Responses reasoning-item id).
+	// Last-non-empty-wins, like the phase marker — distinct from the additive
+	// reasoning blob. Stored on Message.ReasoningItemID and replayed verbatim
+	// next turn so strict gateways get the id back unchanged.
+	var reasoningItemID string
 	// phase is the OpenAI Responses opaque phase marker (commentary/final_answer),
 	// stored verbatim on Message.ProviderPhase and replayed next turn; like the
 	// reasoning blob it is never displayed or interpreted. It is NOT observable
@@ -1802,6 +1808,9 @@ func (e *Engine) runTurn(ctx context.Context, r *Run, sess *session.Session, ws 
 			// streamed token, so it never counts toward the inter-token gap series.
 			noteFirstOutput()
 			reasoningBlob += chunk.Text
+			if chunk.ReasoningItemID != "" {
+				reasoningItemID = chunk.ReasoningItemID
+			}
 		case port.ChunkPhase:
 			// The opaque phase marker (commentary/final_answer). Stored on
 			// Message.ProviderPhase and replayed verbatim next turn. Last-wins (like the
@@ -1835,6 +1844,7 @@ func (e *Engine) runTurn(ctx context.Context, r *Run, sess *session.Session, ws 
 
 	msg := session.NewAssistantMessage(text, reasoningBlob, calls)
 	msg.ProviderPhase = phase
+	msg.ReasoningItemID = reasoningItemID
 	return msg, usage, stop, timing, nil
 }
 

@@ -26,13 +26,14 @@
 //
 //   - Message.Reasoning      (the provider reasoning REPLAY blob)
 //   - Message.ProviderPhase  (the OpenAI Responses phase marker)
+//   - Message.ReasoningItemID (the provider reasoning-item id)
 //   - ToolCall.ItemID        (the provider item id)
 //
 // reach the conversation ONLY via Session.RecordAssistant in the loop, never via an
 // emitted Event. (EvReasoningDelta carries a human-readable reasoning SUMMARY, which
 // the loop deliberately never places on Message.Reasoning — so a fold MUST NOT either.)
 // A reconstructed Session is therefore a faithful structural conversation, and a
-// byte-identical replay only for providers that leave those three fields empty (e.g.
+// byte-identical replay only for providers that leave those four fields empty (e.g.
 // mockllm, a plain chat model). For OpenAI/Anthropic reasoning models the snapshot
 // (which carries them) is the byte-identical path, which is why mecatl's own resume
 // uses the snapshot; the fold is for event-log-SoR hosts that accept (or themselves
@@ -115,7 +116,7 @@ var (
 // The returned Session has its Conversation, Counters, cumulative Usage, lifecycle
 // State, recorded stop reason, and trailing pending ask reconstructed from the
 // stream. See the package doc for the replay-fidelity limitation (Reasoning /
-// ProviderPhase / ItemID are not event-carried).
+// ProviderPhase / ReasoningItemID / ItemID are not event-carried).
 //
 // It returns ErrStream (wrapping the per-item error) if the iterator yields an
 // error, and ErrReconstruct if the reconstructed history is not provider-replayable

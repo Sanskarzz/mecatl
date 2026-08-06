@@ -316,12 +316,12 @@ func TestForkMidToolCallRepairedNotOrphaned(t *testing.T) {
 	}
 }
 
-// TestStripProviderState pins the CROSS-provider carryover contract: the three
-// provider-private replay blobs (Message.Reasoning, Message.ProviderPhase,
-// ToolCall.ItemID) are cleared, every provider-neutral field (Role, Text,
-// ToolCall ID/Name/Args, ToolResult incl. its Parts, Message.Parts) survives
-// verbatim, and the input — including the shared ToolCalls backing arrays — is
-// NEVER mutated.
+// TestStripProviderState pins the CROSS-provider carryover contract: the four
+// provider-private replay blobs (Message.Reasoning, Message.ReasoningItemID,
+// Message.ProviderPhase, ToolCall.ItemID) are cleared, every provider-neutral
+// field (Role, Text, ToolCall ID/Name/Args, ToolResult incl. its Parts,
+// Message.Parts) survives verbatim, and the input — including the shared
+// ToolCalls backing arrays — is NEVER mutated.
 func TestStripProviderState(t *testing.T) {
 	media, err := NewImageContent("image/png", []byte{0x89, 0x50})
 	if err != nil {
@@ -345,10 +345,11 @@ func TestStripProviderState(t *testing.T) {
 			msgs: []Message{
 				NewUserMessage("goal"),
 				{
-					Role:          RoleAssistant,
-					Text:          "working on it",
-					Reasoning:     "openai-encrypted-blob",
-					ProviderPhase: "commentary",
+					Role:            RoleAssistant,
+					Text:            "working on it",
+					Reasoning:       "openai-encrypted-blob",
+					ReasoningItemID: "rs_item_1",
+					ProviderPhase:   "commentary",
 					ToolCalls: []ToolCall{
 						{ID: "c1", Name: "Read", Args: json.RawMessage(`{"path":"a.go"}`), ItemID: "fc_item_1"},
 					},
@@ -414,13 +415,15 @@ func TestStripProviderState(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Snapshot the input's pre-strip blob state for the mutate-verify.
 			type blobState struct {
-				reasoning string
-				phase     string
-				itemIDs   []string
+				reasoning       string
+				reasoningItemID string
+				phase           string
+				itemIDs         []string
 			}
 			before := make([]blobState, len(tt.msgs))
 			for i, m := range tt.msgs {
 				before[i].reasoning = m.Reasoning
+				before[i].reasoningItemID = m.ReasoningItemID
 				before[i].phase = m.ProviderPhase
 				before[i].itemIDs = make([]string, len(m.ToolCalls))
 				for j, c := range m.ToolCalls {
@@ -440,6 +443,9 @@ func TestStripProviderState(t *testing.T) {
 			for i, m := range stripped {
 				if m.Reasoning != "" {
 					t.Fatalf("msg %d: Reasoning = %q, want cleared", i, m.Reasoning)
+				}
+				if m.ReasoningItemID != "" {
+					t.Fatalf("msg %d: ReasoningItemID = %q, want cleared", i, m.ReasoningItemID)
 				}
 				if m.ProviderPhase != "" {
 					t.Fatalf("msg %d: ProviderPhase = %q, want cleared", i, m.ProviderPhase)
@@ -488,9 +494,9 @@ func TestStripProviderState(t *testing.T) {
 			// MUTATE-VERIFY: the input slice AND its ToolCalls backing arrays are
 			// untouched — every blob/ItemID the input carried is still there.
 			for i, m := range tt.msgs {
-				if m.Reasoning != before[i].reasoning || m.ProviderPhase != before[i].phase {
-					t.Fatalf("msg %d: input mutated: Reasoning/ProviderPhase now (%q,%q), were (%q,%q)",
-						i, m.Reasoning, m.ProviderPhase, before[i].reasoning, before[i].phase)
+				if m.Reasoning != before[i].reasoning || m.ProviderPhase != before[i].phase || m.ReasoningItemID != before[i].reasoningItemID {
+					t.Fatalf("msg %d: input mutated: Reasoning/ReasoningItemID/ProviderPhase now (%q,%q,%q), were (%q,%q,%q)",
+						i, m.Reasoning, m.ReasoningItemID, m.ProviderPhase, before[i].reasoning, before[i].reasoningItemID, before[i].phase)
 				}
 				for j, c := range m.ToolCalls {
 					if c.ItemID != before[i].itemIDs[j] {

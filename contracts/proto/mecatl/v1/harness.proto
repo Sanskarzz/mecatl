@@ -1011,6 +1011,10 @@ message ConversationMessage {
   string provider_phase = 6;
   // parts carries non-text media (image/audio) on a USER message; nil otherwise.
   repeated Content parts = 7;
+  // reasoning_item_id is the OpenAI Responses reasoning-item id carrier
+  // (session.Message.ReasoningItemID), replayed verbatim and never
+  // interpreted/displayed by the harness. Opaque, provider-private.
+  string reasoning_item_id = 8;
 }
 
 // SchedulePayload is the structured detail carried by the schedule.* events

@@ -259,18 +259,20 @@ func toProtoCompactionArchive(p session.CompactionArchivePayload) *mecatlv1.Comp
 // toProtoConversationMessage maps one session.Message (an immutable conversation
 // history entry) to its proto ConversationMessage form. It mirrors the Message
 // value object: Role + Text + the assistant's ToolCalls + an optional tool-role
-// ToolResult + the opaque provider replay blobs (Reasoning / ProviderPhase) + the
-// user-role media Parts. It reuses the existing toProtoToolCall / toProtoToolResult
-// / contentToProto mappers so there is no second projection path. This type exists
-// for the CompactionArchive replay surface — the live Converse wire streams events,
-// not history, so it has no message-slice mapper of its own.
+// ToolResult + the opaque provider replay blobs (Reasoning / ProviderPhase /
+// ReasoningItemID) + the user-role media Parts. It reuses the existing
+// toProtoToolCall / toProtoToolResult / contentToProto mappers so there is no
+// second projection path. This type exists for the CompactionArchive replay
+// surface — the live Converse wire streams events, not history, so it has no
+// message-slice mapper of its own.
 func toProtoConversationMessage(m session.Message) *mecatlv1.ConversationMessage {
 	out := &mecatlv1.ConversationMessage{
-		Role:          string(m.Role),
-		Text:          m.Text,
-		Reasoning:     m.Reasoning,
-		ProviderPhase: m.ProviderPhase,
-		Parts:         contentToProto(m.Parts),
+		Role:            string(m.Role),
+		Text:            m.Text,
+		Reasoning:       m.Reasoning,
+		ProviderPhase:   m.ProviderPhase,
+		ReasoningItemId: m.ReasoningItemID,
+		Parts:           contentToProto(m.Parts),
 	}
 	if len(m.ToolCalls) > 0 {
 		calls := make([]*mecatlv1.ToolCall, 0, len(m.ToolCalls))

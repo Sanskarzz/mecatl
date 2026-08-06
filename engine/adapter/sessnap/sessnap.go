@@ -98,6 +98,12 @@ type messageDTO struct {
 	// empty string ("no phase") — purely additive, no version bump. The json tag
 	// stays "phase" so the persisted wire format is unchanged across the rename.
 	ProviderPhase string `json:"phase,omitempty"`
+	// ReasoningItemID carries the OpenAI Responses opaque reasoning-item id on an
+	// assistant message (the reasoning item's provider-assigned id, replayed
+	// verbatim on subsequent stateless turns). omitempty keeps a v1 snapshot with
+	// no "reasoning_item_id" key decoding to the empty string — purely additive, no
+	// version bump (the same precedent as ProviderPhase / Parts).
+	ReasoningItemID string `json:"reasoning_item_id,omitempty"`
 	// Parts carries non-text media on a user message. It is omitempty so a v1
 	// snapshot with no "parts" key decodes to nil Parts — a text-only message,
 	// exactly correct; the field is purely additive and needs no version bump.
@@ -326,25 +332,27 @@ func Unmarshal(line []byte) (*session.Session, error) {
 
 func toDTO(m session.Message) messageDTO {
 	return messageDTO{
-		Role:          m.Role,
-		Text:          m.Text,
-		ToolCalls:     m.ToolCalls,
-		ToolResult:    m.ToolResult,
-		Reasoning:     m.Reasoning,
-		ProviderPhase: m.ProviderPhase,
-		Parts:         contentToDTO(m.Parts),
+		Role:            m.Role,
+		Text:            m.Text,
+		ToolCalls:       m.ToolCalls,
+		ToolResult:      m.ToolResult,
+		Reasoning:       m.Reasoning,
+		ProviderPhase:   m.ProviderPhase,
+		ReasoningItemID: m.ReasoningItemID,
+		Parts:           contentToDTO(m.Parts),
 	}
 }
 
 func fromDTO(dto messageDTO) session.Message {
 	return session.Message{
-		Role:          dto.Role,
-		Text:          dto.Text,
-		ToolCalls:     dto.ToolCalls,
-		ToolResult:    dto.ToolResult,
-		Reasoning:     dto.Reasoning,
-		ProviderPhase: dto.ProviderPhase,
-		Parts:         contentFromDTO(dto.Parts),
+		Role:            dto.Role,
+		Text:            dto.Text,
+		ToolCalls:       dto.ToolCalls,
+		ToolResult:      dto.ToolResult,
+		Reasoning:       dto.Reasoning,
+		ProviderPhase:   dto.ProviderPhase,
+		ReasoningItemID: dto.ReasoningItemID,
+		Parts:           contentFromDTO(dto.Parts),
 	}
 }
 
