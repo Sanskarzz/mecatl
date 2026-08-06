@@ -31,17 +31,29 @@ import (
 // teamCfg is the minimal app Config a member engine factory needs: a model and a
 // shell so the Mutating branch can attempt to register Bash. The workspace is a
 // throwaway temp dir (the command runner roots there, but no command is run in
-// these tests). TrustProject is true: these are the TRUSTED-workspace shell-wiring
-// tests (the issue-#40 trust gate would otherwise nil the sandboxed runner); the
-// untrusted side lives in trust_shell_gate_test.go.
+// these tests). TrustProject: the read-only subagent/member shell is gated on
+// cfg.TrustProject (buildSandboxedCommandRunner) — the operator vouches for the
+// repo's `.git` (issue #40). The untrusted side lives in trust_shell_gate_test.go
+// (shelllessTeamCfg).
 func teamCfg(t *testing.T) Config {
 	t.Helper()
 	return Config{
 		Workspace:    t.TempDir(),
 		Model:        "mock",
 		Shell:        "/bin/sh",
-		TrustProject: true,
+		TrustProject: true, // the shell gate buildSandboxedCommandRunner reads
+		Posture:      PostureAuto,
 	}
+}
+
+// shelllessTeamCfg is teamCfg with workspace trust OFF (TrustProject=false), so
+// the read-only subagent shell is gated out (buildSandboxedCommandRunner reads
+// cfg.TrustProject).
+func shelllessTeamCfg(t *testing.T) Config {
+	t.Helper()
+	cfg := teamCfg(t)
+	cfg.TrustProject = false
+	return cfg
 }
 
 // TestBuildMemberEngineReadOnlySpawnSucceeds exercises fix A's ACCEPTANCE path: a

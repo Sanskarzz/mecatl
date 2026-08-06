@@ -212,9 +212,10 @@ server via `connect`** — the dialed server owns its own posture). `--yolo` is 
 `--posture yolo`** and `--trust-project` is an **alias for `trusted`**; passing
 both a `--posture` value and an alias resolves to the **higher tier** with a
 `WARN`, an unknown `--posture` value fails closed to `strict` with a `WARN`, and a
-CLI flag out-ranks the user-global `posture:` setting (below). Confirm what a given
-combination resolves to with `mecated serve --print-posture` (prints the tier + the
-per-defence breakdown and exits).
+CLI flag out-ranks the user-global `posture:` setting (below). The resolved tier and
+the root-aware `trust_project`/`project_ingestion` decision are emitted as the
+structured `operator posture` startup diagnostic by `mecated serve` (once, before
+serving).
 
 **`auto` is the recommended unattended default.** It is allow-all for the main
 agent *and* its children, so a CI / container / VM run never parks on a mutate-ask
@@ -299,6 +300,59 @@ MECATL_SANDBOX=1 bin/mecated serve --mock --posture auto
 # Disposable sandbox, child defence OFF too:
 MECATL_SANDBOX=1 bin/mecated serve --mock --posture yolo   # == --yolo
 ```
+
+### Project-tier ingestion on headless roots (the opt-in design)
+
+The posture ladder raises `TrustProject=true` at `trusted`/`auto`/`yolo` on **INTERACTIVE** roots —
+the project authority set (AGENTS.md/CLAUDE.md, project rules, agent defs, skills, soul, slash
+commands, ALLOW rules, and the git snapshot) is admitted, and the read-only subagent shell stays
+on (the dev experience, unchanged). For an **unattended scheduler** (mecatequi / mecak8s) running
+on cloned repos, that is a supply-chain channel: whoever pushes to the cloned ref can inject
+instructions through the repo's AGENTS.md or a project soul, and the worktree-fork `git worktree
+add` would run against an unvouched `.git`.
+
+**The fail-safe default** (issue #359, [ADR 0095](../adr/0095-root-aware-project-trust.md)):
+on a **HEADLESS** root the posture ladder does NOT raise `TrustProject`. So `mecatequi --posture
+auto` without any explicit, declared, or remembered trust yields allow-all approvals but **NO repo
+steering AND NO read-only child shell** — the deliberate fail-safe capability loss (the repo's
+`.git` is not vouched, so the worktree checkout cannot run). The operator supplies their own framing
+via `--instructions`:
+
+```sh
+# Untrusted clone: no project steering, no read-only child shell.
+mecatequi --posture auto --instructions "..." --prompt ...
+
+# Trusted clone: this one trust decision admits BOTH steering AND shell.
+mecatequi --posture auto --trust-project --instructions "..." --prompt ...
+```
+
+`TrustProject` is the ONE effective positive workspace-trust decision. It folds the explicit
+`--trust-project` flag, operator-authored `trustedWorkspaces:`, undrifted remembered trust, and the
+interactive posture floor. Every successful trust source admits both project steering and the
+read-only worktree shell. On headless roots posture contributes no trust; on interactive roots the
+historical `trusted`/`auto`/`yolo` floor remains.
+
+The named helper `projectIngestionAdmitted(cfg) = cfg.TrustProject`
+(`internal/app/project_ingestion.go`) remains the single semantic seam for every project-tier
+ingestion site. The shell reads the same final bool because trust is the operator's vouch for the
+workspace and its `.git`. There is no second synchronized ingestion or shell grant.
+
+**`--no-project-trust` is removed.** The negative suppressor (ADR 0092) was replaced because its
+zero value silently admitted steering. Root-aware positive trust gives the fail-safe default.
+
+| deployment | posture | other trust source | ingestion | shell |
+|---|---|---|---|---|
+| headless | strict/auto/yolo | none | F | F |
+| headless | any | explicit/declared/remembered | T | T |
+| interactive | auto/yolo | none | T | T |
+| interactive | strict | explicit/declared/remembered | T | T |
+| interactive | strict | none | F | F |
+
+When trust is absent, the ingestion seam suppresses AGENTS.md/CLAUDE.md, project rules/model
+bindings, project agent definitions and memory, skills, soul, slash commands, and the git snapshot.
+It does not affect the posture ladder's permission approvals, operator-tier config, or deny/ask
+rules from any scope. The read-only child shell is absent for the same trust decision; trusting the
+workspace admits both.
 
 ---
 

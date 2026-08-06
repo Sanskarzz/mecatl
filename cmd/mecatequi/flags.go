@@ -132,6 +132,12 @@ type flags struct {
 	// --reasoning-effort so composition lets CLI out-rank the settings.yaml key.
 	reasoningEffort        string
 	reasoningEffortFlagSet bool
+	// trustProject opts INTO project-tier ingestion (the repo's AGENTS.md/CLAUDE.md,
+	// .mecatl/.claude rules, agents, skills, soul, slash commands, ALLOW rules, git
+	// snapshot) on a HEADLESS root where the posture ladder does NOT grant it. DEFAULT
+	// OFF (the fail-safe default: a CI run over a freshly-cloned untrusted repo
+	// ingests NONE of the repo's steering). Matching the other three roots.
+	trustProject bool
 
 	// Headless telemetry (issue #343): OPT-IN OTLP trace + metrics push. A
 	// single-shot CI run is too short-lived for a Prometheus scrape, so mecatequi
@@ -206,6 +212,7 @@ func parseFlags(argv []string) (flags, error) {
 
 	fs.StringVar(&f.posture, "posture", "", "OPERATOR POSTURE LADDER (strict < trusted < auto < yolo): strict (default) prompts every mutate — and a headless single-shot run has NO approver, so a main-agent ask CANCELS the run (exit 1). For an autonomous CI run use --posture auto (allow-all, child injection-defense ON) or trusted/yolo. trusted honours a project's ALLOW rules; auto adds allow-all + main substitution loosening; yolo additionally auto-runs $()/backtick/heredoc in children. An unknown value fails closed to strict")
 	fs.StringVar(&f.reasoningEffort, "reasoning-effort", "", "OPERATOR REASONING-EFFORT TIER (ADR 0055): auto (default — unset, the provider default applies) or low/medium/high/xhigh/max. OpenAI supports low/medium/high only (xhigh/max clamp to high); Anthropic maps all five. Empty = unset (honours the operator-global settings.yaml reasoning-effort: key). Operator-tier only; a project-tier key is ignored with a WARN. An unknown value fail-softs to unset with a WARN")
+	fs.BoolVar(&f.trustProject, "trust-project", false, "trust the workspace for this run: admit BOTH project steering (AGENTS.md/CLAUDE.md, project rules/agents/skills/soul/commands/git snapshot) and the read-only child worktree shell. On this HEADLESS root posture never grants trust. DEFAULT OFF: without explicit, declared, or remembered trust a cloned repo gets neither steering nor child shell. TRUST BOUNDARY: only pass it for a repo whose content and .git you trust")
 
 	// Headless telemetry (issue #343, ADR 0097): OPT-IN OTLP trace + metrics push.
 	// Both endpoints empty (the default) leaves the pipeline off — no metrics, no
@@ -404,11 +411,19 @@ func appConfig(f flags, diag port.Diagnostics, obs observability) app.Config {
 
 		Posture:        app.ParsePosture(f.posture),
 		PostureFlagSet: f.postureFlagSet,
+		// Explicit workspace trust: on this HEADLESS root the posture ladder never
+		// raises TrustProject, so --trust-project is the one-shot opt-in that admits
+		// both project steering and the read-only worktree shell.
+		TrustProject: f.trustProject,
 		// Reasoning-effort tier (ADR 0055): operator-tier only; reasoningEffortFlagSet
 		// lets CLI out-rank the operator-global settings.yaml reasoning-effort: key.
 		ReasoningEffort:        f.reasoningEffort,
 		ReasoningEffortFlagSet: f.reasoningEffortFlagSet,
 		Privileged:             privilegedProcess(),
+
+		// Headless is explicit deployment identity. DEFAULT true; the posture
+		// ladder never raises workspace trust on a headless root.
+		Headless: f.headless,
 
 		// Interactive = !headless: the deliberate inversion. mecatequi defaults
 		// headless=true (no approver), so a child's unresolved ask is auto-denied /

@@ -149,12 +149,9 @@ func TestResolveTrustEmptyWorkspaceNoDeclared(t *testing.T) {
 	}
 }
 
-// TestDeclaredTrustFeedsSoulGate (R1.3) proves the FOLDED decision reaches the
-// soul provenance gate: a workspace declared in trustedWorkspaces loads its
-// project soul WITHOUT --trust-project, exactly as the flag would — because Build
-// collapses resolveTrust onto cfg.TrustProject before the soul build runs. We
-// simulate that fold here (set cfg.TrustProject = resolveTrust(...).Trusted) and
-// assert the project soul loads.
+// TestDeclaredTrustFeedsSoulGate proves the folded decision reaches the soul
+// provenance gate: declared trust admits project steering exactly as the explicit
+// flag does. Build performs this same fold before selecting the soul.
 func TestDeclaredTrustFeedsSoulGate(t *testing.T) {
 	ws := realWS(t)
 	writeProjectSoul(t, ws, "You are a project persona.")

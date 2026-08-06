@@ -413,15 +413,15 @@ func TestHeadlessFlagDrivesInteractive(t *testing.T) {
 	if def.headless {
 		t.Errorf("headless default = true, want false")
 	}
-	if ac := appConfig(def, nil, nil, nil, nil, nil); !ac.Interactive {
-		t.Errorf("default mecated must be Interactive=true (surfaces asks to the client)")
+	if ac := appConfig(def, nil, nil, nil, nil, nil); !ac.Interactive || ac.Headless {
+		t.Errorf("default mecated must map Interactive=true, Headless=false")
 	}
 	on, err := parseFlags([]string{"--headless"})
 	if err != nil {
 		t.Fatalf("parseFlags: %v", err)
 	}
-	if ac := appConfig(on, nil, nil, nil, nil, nil); ac.Interactive {
-		t.Errorf("--headless must set app.Config.Interactive=false so the reviewer/auto-deny path engages")
+	if ac := appConfig(on, nil, nil, nil, nil, nil); ac.Interactive || !ac.Headless {
+		t.Errorf("--headless must map Interactive=false, Headless=true")
 	}
 }
 
@@ -639,16 +639,16 @@ func TestPostureRefusalReason(t *testing.T) {
 	}
 }
 
-// TestParseFlagsPosture covers the --posture / --print-posture flag surface: the value
-// lands on cfg.posture, postureFlagSet flips ONLY when --posture is explicitly passed
-// (so CLI can out-rank the operator-YAML key), and --print-posture sets its bool.
+// TestParseFlagsPosture covers the --posture flag surface: the value lands on
+// cfg.posture and postureFlagSet flips ONLY when --posture is explicitly passed (so
+// CLI can out-rank the operator-YAML key).
 func TestParseFlagsPosture(t *testing.T) {
 	def, err := parseFlags(nil)
 	if err != nil {
 		t.Fatalf("parseFlags(nil): %v", err)
 	}
-	if def.posture != "" || def.postureFlagSet || def.printPosture {
-		t.Errorf("defaults: posture=%q postureFlagSet=%v printPosture=%v, want empty/false/false", def.posture, def.postureFlagSet, def.printPosture)
+	if def.posture != "" || def.postureFlagSet {
+		t.Errorf("defaults: posture=%q postureFlagSet=%v, want empty/false", def.posture, def.postureFlagSet)
 	}
 
 	set, err := parseFlags([]string{"-posture", "auto"})
@@ -657,17 +657,6 @@ func TestParseFlagsPosture(t *testing.T) {
 	}
 	if set.posture != "auto" || !set.postureFlagSet {
 		t.Errorf("-posture auto: posture=%q postureFlagSet=%v, want \"auto\"/true", set.posture, set.postureFlagSet)
-	}
-
-	pr, err := parseFlags([]string{"-print-posture"})
-	if err != nil {
-		t.Fatalf("parseFlags(-print-posture): %v", err)
-	}
-	if !pr.printPosture {
-		t.Errorf("-print-posture: printPosture=false, want true")
-	}
-	if pr.postureFlagSet {
-		t.Errorf("-print-posture alone must NOT set postureFlagSet")
 	}
 }
 

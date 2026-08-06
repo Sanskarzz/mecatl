@@ -331,6 +331,14 @@ re-prompt; changing the persona / agents / commands / skills does.
 A corrupt or unparseable `settings.yaml` or `trust.yaml` always resolves to
 **untrusted** — a broken config never grants trust.
 
+#### Project-tier ingestion on headless roots (the opt-in design)
+
+On a **headless** root (`--headless`), posture never raises `TrustProject`. Explicit
+`--trust-project`, `trustedWorkspaces:`, or undrifted remembered trust admits BOTH repo steering and
+the read-only child shell. Without any trust source, `mecatequi --posture auto` keeps allow-all
+approvals but gets neither because `.git` is not vouched. See the
+[workspace trust reference](https://github.com/stacklok/mecatl/blob/main/docs/usage/workspace-trust.md#project-tier-ingestion-on-headless-roots-the-opt-in-design).
+
 ---
 
 ## Layer 2 — model-backed guardrails

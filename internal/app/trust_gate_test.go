@@ -83,7 +83,7 @@ func TestUntrustedWorkspaceWithholdsProjectAgentsKeepsUser(t *testing.T) {
 		t.Error("untrusted workspace dropped the USER-tier agent def (over-gating; must stay active)")
 	}
 
-	// Trusted: both admitted.
+	// Trusted + ingestion granted: both admitted.
 	regTrusted := resolveAgentRegistry(context.Background(), Config{
 		Workspace:          ws,
 		AgentsConventional: true,
@@ -161,7 +161,7 @@ func TestUntrustedWorkspaceWithholdsProjectCommands(t *testing.T) {
 		t.Error("untrusted workspace expanded a PROJECT-tier slash command (security gap)")
 	}
 
-	// Trusted + EnableCommands: command expands.
+	// Trusted + ingestion granted + EnableCommands: command expands.
 	if out, ok := expand(Config{Workspace: ws, EnableCommands: true, TrustProject: true}); !ok || out != "Hello from the repo command" {
 		t.Errorf("trusted workspace must expand the project command; got %q ok=%v", out, ok)
 	}
@@ -288,7 +288,7 @@ func TestResolveSkillIndexUntrustedDropsProjectSkill(t *testing.T) {
 		t.Error("untrusted: the USER-tier skill must stay in the preload index (over-gating)")
 	}
 
-	// Trusted: both present.
+	// Trusted + ingestion granted: both present.
 	idxTrusted := resolveSkillIndexForTest(t, Config{
 		Workspace:          ws,
 		SkillsConventional: true,

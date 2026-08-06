@@ -46,6 +46,9 @@ func authoritativeKeys() []string {
 	// TestDeprecatedOutputEconomyIsAbsentFromGeneratedArtifacts).
 	// reasoning-effort is likewise a bare scalar Config field (ADR 0055).
 	keys = append(keys, "reasoning-effort")
+	// plan-mode-auto-approve is likewise a bare scalar Config field (operator-tier
+	// only).
+	keys = append(keys, "plan-mode-auto-approve")
 	return keys
 }
 

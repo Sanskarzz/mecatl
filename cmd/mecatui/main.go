@@ -662,6 +662,9 @@ func embeddedConfig(cfg config, diag port.Diagnostics) app.Config {
 		// a headless `mecated --headless --subagent-ask-reviewer …` and point
 		// `mecatui connect` at it to use the reviewer).
 		Interactive: true,
+		// mecatui is interactive, so trusted/auto/yolo retain the developer
+		// workspace-trust floor.
+		Headless: false,
 		// Diagnostics is the injected file-backed (or, under --quiet, discarding) sink.
 		// It is NEVER stderr: an operational line on stderr corrupts the Bubble Tea
 		// alt-screen. The caller (resolveTransport) opens the sink once over

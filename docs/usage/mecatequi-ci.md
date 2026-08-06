@@ -36,6 +36,14 @@ mecatequi \
   every mutating tool call, and a headless run has no approver — the run is CANCELLED
   on the first ask and exits 1. `auto` is the recommended unattended tier (allow-all,
   child injection-defense ON).
+- **Project-tier ingestion AND the read-only child shell use one root-aware trust decision**
+  ([ADR 0095](../adr/0095-root-aware-project-trust.md)). Headless posture never grants trust.
+  `mecatequi --posture auto` without explicit, declared, or remembered trust is the fail-safe
+  default: allow-all approvals with NO repo steering AND NO read-only child shell. The cloned
+  repo's steering and worktree-fork git path are both withheld because `.git` was not vouched.
+  `--trust-project`, `trustedWorkspaces:`, or undrifted remembered trust admits BOTH. Supply your
+  own framing via `--instructions`. See
+  [workspace trust](workspace-trust.md#project-tier-ingestion-on-headless-roots-the-opt-in-design).
 - **`--untrusted-prompt`** whenever the task body is externally sourced (an issue body,
   a task-graph node): the prompt is wrapped in the harness untrusted-data fence so the
   model treats it as data to act on, not instructions to obey.
@@ -79,6 +87,12 @@ mecatequi \
   (`schema_version` present) — not blindly the last line of the pod log. Capturing
   stdout directly (subprocess pipe, or a container runtime that separates streams)
   makes the literal last line safe.
+- **`Summary.final_text` is clamped to 4000 runes** (rune-aware, ellipsis-suffixed).
+  The summary is the scan-index, not the archive — the full terminal text lives in the
+  durable event log (`--out-events`) and the git diff, never truncated there. A
+  log-tailing consumer reading the summary line for the final reply should check
+  `final_text` for the gist, and go to the event log or the patch for the complete
+  deliverable.
 - **`--run-id` / `--task-ref` are deliberately NOT accepted.** mecatequi stays
   scheduler-agnostic: correlate a run via your own launch identity (Job name, pod
   labels) plus the `session_id` the Summary already carries.

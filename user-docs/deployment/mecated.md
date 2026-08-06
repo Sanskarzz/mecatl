@@ -222,6 +222,13 @@ Two things worth knowing before you rely on it:
 | `--posture auto` | Allow-all server-wide + main substitution loosening; child injection defence **on**. Recommended for unattended use |
 | `--posture yolo` | Also loosens child substitution (injection defence **off**). Isolated single-tenant only. Refused as root without `MECATL_SANDBOX=1` |
 
+On a **headless** root (`--headless`), posture never raises `TrustProject`. Explicit
+`--trust-project`, `trustedWorkspaces:`, or undrifted remembered trust admits BOTH repo steering and
+the read-only child shell. Without a trust source, `--posture auto` keeps its approvals but gets
+neither because `.git` is not vouched. See
+[workspace trust](https://github.com/stacklok/mecatl/blob/main/docs/usage/workspace-trust.md#project-tier-ingestion-on-headless-roots-the-opt-in-design)
+for the full walkthrough.
+
 See [Permissions & guardrails](/what-you-get/permissions.md) for the full rule
 engine. Posture is read from the operator-global `settings.yaml` (`posture:` key)
 and out-ranked by the CLI flag when both are set.

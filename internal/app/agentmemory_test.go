@@ -230,7 +230,7 @@ func TestProjectTierMemoryTrustGated(t *testing.T) {
 		t.Fatalf("untrusted project-tier memory must be WITHHELD, got ok=%v head=%q", ok, head)
 	}
 
-	// Trusted: resolved.
+	// Trusted + ingestion granted: resolved.
 	head, ok := resolveAgentMemoryHead(Config{Workspace: ws, TrustProject: true}, def)
 	if !ok || !strings.Contains(head, sentinel) {
 		t.Fatalf("trusted project-tier memory should resolve with the sentinel, got ok=%v head=%q", ok, head)

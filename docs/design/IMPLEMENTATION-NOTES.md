@@ -122,6 +122,22 @@ with `resolvePosture`/`applyPosture`/`foldOperatorPosture`/`narratePosture`). `-
 `guardrails:`). `applyPosture` derives `AllowAllTools` + the main/child substitution loosening +
 the `TrustProject` floor, BEFORE `resolveTrust` in `Build`.
 
+**Root-aware project trust (issue #359, ADR 0095).** Final `Config.TrustProject` is the ONE
+positive workspace-trust decision after `resolveTrust` folds explicit, declarative, remembered,
+and posture sources. The single-source helper `projectIngestionAdmitted(cfg) = cfg.TrustProject`
+(`internal/app/project_ingestion.go`) gates every project-tier ingestion site — AGENTS.md/CLAUDE.md,
+project rules/model bindings, agent defs + project memory, skills, soul, slash commands, and the git
+snapshot. The read-only subagent/member worktree shell reads the SAME effective bool through
+`buildSandboxedCommandRunner`/`buildWorktreeLister`/`bashScopeMissReason`/
+`subagentShellUntrustedReason`/`applyUntrustedMemberShellNote`, because trust vouches for the repo's
+`.git` (the issue-#40 fork-time-RCE surface). `applyPosture` raises TrustProject at
+`trusted`/`auto`/`yolo` on INTERACTIVE roots ONLY; a HEADLESS root's ladder never raises it, while
+explicit/declarative/remembered trust works on both roots. Thus every valid trust source admits both
+steering and shell, and a headless untrusted repo gets neither. No second synchronized ingestion or
+shell grant exists. `narratePosture` runs after `resolveTrust`, so its `trust_project` and
+`project_ingestion` fields are authoritative and cannot contradict `narrateTrust`. No engine API
+change — composition-only. See ADR 0095 and `docs/usage/workspace-trust.md`.
+
 `AllowAllTools` is still implemented as a **rule** (a single `ScopeCLI` allow-all from the shared
 `yoloAllowAllRule` in `internal/app/build.go`), NOT a `PermissionMode` and NOT an evaluator bypass —
 it loosens only the `ScopeBuiltinDefault` floor, so both invariants above are unchanged. The rule

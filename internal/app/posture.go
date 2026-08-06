@@ -14,17 +14,28 @@ import (
 // switches into ONE ordered tier (strict < trusted < auto < yolo). Like trust.go
 // it is a pure composition concern — engine/governance stays session-free and
 // posture-unaware; posture only COMPOSES the derived knobs (the allow-all rule,
-// the evaluator's loose-substitution option, the project-trust bool) and every
-// decision still goes THROUGH governance.Evaluate, never a bypass.
+// the evaluator's loose-substitution option, and the root-aware project-trust
+// floor) and every decision still goes THROUGH governance.Evaluate, never a bypass.
 //
 // The ladder (owner-approved), and the knobs each tier derives in applyPosture:
 //
-//	posture | AllowAllTools | main loose-subst | child loose-subst    | TrustProject floor
+//	posture | AllowAllTools | main loose-subst | child loose-subst     | TrustProject floor
 //	--------|---------------|------------------|----------------------|-------------------
-//	strict  | false         | false            | false                | (operator's own)
-//	trusted | false         | false            | false                | true
-//	auto    | true          | true             | false (child def ON) | true
-//	yolo    | true          | true             | TRUE  (child def OFF)| true
+//	strict  | false         | false            | false                | (trust sources only)
+//	trusted | false         | false            | false                | interactive-only
+//	auto    | true          | true             | false (child def ON) | interactive-only
+//	yolo    | true          | true             | TRUE  (child def OFF)| interactive-only
+//
+// Issue #359. TrustProject is the ONE effective positive workspace-trust
+// decision after resolveTrust. It gates project-tier ingestion through the named
+// projectIngestionAdmitted seam and directly gates the read-only subagent shell
+// (git worktree operations against the repo's .git, the issue-#40 fork-time-RCE
+// surface). The fail-safe headless default is achieved by making the posture
+// ladder root-aware: a HEADLESS root never raises TrustProject from posture, while
+// explicit/declarative/remembered trust can still make it true. An INTERACTIVE
+// root keeps the historical trusted/auto/yolo floor. Thus an untrusted headless
+// repo gets neither steering nor a read-only child shell, while every legitimate
+// trust source admits both.
 //
 // "child loose-subst" is the NEW Config.LooseChildSubstitution: under yolo a
 // child/subagent/branch engine ALSO loosens the built-in substitution Ask floor
@@ -196,24 +207,34 @@ func resolvePosture(cfg Config, ceiling Posture) Posture {
 }
 
 // applyPosture maps the resolved tier to the derived composition knobs per the
-// ladder table: AllowAllTools (the yolo allow-all rule, main + children), the NEW
+// ladder table: AllowAllTools (the allow-all rule, main + children),
 // LooseChildSubstitution (child substitution loosening, yolo only), and the
-// project-trust floor (raised for trusted/auto/yolo). It MUST run BEFORE
-// resolveTrust in Build so the trust fold + permResolver pick up the raised
-// TrustProject. It NEVER lowers an already-set knob (an operator who passed
-// --trust-project under PostureStrict keeps TrustProject); it only raises.
+// project-trust floor. The floor is raised for trusted/auto/yolo on INTERACTIVE
+// roots only; a HEADLESS root's ladder never raises TrustProject. Explicit trust
+// survives because this function only raises. It MUST run BEFORE resolveTrust so
+// the trust fold and permission resolver see the posture-derived interactive
+// floor.
 func applyPosture(cfg Config) Config {
 	switch cfg.Posture {
 	case PostureYolo:
 		cfg.AllowAllTools = true
 		cfg.LooseChildSubstitution = true
-		cfg.TrustProject = true
+		// TrustProject floor: INTERACTIVE-only. On a HEADLESS root the ladder does
+		// NOT raise TrustProject — the fail-safe default (an untrusted clone gets no
+		// ingestion and no subagent shell without an explicit --trust-project).
+		if !cfg.Headless {
+			cfg.TrustProject = true
+		}
 	case PostureAuto:
 		cfg.AllowAllTools = true
 		cfg.LooseChildSubstitution = false
-		cfg.TrustProject = true
+		if !cfg.Headless {
+			cfg.TrustProject = true
+		}
 	case PostureTrusted:
-		cfg.TrustProject = true
+		if !cfg.Headless {
+			cfg.TrustProject = true
+		}
 	default: // PostureStrict: derive nothing; leave the operator's own flags.
 	}
 	return cfg
@@ -242,31 +263,30 @@ func foldOperatorPosture(cfg Config) Config {
 	return cfg
 }
 
-// ResolveAuthoritativePosture computes the SAME posture tier app.Build resolves —
-// the operator-global settings.yaml `posture:` key (user-global + CLI tiers) folded
-// with the --posture flag and the --yolo/--trust-project aliases, MAX-tier. It is the
-// EXPORTED entry the cmd layer's --print-posture uses so the printed tier is the
-// AUTHORITATIVE one, not the CLI-only approximation (a YAML-only `posture: yolo` would
-// otherwise be under-reported). It builds a transient resolver to read the operator
-// posture (the same construction Build does); a nil/typed-nil resolver (no config
-// source) simply yields the alias-folded flag value. It performs NO mutation and never
-// errors — a missing/corrupt settings.yaml yields the CLI-tier answer (fail-soft, like
-// the rest of the composition's posture reads). It does NOT apply the root-refusal
-// (that is Build's job, via PostureRefusalReason); --print-posture only reports.
+// ResolveAuthoritativePosture computes the posture tier Build resolves: it folds the
+// OPERATOR-TIER `posture:` YAML scalar (CLI --posture out-ranks), then resolves the
+// tier (aliases + ceiling clamp). It does NOT fold workspace trust — that is Build's
+// job, surfaced by the `operator posture` startup diagnostic (narratePosture) after
+// resolveTrust. Callers that need only the tier (mecatui embedded posture, the
+// mecated fast-path refusal) use this; callers that need the full root-aware trust
+// decision drive the real Build and read its structured diagnostic.
 func ResolveAuthoritativePosture(cfg Config) Posture {
 	cfg.permResolver = buildPermResolver(cfg)
 	cfg = foldOperatorPosture(cfg)
 	return resolvePosture(cfg, postureNoCeiling)
 }
 
-// narratePosture logs the resolved posture as a build-once INFO composition fact
-// (mirroring narrateTrust / the guardrails narration). It is called ONLY from Build
-// — never the per-engine deps builders — per the no-per-derivation-duplication rule.
-func narratePosture(diag port.Diagnostics, p Posture) {
+// narratePosture logs the resolved posture and authoritative, fully-folded
+// workspace trust as one build-once composition fact. Build calls it only after
+// resolveTrust, so it cannot contradict the following workspace-trust narration.
+// It is the sole observation/debug surface for the resolved posture + per-defence
+// state; there is no separate print-and-exit CLI.
+func narratePosture(diag port.Diagnostics, p Posture, trustProject bool) {
 	diag.Log(context.Background(), port.LevelInfo, "operator posture",
 		"posture", p.String(),
 		"allow_all", p >= PostureAuto,
 		"main_loose_substitution", p >= PostureAuto,
 		"child_loose_substitution", p == PostureYolo,
-		"trust_project_floor", p >= PostureTrusted)
+		"project_ingestion", trustProject,
+		"trust_project", trustProject)
 }

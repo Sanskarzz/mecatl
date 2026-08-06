@@ -123,8 +123,9 @@ func TestBuildWorktreeListerNilForEmptyWorkspace(t *testing.T) {
 	}
 }
 
-// TestBuildWorktreeListerNilWhenUntrusted: an untrusted workspace gets a nil
-// lister — no git ever runs against an untrusted repo (the gitSnapshot discipline).
+// TestBuildWorktreeListerNilWhenUntrusted: an untrusted workspace (no
+// --trust-project) gets a nil lister — no git ever runs (the gitSnapshot
+// discipline: the shell gate is cfg.TrustProject).
 func TestBuildWorktreeListerNilWhenUntrusted(t *testing.T) {
 	cfg := Config{Workspace: t.TempDir(), Shell: "/bin/sh", TrustProject: false, Diagnostics: port.NopDiagnostics{}}
 	if l := buildWorktreeLister(cfg); l != nil {

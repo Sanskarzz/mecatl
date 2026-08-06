@@ -57,6 +57,18 @@ func TestEmbeddedConfigMapsTrustProject(t *testing.T) {
 	}
 }
 
+// TestEmbeddedConfigHeadlessIsFalse asserts the mecatui embedded server is
+// INTERACTIVE (Headless false): the posture ladder grants ingestion at auto/yolo
+// (the dev default ingests the operator's own CLAUDE.md). The former suppressor
+// was REMOVED (issue #359 redesign); the ingestion axis is now a
+// positive grant raised by applyPosture in app.Build, not a cmd field.
+func TestEmbeddedConfigHeadlessIsFalse(t *testing.T) {
+	off := embeddedConfig(config{workspace: "/ws", model: "m", mock: true}, port.NopDiagnostics{})
+	if off.Headless {
+		t.Error("embeddedConfig.Headless = true, want false (mecatui is interactive; the ladder grants ingestion at auto/yolo)")
+	}
+}
+
 // TestEmbeddedConfigMapsSubagentModel asserts --subagent-model flows through to
 // app.Config.SubagentModel (the def-less child-default model, issue #35).
 func TestEmbeddedConfigMapsSubagentModel(t *testing.T) {
@@ -841,9 +853,9 @@ func TestEmbeddedConfigMapsAllowAll(t *testing.T) {
 	}
 }
 
-// TestParseFlagsPosture covers the embedded-server --posture / --print-posture surface:
-// the value lands on cfg.posture and postureFlagSet flips ONLY when --posture is
-// explicitly passed (so CLI out-ranks the operator-YAML key).
+// TestParseFlagsPosture covers the embedded-server --posture surface: the value
+// lands on cfg.posture and postureFlagSet flips ONLY when --posture is explicitly
+// passed (so CLI out-ranks the operator-YAML key).
 func TestParseFlagsPosture(t *testing.T) {
 	def, err := parseFlags(nil)
 	if err != nil {

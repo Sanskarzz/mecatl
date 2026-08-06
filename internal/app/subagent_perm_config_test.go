@@ -35,7 +35,7 @@ func permCfgWorkspace(t *testing.T, settingsYAML string) Config {
 		Model:                   "mock",
 		Shell:                   "/bin/sh",
 		PermissionsConventional: true,
-		TrustProject:            true,
+		TrustProject:            true, // trusted: loads project tier AND grants the read-only subagent shell (the shell gate)
 	}
 	cfg.permResolver = buildPermResolver(cfg)
 	cfg.childPermResolver = buildChildPermResolver(cfg)

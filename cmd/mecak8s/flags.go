@@ -509,6 +509,9 @@ func appConfig(cfg config, diag port.Diagnostics, obs observability) app.Config 
 		ReasoningEffort:        cfg.reasoningEffort,
 		ReasoningEffortFlagSet: cfg.reasoningEffortFlagSet,
 		Privileged:             privilegedProcess(),
+		// Headless is explicit deployment identity; mecak8s defaults true, so
+		// posture never raises workspace trust.
+		Headless: cfg.headless,
 		// Interactive = !headless: the deliberate headless default. A child's
 		// unresolved ask is auto-denied / routed to the opt-in ask-reviewer.
 		Interactive: !cfg.headless,
