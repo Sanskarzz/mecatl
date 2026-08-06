@@ -356,7 +356,7 @@ func toProtoTeam(p session.TeamPayload) *mecatlv1.Team {
 		Tasks:           tasks,
 		Findings:        findings,
 		Dispositions:    dispositions,
-		Cause:           p.Cause,
+		Cause:           valid(p.Cause),
 	}
 }
 
