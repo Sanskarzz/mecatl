@@ -769,13 +769,34 @@ func (e *Engine) preHook(ctx context.Context, r *Run, sess *session.Session, tur
 		CallID:    string(c.ID),
 	}
 	outcome, herr := e.deps.Hooks.Run(ctx, ev)
+
+	// Normalize the hook's producer-influenced output to valid UTF-8 HERE — the
+	// one point both values arrive (issue #402). A hook is a subprocess and its
+	// Message is its raw stdout (hookexec blockMessage), so it is the same
+	// arbitrary-bytes producer as a tool's stdout; Mutated is its rewritten args
+	// JSON, and json.Valid ACCEPTS invalid UTF-8 inside a string literal, so a
+	// malformed payload would be adopted into c.Args verbatim. Neither value
+	// passes through execute, so RepairToolResult never sees them: without this,
+	// a blocked call's ToolError and a mutated call's Args reach the recorded
+	// conversation RAW while the client stream, the model view and the snapshot
+	// each get U+FFFD from a DIFFERENT mechanism (the mapper backstop, the
+	// provider's JSON marshal, encoding/json on Save) — the invariant holding by
+	// coincidence rather than construction. Repairing inside the JSON leaves it
+	// valid JSON: it only rewrites bytes within string literals, exactly what
+	// json.Unmarshal would have substituted on decode anyway.
+	outcome.Message = session.ToValidUTF8(outcome.Message)
+	if len(outcome.Mutated) > 0 {
+		outcome.Mutated = json.RawMessage(session.ToValidUTF8(string(outcome.Mutated)))
+	}
+
 	if herr != nil {
 		if ctx.Err() != nil {
 			return preHookResult{effective: c}, ctx.Err()
 		}
 		// A hook execution error is surfaced to the model as a block annotation
-		// rather than aborting the whole run.
-		return preHookResult{blocked: true, msg: fmt.Sprintf("PreToolUse hook error: %v", herr)}, nil
+		// rather than aborting the whole run. The error can wrap the hook's own
+		// stderr, so it gets the same repair as Message above.
+		return preHookResult{blocked: true, msg: session.ToValidUTF8(fmt.Sprintf("PreToolUse hook error: %v", herr))}, nil
 	}
 	if outcome.Block {
 		m := outcome.Message

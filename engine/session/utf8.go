@@ -3,9 +3,16 @@ package session
 import "strings"
 
 // ToValidUTF8 returns s with every invalid UTF-8 byte sequence replaced by
-// U+FFFD — the SAME repair encoding/json applies on marshal, so the durable
-// event log, the model view, and the gRPC wire agree byte-for-byte. An
-// already-valid string is returned unchanged.
+// U+FFFD, so the durable event log, the model view, and the gRPC wire all carry
+// the same text. An already-valid string is returned unchanged — which is what
+// makes the three agree: once repaired here, encoding/json has nothing left to
+// substitute and passes the value through untouched.
+//
+// It is NOT byte-identical to what encoding/json would have produced from the
+// RAW string: json substitutes one U+FFFD per invalid BYTE, this one per invalid
+// RUN, so "\xe2\x80" becomes two replacement runes there and one here. That only
+// matters for a value repaired on one path and not the other — which is exactly
+// the divergence the single choke point below exists to prevent.
 //
 // It exists because protobuf string fields REJECT invalid UTF-8 at marshal
 // time (the Converse-stream kill, issue #402): any string that crosses into a
@@ -27,8 +34,14 @@ func ToValidUTF8(s string) string {
 // Byte-exact fields are deliberately untouched:
 //   - Data []byte — binary payloads ride proto bytes fields, which carry no
 //     UTF-8 rule; they must stay byte-identical.
-//   - MIMEType — an IANA machine token, not prose; exactness is the contract
-//     (validateMIME already constrains it upstream), so it is never rewritten.
+//   - MIMEType — an IANA machine token, not prose; exactness is the contract, so
+//     it is never rewritten. What keeps that safe is the TRANSPORT, not a
+//     validator: validateMIME runs only on the inbound media path via NewContent,
+//     and the MCP block constructors (NewResourceLinkBlock /
+//     NewEmbeddedResourceBlock) do not check it — MCP metadata is simply JSON-
+//     decoded before it arrives, which already coerces invalid bytes. A future
+//     non-JSON producer of a block MIME type (a sniffed local file, an HTTP
+//     Content-Type header) reopens issue #402 on this field.
 //
 // The repair is applied at the loop's effective-payload choke point (after
 // PostToolUse, before the recorder/event/record) so the model view, the audit

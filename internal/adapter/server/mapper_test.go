@@ -1288,14 +1288,20 @@ func mustEmbedded(t *testing.T, uri, mime, text string, blob []byte, audience []
 // string fields reject at marshal time.
 const badUTF8 = "\xe2M-^@M-^T"
 
-// TestToProtoNeverFailsMarshalOnInvalidUTF8 is the protobuf-projection backstop
-// oracle (issue #402): NO domain string, however malformed, may make proto
-// marshaling fail. It builds one event of every payload kind with badUTF8
-// injected into the producer-influenced string fields, maps each through
-// toProto, and asserts proto.Marshal succeeds AND the malformed bytes were
-// repaired to U+FFFD. A future payload field that someone forgets to run
-// through the valid() backstop fails this test rather than shipping a
-// stream-killing hole.
+// TestToProtoNeverFailsMarshalOnInvalidUTF8 is the READABLE half of the
+// protobuf-projection backstop oracle (issue #402): NO domain string, however
+// malformed, may make proto marshaling fail. It builds one event of every
+// payload kind with badUTF8 injected into the producer-influenced string
+// fields, maps each through toProto, and asserts proto.Marshal succeeds AND the
+// malformed bytes were repaired to U+FFFD.
+//
+// Its coverage is exactly what the fixtures below SEED, and no more. It does
+// NOT catch a future payload field that someone forgets to run through valid():
+// the field would simply never be populated here, and the test would stay
+// green. That job belongs to TestToProtoStructuralUTF8Guard, which reflects
+// over session.Event and seeds every bare-string field automatically. Keep both
+// — this one documents the shape of a real event and is what you read to
+// understand the mapping; that one is the guard that actually fails closed.
 func TestToProtoNeverFailsMarshalOnInvalidUTF8(t *testing.T) {
 	msg := session.Message{
 		Role:          session.RoleAssistant,

@@ -84,7 +84,7 @@ func contentToProto(parts []session.Content) []*mecatlv1.Content {
 			Kind:     kind,
 			MimeType: p.MIMEType,
 			Data:     p.Data,
-			Url:      p.URL,
+			Url:      valid(p.URL),
 		})
 	}
 	return out
@@ -180,7 +180,7 @@ func toProtoParallel(p session.ParallelPayload) *mecatlv1.Parallel {
 	return &mecatlv1.Parallel{
 		ParentCallId:    p.ParentCallID,
 		Kind:            string(p.Kind),
-		Join:            p.Join,
+		Join:            valid(p.Join), // model-authored arg, not a harness token: normalizeJoin passes unknown values through
 		BranchCount:     ClampInt32(p.BranchCount),
 		BranchIndex:     ClampInt32(p.BranchIndex),
 		ChildId:         p.ChildID,
@@ -189,7 +189,7 @@ func toProtoParallel(p session.ParallelPayload) *mecatlv1.Parallel {
 		RoutedCategory:  p.RoutedCategory,
 		RoutedModel:     p.RoutedModel,
 		Model:           p.Model,
-		ToolName:        p.ToolName,
+		ToolName:        valid(p.ToolName),
 		IsError:         p.IsError,
 		ToolCount:       ClampInt32(p.ToolCount),
 		InnerKind:       string(p.InnerKind),
@@ -345,7 +345,7 @@ func toProtoTeam(p session.TeamPayload) *mecatlv1.Team {
 		MemberSessionId: p.MemberSessionID,
 		InnerKind:       string(p.InnerKind),
 		Text:            valid(p.Text),
-		ToolName:        p.ToolName,
+		ToolName:        valid(p.ToolName),
 		Detail:          valid(p.Detail),
 		IsError:         p.IsError,
 		Rounds:          ClampInt32(p.Rounds),
@@ -442,7 +442,7 @@ func toProtoSubagent(p session.SubagentPayload) *mecatlv1.Subagent {
 		RoutedCategory: p.RoutedCategory,
 		RoutedModel:    p.RoutedModel,
 		Model:          p.Model,
-		ToolName:       p.ToolName,
+		ToolName:       valid(p.ToolName),
 		IsError:        p.IsError,
 		ToolCount:      ClampInt32(p.ToolCount),
 		InnerKind:      string(p.InnerKind),
@@ -459,7 +459,7 @@ func toProtoSubagent(p session.SubagentPayload) *mecatlv1.Subagent {
 func toProtoToolCall(c session.ToolCall) *mecatlv1.ToolCall {
 	return &mecatlv1.ToolCall{
 		Id:   string(c.ID),
-		Name: c.Name,
+		Name: valid(c.Name),
 		Args: valid(string(c.Args)),
 	}
 }
@@ -694,7 +694,7 @@ func toProtoSession(s *session.Session, rm ResolvedModel, caps *mecatlv1.ServerC
 		SessionId:     string(s.ID),
 		State:         string(s.State),
 		Mode:          modeToProto(s.Mode),
-		Workspace:     s.Workspace,
+		Workspace:     valid(s.Workspace),
 		Limits:        limitsToProto(s.Limits),
 		Turns:         ClampInt32(s.Counters.Turns),
 		ToolCalls:     ClampInt32(s.Counters.ToolCalls),

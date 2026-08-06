@@ -3941,7 +3941,7 @@ func (s *Service) GetUserModel(ctx context.Context) (*mecatlv1.GetUserModelRespo
 	out := make([]*mecatlv1.UserModelEntry, 0, len(entries))
 	var agg strings.Builder
 	for _, e := range entries {
-		out = append(out, &mecatlv1.UserModelEntry{Key: e.Key, Description: e.Description})
+		out = append(out, &mecatlv1.UserModelEntry{Key: valid(e.Key), Description: valid(e.Description)})
 		agg.WriteString(e.Key)
 		agg.WriteByte('\t')
 		agg.WriteString(e.Description)

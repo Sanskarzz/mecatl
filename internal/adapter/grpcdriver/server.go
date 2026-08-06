@@ -17,6 +17,41 @@ import (
 	"github.com/stacklok/mecatl/engine/tool"
 )
 
+// valid is the driver-protocol UTF-8 backstop, the peer of internal/adapter/
+// server's mapper backstop (issue #402). Skill/soul/command/agent-def content
+// is os.ReadFile→string off the workspace with NO decoder to launder it, so a
+// Latin-1 SKILL.md or SOUL.md would fail proto.Marshal and turn the RPC into
+// codes.Internal. Applied to every DISK-SOURCED string that crosses into a
+// proto message; harness-authored tokens (ids, origins, enums) are skipped, and
+// AgentMCPServer.Headers is deliberately EXEMPT — it is secret-shaped, and
+// rewriting a credential to repair it would corrupt the very thing it carries.
+func valid(s string) string { return session.ToValidUTF8(s) }
+
+// validAll is valid over a slice; proto3 validates every element of a repeated
+// string field, so a single bad entry fails the whole message.
+func validAll(ss []string) []string {
+	if len(ss) == 0 {
+		return ss
+	}
+	out := make([]string, len(ss))
+	for i, s := range ss {
+		out[i] = valid(s)
+	}
+	return out
+}
+
+// validMap is valid over a map; proto3 validates map KEYS as well as values.
+func validMap(m map[string]string) map[string]string {
+	if len(m) == 0 {
+		return m
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[valid(k)] = valid(v)
+	}
+	return out
+}
+
 // Server wrappers: mount an IN-PROCESS store as the generated driver server
 // interfaces, so a Go driver process (or a bufconn test fixture) is the
 // in-process store plus this file plus a grpc.Server. The session wrapper
@@ -235,8 +270,8 @@ func (s *skillSourceServer) ListSkills(ctx context.Context, _ *driverv1.ListSkil
 	out := make([]*driverv1.SkillMeta, len(metas))
 	for i, m := range metas {
 		out[i] = &driverv1.SkillMeta{
-			Name:        m.Name,
-			Description: m.Description,
+			Name:        valid(m.Name),
+			Description: valid(m.Description),
 			Origin:      string(m.Origin),
 			HasAssets:   m.HasAssets,
 		}
@@ -254,7 +289,7 @@ func (s *skillSourceServer) GetSkillBody(ctx context.Context, req *driverv1.GetS
 	if err != nil {
 		return nil, sourceStatus(err)
 	}
-	return &driverv1.GetSkillBodyResponse{Body: body}, nil
+	return &driverv1.GetSkillBodyResponse{Body: valid(body)}, nil
 }
 
 // ListSkillAssets returns the named skill's payload descriptors; a blank name
@@ -317,7 +352,7 @@ func (s *soulSourceServer) LoadSoul(ctx context.Context, _ *driverv1.LoadSoulReq
 	if err != nil {
 		return nil, sourceStatus(err)
 	}
-	return &driverv1.LoadSoulResponse{Body: body}, nil
+	return &driverv1.LoadSoulResponse{Body: valid(body)}, nil
 }
 
 // agentSourceServer adapts a tool.AgentDefSource to AgentSourceServiceServer.
@@ -340,20 +375,20 @@ func (s *agentSourceServer) ListAgentDefs(ctx context.Context, _ *driverv1.ListA
 	out := make([]*driverv1.AgentDef, len(defs))
 	for i, d := range defs {
 		out[i] = &driverv1.AgentDef{
-			Name:            d.Name,
-			Description:     d.Description,
-			Tools:           d.Tools,
-			DisallowedTools: d.DisallowedTools,
-			Model:           d.Model,
-			Provider:        d.Provider,
-			PermissionMode:  d.PermissionMode,
+			Name:            valid(d.Name),
+			Description:     valid(d.Description),
+			Tools:           validAll(d.Tools),
+			DisallowedTools: validAll(d.DisallowedTools),
+			Model:           valid(d.Model),
+			Provider:        valid(d.Provider),
+			PermissionMode:  valid(d.PermissionMode),
 			MaxTurns:        int32(d.MaxTurns),     //nolint:gosec // bounded operator config, never overflows
 			MaxToolCalls:    int32(d.MaxToolCalls), //nolint:gosec // bounded operator config, never overflows
-			Color:           d.Color,
-			Skills:          d.Skills,
+			Color:           valid(d.Color),
+			Skills:          validAll(d.Skills),
 			McpServers:      toProtoMCPServers(d.MCPServers),
-			Hooks:           d.Hooks,
-			Body:            d.Body,
+			Hooks:           validMap(d.Hooks),
+			Body:            valid(d.Body),
 			Origin:          string(d.Origin),
 		}
 	}
@@ -369,7 +404,8 @@ func toProtoMCPServers(in []tool.AgentMCPServer) []*driverv1.AgentMCPServer {
 	}
 	out := make([]*driverv1.AgentMCPServer, len(in))
 	for i, srv := range in {
-		out[i] = &driverv1.AgentMCPServer{Name: srv.Name, Url: srv.URL, Headers: srv.Headers}
+		// Headers is NOT repaired: see valid's doc — a secret must cross byte-exact.
+		out[i] = &driverv1.AgentMCPServer{Name: valid(srv.Name), Url: valid(srv.URL), Headers: srv.Headers}
 	}
 	return out
 }
@@ -395,7 +431,7 @@ func (s *commandSourceServer) ListCommands(ctx context.Context, _ *driverv1.List
 	}
 	out := make([]*driverv1.CommandMeta, len(cmds))
 	for i, c := range cmds {
-		out[i] = &driverv1.CommandMeta{Name: c.Name, Description: c.Description}
+		out[i] = &driverv1.CommandMeta{Name: valid(c.Name), Description: valid(c.Description)}
 	}
 	return &driverv1.ListCommandsResponse{Commands: out}, nil
 }
@@ -414,7 +450,7 @@ func (s *commandSourceServer) GetCommandBody(ctx context.Context, req *driverv1.
 	if !found {
 		return nil, status.Errorf(codes.NotFound, "unknown command %q", req.GetName())
 	}
-	return &driverv1.GetCommandBodyResponse{Body: body}, nil
+	return &driverv1.GetCommandBodyResponse{Body: valid(body)}, nil
 }
 
 // storeStatus maps a wrapped store's error onto the driver protocol's status

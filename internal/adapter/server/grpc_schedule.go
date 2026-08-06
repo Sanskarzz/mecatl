@@ -328,7 +328,7 @@ func scheduleFireToProto(in port.ScheduleFire) *mecatlv1.ScheduleFire {
 		ScheduleName: in.ScheduleName,
 		SessionId:    string(in.SessionID),
 		Stop:         string(in.Stop),
-		Err:          in.Err,
+		Err:          valid(in.Err),
 	}
 	if !in.FiredAt.IsZero() {
 		out.FiredAt = timestamppb.New(in.FiredAt)

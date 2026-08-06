@@ -2,6 +2,7 @@ package agent_test
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"sync"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/stacklok/mecatl/engine/adapter/memfs"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/agent"
+	"github.com/stacklok/mecatl/engine/governance"
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/tool"
@@ -114,5 +116,107 @@ func TestLoopRepairsInvalidUTF8ToolResult(t *testing.T) {
 	}
 	if modelFacing != emitted.Content {
 		t.Fatalf("model-facing != emitted:\nmodel %q\nemitted %q", modelFacing, emitted.Content)
+	}
+}
+
+// utf8HookRunner is a PreToolUse hook that returns invalid UTF-8 in the two
+// values a hook subprocess controls: the block Message (its raw stdout, via
+// hookexec blockMessage) and the Mutated args JSON.
+type utf8HookRunner struct{ mutate bool }
+
+func (h utf8HookRunner) Run(_ context.Context, ev governance.HookEvent) (governance.HookOutcome, error) {
+	if ev.Phase != governance.PhasePreToolUse {
+		return governance.HookOutcome{}, nil
+	}
+	if h.mutate {
+		return governance.HookOutcome{Mutated: json.RawMessage(`{"path":"` + invalidUTF8 + `"}`)}, nil
+	}
+	return governance.HookOutcome{Block: true, Message: "denied " + invalidUTF8}, nil
+}
+
+// TestPreToolUseHookOutputIsRepaired closes the one path that reaches recorded
+// state WITHOUT crossing execute's RepairToolResult: a PreToolUse hook's own
+// output. A hook is an operator-deployed SUBPROCESS, so its stdout is the same
+// arbitrary-bytes producer as a tool's — hookexec blockMessage returns it with
+// only TrimSpace applied — and a blocked call is turned into a ToolError by four
+// call sites (runOne, runReadBatch Phase 1, and both resolvePendingCall arms),
+// none of which call execute. Mutated args are the same story: json.Valid
+// ACCEPTS invalid UTF-8 inside a string literal, so a malformed payload would be
+// adopted into c.Args verbatim.
+//
+// Without the repair in preHook the wire still survives (the mapper backstop
+// catches it), but the in-memory conversation keeps the RAW bytes while the
+// stream, the model view and the snapshot each get U+FFFD from a different
+// mechanism — the recorded == streamed == model-view invariant holding by
+// coincidence instead of by construction.
+func TestPreToolUseHookOutputIsRepaired(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate bool
+		want   func(t *testing.T, sess *session.Session, evs []session.Event, rec *argRecorder)
+	}{
+		{
+			name: "block message",
+			want: func(t *testing.T, sess *session.Session, evs []session.Event, _ *argRecorder) {
+				t.Helper()
+				// The blocked call is recorded as a ToolError carrying the hook's message.
+				var rec string
+				for i := range sess.Conversation.Messages {
+					if m := &sess.Conversation.Messages[i]; m.ToolResult != nil {
+						rec = m.ToolResult.Content
+					}
+				}
+				assertRepaired(t, "recorded ToolError", rec)
+				for _, ev := range evs {
+					if ev.Type == session.EvHook {
+						assertRepaired(t, "EvHook text", ev.Text)
+					}
+				}
+			},
+		},
+		{
+			// Assert on the args the TOOL actually ran with. That is the strongest
+			// available sink: openCard deliberately emits the ORIGINAL args and the
+			// conversation records what the model emitted, so the rewritten value
+			// reaches only the executing tool and the ToolCallRecorder audit seam.
+			name:   "mutated args",
+			mutate: true,
+			want: func(t *testing.T, _ *session.Session, _ []session.Event, rec *argRecorder) {
+				t.Helper()
+				args := rec.args()
+				assertRepaired(t, "args the tool executed with", args)
+				if !json.Valid([]byte(args)) {
+					t.Errorf("repair broke the args JSON: %q", args)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &argRecorder{name: "Read", readOnly: true}
+			llm := mockllm.New(
+				mockllm.ToolCallTurn(toolCall("c1", "Read", `{"path":"a.go"}`)),
+				mockllm.TextTurn("done"),
+			)
+			e := newEngine(agent.Deps{
+				LLM: llm, Catalog: catalogWith(t, rec),
+				Hooks: utf8HookRunner{mutate: tc.mutate},
+			})
+			sess := newSession(t, session.Limits{})
+			evs := drain(e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), "go"))
+			tc.want(t, sess, evs, rec)
+		})
+	}
+}
+
+func assertRepaired(t *testing.T, what, got string) {
+	t.Helper()
+	if got == "" {
+		t.Fatalf("%s: empty — the test never reached the path it means to pin", what)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("%s still holds invalid UTF-8: %q", what, got)
+	}
+	if !strings.ContainsRune(got, '�') {
+		t.Fatalf("%s not repaired to U+FFFD: %q", what, got)
 	}
 }

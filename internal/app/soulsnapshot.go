@@ -4,6 +4,7 @@ import (
 	"context"
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/server"
 )
@@ -62,7 +63,12 @@ func soulSnapshotWith(cfg Config, io baselineIO) *mecatlv1.SoulInfo {
 	if meta.Present && src != nil {
 		body, _ := src.Load(context.Background())
 		return &mecatlv1.SoulInfo{
-			Content:    body,
+			// The body is os.ReadFile→string with NO decoder to launder it (soul
+			// store ValidateBody checks size/markers, not encoding), so a Latin-1
+			// SOUL.md would fail proto.Marshal and turn GetSoul into codes.Internal
+			// — the issue-#402 crash on a sibling surface. SizeBytes/Sha256 stay
+			// over the ORIGINAL bytes: they describe the file, not this projection.
+			Content:    session.ToValidUTF8(body),
 			SizeBytes:  int64(meta.Size),
 			Sha256:     meta.SHA256,
 			Present:    true,

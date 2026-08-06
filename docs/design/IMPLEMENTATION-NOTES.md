@@ -3991,10 +3991,39 @@ stdlib-only domain leaf, so the inward-only layering rule holds):
   structurally cannot: replayed/rehydrated history (`StreamSessionEvents`,
   compaction archive), child-output previews (`Text`/`Detail`/`Cause` never pass
   through `execute`), custom/future tools via the importable engine, and
-  MCP/OS-sourced metadata. No reflection walker; the coverage is proved by
-  `TestToProtoNeverFailsMarshalOnInvalidUTF8` (one event per payload kind with
-  invalid bytes injected, `proto.Marshal` must succeed and contain U+FFFD) —
-  which fails if a future payload field is added unrepaired.
+  MCP/OS-sourced metadata. The mapper itself uses no reflection walker (a walker
+  would have to guess which fields are harness tokens, and guessing wrong
+  silently rewrites an id); the *test* does, which is where reflection is safe.
+
+  Coverage is TWO tests with different jobs, and the distinction matters:
+  `TestToProtoNeverFailsMarshalOnInvalidUTF8` is the readable fixture — one
+  event per payload kind with invalid bytes injected, `proto.Marshal` must
+  succeed and contain U+FFFD. It covers exactly what it seeds, so it can NOT
+  catch a future field someone forgets to wrap: an unseeded field is simply
+  never populated and the test stays green. `TestToProtoStructuralUTF8Guard`
+  (`internal/adapter/server/utf8_structural_test.go`) is the guard that fails
+  closed — it reflects over `session.Event`, seeds every bare-`string` field
+  (named typedefs are skipped: they are the closed kind/stop/role vocabularies),
+  maps through `toProto`, then protoreflect-walks the output asserting
+  `utf8.ValidString` on every populated string field AND every map key (proto3
+  validates both). A new domain string reaches it with no test edit; the only
+  way to make it pass is to wrap the field or to add its path to
+  `harnessTokenFields` with a stated reason. That inverts the failure mode from
+  "remember to add coverage" (invisible when forgotten) to "justify an
+  exemption" (visible in review) — the property the fixture test lacked, and the
+  reason `ToolName` sat unwrapped at three sites while the fixture stayed green.
+
+  The SAME discipline binds every other package that builds a proto message from
+  a non-harness string. `internal/app` (`soulsnapshot.go` `soulSnapshotWith`,
+  `agentdefs.go` `agentSnapshot`/`skillSnapshot`) and
+  `internal/adapter/grpcdriver` (`server.go` — skill/soul/command bodies, agent
+  defs) read those off disk with NO JSON decode to launder them, unlike MCP and
+  provider text; they carry their own `valid`/`validAll`/`validMap`, covered by
+  `internal/app/utf8_snapshot_test.go` and
+  `internal/adapter/grpcdriver/utf8_server_test.go`.
+  `AgentMCPServer.Headers` is the ONE deliberate exemption — secret-shaped, so
+  repairing it would corrupt the credential it carries; pinned byte-exact by
+  `TestAgentMCPHeadersStayByteExact`.
 
 Both layers are kept: the loop repair owns the *effective* `ToolResult` (all
 views agree); the mapper backstop is the mechanical guarantee that the wire can
