@@ -1,13 +1,19 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
 	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/session"
+	"github.com/stacklok/mecatl/engine/team"
+	"github.com/stacklok/mecatl/internal/adapter/mcp"
+	"github.com/stacklok/mecatl/internal/adapter/mcp/source"
 )
 
 // TestToProtoTable round-trips every EventType and each structured submessage
@@ -1275,4 +1281,109 @@ func mustEmbedded(t *testing.T, uri, mime, text string, blob []byte, audience []
 		t.Fatalf("NewEmbeddedResourceBlock: %v", err)
 	}
 	return c
+}
+
+// badUTF8 is the orphaned-lead-byte sequence from issue #402 (an em dash's E2
+// lead byte retained while its continuation bytes are lost) — a value protobuf
+// string fields reject at marshal time.
+const badUTF8 = "\xe2M-^@M-^T"
+
+// TestToProtoNeverFailsMarshalOnInvalidUTF8 is the protobuf-projection backstop
+// oracle (issue #402): NO domain string, however malformed, may make proto
+// marshaling fail. It builds one event of every payload kind with badUTF8
+// injected into the producer-influenced string fields, maps each through
+// toProto, and asserts proto.Marshal succeeds AND the malformed bytes were
+// repaired to U+FFFD. A future payload field that someone forgets to run
+// through the valid() backstop fails this test rather than shipping a
+// stream-killing hole.
+func TestToProtoNeverFailsMarshalOnInvalidUTF8(t *testing.T) {
+	msg := session.Message{
+		Role:          session.RoleAssistant,
+		Text:          "txt " + badUTF8,
+		Reasoning:     "reason " + badUTF8,
+		ProviderPhase: "phase " + badUTF8,
+		ToolCalls:     []session.ToolCall{session.NewToolCall("c1", "Bash", json.RawMessage(`{"cmd":"`+badUTF8+`"}`))},
+	}
+	emb := mustEmbedded(t, "https://x/"+badUTF8, "application/octet-stream", "", []byte{0xff, 0xfe}, []string{badUTF8})
+	parts := []session.Content{
+		session.NewTextBlock("body " + badUTF8),
+		session.NewResourceLinkBlock("https://x/"+badUTF8, badUTF8, badUTF8, badUTF8, "text/plain", 1, []string{badUTF8}),
+		emb,
+	}
+
+	events := map[string]session.Event{
+		"message.delta": {Type: session.EvMessageDelta, Text: "delta " + badUTF8},
+		"tool.call":     {Type: session.EvToolCall, ToolCall: &msg.ToolCalls[0]},
+		"tool.result": {Type: session.EvToolResult, ToolResult: &session.ToolResult{
+			CallID: "c1", Content: "out " + badUTF8, Parts: parts,
+		}},
+		"permission.ask": {Type: session.EvPermissionAsk, Ask: &session.PendingAsk{
+			AskID: "a1", Tool: "Bash" + badUTF8, Args: json.RawMessage(`{"x":"` + badUTF8 + `"}`), Reason: "why " + badUTF8,
+		}},
+		"result": {Type: session.EvResult, Result: &session.ResultPayload{Stop: session.StopEndTurn, Text: "final " + badUTF8, Error: "err " + badUTF8}},
+		"hook":   {Type: session.EvHook, Hook: &session.HookPayload{Phase: "PreToolUse", Tool: "Bash" + badUTF8}},
+		"approval": {Type: session.EvApproval, Approval: &session.ApprovalPayload{
+			AskID: "a1", Verdict: session.VerdictStringAllowOnce, Tool: "Bash" + badUTF8, Call: "c1",
+		}},
+		"user_prompt": {Type: session.EvUserPrompt, UserPrompt: &session.UserPromptPayload{Text: "ask " + badUTF8}},
+		"compaction.archive": {Type: session.EvCompactionArchive, CompactionArchive: &session.CompactionArchivePayload{
+			Replaced: []session.Message{msg},
+		}},
+		"subagent": {Type: session.EvSubagentEnd, Subagent: &session.SubagentPayload{
+			ParentCallID: "p1", ChildID: "ch1", Goal: "g " + badUTF8, Text: "t " + badUTF8,
+			Detail: "d " + badUTF8, Cause: "c " + badUTF8, Stop: session.StopError,
+		}},
+		"team": {Type: session.EvTeamEnd, Team: &session.TeamPayload{
+			ParentCallID: "p1", TeamID: "t1", Member: "m " + badUTF8, Text: "t " + badUTF8, Detail: "d " + badUTF8,
+			Roster:       []session.TeamMemberSpec{{Name: "n " + badUTF8, Role: "r " + badUTF8}},
+			Tasks:        []session.TeamTaskSnapshot{{ID: "1", Description: "desc " + badUTF8, Assignee: "as " + badUTF8, Deps: []string{badUTF8}}},
+			Findings:     []session.TeamFindingSnapshot{{Member: "m " + badUTF8, Body: "b " + badUTF8}},
+			Dispositions: []session.TeamMemberDisposition{{Name: "n " + badUTF8, Disposition: "stopped", Reason: "error"}},
+		}},
+		"parallel": {Type: session.EvParallelBranch, Parallel: &session.ParallelPayload{
+			ParentCallID: "p1", Kind: session.ParallelBranchTool, BranchLabel: "bl " + badUTF8, Goal: "g " + badUTF8,
+			Text: "t " + badUTF8, Detail: "d " + badUTF8, Workspace: "/ws/" + badUTF8, WinnerWorkspace: "/ww/" + badUTF8,
+		}},
+		"schedule": {Type: session.EvScheduleFired, Schedule: &session.SchedulePayload{
+			ScheduleName: "s", FireID: "f", SessionID: "sid", Kind: "fired", Err: "e " + badUTF8,
+		}},
+	}
+
+	for name, ev := range events {
+		out := toProto(ev)
+		b, err := proto.Marshal(out)
+		if err != nil {
+			t.Fatalf("%s: proto.Marshal failed (the stream-kill bug): %v", name, err)
+		}
+		if !bytes.Contains(b, []byte("�")) {
+			t.Fatalf("%s: expected U+FFFD repair in marshaled output, got none (%x)", name, b)
+		}
+	}
+}
+
+// TestMapperBackstopNonEventMessages covers the non-event mappers (MCP
+// inspection, worktrees, session summaries, team roster/tasks) whose strings
+// are MCP-server- or OS-sourced — the most likely NEXT instance of this bug
+// class, and not covered by the loop's ToolResult repair at all.
+func TestMapperBackstopNonEventMessages(t *testing.T) {
+	check := func(name string, m proto.Message) {
+		t.Helper()
+		if _, err := proto.Marshal(m); err != nil {
+			t.Fatalf("%s: proto.Marshal failed: %v", name, err)
+		}
+	}
+	check("McpResource", toProtoMcpResource(mcp.Resource{Server: "s", URI: "u" + badUTF8, Name: "n" + badUTF8, Title: "t" + badUTF8, Description: "d" + badUTF8, MIMEType: "text/plain"}))
+	check("McpResourceContents", toProtoMcpResourceContents(mcp.ResourceContents{URI: "u" + badUTF8, MIMEType: "text/plain", Text: "x" + badUTF8, Blob: []byte{0xff}}))
+	check("McpPrompt", toProtoMcpPrompt(mcp.Prompt{Server: "s", Name: "n" + badUTF8, Title: "t" + badUTF8, Description: "d" + badUTF8, Arguments: []mcp.PromptArgument{{Name: "a" + badUTF8, Title: "at" + badUTF8, Description: "ad" + badUTF8}}}))
+	check("McpPromptMessage", toProtoMcpPromptMessage(mcp.PromptMessage{Role: "user" + badUTF8, Text: "x" + badUTF8}))
+	check("McpSource", toProtoMcpSource(source.SourceInfo{Name: "n" + badUTF8, Kind: "k", Group: "g" + badUTF8, Servers: []source.ServerInfo{{Name: "sv" + badUTF8, URL: "u" + badUTF8, Transport: "http", Group: "g" + badUTF8}}, Diagnostics: []string{"d" + badUTF8}}))
+	check("Worktree", toProtoWorktree(Worktree{Path: "/p" + badUTF8, Branch: "b" + badUTF8, Head: "h" + badUTF8}))
+	check("SessionSummary", toProtoSessionSummary(SessionSummary{SessionID: "s", State: "idle", ModelID: "m", Title: "t" + badUTF8}))
+	check("TeamMember", toProtoTeamMember(team.Member{Name: "n" + badUTF8, AgentType: "a" + badUTF8}))
+	check("TeamTask", toProtoTeamTask(team.Task{ID: "1", Description: "d" + badUTF8, Assignee: "a" + badUTF8, Deps: []team.TaskID{team.TaskID("x" + badUTF8)}}))
+	check("TeamOutcome", toProtoTeamOutcome(agent.TeamOutcome{
+		Quiescent: true,
+		Members:   []agent.MemberOutcome{{Name: "n" + badUTF8, Reason: agent.StopReasonError}},
+		Findings:  []session.TeamFindingSnapshot{{Member: "m" + badUTF8, Body: "b" + badUTF8}},
+	}))
 }

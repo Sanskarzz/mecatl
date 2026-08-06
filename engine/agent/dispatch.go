@@ -1036,6 +1036,17 @@ func (e *Engine) execute(ctx context.Context, r *Run, sess *session.Session, ws 
 	// redaction reaches the audit log too rather than leaking the raw tool output.
 	res = e.postHook(ctx, r, sess, turnIdx, c, res)
 
+	// Normalize the effective result to valid UTF-8 BEFORE it is logged,
+	// emitted, or recorded (issue #402): a tool can hand back arbitrary bytes
+	// (a command's stdout, a file's contents, an MCP server's text), and a
+	// protobuf string field rejects invalid UTF-8 at marshal time, killing the
+	// Converse stream. Repairing here — after PostToolUse, before the three
+	// consumers — keeps the recorded == streamed == model-view invariant: all
+	// three carry the SAME repaired text. The protobuf mapper keeps its own
+	// backstop for producers that never pass through execute; this is the
+	// semantic repair, not the last-resort one.
+	res = session.RepairToolResult(res)
+
 	if e.deps.ToolCallRecorder != nil {
 		e.deps.ToolCallRecorder.ToolCall(sess.ID, c, res, queued, dur)
 	}

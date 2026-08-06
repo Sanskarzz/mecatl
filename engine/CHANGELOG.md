@@ -13,6 +13,22 @@ The covered surface is the seven core packages (`session`, `governance`, `tool`,
 
 ### Added
 
+- **`session.ToValidUTF8` and `session.RepairToolResult`** (issue #402) — the
+  UTF-8 repair primitives that close the Converse-stream kill. A tool can hand
+  back arbitrary bytes (a command's stdout, a file's contents, an MCP server's
+  text), and a protobuf string field REJECTS invalid UTF-8 at marshal time,
+  which terminated the live gRPC stream with `codes.Internal`. `ToValidUTF8`
+  applies the SAME U+FFFD repair `encoding/json` uses, so the durable event
+  log, the model view, and the wire agree byte-for-byte. `RepairToolResult`
+  returns a copy of a `ToolResult` with `Content` and the textual fields of
+  every `Parts` block normalized (`Text`/`Name`/`Title`/`Description`/`URL`/
+  `LastModified`/`Audience`), leaving binary `Data` and the `MIMEType` token
+  byte-exact. It is applied at the loop's effective-payload choke point
+  (`engine/agent` `execute`, after PostToolUse, before recorder/emit/record);
+  the protobuf mapper keeps its own backstop for producers that never pass
+  through the loop. Classified Added per COMPATIBILITY.md (new exported funcs
+  are a minor bump). (issue #402)
+
 - **Permanent provider-error signal** (#346) — a neutral, fail-open way to tell
   "transient — retry may work" from "permanent — this request shape is rejected":
   - `port.PermanentError` — an interface (`error` + `Permanent() bool`) the

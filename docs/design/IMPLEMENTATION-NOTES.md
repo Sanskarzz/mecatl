@@ -3945,6 +3945,66 @@ for model-authored structured output; MCP `outputSchema` is arbitrary
 server-provided full JSON Schema and `ValidateJSON` would silently under-enforce
 — a second, weaker path).
 
+### Tool-result UTF-8 validity (issue #402)
+
+A tool can hand back arbitrary bytes, and an invalid-UTF-8 Go string in a
+`session.ToolResult` (or any producer-influenced string) kills the live gRPC
+Converse stream: the mapper copies the Go string into a protobuf string field
+verbatim, and protobuf REJECTS invalid UTF-8 at marshal time (`codes.Internal`),
+after which the relay cancels the run. The confirmed producer was a Bash call
+(`sed … | cat -t`): BSD `cat -t` renders a valid em dash's continuation bytes as
+ASCII while retaining the `\xe2` lead byte, leaving an orphaned lead byte. The
+byte path is `internal/adapter/osfs/osfs.go` (`cappedBuffer`, a hard byte cap
+with no rune awareness) → `engine/adapter/fstools` (`truncate` only avoids
+*introducing* a mid-rune split on VALID input; it does not repair pre-existing
+invalid bytes) → `session.NewToolResult` → `engine/agent` `execute` →
+`internal/adapter/server/mapper.go` (`toProtoToolResult`). The durable JSON event
+log survives because `encoding/json` already substitutes U+FFFD on marshal —
+which is why replay/persistence can look healthy while the live stream dies.
+
+The fix is defense in depth, two layers (both consume `engine/session`, the
+stdlib-only domain leaf, so the inward-only layering rule holds):
+
+- **Semantic repair (the primary defense).** `engine/session/utf8.go`
+  (`ToValidUTF8` / `RepairToolResult`) applies the SAME U+FFFD repair
+  `encoding/json` uses, so the durable log, the model view, and the wire agree
+  byte-for-byte. `RepairToolResult` returns a COPY (the value object stays
+  immutable) with `Content` and the textual fields of every `Parts` block
+  normalized (`Text`/`Name`/`Title`/`Description`/`URL`/`LastModified`/
+  `Audience`), leaving binary `Data` (proto `bytes`, no UTF-8 rule) and the
+  `MIMEType` IANA token byte-exact. It is applied at the loop's
+  effective-payload choke point in `engine/agent/dispatch.go` (`execute`), AFTER
+  PostToolUse and BEFORE the recorder / `EvToolResult` emit / `RecordToolResults`
+  — so the recorded == streamed == model-view invariant holds with the SAME
+  repaired text. It is deliberately NOT in the `NewToolResult*` constructors:
+  those are also called by replay/test paths with already-persisted data, and
+  constructor-side repair would smear the single-choke-point invariant across
+  every caller.
+- **Mechanical backstop (last resort).** `internal/adapter/server/mapper.go`
+  runs every producer-influenced string through `session.ToValidUTF8` (the local
+  `valid` alias) at the assignment — `toProto`/`toProtoToolResult`/
+  `blocksToProto`/`toProtoConversationMessage`/`toProtoToolCall`(Args)/the
+  delegation mappers/`toProtoResult`/`toProtoUserPrompt`/`toProtoApproval`/
+  `toProtoHook`/team outcome+task snapshots/the MCP-inspection, worktree, and
+  session-summary mappers. Harness-authored constants and machine tokens (ids,
+  kinds, stops, enums) are skipped. This covers the producers the loop repair
+  structurally cannot: replayed/rehydrated history (`StreamSessionEvents`,
+  compaction archive), child-output previews (`Text`/`Detail`/`Cause` never pass
+  through `execute`), custom/future tools via the importable engine, and
+  MCP/OS-sourced metadata. No reflection walker; the coverage is proved by
+  `TestToProtoNeverFailsMarshalOnInvalidUTF8` (one event per payload kind with
+  invalid bytes injected, `proto.Marshal` must succeed and contain U+FFFD) —
+  which fails if a future payload field is added unrepaired.
+
+Both layers are kept: the loop repair owns the *effective* `ToolResult` (all
+views agree); the mapper backstop is the mechanical guarantee that the wire can
+never die of this class again. Regression coverage: `engine/session/utf8_test.go`
+(unit + `FuzzRepairToolResult`, oracle `utf8.ValidString` + binary
+byte-identity), `engine/agent/utf8_repair_loop_test.go` (the three views agree),
+`internal/adapter/server/grpc_test.go`
+(`TestGRPCConverseInvalidUTF8ToolResult`, the stream reaches its terminal result
+instead of `codes.Internal`).
+
 ### MCP structured results: fail-closed + CallMcpWithQuery (ADR 0063)
 
 The size bound above is honest for **unstructured text** (a truncated string with a
