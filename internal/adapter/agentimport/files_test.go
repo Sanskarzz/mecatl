@@ -123,6 +123,55 @@ func TestCopyWorkspaceRefusesDestinationInsideSource(t *testing.T) {
 	}
 }
 
+// TestCopyWorkspaceRefusesDestinationViaSymlinkedAncestor pins that the
+// inside-source guard resolves the destination's EXISTING ancestors, not just
+// the lexical path: a destination under a symlinked parent that physically
+// lands inside the source must be refused even though its lexical spelling
+// starts outside it.
+func TestCopyWorkspaceRefusesDestinationViaSymlinkedAncestor(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink fixtures require a POSIX filesystem")
+	}
+	src := t.TempDir()
+	writeTestFile(t, filepath.Join(src, "file.txt"), "content")
+	// alias is a lexical path OUTSIDE src whose target IS src: a destination
+	// spelled through it physically lands inside the source tree.
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(src, alias); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	dst := filepath.Join(alias, "nested", "target")
+
+	_, err := CopyWorkspace(src, dst)
+	if err == nil || !strings.Contains(err.Error(), "must not be inside source") {
+		t.Fatalf("CopyWorkspace error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(src, "nested")); !os.IsNotExist(err) {
+		t.Fatalf("destination created inside source, stat error = %v", err)
+	}
+}
+
+// TestCopyWorkspaceAcceptsSiblingDestination guards against over-tightening
+// the containment check: a destination that is a SIBLING of the source shares
+// a lexical prefix with it but is not inside it, and must be accepted.
+func TestCopyWorkspaceAcceptsSiblingDestination(t *testing.T) {
+	base := t.TempDir()
+	src := filepath.Join(base, "src")
+	dst := filepath.Join(base, "dst")
+	writeTestFile(t, filepath.Join(src, "file.txt"), "content")
+
+	stats, err := CopyWorkspace(src, dst)
+	if err != nil {
+		t.Fatalf("CopyWorkspace: %v", err)
+	}
+	if stats.Files != 1 {
+		t.Fatalf("stats = %#v", stats)
+	}
+	if got, err := os.ReadFile(filepath.Join(dst, "file.txt")); err != nil || string(got) != "content" {
+		t.Fatalf("copied file = %q, %v", got, err)
+	}
+}
+
 func writeTestFile(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
