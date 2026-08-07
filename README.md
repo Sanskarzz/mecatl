@@ -54,7 +54,7 @@ ships as a client of the same API.
 
 ## Quick start
 
-Requires **Go 1.26.3** (the `go` directive in `go.mod` auto-fetches it) and
+Requires **Go 1.26.5** (the `go` directive in `go.mod` auto-fetches it) and
 [go-task](https://taskfile.dev). [golangci-lint](https://golangci-lint.run) for linting,
 [buf](https://buf.build) only to regenerate the proto.
 
