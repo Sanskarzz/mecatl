@@ -107,7 +107,7 @@ func copyTree(src, dst string, skipTopLevel map[string]bool) (CopyStats, error) 
 	if err != nil {
 		return CopyStats{}, fmt.Errorf("resolve source symlinks %q: %w", src, err)
 	}
-	dstAbs, err := filepath.Abs(dst)
+	dstAbs, err := canonicalizePath(dst)
 	if err != nil {
 		return CopyStats{}, fmt.Errorf("resolve destination %q: %w", dst, err)
 	}
@@ -193,6 +193,44 @@ func executeCopy(dstAbs string, plan []copyEntry, stats *CopyStats) error {
 		stats.Files++
 	}
 	return nil
+}
+
+// canonicalizePath resolves path to the same canonical absolute form
+// filepath.EvalSymlinks produces for an existing path, without requiring the
+// path itself to exist: the deepest EXISTING ancestor is symlink-resolved and
+// the unresolved tail is re-appended. The copyTree inside-source guard compares
+// a symlink-resolved source against a destination that typically does not exist
+// yet, so both must be canonicalized into the same form — comparing
+// EvalSymlinks(src) against a merely filepath.Abs'd dst misses containment on
+// hosts where an ancestor is a system alias (macOS /var -> /private/var).
+func canonicalizePath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	existing := abs
+	var tail []string
+	for {
+		if _, err := os.Lstat(existing); err == nil {
+			break
+		} else if !os.IsNotExist(err) {
+			return "", fmt.Errorf("verify %q: %w", existing, err)
+		}
+		parent := filepath.Dir(existing)
+		if parent == existing {
+			return filepath.Clean(abs), nil
+		}
+		tail = append([]string{filepath.Base(existing)}, tail...)
+		existing = parent
+	}
+	resolved, err := filepath.EvalSymlinks(existing)
+	if err != nil {
+		return "", fmt.Errorf("resolve symlinks %q: %w", existing, err)
+	}
+	if len(tail) == 0 {
+		return resolved, nil
+	}
+	return filepath.Join(append([]string{resolved}, tail...)...), nil
 }
 
 func copyRegularFile(src, dst string, mode fs.FileMode) (err error) {

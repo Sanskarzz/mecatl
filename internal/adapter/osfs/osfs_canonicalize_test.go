@@ -89,8 +89,15 @@ func TestMatchReadRoot_Lexical(t *testing.T) {
 	// /srv -> /var/srv) but compares against the root VERBATIM — production
 	// roots are canonical by construction (WithReadRoots canonicalizes at
 	// construction; issue #356). A lexical root under an aliased top-level
-	// component would mismatch its own paths on such hosts.
-	root := filepath.Join(t.TempDir(), "skills", "demo")
+	// component would mismatch its own paths on such hosts. t.TempDir() is
+	// canonicalized here for exactly that reason: on macOS it returns a /var/...
+	// alias, which would violate the canonical-root precondition this test
+	// documents.
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks(TempDir): %v", err)
+	}
+	root := filepath.Join(base, "skills", "demo")
 	for _, tc := range []struct {
 		path string
 		ok   bool
