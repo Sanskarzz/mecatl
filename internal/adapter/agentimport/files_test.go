@@ -152,12 +152,13 @@ func TestCopyWorkspaceRefusesDestinationViaSymlinkedAncestor(t *testing.T) {
 }
 
 // TestCopyWorkspaceAcceptsSiblingDestination guards against over-tightening
-// the containment check: a destination that is a SIBLING of the source shares
-// a lexical prefix with it but is not inside it, and must be accepted.
+// the containment check: the destination is spelled so that the source path is
+// a literal string prefix of it ("…/src" vs "…/src-copy") while not being a
+// path ancestor, so a HasPrefix that forgets the trailing separator refuses it.
 func TestCopyWorkspaceAcceptsSiblingDestination(t *testing.T) {
 	base := t.TempDir()
 	src := filepath.Join(base, "src")
-	dst := filepath.Join(base, "dst")
+	dst := src + "-copy"
 	writeTestFile(t, filepath.Join(src, "file.txt"), "content")
 
 	stats, err := CopyWorkspace(src, dst)
