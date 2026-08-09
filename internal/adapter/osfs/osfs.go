@@ -59,6 +59,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bmatcuk/doublestar/v4"
 
@@ -1303,7 +1304,17 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 		return len(p), nil // discard, but report full consumption
 	}
 	if len(p) > remaining {
-		c.buf.Write(p[:remaining])
+		// Cut on a rune boundary (issue #402): a byte-offset cut lands mid-rune
+		// roughly 2 times in 3 for multibyte output, manufacturing invalid UTF-8
+		// from a command whose own output was perfectly valid — and a protobuf
+		// string field rejects that at marshal time. The tail past the cap is
+		// discarded anyway, so dropping the partial rune's lead bytes loses
+		// nothing. Mirrors fstools truncate, which already cuts this way.
+		cut := remaining
+		for cut > 0 && !utf8.RuneStart(p[cut]) {
+			cut--
+		}
+		c.buf.Write(p[:cut])
 		return len(p), nil
 	}
 	return c.buf.Write(p)

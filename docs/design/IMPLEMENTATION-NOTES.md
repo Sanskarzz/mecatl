@@ -4007,6 +4007,108 @@ for model-authored structured output; MCP `outputSchema` is arbitrary
 server-provided full JSON Schema and `ValidateJSON` would silently under-enforce
 — a second, weaker path).
 
+### Tool-result UTF-8 validity (issue #402)
+
+A tool can hand back arbitrary bytes, and an invalid-UTF-8 Go string in a
+`session.ToolResult` (or any producer-influenced string) kills the live gRPC
+Converse stream: the mapper copies the Go string into a protobuf string field
+verbatim, and protobuf REJECTS invalid UTF-8 at marshal time (`codes.Internal`),
+after which the relay cancels the run. The confirmed producer was a Bash call
+(`sed … | cat -t`): BSD `cat -t` renders a valid em dash's continuation bytes as
+ASCII while retaining the `\xe2` lead byte, leaving an orphaned lead byte. The
+byte path is `internal/adapter/osfs/osfs.go` (`cappedBuffer`) →
+`engine/adapter/fstools` (`truncate` only avoids *introducing* a mid-rune split
+on VALID input; it does not repair pre-existing invalid bytes) →
+`session.NewToolResult` → `engine/agent` `execute` →
+`internal/adapter/server/mapper.go` (`toProtoToolResult`). The durable JSON event
+log survives because `encoding/json` already substitutes U+FFFD on marshal —
+which is why replay/persistence can look healthy while the live stream dies.
+
+`cappedBuffer` was ALSO a producer in its own right, not just a conduit: its cap
+is a BYTE cap, so a cut landed mid-rune for two of every three offsets in
+3-byte-rune output, manufacturing invalid UTF-8 from a command whose own output
+was well-formed (`maxCommandOutput` is 1 MiB, and `1048576 mod 3 == 1`, so a CJK
+or emoji stream really does split there). It now cuts on a rune boundary in the
+truncating branch — the tail past the cap is discarded anyway, so the partial
+rune's lead bytes cost nothing — mirroring `engine/adapter/fstools` `truncate`,
+which already cut this way. The trim is CAP-ONLY: output that fits crosses
+byte-for-byte even when already malformed, because bounding and sanitizing are
+different jobs and the loop's choke point owns the second. Pinned by
+`internal/adapter/osfs/cappedbuffer_utf8_test.go` (every cap offset across
+several runes, plus the under-cap byte-exactness case).
+
+The fix is defense in depth, two layers (both consume `engine/session`, the
+stdlib-only domain leaf, so the inward-only layering rule holds):
+
+- **Semantic repair (the primary defense).** `engine/session/utf8.go`
+  (`ToValidUTF8` / `RepairToolResult`) applies the SAME U+FFFD repair
+  `encoding/json` uses, so the durable log, the model view, and the wire agree
+  byte-for-byte. `RepairToolResult` returns a COPY (the value object stays
+  immutable) with `Content` and the textual fields of every `Parts` block
+  normalized (`Text`/`Name`/`Title`/`Description`/`URL`/`LastModified`/
+  `Audience`), leaving binary `Data` (proto `bytes`, no UTF-8 rule) and the
+  `MIMEType` IANA token byte-exact. It is applied at the loop's
+  effective-payload choke point in `engine/agent/dispatch.go` (`execute`), AFTER
+  PostToolUse and BEFORE the recorder / `EvToolResult` emit / `RecordToolResults`
+  — so the recorded == streamed == model-view invariant holds with the SAME
+  repaired text. It is deliberately NOT in the `NewToolResult*` constructors:
+  those are also called by replay/test paths with already-persisted data, and
+  constructor-side repair would smear the single-choke-point invariant across
+  every caller.
+- **Mechanical backstop (last resort).** `internal/adapter/server/mapper.go`
+  runs every producer-influenced string through `session.ToValidUTF8` (the local
+  `valid` alias) at the assignment — `toProto`/`toProtoToolResult`/
+  `blocksToProto`/`toProtoConversationMessage`/`toProtoToolCall`(Args)/the
+  delegation mappers/`toProtoResult`/`toProtoUserPrompt`/`toProtoApproval`/
+  `toProtoHook`/team outcome+task snapshots/the MCP-inspection, worktree, and
+  session-summary mappers. Harness-authored constants and machine tokens (ids,
+  kinds, stops, enums) are skipped. This covers the producers the loop repair
+  structurally cannot: replayed/rehydrated history (`StreamSessionEvents`,
+  compaction archive), child-output previews (`Text`/`Detail`/`Cause` never pass
+  through `execute`), custom/future tools via the importable engine, and
+  MCP/OS-sourced metadata. The mapper itself uses no reflection walker (a walker
+  would have to guess which fields are harness tokens, and guessing wrong
+  silently rewrites an id); the *test* does, which is where reflection is safe.
+
+  Coverage is TWO tests with different jobs, and the distinction matters:
+  `TestToProtoNeverFailsMarshalOnInvalidUTF8` is the readable fixture — one
+  event per payload kind with invalid bytes injected, `proto.Marshal` must
+  succeed and contain U+FFFD. It covers exactly what it seeds, so it can NOT
+  catch a future field someone forgets to wrap: an unseeded field is simply
+  never populated and the test stays green. `TestToProtoStructuralUTF8Guard`
+  (`internal/adapter/server/utf8_structural_test.go`) is the guard that fails
+  closed — it reflects over `session.Event`, seeds every bare-`string` field
+  (named typedefs are skipped: they are the closed kind/stop/role vocabularies),
+  maps through `toProto`, then protoreflect-walks the output asserting
+  `utf8.ValidString` on every populated string field AND every map key (proto3
+  validates both). A new domain string reaches it with no test edit; the only
+  way to make it pass is to wrap the field or to add its path to
+  `harnessTokenFields` with a stated reason. That inverts the failure mode from
+  "remember to add coverage" (invisible when forgotten) to "justify an
+  exemption" (visible in review) — the property the fixture test lacked, and the
+  reason `ToolName` sat unwrapped at three sites while the fixture stayed green.
+
+  The SAME discipline binds every other package that builds a proto message from
+  a non-harness string. `internal/app` (`soulsnapshot.go` `soulSnapshotWith`,
+  `agentdefs.go` `agentSnapshot`/`skillSnapshot`) and
+  `internal/adapter/grpcdriver` (`server.go` — skill/soul/command bodies, agent
+  defs) read those off disk with NO JSON decode to launder them, unlike MCP and
+  provider text; they carry their own `valid`/`validAll`/`validMap`, covered by
+  `internal/app/utf8_snapshot_test.go` and
+  `internal/adapter/grpcdriver/utf8_server_test.go`.
+  `AgentMCPServer.Headers` is the ONE deliberate exemption — secret-shaped, so
+  repairing it would corrupt the credential it carries; pinned byte-exact by
+  `TestAgentMCPHeadersStayByteExact`.
+
+Both layers are kept: the loop repair owns the *effective* `ToolResult` (all
+views agree); the mapper backstop is the mechanical guarantee that the wire can
+never die of this class again. Regression coverage: `engine/session/utf8_test.go`
+(unit + `FuzzRepairToolResult`, oracle `utf8.ValidString` + binary
+byte-identity), `engine/agent/utf8_repair_loop_test.go` (the three views agree),
+`internal/adapter/server/grpc_test.go`
+(`TestGRPCConverseInvalidUTF8ToolResult`, the stream reaches its terminal result
+instead of `codes.Internal`).
+
 ### MCP structured results: fail-closed + CallMcpWithQuery (ADR 0063)
 
 The size bound above is honest for **unstructured text** (a truncated string with a

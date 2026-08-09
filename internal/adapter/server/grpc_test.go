@@ -125,6 +125,69 @@ func TestGRPCConverseFullCycle(t *testing.T) {
 	}
 }
 
+// TestGRPCConverseInvalidUTF8ToolResult is the issue-#402 regression: a tool
+// whose result carries invalid UTF-8 (the orphaned-lead-byte sequence BSD
+// `cat -t` produces from an em dash) must NOT terminate the Converse stream
+// with codes.Internal. Before the fix, toProtoToolResult copied the Go string
+// into a protobuf string field verbatim and proto.Marshal rejected it, killing
+// the stream mid-run. recvAll t.Fatalf's on any non-EOF Recv error, so reaching
+// a terminal result here proves the stream survived; we additionally assert the
+// result text was repaired to U+FFFD.
+func TestGRPCConverseInvalidUTF8ToolResult(t *testing.T) {
+	bad := &scriptTool{name: "Bash", readOnly: true, content: "out \xe2M-^@M-^T end"}
+	llm := mockllm.New(
+		mockllm.ToolCallTurn(call("c1", "Bash", `{"command":"sed -n 1p x | cat -t"}`)),
+		mockllm.TextTurn("all done"),
+	)
+	svc := newService(t, llm, allowRules(), bad)
+	client, cleanup := dialGRPC(t, svc)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cs, err := client.CreateSession(ctx, &mecatlv1.CreateSessionRequest{Workspace: "/ws"})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	stream, err := client.Converse(ctx)
+	if err != nil {
+		t.Fatalf("Converse: %v", err)
+	}
+	if err := stream.Send(&mecatlv1.ConverseRequest{
+		Kind: &mecatlv1.ConverseRequest_Prompt{Prompt: &mecatlv1.Prompt{SessionId: cs.GetSessionId(), Text: "run"}},
+	}); err != nil {
+		t.Fatalf("Send prompt: %v", err)
+	}
+	_ = stream.CloseSend()
+
+	// recvAll fails the test on any non-EOF error (codes.Internal from a failed
+	// marshal), so draining to EOF here IS the regression assertion.
+	events := recvAll(t, stream)
+
+	// The tool.result event crossed the wire with its text repaired.
+	var tr *mecatlv1.ToolResult
+	for _, e := range events {
+		if e.GetType() == "tool.result" && e.GetToolResult().GetCallId() == "c1" {
+			tr = e.GetToolResult()
+			break
+		}
+	}
+	if tr == nil {
+		t.Fatalf("no tool.result event for c1 in %v", typesOf(events))
+	}
+	if !strings.ContainsRune(tr.GetContent(), '�') {
+		t.Fatalf("tool.result content not repaired to U+FFFD: %q", tr.GetContent())
+	}
+
+	// The run reached its terminal result, not a stream-kill.
+	res := lastResult(t, events)
+	if res.GetStop() != "end_turn" || res.GetText() != "all done" {
+		t.Fatalf("result = %+v", res)
+	}
+}
+
 // TestGRPCCloseSession asserts the session-end RPC: a created session closes ok,
 // a second close is idempotent (still ok, since close != delete-snapshot), and a
 // never-created id surfaces as codes.NotFound.

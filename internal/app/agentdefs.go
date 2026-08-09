@@ -1148,12 +1148,12 @@ func agentSnapshot(cfg Config, reg *agents.Registry) []*mecatlv1.AgentInfo {
 	for _, def := range reg.List() {
 		names, _ := scopedToolNames(def, base, "") // pure name-set projection; diags dropped
 		out = append(out, &mecatlv1.AgentInfo{
-			Name:           def.Name,
-			Description:    def.Description,
-			Model:          resolveModel(cfg, def),
-			Tools:          names,
-			PermissionMode: strings.TrimSpace(def.PermissionMode),
-			Color:          def.Color,
+			Name:           session.ToValidUTF8(def.Name),
+			Description:    session.ToValidUTF8(def.Description),
+			Model:          session.ToValidUTF8(resolveModel(cfg, def)),
+			Tools:          names, // harness tool names: scopedToolNames drops anything not in the catalog
+			PermissionMode: session.ToValidUTF8(strings.TrimSpace(def.PermissionMode)),
+			Color:          session.ToValidUTF8(def.Color),
 		})
 	}
 	return out
@@ -1172,8 +1172,8 @@ func skillSnapshot(discovered []skills.Skill) []*mecatlv1.SkillInfo {
 	out := make([]*mecatlv1.SkillInfo, 0, len(sorted))
 	for _, s := range sorted {
 		out = append(out, &mecatlv1.SkillInfo{
-			Name:        s.Name,
-			Description: s.Description,
+			Name:        session.ToValidUTF8(s.Name),
+			Description: session.ToValidUTF8(s.Description),
 		})
 	}
 	return out

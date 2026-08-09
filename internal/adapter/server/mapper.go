@@ -12,6 +12,17 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/mcp/source"
 )
 
+// valid is the protobuf-projection UTF-8 backstop (issue #402): a protobuf
+// string field REJECTS invalid UTF-8 at marshal time, which killed the Converse
+// stream when a tool handed back arbitrary bytes. The domain repairs the
+// effective ToolResult at the loop's choke point (engine/agent execute), but
+// this mapper is the LAST line of defense for every OTHER producer-influenced
+// string that crosses into a proto message — replayed/rehydrated history,
+// child-output previews, MCP/OS-sourced metadata, and any future field. It is
+// mechanical (one word per assignment), never a reflection walker. Harness-
+// authored constants and machine tokens (ids, kinds, stops, enums) are skipped.
+func valid(s string) string { return session.ToValidUTF8(s) }
+
 // contentFromProto maps the proto Content parts of a multimodal prompt into the
 // domain []session.Content. It is the wire→domain choke point: each part is
 // constructed through session.NewContent, which enforces the structural
@@ -73,7 +84,7 @@ func contentToProto(parts []session.Content) []*mecatlv1.Content {
 			Kind:     kind,
 			MimeType: p.MIMEType,
 			Data:     p.Data,
-			Url:      p.URL,
+			Url:      valid(p.URL),
 		})
 	}
 	return out
@@ -111,7 +122,7 @@ func toProto(ev session.Event) *mecatlv1.Event {
 		Type: string(ev.Type),
 		Seq:  ev.Seq,
 		Turn: ClampInt32(ev.Turn),
-		Text: ev.Text,
+		Text: valid(ev.Text),
 	}
 	if ev.ToolCall != nil {
 		out.ToolCall = toProtoToolCall(*ev.ToolCall)
@@ -169,28 +180,28 @@ func toProtoParallel(p session.ParallelPayload) *mecatlv1.Parallel {
 	return &mecatlv1.Parallel{
 		ParentCallId:    p.ParentCallID,
 		Kind:            string(p.Kind),
-		Join:            p.Join,
+		Join:            valid(p.Join), // model-authored arg, not a harness token: normalizeJoin passes unknown values through
 		BranchCount:     ClampInt32(p.BranchCount),
 		BranchIndex:     ClampInt32(p.BranchIndex),
 		ChildId:         p.ChildID,
-		BranchLabel:     p.BranchLabel,
-		Goal:            p.Goal,
+		BranchLabel:     valid(p.BranchLabel),
+		Goal:            valid(p.Goal),
 		RoutedCategory:  p.RoutedCategory,
 		RoutedModel:     p.RoutedModel,
 		Model:           p.Model,
-		ToolName:        p.ToolName,
+		ToolName:        valid(p.ToolName),
 		IsError:         p.IsError,
 		ToolCount:       ClampInt32(p.ToolCount),
 		InnerKind:       string(p.InnerKind),
-		Text:            p.Text,
-		Detail:          p.Detail,
+		Text:            valid(p.Text),
+		Detail:          valid(p.Detail),
 		Failed:          p.Failed,
-		Workspace:       p.Workspace,
+		Workspace:       valid(p.Workspace),
 		Stop:            string(p.Stop),
 		Usage:           toProtoUsage(p.Usage),
 		DurationMs:      p.DurationMs,
 		Winner:          ClampInt32(p.Winner),
-		WinnerWorkspace: p.WinnerWorkspace,
+		WinnerWorkspace: valid(p.WinnerWorkspace),
 	}
 }
 
@@ -207,7 +218,7 @@ func toProtoSchedule(p session.SchedulePayload) *mecatlv1.SchedulePayload {
 		SessionId:    string(p.SessionID),
 		Kind:         p.Kind,
 		Stop:         string(p.Stop),
-		Err:          p.Err,
+		Err:          valid(p.Err),
 	}
 }
 
@@ -220,7 +231,7 @@ func toProtoApproval(p session.ApprovalPayload) *mecatlv1.Approval {
 	return &mecatlv1.Approval{
 		AskId:       p.AskID,
 		Verdict:     p.Verdict,
-		Tool:        p.Tool,
+		Tool:        valid(p.Tool),
 		CallId:      string(p.Call),
 		AllowAlways: p.AllowAlways,
 	}
@@ -233,7 +244,7 @@ func toProtoApproval(p session.ApprovalPayload) *mecatlv1.Approval {
 // StreamSessionEvents replay surfaces what the user asked.
 func toProtoUserPrompt(p session.UserPromptPayload) *mecatlv1.UserPrompt {
 	return &mecatlv1.UserPrompt{
-		Text:  p.Text,
+		Text:  valid(p.Text),
 		Parts: contentToProto(p.Parts),
 	}
 }
@@ -267,11 +278,15 @@ func toProtoCompactionArchive(p session.CompactionArchivePayload) *mecatlv1.Comp
 // message-slice mapper of its own.
 func toProtoConversationMessage(m session.Message) *mecatlv1.ConversationMessage {
 	out := &mecatlv1.ConversationMessage{
-		Role:            string(m.Role),
-		Text:            m.Text,
-		Reasoning:       m.Reasoning,
-		ProviderPhase:   m.ProviderPhase,
-		ReasoningItemId: m.ReasoningItemID,
+		Role: string(m.Role),
+		Text: valid(m.Text),
+		// Reasoning / ProviderPhase / ReasoningItemId are opaque provider-minted
+		// blobs, but this is the CLIENT-facing projection only — the provider
+		// replay reads the DOMAIN Message, never this proto — so repairing here
+		// cannot corrupt the byte-exact round-trip those values rely on.
+		Reasoning:       valid(m.Reasoning),
+		ProviderPhase:   valid(m.ProviderPhase),
+		ReasoningItemId: valid(m.ReasoningItemID),
 		Parts:           contentToProto(m.Parts),
 	}
 	if len(m.ToolCalls) > 0 {
@@ -296,8 +311,8 @@ func toProtoTeam(p session.TeamPayload) *mecatlv1.Team {
 	roster := make([]*mecatlv1.TeamMemberSpec, 0, len(p.Roster))
 	for _, m := range p.Roster {
 		roster = append(roster, &mecatlv1.TeamMemberSpec{
-			Name:           m.Name,
-			Role:           m.Role,
+			Name:           valid(m.Name),
+			Role:           valid(m.Role),
 			Mutating:       m.Mutating,
 			Lead:           m.Lead,
 			RoutedCategory: m.RoutedCategory,
@@ -311,12 +326,12 @@ func toProtoTeam(p session.TeamPayload) *mecatlv1.Team {
 	}
 	findings := make([]*mecatlv1.TeamFinding, 0, len(p.Findings))
 	for _, f := range p.Findings {
-		findings = append(findings, &mecatlv1.TeamFinding{Member: f.Member, Body: f.Body})
+		findings = append(findings, &mecatlv1.TeamFinding{Member: valid(f.Member), Body: valid(f.Body)})
 	}
 	dispositions := make([]*mecatlv1.TeamMemberDisposition, 0, len(p.Dispositions))
 	for _, d := range p.Dispositions {
 		dispositions = append(dispositions, &mecatlv1.TeamMemberDisposition{
-			Name:        d.Name,
+			Name:        valid(d.Name),
 			Stopped:     d.Disposition == "stopped",
 			Reason:      toProtoTeamMemberStopReason(d.Reason),
 			ErrorRounds: ClampInt32(d.ErrorRounds),
@@ -326,12 +341,12 @@ func toProtoTeam(p session.TeamPayload) *mecatlv1.Team {
 		ParentCallId:    p.ParentCallID,
 		TeamId:          p.TeamID,
 		Roster:          roster,
-		Member:          p.Member,
+		Member:          valid(p.Member),
 		MemberSessionId: p.MemberSessionID,
 		InnerKind:       string(p.InnerKind),
-		Text:            p.Text,
-		ToolName:        p.ToolName,
-		Detail:          p.Detail,
+		Text:            valid(p.Text),
+		ToolName:        valid(p.ToolName),
+		Detail:          valid(p.Detail),
 		IsError:         p.IsError,
 		Rounds:          ClampInt32(p.Rounds),
 		Stop:            string(p.Stop),
@@ -341,7 +356,7 @@ func toProtoTeam(p session.TeamPayload) *mecatlv1.Team {
 		Tasks:           tasks,
 		Findings:        findings,
 		Dispositions:    dispositions,
-		Cause:           p.Cause,
+		Cause:           valid(p.Cause),
 	}
 }
 
@@ -355,7 +370,7 @@ func toProtoTeamOutcome(o agent.TeamOutcome) *mecatlv1.TeamOutcome {
 	dispositions := make([]*mecatlv1.TeamMemberDisposition, 0, len(o.Members))
 	for _, m := range o.Members {
 		dispositions = append(dispositions, &mecatlv1.TeamMemberDisposition{
-			Name:        m.Name,
+			Name:        valid(m.Name),
 			Stopped:     m.Stopped,
 			Reason:      toProtoTeamMemberStopReason(string(m.Reason)),
 			ErrorRounds: ClampInt32(m.ErrorRounds),
@@ -363,7 +378,7 @@ func toProtoTeamOutcome(o agent.TeamOutcome) *mecatlv1.TeamOutcome {
 	}
 	findings := make([]*mecatlv1.TeamFinding, 0, len(o.Findings))
 	for _, f := range o.Findings {
-		findings = append(findings, &mecatlv1.TeamFinding{Member: f.Member, Body: f.Body})
+		findings = append(findings, &mecatlv1.TeamFinding{Member: valid(f.Member), Body: valid(f.Body)})
 	}
 	return &mecatlv1.TeamOutcome{
 		Rounds:          ClampInt32(o.Rounds),
@@ -400,12 +415,14 @@ func toProtoTeamMemberStopReason(r string) mecatlv1.TeamMemberStopReason {
 // the snapshot's Deps are already []string and copied verbatim here.
 func toProtoTeamTaskSnapshot(t session.TeamTaskSnapshot) *mecatlv1.TeamTask {
 	deps := make([]string, len(t.Deps))
-	copy(deps, t.Deps)
+	for i, d := range t.Deps {
+		deps[i] = valid(d)
+	}
 	return &mecatlv1.TeamTask{
 		Id:          t.ID,
-		Description: t.Description,
+		Description: valid(t.Description),
 		State:       t.State,
-		Assignee:    t.Assignee,
+		Assignee:    valid(t.Assignee),
 		Deps:        deps,
 	}
 }
@@ -420,20 +437,20 @@ func toProtoSubagent(p session.SubagentPayload) *mecatlv1.Subagent {
 	return &mecatlv1.Subagent{
 		ParentCallId:   p.ParentCallID,
 		ChildId:        p.ChildID,
-		Goal:           p.Goal,
+		Goal:           valid(p.Goal),
 		Background:     p.Background,
 		RoutedCategory: p.RoutedCategory,
 		RoutedModel:    p.RoutedModel,
 		Model:          p.Model,
-		ToolName:       p.ToolName,
+		ToolName:       valid(p.ToolName),
 		IsError:        p.IsError,
 		ToolCount:      ClampInt32(p.ToolCount),
 		InnerKind:      string(p.InnerKind),
-		Text:           p.Text,
-		Detail:         p.Detail,
+		Text:           valid(p.Text),
+		Detail:         valid(p.Detail),
 		Usage:          toProtoUsage(p.Usage),
 		Stop:           string(p.Stop),
-		Cause:          p.Cause,
+		Cause:          valid(p.Cause),
 		DurationMs:     p.DurationMs,
 	}
 }
@@ -442,8 +459,8 @@ func toProtoSubagent(p session.SubagentPayload) *mecatlv1.Subagent {
 func toProtoToolCall(c session.ToolCall) *mecatlv1.ToolCall {
 	return &mecatlv1.ToolCall{
 		Id:   string(c.ID),
-		Name: c.Name,
-		Args: string(c.Args),
+		Name: valid(c.Name),
+		Args: valid(string(c.Args)),
 	}
 }
 
@@ -460,12 +477,12 @@ func toProtoToolCall(c session.ToolCall) *mecatlv1.ToolCall {
 func toProtoToolResult(r session.ToolResult) *mecatlv1.ToolResult {
 	out := &mecatlv1.ToolResult{
 		CallId:  string(r.CallID),
-		Content: r.Content,
+		Content: valid(r.Content),
 		IsError: r.IsError,
 		Blocks:  blocksToProto(r.Parts),
 	}
 	if sc := structuredContentText(r.Parts); sc != "" {
-		out.StructuredContent = sc
+		out.StructuredContent = valid(sc)
 	}
 	return out
 }
@@ -493,19 +510,23 @@ func blocksToProto(parts []session.Content) []*mecatlv1.ContentBlock {
 	}
 	out := make([]*mecatlv1.ContentBlock, 0, len(parts))
 	for _, p := range parts {
+		aud := make([]string, len(p.Audience))
+		for i, a := range p.Audience {
+			aud[i] = valid(a)
+		}
 		out = append(out, &mecatlv1.ContentBlock{
 			Kind:         blockKindToProto(p.BlockKind),
 			MimeType:     p.MIMEType,
 			Data:         p.Data,
-			Url:          p.URL,
-			Text:         p.Text,
-			Name:         p.Name,
-			Title:        p.Title,
-			Description:  p.Description,
+			Url:          valid(p.URL),
+			Text:         valid(p.Text),
+			Name:         valid(p.Name),
+			Title:        valid(p.Title),
+			Description:  valid(p.Description),
 			Size:         p.Size,
-			Audience:     p.Audience,
+			Audience:     aud,
 			Priority:     p.Priority,
-			LastModified: p.LastModified,
+			LastModified: valid(p.LastModified),
 		})
 	}
 	return out
@@ -604,9 +625,9 @@ func mediaKindFromBlock(k mecatlv1.ContentBlock_Kind) session.MediaKind {
 func toProtoAsk(a session.PendingAsk) *mecatlv1.PermissionAsk {
 	return &mecatlv1.PermissionAsk{
 		AskId:  a.AskID,
-		Tool:   a.Tool,
-		Args:   string(a.Args),
-		Reason: a.Reason,
+		Tool:   valid(a.Tool),
+		Args:   valid(string(a.Args)),
+		Reason: valid(a.Reason),
 	}
 }
 
@@ -614,9 +635,9 @@ func toProtoAsk(a session.PendingAsk) *mecatlv1.PermissionAsk {
 func toProtoResult(p session.ResultPayload) *mecatlv1.Result {
 	return &mecatlv1.Result{
 		Stop:      string(p.Stop),
-		Text:      p.Text,
+		Text:      valid(p.Text),
 		Usage:     toProtoUsage(p.Usage),
-		Error:     p.Error,
+		Error:     valid(p.Error),
 		Permanent: p.Permanent,
 	}
 }
@@ -632,8 +653,8 @@ func toProtoTurnEnd(p session.TurnEndPayload) *mecatlv1.TurnEnd {
 // toProtoHook maps a session.HookPayload to its proto Hook form.
 func toProtoHook(h session.HookPayload) *mecatlv1.Hook {
 	return &mecatlv1.Hook{
-		Phase:    h.Phase,
-		Tool:     h.Tool,
+		Phase:    valid(h.Phase),
+		Tool:     valid(h.Tool),
 		Decision: hookDecisionToProto(h.Decision),
 		CallId:   string(h.CallID),
 	}
@@ -673,13 +694,13 @@ func toProtoSession(s *session.Session, rm ResolvedModel, caps *mecatlv1.ServerC
 		SessionId:     string(s.ID),
 		State:         string(s.State),
 		Mode:          modeToProto(s.Mode),
-		Workspace:     s.Workspace,
+		Workspace:     valid(s.Workspace),
 		Limits:        limitsToProto(s.Limits),
 		Turns:         ClampInt32(s.Counters.Turns),
 		ToolCalls:     ClampInt32(s.Counters.ToolCalls),
 		CreatedAtUnix: s.CreatedAt.Unix(),
 		ResolvedModel: resolvedModelToProto(rm),
-		Title:         s.Title,
+		Title:         valid(s.Title),
 		Capabilities:  caps,
 	}
 }
@@ -743,10 +764,10 @@ func modeToProto(m session.PermissionMode) mecatlv1.PermissionMode {
 func toProtoMcpResource(r mcp.Resource) *mecatlv1.McpResource {
 	return &mecatlv1.McpResource{
 		Server:      r.Server,
-		Uri:         r.URI,
-		Name:        r.Name,
-		Title:       r.Title,
-		Description: r.Description,
+		Uri:         valid(r.URI),
+		Name:        valid(r.Name),
+		Title:       valid(r.Title),
+		Description: valid(r.Description),
 		MimeType:    r.MIMEType,
 		Size:        r.Size,
 		ReadOnly:    r.ReadOnly,
@@ -766,9 +787,9 @@ func toProtoMcpResources(rs []mcp.Resource) []*mecatlv1.McpResource {
 // form. Binary Blob passes through unchanged as proto bytes.
 func toProtoMcpResourceContents(c mcp.ResourceContents) *mecatlv1.McpResourceContents {
 	return &mecatlv1.McpResourceContents{
-		Uri:      c.URI,
+		Uri:      valid(c.URI),
 		MimeType: c.MIMEType,
-		Text:     c.Text,
+		Text:     valid(c.Text),
 		Blob:     c.Blob,
 	}
 }
@@ -776,9 +797,9 @@ func toProtoMcpResourceContents(c mcp.ResourceContents) *mecatlv1.McpResourceCon
 // toProtoMcpPromptArgument maps an mcp.PromptArgument to proto.
 func toProtoMcpPromptArgument(a mcp.PromptArgument) *mecatlv1.McpPromptArgument {
 	return &mecatlv1.McpPromptArgument{
-		Name:        a.Name,
-		Title:       a.Title,
-		Description: a.Description,
+		Name:        valid(a.Name),
+		Title:       valid(a.Title),
+		Description: valid(a.Description),
 		Required:    a.Required,
 	}
 }
@@ -791,9 +812,9 @@ func toProtoMcpPrompt(p mcp.Prompt) *mecatlv1.McpPrompt {
 	}
 	return &mecatlv1.McpPrompt{
 		Server:      p.Server,
-		Name:        p.Name,
-		Title:       p.Title,
-		Description: p.Description,
+		Name:        valid(p.Name),
+		Title:       valid(p.Title),
+		Description: valid(p.Description),
 		Arguments:   args,
 	}
 }
@@ -809,7 +830,7 @@ func toProtoMcpPrompts(ps []mcp.Prompt) []*mecatlv1.McpPrompt {
 
 // toProtoMcpPromptMessage maps an mcp.PromptMessage to proto.
 func toProtoMcpPromptMessage(m mcp.PromptMessage) *mecatlv1.McpPromptMessage {
-	return &mecatlv1.McpPromptMessage{Role: m.Role, Text: m.Text}
+	return &mecatlv1.McpPromptMessage{Role: valid(m.Role), Text: valid(m.Text)}
 }
 
 // toProtoMcpSource maps a source.SourceInfo snapshot to its proto form.
@@ -817,19 +838,21 @@ func toProtoMcpSource(s source.SourceInfo) *mecatlv1.McpSource {
 	servers := make([]*mecatlv1.McpServerInfo, 0, len(s.Servers))
 	for _, sv := range s.Servers {
 		servers = append(servers, &mecatlv1.McpServerInfo{
-			Name:      sv.Name,
-			Url:       sv.URL,
+			Name:      valid(sv.Name),
+			Url:       valid(sv.URL),
 			Transport: sv.Transport,
-			Group:     sv.Group,
+			Group:     valid(sv.Group),
 		})
 	}
 	diags := make([]string, len(s.Diagnostics))
-	copy(diags, s.Diagnostics)
+	for i, d := range s.Diagnostics {
+		diags[i] = valid(d)
+	}
 	return &mecatlv1.McpSource{
-		Name:        s.Name,
+		Name:        valid(s.Name),
 		Kind:        s.Kind,
 		Enabled:     s.Enabled,
-		Group:       s.Group,
+		Group:       valid(s.Group),
 		Servers:     servers,
 		Diagnostics: diags,
 	}
@@ -839,7 +862,7 @@ func toProtoMcpSource(s source.SourceInfo) *mecatlv1.McpSource {
 func toProtoCommands(cs []Command) []*mecatlv1.Command {
 	out := make([]*mecatlv1.Command, 0, len(cs))
 	for _, c := range cs {
-		out = append(out, &mecatlv1.Command{Name: c.Name, Description: c.Description})
+		out = append(out, &mecatlv1.Command{Name: valid(c.Name), Description: valid(c.Description)})
 	}
 	return out
 }
@@ -847,9 +870,9 @@ func toProtoCommands(cs []Command) []*mecatlv1.Command {
 // toProtoWorktree maps a Service Worktree to its proto form (issue #102).
 func toProtoWorktree(w Worktree) *mecatlv1.Worktree {
 	return &mecatlv1.Worktree{
-		Path:   w.Path,
-		Branch: w.Branch,
-		Head:   w.Head,
+		Path:   valid(w.Path),
+		Branch: valid(w.Branch),
+		Head:   valid(w.Head),
 		Bare:   w.Bare,
 	}
 }
@@ -874,7 +897,7 @@ func toProtoSessionSummary(s SessionSummary) *mecatlv1.SessionSummary {
 		Turns:          ClampInt32(s.Turns),
 		ModelId:        s.ModelID,
 		CreatedAtUnix:  s.CreatedAtUnix,
-		Title:          s.Title,
+		Title:          valid(s.Title),
 	}
 }
 
@@ -893,8 +916,8 @@ func toProtoSessionSummaries(rows []SessionSummary) []*mecatlv1.SessionSummary {
 // toProtoTeamMember maps a team.Member roster entry to its proto form.
 func toProtoTeamMember(m team.Member) *mecatlv1.TeamMember {
 	return &mecatlv1.TeamMember{
-		Name:      m.Name,
-		AgentType: m.AgentType,
+		Name:      valid(m.Name),
+		AgentType: valid(m.AgentType),
 		State:     string(m.State),
 		SessionId: string(m.Session),
 	}
@@ -913,13 +936,13 @@ func toProtoTeamMembers(ms []team.Member) []*mecatlv1.TeamMember {
 func toProtoTeamTask(t team.Task) *mecatlv1.TeamTask {
 	deps := make([]string, 0, len(t.Deps))
 	for _, d := range t.Deps {
-		deps = append(deps, string(d))
+		deps = append(deps, valid(string(d)))
 	}
 	return &mecatlv1.TeamTask{
 		Id:          string(t.ID),
-		Description: t.Description,
+		Description: valid(t.Description),
 		State:       string(t.State),
-		Assignee:    t.Assignee,
+		Assignee:    valid(t.Assignee),
 		Deps:        deps,
 	}
 }
