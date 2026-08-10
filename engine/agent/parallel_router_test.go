@@ -81,8 +81,8 @@ func parallelArgsJSON(tasks ...string) json.RawMessage {
 // A wired routeTask + factory mints each branch on the ROUTED model.
 func TestParallelRoutesBranchOnClassifiedModel(t *testing.T) {
 	tl := routerParallelTool(true)
-	caps := parentCaps{children: newChildRunRegistry(), routeTask: func(context.Context, string) (string, string, bool) {
-		return "large", "big-model", true
+	caps := parentCaps{children: newChildRunRegistry(), routeTask: func(context.Context, string) (string, string, string, bool) {
+		return "large", "big-model", "", true
 	}}
 	res, err := tl.ExecuteWithParent(context.Background(),
 		session.NewToolCall("p1", "Parallel", parallelArgsJSON("explore A", "explore B")),
@@ -103,8 +103,8 @@ func TestParallelRoutesBranchOnClassifiedModel(t *testing.T) {
 // branch still completes, never errors.
 func TestParallelRouteMissInheritsDefault(t *testing.T) {
 	tl := routerParallelTool(true)
-	caps := parentCaps{children: newChildRunRegistry(), routeTask: func(context.Context, string) (string, string, bool) {
-		return "", "", false // miss
+	caps := parentCaps{children: newChildRunRegistry(), routeTask: func(context.Context, string) (string, string, string, bool) {
+		return "", "", RouterMissDegenerateInput, false // miss
 	}}
 	res, err := tl.ExecuteWithParent(context.Background(),
 		session.NewToolCall("p1", "Parallel", parallelArgsJSON("explore A")),
@@ -137,9 +137,9 @@ func TestParallelOffIsDefaultEngine(t *testing.T) {
 	// routed engine, so classifying would be wasted spend; the gate skips it entirely).
 	var calls int
 	tl2 := routerParallelTool(false) // factory nil
-	caps := parentCaps{children: newChildRunRegistry(), routeTask: func(context.Context, string) (string, string, bool) {
+	caps := parentCaps{children: newChildRunRegistry(), routeTask: func(context.Context, string) (string, string, string, bool) {
 		calls++
-		return "large", "big", true
+		return "large", "big", "", true
 	}}
 	res2, err := tl2.ExecuteWithParent(context.Background(),
 		session.NewToolCall("p2", "Parallel", parallelArgsJSON("a")),
@@ -163,11 +163,11 @@ func TestParallelRoutesEachBranchExactlyOnce(t *testing.T) {
 		mu    sync.Mutex
 		calls int
 	)
-	caps := parentCaps{children: newChildRunRegistry(), routeTask: func(context.Context, string) (string, string, bool) {
+	caps := parentCaps{children: newChildRunRegistry(), routeTask: func(context.Context, string) (string, string, string, bool) {
 		mu.Lock()
 		calls++
 		mu.Unlock()
-		return "large", "big-model", true
+		return "large", "big-model", "", true
 	}}
 	const branches = 3
 	tasks := make([]string, branches)
@@ -200,11 +200,11 @@ func TestParallelRoutesMultiTurnBranchExactlyOnce(t *testing.T) {
 		mu    sync.Mutex
 		calls int
 	)
-	caps := parentCaps{children: newChildRunRegistry(), routeTask: func(context.Context, string) (string, string, bool) {
+	caps := parentCaps{children: newChildRunRegistry(), routeTask: func(context.Context, string) (string, string, string, bool) {
 		mu.Lock()
 		calls++
 		mu.Unlock()
-		return "large", "big-model", true
+		return "large", "big-model", "", true
 	}}
 	// Pass an emit closure so the branch's intermediate tool.result is counted — proving the
 	// branch genuinely ran multi-turn (a branch_tool event for the Noop call must appear),
@@ -255,8 +255,8 @@ func TestParallelBranchStartCarriesRoutedMetadata(t *testing.T) {
 		evs = append(evs, ev)
 		mu.Unlock()
 	}
-	caps := parentCaps{children: newChildRunRegistry(), routeTask: func(context.Context, string) (string, string, bool) {
-		return "large", "big-model", true
+	caps := parentCaps{children: newChildRunRegistry(), routeTask: func(context.Context, string) (string, string, string, bool) {
+		return "large", "big-model", "", true
 	}}
 	if _, err := tl.ExecuteWithParent(context.Background(),
 		session.NewToolCall("p1", "Parallel", parallelArgsJSON("a")),
@@ -290,8 +290,8 @@ func TestParallelBranchStartCarriesRoutedMetadata(t *testing.T) {
 	}
 }
 
-// A router MISS leaves the routed metadata empty on branch_start (a miss and a never-routed
-// branch are indistinguishable on the wire — both carry no category/model).
+// A router MISS leaves the routed category/model empty on branch_start and carries its
+// static reason, so it remains distinguishable from a different gate or miss.
 func TestParallelBranchStartEmptyRoutedOnMiss(t *testing.T) {
 	tl := routerParallelTool(true)
 	var (
@@ -299,8 +299,8 @@ func TestParallelBranchStartEmptyRoutedOnMiss(t *testing.T) {
 		evs []session.Event
 	)
 	emit := func(ev session.Event) { mu.Lock(); evs = append(evs, ev); mu.Unlock() }
-	caps := parentCaps{children: newChildRunRegistry(), routeTask: func(context.Context, string) (string, string, bool) {
-		return "", "", false
+	caps := parentCaps{children: newChildRunRegistry(), routeTask: func(context.Context, string) (string, string, string, bool) {
+		return "", "", RouterMissDegenerateInput, false
 	}}
 	if _, err := tl.ExecuteWithParent(context.Background(),
 		session.NewToolCall("p1", "Parallel", parallelArgsJSON("a")),
@@ -309,15 +309,64 @@ func TestParallelBranchStartEmptyRoutedOnMiss(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
+	sawStart := false
 	for _, ev := range evs {
 		if ev.Type == session.EvParallelBranch && ev.Parallel != nil &&
 			ev.Parallel.Kind == session.ParallelBranchStart {
+			sawStart = true
 			if ev.Parallel.RoutedCategory != "" || ev.Parallel.RoutedModel != "" {
 				t.Fatalf("a router miss must leave routed metadata empty; got (%q, %q)",
 					ev.Parallel.RoutedCategory, ev.Parallel.RoutedModel)
 			}
+			if ev.Parallel.RoutingReason != RouterMissDegenerateInput {
+				t.Fatalf("router-miss RoutingReason = %q, want %q",
+					ev.Parallel.RoutingReason, RouterMissDegenerateInput)
+			}
 		}
 	}
+	if !sawStart {
+		t.Fatal("no parallel branch_start event emitted")
+	}
+}
+
+// A route hit whose engine factory declines is fail-soft, but branch_start must describe
+// the fallback that actually ran rather than claim the rejected target.
+func TestParallelBranchStartFactoryDeclineIsNotReportedAsRouted(t *testing.T) {
+	tl := NewParallelTool(markerEngine("DEFAULT"), routerForker{},
+		WithParallelEngineFactory(func(string) (*Engine, bool) { return nil, false })).(*ParallelTool)
+	var (
+		mu  sync.Mutex
+		evs []session.Event
+	)
+	emit := func(ev session.Event) { mu.Lock(); evs = append(evs, ev); mu.Unlock() }
+	caps := parentCaps{children: newChildRunRegistry(), routeTask: func(context.Context, string) (string, string, string, bool) {
+		return "large", "big-model", "", true
+	}}
+	res, err := tl.ExecuteWithParent(context.Background(),
+		session.NewToolCall("p1", "Parallel", parallelArgsJSON("a")),
+		memfs.NewWorkspace("/ws"), emit, caps)
+	if err != nil {
+		t.Fatalf("transport error: %v", err)
+	}
+	if !strings.Contains(res.Content, "DEFAULT") {
+		t.Fatalf("factory decline must run the fallback engine; got %q", res.Content)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, ev := range evs {
+		if ev.Type == session.EvParallelBranch && ev.Parallel != nil &&
+			ev.Parallel.Kind == session.ParallelBranchStart {
+			if ev.Parallel.RoutedCategory != "" || ev.Parallel.RoutedModel != "" ||
+				ev.Parallel.RoutingReason != session.RoutingReasonTargetUnavailable {
+				t.Fatalf("factory-decline branch_start = %+v", ev.Parallel)
+			}
+			if ev.Parallel.Model != "DEFAULT" {
+				t.Fatalf("factory-decline Model = %q, want fallback DEFAULT", ev.Parallel.Model)
+			}
+			return
+		}
+	}
+	t.Fatal("no parallel branch_start event emitted")
 }
 
 // TestParallelFanOutSharesBreakerRace drives a real Parallel fan-out of N branches through
@@ -398,8 +447,8 @@ func TestParallelRoutedEventsNoContentLeak(t *testing.T) {
 		evs []session.Event
 	)
 	emit := func(ev session.Event) { mu.Lock(); evs = append(evs, ev); mu.Unlock() }
-	caps := parentCaps{children: newChildRunRegistry(), routeTask: func(context.Context, string) (string, string, bool) {
-		return "large", "big", true
+	caps := parentCaps{children: newChildRunRegistry(), routeTask: func(context.Context, string) (string, string, string, bool) {
+		return "large", "big", "", true
 	}}
 	if _, err := tl.ExecuteWithParent(context.Background(),
 		session.NewToolCall("p1", "Parallel", parallelArgsJSON("benign task prompt")),

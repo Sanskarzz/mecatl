@@ -63,7 +63,7 @@
     method func (*Supervisor).AddMember(ctx context.Context, spec MemberSpec) error
     method func (*Supervisor).CancelMember(name string) bool
     method func (*Supervisor).MemberModel(name string) string
-    method func (*Supervisor).MemberRouting(name string) (category string, model string)
+    method func (*Supervisor).MemberRouting(name string) (category string, model string, reason string)
     method func (*Supervisor).Run(ctx context.Context, sink func(TeamEvent)) TeamOutcome
     method func (*TeamTool).Execute(ctx context.Context, call session.ToolCall, ws tool.Workspace) (session.ToolResult, error)
     method func (*TeamTool).ExecuteObserved(ctx context.Context, call session.ToolCall, ws tool.Workspace, emit func(session.Event)) (session.ToolResult, error)
@@ -157,6 +157,7 @@ func WithParallelEngineFactory(f func(model string) (*Engine, bool)) ParallelOpt
 func WithParallelJudge(j BranchJudge) ParallelOption
 func WithParallelStore(store port.SessionStore) ParallelOption
 func WithParallelSubagentStopHook(h port.HookRunner) ParallelOption
+func WithPinnedAgents(names []string) SubagentOption
 func WithReadOnlyForker(f tool.WorkspaceForker) SupervisorOption
 func WithRoutableAgents(names []string) SubagentOption
 func WithSharedChildWorkspace(f func(root string) tool.Workspace) SubagentOption
