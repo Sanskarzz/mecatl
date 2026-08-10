@@ -135,20 +135,18 @@ func TestRunStreamingTimeout(t *testing.T) {
 	}
 }
 
-// TestRunStreamingDefaultTimeoutWhenNoDeadline mirrors the Run oracle's timeout
-// discipline for the streaming path: a deadline-free ctx gets the runner's
-// defaultCommandTimeout, so a command that would hang forever cannot park the
-// caller. Waiting out the real 30s is not test-viable, so this proves the
-// deadline-keeping machinery is live by cancelling mid-run and asserting the
-// stream unwinds PROMPTLY (the process-group kill), not after the sleep ends.
-func TestRunStreamingDefaultTimeoutWhenNoDeadline(t *testing.T) {
+// TestRunStreamingCancelWithoutDeadline tests cancellation after streaming begins
+// with a deadline-free caller context. The sleeper is launched before readiness
+// is signaled to eliminate the child-creation race; cancellation must still
+// unwind the retained shell promptly.
+func TestRunStreamingCancelWithoutDeadline(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := newStreamer(t, t.TempDir())
 
 	var out syncBuffer
 	done := make(chan error, 1)
 	go func() {
-		_, err := s.RunStreaming(ctx, "echo before; sleep 30; echo after", "", &out)
+		_, err := s.RunStreaming(ctx, "sleep 30 & echo before; wait; echo after", "", &out)
 		done <- err
 	}()
 
