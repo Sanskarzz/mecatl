@@ -270,10 +270,14 @@ func (s *skillSourceServer) ListSkills(ctx context.Context, _ *driverv1.ListSkil
 	out := make([]*driverv1.SkillMeta, len(metas))
 	for i, m := range metas {
 		out[i] = &driverv1.SkillMeta{
-			Name:        valid(m.Name),
-			Description: valid(m.Description),
-			Origin:      string(m.Origin),
-			HasAssets:   m.HasAssets,
+			Name:          valid(m.Name),
+			Description:   valid(m.Description),
+			Origin:        string(m.Origin),
+			HasAssets:     m.HasAssets,
+			License:       valid(m.License),
+			Compatibility: valid(m.Compatibility),
+			Metadata:      validMap(m.Metadata),
+			AllowedTools:  validAll(m.AllowedTools),
 		}
 	}
 	return &driverv1.ListSkillsResponse{Skills: out}, nil
@@ -304,6 +308,9 @@ func (s *skillSourceServer) ListSkillAssets(ctx context.Context, req *driverv1.L
 	}
 	out := make([]*driverv1.SkillAsset, len(assets))
 	for i, a := range assets {
+		if !tool.ValidSkillAssetName(a.Name) {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid logical asset name %q", a.Name)
+		}
 		out[i] = &driverv1.SkillAsset{Name: a.Name, Size: a.Size, Executable: a.Executable}
 	}
 	return &driverv1.ListSkillAssetsResponse{Assets: out}, nil

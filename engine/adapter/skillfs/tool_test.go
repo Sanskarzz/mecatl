@@ -3,6 +3,7 @@ package skillfs
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -88,6 +89,76 @@ func TestToolExecuteReturnsBody(t *testing.T) {
 	if strings.Contains(res.Content, "Base directory:") {
 		t.Errorf("a skill with no source path must not advertise a base directory, got %q", res.Content)
 	}
+	if strings.Contains(res.Content, "Compatibility:") {
+		t.Errorf("a skill with no compatibility must not surface a compatibility note, got %q", res.Content)
+	}
+}
+
+// TestToolExecuteSurfacesCompatibilityNote pins the advisory `compatibility`
+// frontmatter field surfacing on activation (issue #419): a skill with a
+// non-empty Compatibility renders a "Compatibility:" line in the activation
+// output, between the base-directory block and the body. It is advisory, never
+// a gate.
+func TestToolExecuteSurfacesCompatibilityNote(t *testing.T) {
+	tl := newToolOver(t, []Skill{
+		{Name: "compat", Description: "a skill with compatibility", Body: "BODY", Compatibility: "mecatl >= 0.1"},
+	})
+	res := exec(t, tl, call(t, map[string]any{"name": "compat"}))
+	if res.IsError {
+		t.Fatalf("Execute errored: %s", res.Content)
+	}
+	if !strings.Contains(res.Content, "Compatibility: mecatl >= 0.1\n") {
+		t.Errorf("activation output missing the Compatibility note, got %q", res.Content)
+	}
+	// The note sits BEFORE the blank-line + body separator.
+	if !strings.HasSuffix(res.Content, "\n\nBODY") {
+		t.Errorf("activation output should end with the body after the note + blank line, got %q", res.Content)
+	}
+}
+
+// TestExecuteSurfacesAllowedToolsAdvisory pins the advisory `allowed-tools`
+// frontmatter field (agentskills.io, Experimental; issue #419): a skill with a
+// non-empty AllowedTools renders an advisory note naming them — which EXPLICITLY
+// states that each call still follows normal permission rules, so the model
+// does NOT infer pre-approval. It is ADVISORY ONLY — never a permission grant. A
+// skill WITHOUT the field renders no note (byte-identical to before, preserving
+// the activation golden).
+func TestExecuteSurfacesAllowedToolsAdvisory(t *testing.T) {
+	t.Run("skill with allowed-tools renders the advisory note", func(t *testing.T) {
+		tl := newToolOver(t, []Skill{
+			{Name: "tooling", Description: "a skill with allowed-tools", Body: "BODY", AllowedTools: []string{"Bash", "Read", "Grep"}},
+		})
+		res := exec(t, tl, call(t, map[string]any{"name": "tooling"}))
+		if res.IsError {
+			t.Fatalf("Execute errored: %s", res.Content)
+		}
+		want := "This skill declares allowed-tools: Bash, Read, Grep. These are the tools the skill expects to use; each call still follows normal permission rules.\n"
+		if !strings.Contains(res.Content, want) {
+			t.Errorf("activation output missing the allowed-tools advisory note, got %q", res.Content)
+		}
+		// The note sits BEFORE the blank-line + body separator.
+		if !strings.HasSuffix(res.Content, "\n\nBODY") {
+			t.Errorf("activation output should end with the body after the note + blank line, got %q", res.Content)
+		}
+	})
+
+	t.Run("skill without allowed-tools renders no note (byte-identical)", func(t *testing.T) {
+		tl := newToolOver(t, []Skill{
+			{Name: "plain", Description: "a skill without allowed-tools", Body: "BODY"},
+		})
+		res := exec(t, tl, call(t, map[string]any{"name": "plain"}))
+		if res.IsError {
+			t.Fatalf("Execute errored: %s", res.Content)
+		}
+		if strings.Contains(res.Content, "allowed-tools") {
+			t.Errorf("a skill without allowed-tools must NOT render the note (byte-identical), got %q", res.Content)
+		}
+		// The plain rendering is exactly the header + blank + body.
+		want := "Skill: plain\n\nBODY"
+		if res.Content != want {
+			t.Errorf("plain activation drifted from the byte-identical rendering:\n got %q\nwant %q", res.Content, want)
+		}
+	})
 }
 
 // TestToolExecuteRendersBaseDirectory pins the runtime-discoverability header for
@@ -314,6 +385,99 @@ func TestRegisterSourceOptInAndMerge(t *testing.T) {
 	}
 }
 
+// TestExecuteEnumeratesBundledAssets pins the agentskills.io "should enumerate
+// bundled scripts/resources but must not eagerly read them" contract: a skill
+// WITH assets renders a "Bundled files:" block listing each asset's logical
+// name (sorted, indented); a skill with NO assets renders no such block
+// (byte-identical to the pre-enumeration rendering).
+func TestExecuteEnumeratesBundledAssets(t *testing.T) {
+	t.Run("skill with assets renders the enumeration block", func(t *testing.T) {
+		dir := t.TempDir()
+		writeSkill(t, dir, "deploy", "---\nname: deploy\ndescription: deploy the app\n---\nRun the deploy script.\n")
+		writeAsset(t, dir, "deploy", "scripts/run.sh", "#!/bin/sh\ndeploy\n")
+		writeAsset(t, dir, "deploy", "references/api.md", "API notes\n")
+
+		discovered, skips, err := DirSource{Dir: dir}.Skills(context.Background())
+		if err != nil || len(skips) != 0 || len(discovered) != 1 {
+			t.Fatalf("discover: %v skips=%v n=%d", err, skips, len(discovered))
+		}
+		tl := newToolOver(t, discovered)
+		res := exec(t, tl, call(t, map[string]any{"name": "deploy"}))
+		if res.IsError {
+			t.Fatalf("Execute errored: %s", res.Content)
+		}
+		// The enumeration block lists both logical names, sorted.
+		wantBlock := "Bundled files:\n" +
+			"  - references/api.md\n" +
+			"  - scripts/run.sh\n"
+		if !strings.Contains(res.Content, wantBlock) {
+			t.Errorf("activation output missing the bundled-files enumeration block %q, got %q", wantBlock, res.Content)
+		}
+		// The block sits AFTER the base-directory guidance and BEFORE the blank
+		// line + body.
+		guidanceIdx := strings.Index(res.Content, "read them with the Read tool by absolute path")
+		enumerIdx := strings.Index(res.Content, "Bundled files:")
+		bodyIdx := strings.Index(res.Content, "\n\nRun the deploy script.")
+		if guidanceIdx < 0 || enumerIdx < 0 || bodyIdx < 0 {
+			t.Fatalf("activation output missing expected sections, got %q", res.Content)
+		}
+		if guidanceIdx >= enumerIdx || enumerIdx >= bodyIdx {
+			t.Errorf("enumeration block out of order: guidance@%d enumeration@%d body@%d", guidanceIdx, enumerIdx, bodyIdx)
+		}
+		// Names must NOT include the SKILL.md body file itself.
+		if strings.Contains(res.Content, "SKILL.md") {
+			t.Errorf("enumeration must not list SKILL.md (it is the body, not a payload), got %q", res.Content)
+		}
+	})
+
+	t.Run("skill without assets renders no enumeration block", func(t *testing.T) {
+		tl := newToolOver(t, []Skill{{Name: "plain", Description: "no assets", Body: "BODY"}})
+		res := exec(t, tl, call(t, map[string]any{"name": "plain"}))
+		if res.IsError {
+			t.Fatalf("Execute errored: %s", res.Content)
+		}
+		if strings.Contains(res.Content, "Bundled files:") {
+			t.Errorf("a skill without assets must NOT render the enumeration block, got %q", res.Content)
+		}
+		// Byte-identical to the pre-enumeration rendering.
+		want := "Skill: plain\n\nBODY"
+		if res.Content != want {
+			t.Errorf("asset-less activation drifted from the byte-identical rendering:\n got %q\nwant %q", res.Content, want)
+		}
+	})
+}
+
+func TestToolExecuteBoundsBundledAssetInventory(t *testing.T) {
+	assets := make([]tool.SkillAsset, 1_000)
+	for i := range assets {
+		assets[i] = tool.SkillAsset{Name: fmt.Sprintf("references/%04d.md", i)}
+	}
+	tl := NewTool(
+		[]tool.SkillMeta{{Name: "asset-heavy", Description: "many assets"}},
+		assetInventoryActivator{body: "Follow these instructions.", assets: assets},
+	)
+	res := exec(t, tl, call(t, map[string]any{"name": "asset-heavy"}))
+	if res.IsError {
+		t.Fatalf("Execute errored: %s", res.Content)
+	}
+	if !strings.Contains(res.Content, "Follow these instructions.") {
+		t.Errorf("asset inventory consumed the activation result before the body: %q", res.Content)
+	}
+	if !strings.Contains(res.Content, "bundled files omitted.") {
+		t.Errorf("large asset inventory must disclose omitted entries, got %q", res.Content)
+	}
+}
+
+type assetInventoryActivator struct {
+	body    string
+	baseDir string
+	assets  []tool.SkillAsset
+}
+
+func (a assetInventoryActivator) Activate(context.Context, string) (Activation, error) {
+	return Activation{Body: a.body, BaseDir: a.baseDir, Assets: a.assets}, nil
+}
+
 func TestToolBodyTruncated(t *testing.T) {
 	big := strings.Repeat("x", 30_000)
 	tl := newToolOver(t, []Skill{{Name: "big", Description: "huge", Body: big}})
@@ -326,5 +490,28 @@ func TestToolBodyTruncated(t *testing.T) {
 	}
 	if !strings.Contains(res.Content, "truncated") {
 		t.Error("truncated body should carry a truncation marker")
+	}
+}
+
+func TestToolExecuteActivationHeaderOrder(t *testing.T) {
+	tl := NewTool([]tool.SkillMeta{{
+		Name: "ordered", Description: "ordered", Compatibility: "mecatl >= 0.1", AllowedTools: []string{"Read", "Bash"},
+	}}, assetInventoryActivator{
+		body:    "BODY",
+		baseDir: "/opt/skills/ordered",
+		assets:  []tool.SkillAsset{{Name: "references/api.md"}},
+	})
+	res := exec(t, tl, call(t, map[string]any{"name": "ordered"}))
+	if res.IsError {
+		t.Fatalf("Execute errored: %s", res.Content)
+	}
+	want := "Skill: ordered\n" +
+		"Base directory: /opt/skills/ordered\n" +
+		"Bundled files (references/, scripts/, assets/) live under the base directory; read them with the Read tool by absolute path, and run bundled scripts via Bash with their absolute path.\n" +
+		"Compatibility: mecatl >= 0.1\n" +
+		"This skill declares allowed-tools: Read, Bash. These are the tools the skill expects to use; each call still follows normal permission rules.\n" +
+		"Bundled files:\n  - references/api.md\n\nBODY"
+	if res.Content != want {
+		t.Errorf("activation header order drifted:\n got %q\nwant %q", res.Content, want)
 	}
 }
