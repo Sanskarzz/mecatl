@@ -50,12 +50,26 @@ func serve(ctx context.Context, cfg config, svc *server.Service, obs observabili
 		return err
 	}
 
+	// The validator owns background JWKS refresh, so it is constructed with the
+	// SERVER-ROOT ctx. A misconfigured OIDC setup is FATAL: the pod refuses to
+	// start rather than silently serving unauthenticated (ADR 0100).
+	// Logged BEFORE construction so it appears even if the validator then fails
+	// to build.
+	warnInsecureIssuer(cfg.oidc)
+	validator, err := cliconfig.OIDCValidator(ctx, cfg.oidc)
+	if err != nil {
+		return err
+	}
 	auth := server.NewAuthenticator(server.SecurityConfig{
 		AuthToken: cfg.authToken,
+		Validator: validator,
 		// No rate limiting on a pod: it is fronted by the Service/mesh, not a
 		// raw public port. RateBurst 0 leaves the authenticator's rate limiter
 		// disabled.
 	})
+	// The validator owns a background JWKS refresh that only its own Close()
+	// stops — cancelling ctx does not. No-op when identity is off.
+	defer auth.Close()
 
 	// --- gRPC: auth interceptors, standard health service ---
 	grpcOpts := []grpc.ServerOption{
@@ -113,7 +127,9 @@ func serve(ctx context.Context, cfg config, svc *server.Service, obs observabili
 		TLSConfig:         tlsCfg,
 	}
 
-	authed := cfg.authToken != "" || tlsCfg != nil
+	// Caller identity counts as authentication: an OIDC deployment may carry no
+	// static token at all.
+	authed := cfg.authToken != "" || cfg.oidc.Enabled() || tlsCfg != nil
 	warnIfNonLoopback("grpc-addr", cfg.grpcAddr, authed)
 	warnIfNonLoopback("http-addr", cfg.httpAddr, authed)
 
@@ -290,4 +306,14 @@ func warnIfNonLoopback(flagName, addr string, authed bool) {
 // signal boundary (mecak8s reacts to SIGTERM by draining + bounded-stopping).
 func signalCtx() (context.Context, context.CancelFunc) {
 	return signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+}
+
+// warnInsecureIssuer logs the SSRF-relaxation warning when the operator enabled
+// it, and is silent otherwise. It is a function rather than an inline branch so
+// the caller does not grow another decision point (gocyclo), and so both server
+// mains surface the warning identically.
+func warnInsecureIssuer(c cliconfig.OIDCConfig) {
+	if w := c.InsecureIssuerWarning(); w != "" {
+		slog.Warn(w)
+	}
 }
