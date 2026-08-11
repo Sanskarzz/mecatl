@@ -354,6 +354,18 @@ export MECATL_AUTH_TOKEN="$(your-oidc-cli print-access-token)"
 bin/mecatui connect 127.0.0.1:8080 --auth-token "$MECATL_AUTH_TOKEN" --workspace /tmp
 ```
 
+To prove that the token is actually required, remove the environment fallback and
+submit a prompt in a separate TUI session:
+
+```sh
+env -u MECATL_AUTH_TOKEN \
+  bin/mecatui connect 127.0.0.1:8080 --workspace /tmp
+```
+
+A gRPC dial can succeed before credentials are checked; the unauthenticated
+session's first request must fail before it produces a model response. If it
+replies, treat that as an authentication bypass.
+
 `--workspace` identifies a directory on the **agent pod**, not the machine
 running the TUI. Use a path that exists in the pod; `/tmp` is appropriate for
 this connectivity check, but is not a shared developer checkout. For a remote
