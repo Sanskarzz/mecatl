@@ -120,6 +120,8 @@ Documentation/citation conventions are in [`docs/design/README.md`](../design/RE
 - [0094 — Opt-in project ingestion: two-axis positive grants](./0094-opt-in-project-ingestion.md) *(superseded by 0095)*
 - [0095 — Root-aware project trust](./0095-root-aware-project-trust.md) *(the authoritative #359 trust decision; supersedes 0092 + 0094)*
 - [0096 — Diagnostic-only posture reporting](./0096-diagnostic-only-posture-reporting.md) *(orthogonal reporting surface; relates to 0095)*
+- [0100 — Caller identity: accept a principal, thread it everywhere, record the owner](./0100-caller-identity-threading.md) *(agent-identity Track A; audit-trail phase)*
+- [0101 — Bound cached JWKS staleness](./0101-bounded-jwks-staleness.md)
 - [0024 — System-prompt research](./0024-system-prompt-research.md) *(research)*
 - [0041 — Output-economy default prompt](./0041-output-economy-default-prompt.md)
 - [0054 — Reasoning rebalance of the default-tone prompt](./0054-reasoning-rebalance-default-prompt.md)

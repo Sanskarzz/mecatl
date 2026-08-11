@@ -103,6 +103,40 @@ loopback-only server. Flags not covered here are advanced operator tuning; run
 | `--client-ca` | `""` | PEM client-CA bundle; enables mTLS (requires `--tls-cert`/`--tls-key`) |
 | `--rate-limit` | `0` (off) | Sustained per-client request rate in req/s |
 | `--rate-burst` | `0` (derived) | Token-bucket burst; zero derives a sane default from `--rate-limit` |
+| `--oidc-issuer` | `""` (off) | OIDC issuer URL whose tokens identify callers; setting it turns caller identity on. See [Caller identity](#caller-identity-oidc) |
+| `--oidc-jwks-uri` | `""` (derived) | Static JWKS endpoint, short-circuiting OIDC discovery (air-gapped or pinned-key deployments) |
+| `--oidc-audience` | `""` | Audience (`aud`) this deployment accepts; **required** with `--oidc-issuer` |
+| `--oidc-max-jwks-staleness` | `1h` | Maximum age of last-good signing keys during an IdP outage. `0` deliberately disables this bound; negative values are rejected. |
+
+#### Caller identity (OIDC)
+
+`--oidc-issuer` names the identity provider whose tokens identify your callers.
+When it is set, every request must present a bearer that provider vouches for,
+and the verified `(issuer, subject)` pair is recorded as the **owner** of each
+session the caller creates. `--oidc-audience` is required alongside it — an
+audience-less verifier would accept tokens minted for a different service.
+`--oidc-jwks-uri` pins the signing-key endpoint instead of discovering it.
+
+**This is attribution, not isolation.** Sessions, schedules and event-log
+records gain an owner so you can see who did what; nothing is refused on
+identity grounds. Any authenticated caller can still list and act on any
+session — per-caller access control is a separate, later piece of work. Do not
+deploy these flags as a tenancy boundary.
+
+The production validator is `toolhive-core/authn` **v0.0.39**. A bad OIDC
+configuration, including an unreachable initial key fetch, fails closed at startup
+rather than falling back to unauthenticated traffic. After a successful fetch, the
+last good JWKS can cover a brief IdP outage. `--oidc-max-jwks-staleness=1h` bounds
+that fallback: once keys are older than the bound, a failed refresh returns **503
+Service Unavailable**. `0` is an explicit acceptance of unbounded cached-key
+availability and its signing-key revocation exposure.
+
+This is a bound on **signing-key** revocation during an outage, not per-token
+revocation. An otherwise valid token remains acceptable until its normal expiry.
+The JWKS cache is process-local and not persisted; a restarted process fetches
+current keys again. The flags are identical on `mecak8s`. Full reference:
+[usage.md](https://github.com/stacklok/mecatl/blob/main/docs/usage.md) and
+[ADR 0100](https://github.com/stacklok/mecatl/blob/main/docs/adr/0100-caller-identity-threading.md).
 
 #### Daemon config file (`daemon.yaml`)
 
@@ -313,6 +347,10 @@ mecatl exposes command and file execution. The security model has three layers:
    interface. No traffic crosses the machine.
 2. **Authentication.** Off by default for the loopback case. Enable a bearer token
    (`--auth-token` / `MECATL_AUTH_TOKEN`) before binding a non-loopback address.
+   [Caller identity](#caller-identity-oidc) is a separate, additive axis: a shared
+   token is one credential with no subject behind it, while `--oidc-issuer` gives
+   each caller a distinct identity. Identity records **who** acted; it does not
+   yet decide **what** they may act on.
 3. **Transport.** Plaintext by default. Add `--tls-cert` + `--tls-key` for TLS;
    add `--client-ca` to require and verify client certificates (mTLS).
 
