@@ -41,3 +41,27 @@ func TestOIDCValidatorRejectsNegativeMaxJWKSStaleness(t *testing.T) {
 		t.Fatalf("OIDCValidator error = %v, want ErrOIDCMisconfigured", err)
 	}
 }
+
+func TestValidateOIDCAuthToken(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		oidc      OIDCConfig
+		authToken string
+		wantErr   bool
+	}{
+		{name: "neither"},
+		{name: "static token only", authToken: "secret"},
+		{name: "OIDC only", oidc: OIDCConfig{Issuer: "https://idp.example"}},
+		{name: "both", oidc: OIDCConfig{Issuer: "https://idp.example"}, authToken: "secret", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateOIDCAuthToken(tc.oidc, tc.authToken)
+			if tc.wantErr && !errors.Is(err, ErrOIDCMisconfigured) {
+				t.Fatalf("ValidateOIDCAuthToken() error = %v, want ErrOIDCMisconfigured", err)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("ValidateOIDCAuthToken() error = %v, want nil", err)
+			}
+		})
+	}
+}

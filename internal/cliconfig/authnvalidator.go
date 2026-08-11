@@ -59,10 +59,16 @@ func (a authnValidator) Close() error { a.v.Close(); return nil }
 //	CodeInvalidToken   (401) → ErrInvalidToken
 //	CodeInvalidRequest (400) → ErrInvalidToken
 //
-// Anything unrecognised — including a non-*authn.Error — maps to ErrInvalidToken:
-// fail CLOSED. Treating an unknown failure as transient would let a caller retry
-// its way past a verdict nobody understood.
+// Context cancellation and deadlines pass through unchanged: they describe the
+// caller's request, not a JWT verdict, and the server maps them to their native
+// gRPC status without spending rejected-token budget.
+//
+// Anything else unrecognised — including a non-*authn.Error — maps to
+// ErrInvalidToken: fail CLOSED.
 func errToSentinel(err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
 	var aerr *authn.Error
 	if errors.As(err, &aerr) {
 		switch aerr.Code {

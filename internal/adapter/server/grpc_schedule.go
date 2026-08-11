@@ -198,6 +198,10 @@ func (h *ScheduleServer) ListFires(ctx context.Context, req *mecatlv1.ListFiresR
 // session's owner, or the verified context principal), never from the request
 // body — the same discipline that keeps an owner field off CreateSessionRequest.
 // The field is projected OUTBOUND only (scheduleSpecToProto).
+//
+// OriginSessionID is likewise deliberately never populated here and has no v1
+// proto field. It is an in-process-only routing key stamped by the Schedule tool
+// from the executing session; network callers cannot select a delivery target.
 func protoToScheduleSpec(in *mecatlv1.ScheduleSpec) (port.ScheduleSpec, error) {
 	out := port.ScheduleSpec{
 		Name:              in.GetName(),

@@ -8,11 +8,15 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 
 	"github.com/stacklok/mecatl/engine/session"
@@ -46,6 +50,40 @@ func (f fakeValidator) Validate(_ context.Context, bearer string) (*session.Prin
 	return nil, fmt.Errorf("token rejected: %w", server.ErrInvalidToken)
 }
 
+type countingValidator struct {
+	fakeValidator
+	calls int
+}
+
+func (v *countingValidator) Validate(ctx context.Context, bearer string) (*session.Principal, error) {
+	v.calls++
+	return v.fakeValidator.Validate(ctx, bearer)
+}
+
+type blockingInvalidValidator struct {
+	entered     chan struct{}
+	release     chan struct{}
+	calls       atomic.Int32
+	result      *session.Principal
+	validBearer string
+}
+
+func (v *blockingInvalidValidator) Validate(_ context.Context, bearer string) (*session.Principal, error) {
+	v.calls.Add(1)
+	v.entered <- struct{}{}
+	<-v.release
+	if v.validBearer != "" && bearer == v.validBearer {
+		return v.result, nil
+	}
+	return nil, server.ErrInvalidToken
+}
+
+type contextValidator struct{}
+
+func (contextValidator) Validate(ctx context.Context, _ string) (*session.Principal, error) {
+	return nil, ctx.Err()
+}
+
 // edgeAlice is the principal the good tokens below vouch for. Identity is the
 // (iss, sub) PAIR — the tests assert both.
 var edgeAlice = session.Principal{
@@ -70,7 +108,17 @@ func oidcOnly(t *testing.T, v fakeValidator, rate float64, burst int) *server.Au
 // non-empty) and reports the handler context it saw (nil when the handler never
 // ran) plus the interceptor error.
 func callUnary(a *server.Authenticator, bearer string) (handlerCtx context.Context, err error) {
-	ctx := context.Background()
+	return callUnaryFrom(a, bearer, "")
+}
+
+func callUnaryFrom(a *server.Authenticator, bearer, addr string) (handlerCtx context.Context, err error) {
+	return callUnaryContextFrom(context.Background(), a, bearer, addr)
+}
+
+func callUnaryContextFrom(ctx context.Context, a *server.Authenticator, bearer, addr string) (handlerCtx context.Context, err error) {
+	if addr != "" {
+		ctx = peer.NewContext(ctx, &peer.Peer{Addr: testAddr(addr)})
+	}
 	if bearer != "" {
 		ctx = metadata.NewIncomingContext(ctx, metadata.Pairs("authorization", "Bearer "+bearer))
 	}
@@ -81,6 +129,11 @@ func callUnary(a *server.Authenticator, bearer string) (handlerCtx context.Conte
 		})
 	return handlerCtx, err
 }
+
+type testAddr string
+
+func (testAddr) Network() string  { return "tcp" }
+func (a testAddr) String() string { return string(a) }
 
 // fakeServerStream is the minimal grpc.ServerStream the StreamInterceptor needs:
 // it only ever reads Context() before delegating, and principalStream wraps it.
@@ -97,7 +150,17 @@ func (s fakeServerStream) Context() context.Context { return s.ctx }
 // own principalStream wrapping path, distinct from the unary one — so it needs
 // its own coverage, not an inference from callUnary.
 func callStream(a *server.Authenticator, bearer string) (handlerCtx context.Context, err error) {
-	ctx := context.Background()
+	return callStreamFrom(a, bearer, "")
+}
+
+func callStreamFrom(a *server.Authenticator, bearer, addr string) (handlerCtx context.Context, err error) {
+	return callStreamContextFrom(context.Background(), a, bearer, addr)
+}
+
+func callStreamContextFrom(ctx context.Context, a *server.Authenticator, bearer, addr string) (handlerCtx context.Context, err error) {
+	if addr != "" {
+		ctx = peer.NewContext(ctx, &peer.Peer{Addr: testAddr(addr)})
+	}
 	if bearer != "" {
 		ctx = metadata.NewIncomingContext(ctx, metadata.Pairs("authorization", "Bearer "+bearer))
 	}
@@ -113,11 +176,25 @@ func callStream(a *server.Authenticator, bearer string) (handlerCtx context.Cont
 // callHTTP drives the HTTP middleware and reports the handler context it saw
 // (nil when the handler never ran) plus the recorded response.
 func callHTTP(a *server.Authenticator, bearer string) (handlerCtx context.Context, rec *httptest.ResponseRecorder) {
-	req := httptest.NewRequest(http.MethodGet, "/v1/sessions", nil)
+	return callHTTPFrom(a, bearer, "10.0.0.1:34567", nil)
+}
+
+func callHTTPFrom(a *server.Authenticator, bearer, remoteAddr string, headers http.Header) (handlerCtx context.Context, rec *httptest.ResponseRecorder) {
+	return callHTTPContextFrom(context.Background(), a, bearer, remoteAddr, headers)
+}
+
+func callHTTPContextFrom(ctx context.Context, a *server.Authenticator, bearer, remoteAddr string, headers http.Header) (handlerCtx context.Context, rec *httptest.ResponseRecorder) {
+	req := httptest.NewRequest(http.MethodGet, "/v1/sessions", nil).WithContext(ctx)
 	if bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
-	req.RemoteAddr = "10.0.0.1:34567"
+	if headers != nil {
+		req.Header = headers.Clone()
+		if bearer != "" {
+			req.Header.Set("Authorization", "Bearer "+bearer)
+		}
+	}
+	req.RemoteAddr = remoteAddr
 	rec = httptest.NewRecorder()
 	a.Middleware(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		handlerCtx = r.Context()
@@ -417,15 +494,16 @@ func TestCallerIdentity_Scenario1_RateLimitKeyedOnPrincipal(t *testing.T) {
 			transient: map[string]bool{"jwks-down": true},
 		}, 1, 1)
 		for _, tok := range []string{"nope", "also-nope", "jwks-down", ""} {
-			if _, err := callUnary(auth, tok); err == nil {
+			if _, err := callUnaryFrom(auth, tok, "10.0.0.1:1234"); err == nil {
 				t.Fatalf("token %q was accepted", tok)
 			}
 		}
 		if keys := auth.TrackedClientKeysForTest(); len(keys) != 0 {
-			t.Fatalf("tracked keys = %v, want none (a rejected token must not create a bucket)", keys)
+			t.Fatalf("tracked keys = %v, want none (a rejected token must not create a post-validation bucket)", keys)
 		}
-		// Nor may it have consumed the good subject's budget.
-		if _, err := callUnary(auth, "good"); err != nil {
+		// Rejections from one peer do not consume another peer's pre-validation
+		// budget or the good subject's post-validation budget.
+		if _, err := callUnaryFrom(auth, "good", "10.0.0.2:1234"); err != nil {
 			t.Fatalf("valid request after rejections err = %v, want nil", err)
 		}
 		if keys := auth.TrackedClientKeysForTest(); !slices.ContainsFunc(keys, func(k string) bool {
@@ -434,6 +512,289 @@ func TestCallerIdentity_Scenario1_RateLimitKeyedOnPrincipal(t *testing.T) {
 			t.Fatalf("tracked keys = %v, want edgeAlice's bucket", keys)
 		}
 	})
+}
+
+func newLimitedOIDC(v server.PrincipalValidator) *server.Authenticator {
+	return server.NewAuthenticator(server.SecurityConfig{Validator: v, RateLimit: 0.0001, RateBurst: 1})
+}
+
+func TestCallerIdentityRejectedBearerLimitSerializesConcurrentValidation(t *testing.T) {
+	v := &blockingInvalidValidator{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(v.release) }) }
+	defer release()
+	auth := newLimitedOIDC(v)
+
+	first := make(chan error, 1)
+	go func() {
+		_, err := callUnaryFrom(auth, "bad", "10.0.0.1:1000")
+		first <- err
+	}()
+	<-v.entered
+
+	const concurrent = 4
+	start := make(chan struct{})
+	attempting := make(chan struct{}, concurrent)
+	results := make(chan error, concurrent)
+	var ready sync.WaitGroup
+	var done sync.WaitGroup
+	ready.Add(concurrent)
+	done.Add(concurrent)
+	for range concurrent {
+		go func() {
+			defer done.Done()
+			ready.Done()
+			<-start
+			attempting <- struct{}{}
+			_, err := callUnaryFrom(auth, "bad", "10.0.0.1:2000")
+			results <- err
+		}()
+	}
+	ready.Wait()
+	close(start)
+	for range concurrent {
+		<-attempting
+	}
+
+	if got := v.calls.Load(); got != 1 {
+		t.Fatalf("validator calls while first validation is blocked = %d, want 1", got)
+	}
+	release()
+	if err := <-first; status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("first request code = %v, want Unauthenticated", status.Code(err))
+	}
+	done.Wait()
+	close(results)
+	for err := range results {
+		if status.Code(err) != codes.ResourceExhausted {
+			t.Fatalf("concurrent request code = %v, want ResourceExhausted", status.Code(err))
+		}
+	}
+	if got := v.calls.Load(); got != 1 {
+		t.Fatalf("validator calls = %d, want exactly 1", got)
+	}
+}
+
+func TestCallerIdentityValidationPreservesContextStatus(t *testing.T) {
+	auth := newLimitedOIDC(contextValidator{})
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+		want codes.Code
+		call func(context.Context) error
+	}{
+		{
+			name: "unary canceled", ctx: canceledContext(), want: codes.Canceled,
+			call: func(ctx context.Context) error {
+				_, err := callUnaryContextFrom(ctx, auth, "token", "10.0.0.1:1000")
+				return err
+			},
+		},
+		{
+			name: "stream deadline", ctx: expiredContext(), want: codes.DeadlineExceeded,
+			call: func(ctx context.Context) error {
+				_, err := callStreamContextFrom(ctx, auth, "token", "10.0.0.2:1000")
+				return err
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := status.Code(tc.call(tc.ctx)); got != tc.want {
+				t.Fatalf("code = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCallerIdentityHTTPValidationContextStatus(t *testing.T) {
+	auth := newLimitedOIDC(contextValidator{})
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+		body string
+	}{
+		{name: "canceled", ctx: canceledContext(), body: "request canceled"},
+		{name: "deadline", ctx: expiredContext(), body: "request deadline exceeded"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, rec := callHTTPContextFrom(tc.ctx, auth, "token", "10.0.0.1:1000", nil)
+			if rec.Code != http.StatusRequestTimeout {
+				t.Fatalf("status = %d, want 408", rec.Code)
+			}
+			if rec.Header().Get("WWW-Authenticate") != "" {
+				t.Fatal("context error set WWW-Authenticate")
+			}
+			if !strings.Contains(rec.Body.String(), tc.body) {
+				t.Fatalf("body = %q, want %q", rec.Body.String(), tc.body)
+			}
+		})
+	}
+}
+
+func TestCallerIdentityValidationGateHonorsWaitingContext(t *testing.T) {
+	result := edgeAlice
+	v := &blockingInvalidValidator{entered: make(chan struct{}, 1), release: make(chan struct{}), result: &result, validBearer: "good"}
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(v.release) }) }
+	defer release()
+	auth := newLimitedOIDC(v)
+
+	first := make(chan error, 1)
+	go func() {
+		_, err := callUnaryFrom(auth, "good", "10.0.0.1:1000")
+		first <- err
+	}()
+	<-v.entered
+
+	if _, err := callUnaryContextFrom(canceledContext(), auth, "bad", "10.0.0.1:2000"); status.Code(err) != codes.Canceled {
+		t.Fatalf("waiting unary code = %v, want Canceled", status.Code(err))
+	}
+	if _, err := callStreamContextFrom(expiredContext(), auth, "bad", "10.0.0.1:3000"); status.Code(err) != codes.DeadlineExceeded {
+		t.Fatalf("waiting stream code = %v, want DeadlineExceeded", status.Code(err))
+	}
+	if got := v.calls.Load(); got != 1 {
+		t.Fatalf("validator calls while same-peer gate is blocked = %d, want 1", got)
+	}
+
+	release()
+	if err := <-first; err != nil {
+		t.Fatalf("first validation error = %v", err)
+	}
+	if _, err := callUnaryFrom(auth, "bad", "10.0.0.1:4000"); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("bad request after canceled waits code = %v, want Unauthenticated", status.Code(err))
+	}
+	if got := v.calls.Load(); got != 2 {
+		t.Fatalf("validator calls = %d, want 2", got)
+	}
+}
+
+func canceledContext() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
+}
+
+func expiredContext() context.Context {
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	return ctx
+}
+
+func TestCallerIdentityRejectedBearerLimitHTTP(t *testing.T) {
+	v := &countingValidator{fakeValidator: fakeValidator{
+		ok:        map[string]session.Principal{"good": edgeAlice},
+		transient: map[string]bool{"jwks-down": true},
+	}}
+	auth := newLimitedOIDC(v)
+
+	if _, rec := callHTTPFrom(auth, "bad", "10.0.0.1:1000", nil); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("first bad status = %d, want 401", rec.Code)
+	}
+	spoofed := http.Header{"Forwarded": {"for=203.0.113.8"}, "X-Forwarded-For": {"203.0.113.9"}}
+	if _, rec := callHTTPFrom(auth, "bad-again", "10.0.0.1:2000", spoofed); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("second bad status = %d, want 429", rec.Code)
+	}
+	if v.calls != 1 {
+		t.Fatalf("validator calls = %d, want 1 (forwarding headers must not bypass direct-peer limit)", v.calls)
+	}
+	if _, rec := callHTTPFrom(auth, "bad", "10.0.0.2:1000", nil); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("independent peer status = %d, want 401", rec.Code)
+	}
+	if v.calls != 2 {
+		t.Fatalf("validator calls = %d, want 2 after independent peer", v.calls)
+	}
+
+	validV := &countingValidator{fakeValidator: fakeValidator{ok: map[string]session.Principal{"good": edgeAlice}}}
+	validAuth := newLimitedOIDC(validV)
+	for range 3 {
+		_, _ = callHTTPFrom(validAuth, "good", "10.0.0.3:1000", nil)
+	}
+	if _, rec := callHTTPFrom(validAuth, "bad", "10.0.0.3:2000", nil); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("bad request after valid traffic status = %d, want 401", rec.Code)
+	}
+	if validV.calls != 4 {
+		t.Fatalf("validator calls = %d, want 4 (valid traffic must not consume rejected-token budget)", validV.calls)
+	}
+
+	unavailableV := &countingValidator{fakeValidator: fakeValidator{transient: map[string]bool{"jwks-down": true}}}
+	unavailableAuth := newLimitedOIDC(unavailableV)
+	for range 2 {
+		if _, rec := callHTTPFrom(unavailableAuth, "jwks-down", "10.0.0.4:1000", nil); rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("IdP unavailable status = %d, want 503", rec.Code)
+		}
+	}
+	if unavailableV.calls != 2 {
+		t.Fatalf("validator calls during repeated outage = %d, want 2", unavailableV.calls)
+	}
+}
+
+func TestCallerIdentityRejectedBearerTrackingIsBounded(t *testing.T) {
+	v := &countingValidator{fakeValidator: fakeValidator{}}
+	auth := newLimitedOIDC(v)
+	for i := range 4100 {
+		_, _ = callHTTPFrom(auth, "bad", fmt.Sprintf("10.0.%d.%d:1000", i/256, i%256), nil)
+	}
+	if got := auth.RejectedTrackedClientCountForTest(); got > 4096 {
+		t.Fatalf("tracked rejected-token clients = %d, want at most 4096", got)
+	}
+}
+
+func TestCallerIdentityRejectedBearerLimitUnary(t *testing.T) {
+	v := &countingValidator{fakeValidator: fakeValidator{ok: map[string]session.Principal{"good": edgeAlice}}}
+	auth := newLimitedOIDC(v)
+	if _, err := callUnaryFrom(auth, "bad", "10.0.0.1:1000"); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("first bad code = %v, want Unauthenticated", status.Code(err))
+	}
+	if _, err := callUnaryFrom(auth, "bad-again", "10.0.0.1:2000"); status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("second bad code = %v, want ResourceExhausted", status.Code(err))
+	}
+	if _, err := callUnaryFrom(auth, "bad", "10.0.0.2:1000"); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("independent peer code = %v, want Unauthenticated", status.Code(err))
+	}
+	if v.calls != 2 {
+		t.Fatalf("validator calls = %d, want 2", v.calls)
+	}
+
+	validV := &countingValidator{fakeValidator: fakeValidator{ok: map[string]session.Principal{"good": edgeAlice}}}
+	validAuth := newLimitedOIDC(validV)
+	for range 3 {
+		_, _ = callUnaryFrom(validAuth, "good", "10.0.0.3:1000")
+	}
+	if _, err := callUnaryFrom(validAuth, "bad", "10.0.0.3:2000"); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("bad request after valid traffic code = %v, want Unauthenticated", status.Code(err))
+	}
+	if validV.calls != 4 {
+		t.Fatalf("validator calls = %d, want 4", validV.calls)
+	}
+}
+
+func TestCallerIdentityRejectedBearerLimitStream(t *testing.T) {
+	v := &countingValidator{fakeValidator: fakeValidator{ok: map[string]session.Principal{"good": edgeAlice}}}
+	auth := newLimitedOIDC(v)
+	if _, err := callStreamFrom(auth, "bad", "10.0.0.1:1000"); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("first bad code = %v, want Unauthenticated", status.Code(err))
+	}
+	if _, err := callStreamFrom(auth, "bad-again", "10.0.0.1:2000"); status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("second bad code = %v, want ResourceExhausted", status.Code(err))
+	}
+	if _, err := callStreamFrom(auth, "bad", "10.0.0.2:1000"); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("independent peer code = %v, want Unauthenticated", status.Code(err))
+	}
+	if v.calls != 2 {
+		t.Fatalf("validator calls = %d, want 2", v.calls)
+	}
+
+	validV := &countingValidator{fakeValidator: fakeValidator{ok: map[string]session.Principal{"good": edgeAlice}}}
+	validAuth := newLimitedOIDC(validV)
+	for range 3 {
+		_, _ = callStreamFrom(validAuth, "good", "10.0.0.3:1000")
+	}
+	if _, err := callStreamFrom(validAuth, "bad", "10.0.0.3:2000"); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("bad request after valid traffic code = %v, want Unauthenticated", status.Code(err))
+	}
+	if validV.calls != 4 {
+		t.Fatalf("validator calls = %d, want 4", validV.calls)
+	}
 }
 
 // TestCallerIdentityStreamInterceptor covers the STREAM half of the gRPC edge.

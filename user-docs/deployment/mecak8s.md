@@ -312,7 +312,9 @@ process-local and unpersisted, so a restarted pod fetches current keys again.
 Use the opt-in overlay, which appends four flags to the agent:
 
 ```sh
-kubectl apply -k deploy/mecak8s-oidc     # edit the three values first
+# Use a registry your target cluster can pull from; ko.local is not sufficient.
+export KO_DOCKER_REPO=registry.example/mecatl
+task deploy:apply ROOT=deploy/mecak8s-oidc     # edit the three values first
 ```
 
 | Flag | Meaning |
@@ -335,6 +337,39 @@ allows DNS and TCP 443 to any destination. An in-cluster IdP on another port
 **does** need its own egress rule — the namespace default-deny is real, and a
 missing rule shows up as the agent failing to fetch the JWKS and the pod
 CrashLoopBackOff'ing at startup.
+
+### Use it from the TUI
+
+`mecatui` is an external gRPC client. Obtain a token using your normal IdP
+login flow, then use `mecatui connect` and provide the token with
+`--auth-token` (or `MECATL_AUTH_TOKEN`). The TUI sends it as bearer metadata on
+every RPC; it does not obtain or refresh OIDC tokens for you.
+
+For a development port-forward, bearer traffic stays on loopback:
+
+```sh
+kubectl port-forward -n mecatl service/mecak8s-agent 8080:8080 &
+export MECATL_AUTH_TOKEN="$(your-oidc-cli print-access-token)"
+bin/mecatui connect 127.0.0.1:8080 --auth-token "$MECATL_AUTH_TOKEN" --workspace /tmp
+```
+
+`--workspace` identifies a directory on the **agent pod**, not the machine
+running the TUI. Use a path that exists in the pod; `/tmp` is appropriate for
+this connectivity check, but is not a shared developer checkout. For a remote
+endpoint, use TLS (`--tls`, and `--tls-ca` for a private CA): the TUI rejects a
+bearer on a non-loopback cleartext connection.
+
+After creating a session in the TUI, verify the saved owner through the HTTP
+API (port-forward `8081:8081` as well if needed):
+
+```sh
+curl -s http://127.0.0.1:8081/v1/sessions \
+  -H "Authorization: Bearer $MECATL_AUTH_TOKEN"
+```
+
+The returned session row contains the verified `owner`. This is a practical
+end-user path through the same gRPC authentication edge that the TUI uses; the
+kind e2e suite additionally exercises it against a real in-cluster Dex.
 
 ### Seeing who owns what
 

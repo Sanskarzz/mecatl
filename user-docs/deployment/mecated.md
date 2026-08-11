@@ -101,8 +101,8 @@ loopback-only server. Flags not covered here are advanced operator tuning; run
 | `--tls-cert` | `""` | PEM server certificate; enables TLS on both listeners when paired with `--tls-key` |
 | `--tls-key` | `""` | PEM server private key |
 | `--client-ca` | `""` | PEM client-CA bundle; enables mTLS (requires `--tls-cert`/`--tls-key`) |
-| `--rate-limit` | `0` (off) | Sustained per-client request rate in req/s |
-| `--rate-burst` | `0` (derived) | Token-bucket burst; zero derives a sane default from `--rate-limit` |
+| `--rate-limit` | `0` (off) | Sustained per-client request rate in req/s; with OIDC, also limits rejected bearer validation per direct transport peer IP |
+| `--rate-burst` | `0` (derived) | Token-bucket burst; zero derives a sane default from `--rate-limit`, including the OIDC rejected-token bucket |
 | `--oidc-issuer` | `""` (off) | OIDC issuer URL whose tokens identify callers; setting it turns caller identity on. See [Caller identity](#caller-identity-oidc) |
 | `--oidc-jwks-uri` | `""` (derived) | Static JWKS endpoint, short-circuiting OIDC discovery (air-gapped or pinned-key deployments) |
 | `--oidc-audience` | `""` | Audience (`aud`) this deployment accepts; **required** with `--oidc-issuer` |
@@ -130,6 +130,15 @@ last good JWKS can cover a brief IdP outage. `--oidc-max-jwks-staleness=1h` boun
 that fallback: once keys are older than the bound, a failed refresh returns **503
 Service Unavailable**. `0` is an explicit acceptance of unbounded cached-key
 availability and its signing-key revocation exposure.
+
+When OIDC and `--rate-limit` are both enabled, rejected bearer traffic has a
+separate pre-validation bucket keyed only by the **direct transport peer IP**.
+The server never trusts `Forwarded` or `X-Forwarded-For` for this decision. Once
+a peer exhausts the bucket, requests return HTTP **429** / gRPC
+`RESOURCE_EXHAUSTED` before another validator call. Valid tokens do not consume
+that bucket; they continue to the existing verified-principal limiter and are
+charged there once. A normally admitted bad token remains **401** / gRPC
+`UNAUTHENTICATED`, while an IdP outage remains **503** / gRPC `UNAVAILABLE`.
 
 This is a bound on **signing-key** revocation during an outage, not per-token
 revocation. An otherwise valid token remains acceptable until its normal expiry.

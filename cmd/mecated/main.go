@@ -1712,10 +1712,10 @@ func readAskReviewerPolicy(path string) (string, error) {
 // /debug/flightrecorder is not mounted.
 //
 // The harness API is protected by the server.Authenticator (bearer auth + rate
-// limiting, both off by default) and optionally by TLS / mutual TLS. The
-// liveness/readiness probes and the standard gRPC health service are mounted
-// OUTSIDE the auth/rate-limit layer so orchestrators can probe without
-// credentials.
+// limiting, both off by default) and optionally by TLS / mutual TLS. HTTP
+// liveness/readiness probes are mounted OUTSIDE the auth/rate-limit layer so
+// orchestrators can probe without credentials. The gRPC health service shares
+// the server-wide interceptors and therefore requires credentials when auth is on.
 func serve(ctx context.Context, cfg config, svc *server.Service, reg *prometheus.Registry, recorder *telemetry.FlightRecorder, slowTurns *telemetry.SlowTurnBuffer) error {
 	tlsCfg, auth, err := buildEdge(ctx, cfg)
 	if err != nil {
@@ -1873,6 +1873,9 @@ func buildEdge(ctx context.Context, cfg config) (*tls.Config, *server.Authentica
 	// Logged BEFORE construction so it appears even if the validator then fails
 	// to build.
 	warnInsecureIssuer(cfg.oidc)
+	if err := cliconfig.ValidateOIDCAuthToken(cfg.oidc, cfg.authToken); err != nil {
+		return nil, nil, err
+	}
 	validator, err := cliconfig.OIDCValidator(ctx, cfg.oidc)
 	if err != nil {
 		return nil, nil, err

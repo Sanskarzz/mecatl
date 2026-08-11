@@ -4304,7 +4304,7 @@ func listSessionsMeta(ctx context.Context, ml port.MetaLister) ([]SessionSummary
 			CreatedAtUnix:  r.CreatedAt.Unix(),
 			ModelID:        r.ModelID,
 			Title:          r.Title,
-			Owner:          r.Owner,
+			Owner:          r.Owner.Clone(),
 		}
 		// A zero CreatedAt (a snapshot with no created_at, or a corrupt row that
 		// left CreatedAt at the zero time) maps to 0, NOT the zero time's Unix

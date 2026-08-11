@@ -17,8 +17,10 @@ boundary to Kubernetes networking.
 - **Recommended in-pod control: enable `--auth-token`.** mecated supports
   `--auth-token` (bearer-token auth) as well as TLS and mTLS. Turning on
   `--auth-token` gives you a caller-identity check that travels with the pod,
-  independent of network topology. The `/healthz` and `/readyz` endpoints are
-  mounted **outside** the auth boundary, so probes keep working when auth is on.
+  independent of network topology. The HTTP `/healthz` and `/readyz` endpoints
+  are mounted **outside** the auth boundary so probes keep working; the gRPC
+  health service shares the API's auth interceptors and needs credentials when
+  auth is enabled.
 - A default-deny ingress **`NetworkPolicy`** ships in `networkpolicy.yaml`
   (wired into `kustomization.yaml`). It selects the mecated pod and allows no
   ingress until you add an explicit allow for your clients — defense-in-depth on
@@ -103,7 +105,9 @@ on **caller identity**: a real IdP authenticates each caller, and every session
 and schedule records the verified `(issuer, subject)` that owns it.
 
 ```sh
-kubectl apply -k deploy/mecak8s-oidc     # edit the three flag values first
+# Use a registry your target cluster can pull from; ko.local is not sufficient.
+export KO_DOCKER_REPO=registry.example/mecatl
+task deploy:apply ROOT=deploy/mecak8s-oidc     # edit the three flag values first
 ```
 
 It appends four flags to the agent — `--oidc-issuer`, `--oidc-audience`

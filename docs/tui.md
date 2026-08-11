@@ -69,10 +69,12 @@ The transport is exactly what the invocation says — there is no implicit probe
 or fallback:
 
 - **Bare `mecatui [flags]`** — always host an embedded `mecated` in-process over
-  a private UNIX socket; **never probe** loopback, **never dial**. All
-  embedded-server flags (`--mock`, `--trust-project`, provider knobs, …) apply,
-  and the remote-only flags (`--auth-token`, `--tls`, `--tls-ca`, `--insecure`)
-  are **rejected** here.
+  a private UNIX socket; **never probe** loopback, **never dial**. The socket
+  lives in a same-local-user private directory; it is a local trust boundary,
+  not a bearer/OIDC authentication surface. Its sessions are therefore
+  intentionally ownerless. All embedded-server flags (`--mock`,
+  `--trust-project`, provider knobs, …) apply, and the remote-only flags
+  (`--auth-token`, `--tls`, `--tls-ca`, `--insecure`) are **rejected** here.
 
 - **`mecatui connect ADDRESS [flags]`** — always dial a running `mecated` at
   `ADDRESS` (host:port); **never probe** loopback and **never embed** — the
@@ -83,8 +85,27 @@ or fallback:
   ```sh
   bin/mecated serve &                                 # listens on 127.0.0.1:8080
   bin/mecatui connect 127.0.0.1:8080 --workspace "$PWD"
-  bin/mecatui connect mecated.internal:443 --tls --auth-token $MECATL_AUTH_TOKEN
+  bin/mecatui connect mecated.internal:443 --tls --auth-token "$MECATL_AUTH_TOKEN"
   ```
+
+### OIDC-connected server
+
+For a `mecated` or `mecak8s` deployment with caller identity enabled, obtain an
+OIDC token from your identity provider and pass it to the **external** transport.
+`mecatui` sends it as per-RPC `authorization: Bearer …` metadata on every gRPC
+request; it does not run an OIDC browser flow or refresh the token itself.
+
+```sh
+# A local port-forward is loopback, so it is the one plaintext bearer exception.
+kubectl port-forward -n mecatl service/mecak8s-agent 8080:8080 &
+export MECATL_AUTH_TOKEN="$(your-oidc-cli print-access-token)"
+bin/mecatui connect 127.0.0.1:8080 --auth-token "$MECATL_AUTH_TOKEN" --workspace /tmp
+```
+
+For a non-loopback endpoint, `mecatui` refuses to send a bearer without `--tls`.
+Use `--tls-ca` when the deployment uses a private CA. The workspace is evaluated
+by the **server**, not the TUI host: `/tmp` above is a path inside the selected
+agent pod, not your local checkout. See the [mecak8s caller-identity guide](usage/mecak8s.md#multi-user-caller-identity-opt-in) for the attribution model and its non-tenancy limits.
 
 `ADDRESS` must immediately follow `connect`; a missing or flag-first `ADDRESS` is
 a usage error, with one carve-out: `mecatui connect --help` renders the connect

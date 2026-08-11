@@ -46,6 +46,9 @@ var (
 	// the token's validity is UNKNOWN. It is deliberately distinct from
 	// ErrInvalidToken — an IdP outage must not be reported as an authn failure.
 	ErrIdentityUnavailable = errors.New("identity provider unavailable")
+	// errRejectedRateLimit means the direct peer exhausted its separate
+	// pre-validation budget for rejected bearer credentials.
+	errRejectedRateLimit = errors.New("rejected bearer rate limit exceeded")
 )
 
 // SecurityConfig configures the reusable authentication and rate-limiting
@@ -123,6 +126,10 @@ type limiterSet struct {
 
 	mu      sync.Mutex
 	clients map[string]*clientLimiter
+	// overflow is used only by the rejected-token limiter after clients reaches
+	// maxTrackedClients and no idle entry can be evicted. New peers then share a
+	// bucket rather than growing the map without bound.
+	overflow *clientLimiter
 	// idleTTL evicts a client limiter that has not been seen for this long, so
 	// memory stays bounded under churning client identities (e.g. peer IPs).
 	idleTTL time.Duration
@@ -133,6 +140,10 @@ type limiterSet struct {
 type clientLimiter struct {
 	lim  *rate.Limiter
 	seen time.Time
+	// validationGate serializes rejected-bearer validation for one direct peer.
+	// It is a context-aware gate: a waiting request may leave when its caller
+	// cancels, without waiting for an in-flight validator call to finish.
+	validationGate chan struct{}
 }
 
 // maxTrackedClients caps the per-client map; once exceeded a sweep evicts idle
@@ -159,6 +170,18 @@ func newLimiterSet(rps float64, burst int) *limiterSet {
 	}
 }
 
+func newRejectedLimiterSet(rps float64, burst int) *limiterSet {
+	s := newLimiterSet(rps, burst)
+	s.overflow = newClientLimiter(s.r, s.burst)
+	return s
+}
+
+func newClientLimiter(r rate.Limit, burst int) *clientLimiter {
+	gate := make(chan struct{}, 1)
+	gate <- struct{}{}
+	return &clientLimiter{lim: rate.NewLimiter(r, burst), validationGate: gate}
+}
+
 // allow reports whether a request from client key may proceed: it must satisfy
 // both the per-client and the global limiter.
 func (s *limiterSet) allow(key string) bool {
@@ -170,22 +193,56 @@ func (s *limiterSet) allow(key string) bool {
 	return s.global.Allow()
 }
 
+// allowValidation runs validate only while key's rejected-token bucket has
+// budget. Successful validation and operational errors are not charged; an
+// invalid/admissibility rejection consumes one token. A peer is intentionally
+// serialized to protect the validator, but waiting requests can leave promptly
+// when ctx is canceled or reaches its deadline.
+func (s *limiterSet) allowValidation(ctx context.Context, key string, validate func() (*session.Principal, error), charge func(error) bool) (*session.Principal, bool, error) {
+	cl := s.clientLimiterEntry(key)
+	select {
+	case <-cl.validationGate:
+		defer func() { cl.validationGate <- struct{}{} }()
+	case <-ctx.Done():
+		return nil, true, ctx.Err()
+	}
+
+	now := s.now()
+	if cl.lim.TokensAt(now) < 1 {
+		return nil, false, nil
+	}
+	p, err := validate()
+	if charge(err) {
+		cl.lim.AllowN(s.now(), 1)
+	}
+	return p, true, err
+}
+
 // clientLimiter returns (creating if needed) the limiter for key, refreshing its
 // last-seen stamp and opportunistically evicting idle entries.
 func (s *limiterSet) clientLimiter(key string) *rate.Limiter {
+	return s.clientLimiterEntry(key).lim
+}
+
+func (s *limiterSet) clientLimiterEntry(key string) *clientLimiter {
 	now := s.now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if c, ok := s.clients[key]; ok {
 		c.seen = now
-		return c.lim
+		return c
 	}
 	if len(s.clients) >= maxTrackedClients {
 		s.evictIdleLocked(now)
+		if len(s.clients) >= maxTrackedClients && s.overflow != nil {
+			s.overflow.seen = now
+			return s.overflow
+		}
 	}
-	c := &clientLimiter{lim: rate.NewLimiter(s.r, s.burst), seen: now}
+	c := newClientLimiter(s.r, s.burst)
+	c.seen = now
 	s.clients[key] = c
-	return c.lim
+	return c
 }
 
 // evictIdleLocked removes clients not seen within idleTTL. The caller holds mu.
@@ -237,6 +294,10 @@ func clientKeyFromAddr(addr string) string {
 type Authenticator struct {
 	cfg      SecurityConfig
 	limiters *limiterSet
+	// rejectedLimiters protects the validator from repeated rejected bearers.
+	// It is separate from limiters so valid requests consume only their verified
+	// principal's post-validation bucket.
+	rejectedLimiters *limiterSet
 	// closeOnce guards the optional validator teardown so a defer plus an
 	// explicit shutdown call cannot double-close.
 	closeOnce sync.Once
@@ -269,21 +330,27 @@ func NewAuthenticator(cfg SecurityConfig) *Authenticator {
 	a := &Authenticator{cfg: cfg}
 	if cfg.rateEnabled() {
 		a.limiters = newLimiterSet(cfg.RateLimit, cfg.RateBurst)
+		if cfg.identityConfigured() {
+			a.rejectedLimiters = newRejectedLimiterSet(cfg.RateLimit, cfg.RateBurst)
+		}
 	}
 	return a
 }
 
-// tokenFromMetadata extracts the bearer token from incoming gRPC metadata.
-func tokenFromMetadata(ctx context.Context) (string, bool) {
+// tokenFromMetadata extracts the bearer token from incoming gRPC metadata. gRPC
+// permits repeated metadata keys, but authorization is singular: duplicates are
+// rejected rather than choosing an attacker-controlled first or last value.
+func tokenFromMetadata(ctx context.Context) (token string, present, duplicate bool) {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
-		return "", false
+		return "", false, false
 	}
 	vals := md.Get(authHeader)
-	if len(vals) == 0 {
-		return "", false
+	if len(vals) != 1 {
+		return "", false, len(vals) > 1
 	}
-	return bearerFromAuthValue(vals[0])
+	token, present = bearerFromAuthValue(vals[0])
+	return token, present, false
 }
 
 // identify runs the caller-identity step: when a verifier is wired the bearer is
@@ -291,23 +358,37 @@ func tokenFromMetadata(ctx context.Context) (string, bool) {
 // (nil, nil) — absent identity, never a fabricated caller. A missing bearer,
 // a rejected token, a nil-principal verdict and an UNUSABLE principal (see
 // admissiblePrincipal) are all ErrInvalidToken; an unreachable IdP surfaces as
-// ErrIdentityUnavailable. There is no fallback branch: a non-nil error means the
-// request stops here, before any rate-limit bucket is created for it.
-func (a *Authenticator) identify(ctx context.Context, bearer string, present bool) (*session.Principal, error) {
+// ErrIdentityUnavailable. With OIDC rate limiting enabled, a presented bearer
+// first passes the direct-peer rejected-token budget; invalid/admissibility
+// rejections consume that separate budget, while successful validation and
+// operational validator errors do not.
+func (a *Authenticator) identify(ctx context.Context, bearer string, present bool, peerKey string) (*session.Principal, error) {
 	if !a.cfg.identityConfigured() {
 		return nil, nil
 	}
 	if !present {
 		return nil, ErrInvalidToken
 	}
-	p, err := a.cfg.Validator.Validate(ctx, bearer)
-	if err != nil {
-		return nil, err
+	validate := func() (*session.Principal, error) {
+		p, err := a.cfg.Validator.Validate(ctx, bearer)
+		if err != nil {
+			return nil, err
+		}
+		if !admissiblePrincipal(p) {
+			return nil, ErrInvalidToken
+		}
+		return p, nil
 	}
-	if !admissiblePrincipal(p) {
-		return nil, ErrInvalidToken
+	if a.rejectedLimiters == nil {
+		return validate()
 	}
-	return p, nil
+	p, allowed, err := a.rejectedLimiters.allowValidation(ctx, peerKey, validate, func(err error) bool {
+		return errors.Is(err, ErrInvalidToken)
+	})
+	if !allowed {
+		return nil, errRejectedRateLimit
+	}
+	return p, err
 }
 
 // admissiblePrincipal reports whether a validator's verdict is a principal the
@@ -338,9 +419,20 @@ func admissiblePrincipal(p *session.Principal) bool {
 	return true
 }
 
-// identityStatus maps an identify error onto a gRPC status: a transient IdP
-// outage is Unavailable (503-class), everything else Unauthenticated.
+// identityStatus maps an identify error onto a gRPC status: context cancellation
+// and deadlines retain their native statuses, rejected-token throttling is
+// ResourceExhausted, a transient IdP outage is Unavailable (503-class), and
+// every other rejection is Unauthenticated.
 func identityStatus(err error) error {
+	if errors.Is(err, context.Canceled) {
+		return status.Error(codes.Canceled, context.Canceled.Error())
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return status.Error(codes.DeadlineExceeded, context.DeadlineExceeded.Error())
+	}
+	if errors.Is(err, errRejectedRateLimit) {
+		return status.Error(codes.ResourceExhausted, "rate limit exceeded")
+	}
 	if errors.Is(err, ErrIdentityUnavailable) {
 		return status.Error(codes.Unavailable, "identity provider unavailable")
 	}
@@ -351,7 +443,10 @@ func identityStatus(err error) error {
 // identity (when a verifier is wired), returning the token presented (empty when
 // static auth is off) and the verified principal (nil when identity is off).
 func (a *Authenticator) authGRPC(ctx context.Context) (string, *session.Principal, error) {
-	bearer, present := tokenFromMetadata(ctx)
+	bearer, present, duplicate := tokenFromMetadata(ctx)
+	if duplicate {
+		return "", nil, status.Error(codes.Unauthenticated, "duplicate authorization metadata")
+	}
 	staticTok := ""
 	if a.cfg.authEnabled() {
 		if !present || !constantTimeTokenMatch(bearer, a.cfg.AuthToken) {
@@ -359,7 +454,11 @@ func (a *Authenticator) authGRPC(ctx context.Context) (string, *session.Principa
 		}
 		staticTok = bearer
 	}
-	p, err := a.identify(ctx, bearer, present)
+	peerKey := clientKeyFromAddr("")
+	if pr, ok := peer.FromContext(ctx); ok && pr.Addr != nil {
+		peerKey = clientKeyFromAddr(pr.Addr.String())
+	}
+	p, err := a.identify(ctx, bearer, present, peerKey)
 	if err != nil {
 		return "", nil, identityStatus(err)
 	}
@@ -454,8 +553,22 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 			}
 			token = bearer
 		}
-		principal, err := a.identify(r.Context(), bearer, present)
+		principal, err := a.identify(r.Context(), bearer, present, clientKeyFromAddr(r.RemoteAddr))
 		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				// HTTP has no standard cancellation status. Use 408 without an auth
+				// challenge: this is the caller ending its request, not bad credentials.
+				writeError(w, http.StatusRequestTimeout, "request canceled")
+				return
+			}
+			if errors.Is(err, context.DeadlineExceeded) {
+				writeError(w, http.StatusRequestTimeout, "request deadline exceeded")
+				return
+			}
+			if errors.Is(err, errRejectedRateLimit) {
+				writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
+				return
+			}
 			if errors.Is(err, ErrIdentityUnavailable) {
 				// A transient IdP outage: the token's validity is UNKNOWN, so
 				// this is a 503 with no auth challenge — never a 401.

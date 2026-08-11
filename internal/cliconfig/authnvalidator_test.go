@@ -15,10 +15,26 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/stacklok/toolhive-core/authn"
 
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/internal/adapter/server"
 )
+
+func TestErrToSentinelPreservesUnavailableAndContext(t *testing.T) {
+	unavailable := errToSentinel(&authn.Error{Code: authn.CodeUnavailable})
+	if !errors.Is(unavailable, server.ErrIdentityUnavailable) {
+		t.Fatalf("CodeUnavailable = %v, want ErrIdentityUnavailable", unavailable)
+	}
+	for _, want := range []error{context.Canceled, context.DeadlineExceeded} {
+		if got := errToSentinel(want); !errors.Is(got, want) {
+			t.Fatalf("errToSentinel(%v) = %v, want original context error", want, got)
+		}
+		if errors.Is(errToSentinel(want), server.ErrInvalidToken) {
+			t.Fatalf("errToSentinel(%v) wrapped ErrInvalidToken", want)
+		}
+	}
+}
 
 // --- the static-JWKS fixture -------------------------------------------------
 

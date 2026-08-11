@@ -72,6 +72,11 @@ func TestCallerIdentity_Scenario2_InternalGoroutinesRunAsSystem(t *testing.T) {
 			paths: []string{"store.Due", "fire", "delivery", "reconcile"},
 			run:   startProbedScheduler,
 		},
+		syscaller.RootModelCatalogRefresh: {paths: []string{"lister.ListModels"}, run: func(_ context.Context, _ *testing.T, seen observe) {
+			app.ObserveStartupModelRefreshForTest(func(ctx context.Context) {
+				seen(ctx, "lister.ListModels")
+			})
+		}},
 		syscaller.RootJWKSRefresh: {paths: []string{"validator.New"}, run: func(ctx context.Context, t *testing.T, seen observe) {
 			// The validator owns background key rotation, so the ctx it is
 			// CONSTRUCTED with is the refresh goroutine's root.

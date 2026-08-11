@@ -595,7 +595,12 @@ before deciding and an unavailable refresh maps to **503**, not 401. `0` is the
 explicit unbounded-availability escape hatch; negative durations are rejected.
 The JWKS cache is process-local and never persisted, so restart re-fetches current
 keys. This bounds signing-key revocation exposure during an outage; it does not
-provide per-token revocation before token expiry. With no validator wired the
+provide per-token revocation before token expiry. When OIDC and `--rate-limit`
+are both enabled, a separate pre-validation bucket limits rejected bearers by
+**direct transport peer IP** before another validator call. Forwarding headers
+are deliberately ignored. A successful validation does not consume that bucket;
+the existing post-validation limiter still charges the verified `(Issuer,
+Subject)` exactly once. With no validator wired the
 whole path is byte-identical to a mecatl without identity. Caller identity is
 deliberately independent of the static
 `--auth-token`: `SecurityConfig.identityConfigured()` gates neither on nor off

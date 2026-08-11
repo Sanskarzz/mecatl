@@ -2,8 +2,8 @@
 // on the root context of every internal goroutine that has no caller.
 //
 // Internal work — the session GC, the two dream consolidators, the scheduler's
-// tick/fire/delivery/reconcile loops, the token validator's background JWKS
-// refresh — crosses port boundaries with nobody to attribute it to. It runs as
+// tick/fire/delivery/reconcile loops, the startup model-catalog refresh, and the
+// token validator's background JWKS refresh — crosses port boundaries with nobody to attribute it to. It runs as
 // an explicit `system` principal rather than an ABSENT one, so the day an
 // enforcement check lands (the isolation track, #368) these callers neither
 // break silently nor get mistaken for an anonymous user.
@@ -40,6 +40,9 @@ const (
 	// RootScheduler is the scheduler's lifecycle root: every tick, fire,
 	// delivery and reconcile context descends from Scheduler.Start's ctx.
 	RootScheduler Root = "scheduler"
+	// RootModelCatalogRefresh is the one-shot startup live-model refresh. It does
+	// not cover request-driven stale-model refreshes, which retain their caller.
+	RootModelCatalogRefresh Root = "model-catalog-refresh"
 	// RootJWKSRefresh is the token validator's background JWKS refresh, which
 	// owns the server-root context handed to the validator constructor.
 	RootJWKSRefresh Root = "jwks-refresh"
@@ -56,6 +59,7 @@ var Roots = []Root{
 	RootMemoryConsolidation,
 	RootUserModelConsolidation,
 	RootScheduler,
+	RootModelCatalogRefresh,
 	RootJWKSRefresh,
 }
 

@@ -124,6 +124,16 @@ func RegisterOIDCFlags(fs *flag.FlagSet, c *OIDCConfig) {
 // be wired. It is fatal at startup by design.
 var ErrOIDCMisconfigured = errors.New("oidc: misconfigured")
 
+// ValidateOIDCAuthToken rejects two incompatible edge-authentication modes. An
+// opaque static bearer cannot also be the OIDC JWT that caller identity validates.
+// Keeping this in shared config makes mecated and mecak8s fail identically.
+func ValidateOIDCAuthToken(c OIDCConfig, authToken string) error {
+	if c.Enabled() && authToken != "" {
+		return fmt.Errorf("%w: --auth-token and --oidc-issuer are mutually exclusive", ErrOIDCMisconfigured)
+	}
+	return nil
+}
+
 // OIDCValidator resolves c into a token validator, or (nil, nil) when caller
 // identity is off (the unchanged path).
 //

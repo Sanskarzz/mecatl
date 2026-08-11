@@ -50,25 +50,10 @@ func serve(ctx context.Context, cfg config, svc *server.Service, obs observabili
 		return err
 	}
 
-	// The validator owns background JWKS refresh, so it is constructed with the
-	// SERVER-ROOT ctx. A misconfigured OIDC setup is FATAL: the pod refuses to
-	// start rather than silently serving unauthenticated (ADR 0100).
-	// Logged BEFORE construction so it appears even if the validator then fails
-	// to build.
-	warnInsecureIssuer(cfg.oidc)
-	validator, err := cliconfig.OIDCValidator(ctx, cfg.oidc)
+	auth, err := newAuthenticator(ctx, cfg)
 	if err != nil {
 		return err
 	}
-	auth := server.NewAuthenticator(server.SecurityConfig{
-		AuthToken: cfg.authToken,
-		Validator: validator,
-		// No rate limiting on a pod: it is fronted by the Service/mesh, not a
-		// raw public port. RateBurst 0 leaves the authenticator's rate limiter
-		// disabled.
-	})
-	// The validator owns a background JWKS refresh that only its own Close()
-	// stops — cancelling ctx does not. No-op when identity is off.
 	defer auth.Close()
 
 	// --- gRPC: auth interceptors, standard health service ---
@@ -201,6 +186,29 @@ func serve(ctx context.Context, cfg config, svc *server.Service, obs observabili
 
 	boundedShutdown(grpcSrv, httpSrv, metricsSrv, svc)
 	return nil
+}
+
+// newAuthenticator constructs the caller-identity boundary with the server-root
+// context so its JWKS refresh survives individual requests. A broken OIDC setup
+// is fatal: the pod must not silently serve unauthenticated traffic.
+func newAuthenticator(ctx context.Context, cfg config) (*server.Authenticator, error) {
+	// Log before construction so an insecure test-only relaxation is visible even
+	// when validator construction then fails.
+	warnInsecureIssuer(cfg.oidc)
+	if err := cliconfig.ValidateOIDCAuthToken(cfg.oidc, cfg.authToken); err != nil {
+		return nil, err
+	}
+	validator, err := cliconfig.OIDCValidator(ctx, cfg.oidc)
+	if err != nil {
+		return nil, err
+	}
+	return server.NewAuthenticator(server.SecurityConfig{
+		AuthToken: cfg.authToken,
+		Validator: validator,
+		// No rate limiting on a pod: it is fronted by the Service/mesh, not a
+		// raw public port. RateBurst 0 leaves the authenticator's rate limiter
+		// disabled.
+	}), nil
 }
 
 // boundedShutdown is the ADR-0048-§4d shutdown sequence:

@@ -491,6 +491,40 @@ func TestListSessionsRowOwnerIsNotAliased(t *testing.T) {
 	}
 }
 
+type stableOwnerMetaStore struct {
+	owner *session.Principal
+}
+
+func (*stableOwnerMetaStore) Save(context.Context, *session.Session) error { return nil }
+func (*stableOwnerMetaStore) Load(context.Context, session.SessionID) (*session.Session, error) {
+	return nil, port.ErrSessionNotFound
+}
+func (s *stableOwnerMetaStore) MetaList(context.Context) ([]port.SessionMeta, error) {
+	return []port.SessionMeta{{ID: "meta-session", Owner: s.owner}}, nil
+}
+
+func TestMetaListerRowOwnerIsNotAliased(t *testing.T) {
+	stable := &session.Principal{Issuer: alice.Issuer, Subject: alice.Subject, GrantType: alice.GrantType, Name: alice.Name}
+	store := &stableOwnerMetaStore{owner: stable}
+	svc := newServiceWithStore(t, store)
+
+	rows, err := svc.ListSessions(context.Background())
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	row := rowFor(t, rows, "meta-session")
+	if row.Owner == nil {
+		t.Fatal("row owner is nil; the fixture did not exercise the MetaLister path")
+	}
+	if row.Owner == stable {
+		t.Fatal("row owner aliases the MetaLister's stable owner pointer")
+	}
+	row.Owner.Subject = "attacker"
+	if got := ownerOf(stable); got != *alice {
+		t.Fatalf("mutating the list row rewrote the MetaLister owner: got %+v, want %+v", got, *alice)
+	}
+}
+
 // newServiceWithEngineOverStore is newServiceWithStore with a scripted LLM, so a
 // test can drive a real run through the run-entry funnel over a caller-supplied
 // store.

@@ -37,6 +37,7 @@ on:
       - internal/adapter/server/grpc.go
       - internal/adapter/server/http.go
       - deploy/mecak8s/**
+      - deploy/mecak8s-oidc/**
       - e2e/k8s/**
       - go.mod
       - go.sum
@@ -54,6 +55,7 @@ on:
       - internal/adapter/server/grpc.go
       - internal/adapter/server/http.go
       - deploy/mecak8s/**
+      - deploy/mecak8s-oidc/**
       - e2e/k8s/**
       - go.mod
       - go.sum
@@ -102,6 +104,17 @@ jobs:
         with:
           version: 3.x
           repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Validate the published base and OIDC overlay before the runtime suite. The
+      # Dex fixture adds its test-only private-issuer relaxation imperatively, so
+      # it cannot prove the operator-facing overlay remains safe or well-formed.
+      - name: Install deploy manifest validators
+        run: |
+          go install sigs.k8s.io/kustomize/kustomize/v5@v5.7.1
+          go install github.com/yannh/kubeconform/cmd/kubeconform@v0.7.0
+
+      - name: task deploy:check
+        run: task deploy:check
 
       # kind: pinned version, installed via `go install` (no third-party action —
       # the house idiom for go-installable tools, matching actionlint/govulncheck

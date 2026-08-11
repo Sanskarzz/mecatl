@@ -22,6 +22,12 @@ import (
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
+	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 // --- bearer-carrying HTTP helpers --------------------------------------------
@@ -328,6 +334,41 @@ var _ = ginkgo.Describe("caller identity, from the caller's and operator's view"
 			st, _ = createSessionAs(ctx, addr, "")
 			gomega.Expect(st).To(gomega.Equal(http.StatusUnauthorized),
 				"an unauthenticated request was accepted while identity is on")
+		})
+
+		// Story 5a — the same real-Dex credentials work through the gRPC edge used by
+		// remote mecatui clients. The mock provider makes CreateSession sufficient: it
+		// proves metadata extraction, interceptor validation, and principal admission
+		// without requiring a live LLM turn.
+		ginkgo.It("authenticates gRPC requests with Dex bearer metadata", func() {
+			addr, stop := portForwardGRPC(agentPods[0])
+			defer stop()
+
+			conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+			gomega.Expect(err).NotTo(gomega.HaveOccurred(), "dial gRPC port-forward")
+			defer func() { _ = conn.Close() }()
+			client := mecatlv1.NewHarnessServiceClient(conn)
+
+			request := func(ctx context.Context) error {
+				_, err := client.CreateSession(ctx, &mecatlv1.CreateSessionRequest{Workspace: "/tmp"})
+				return err
+			}
+			ctx, cancel := shortCtx(30 * time.Second)
+			defer cancel()
+			authCtx := metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+alice)
+			gomega.Expect(request(authCtx)).To(gomega.Succeed(),
+				"a real Dex token was refused by the gRPC interceptor")
+
+			missingCtx, missingCancel := shortCtx(30 * time.Second)
+			defer missingCancel()
+			gomega.Expect(status.Code(request(missingCtx))).To(gomega.Equal(codes.Unauthenticated),
+				"gRPC accepted a request without a bearer while identity is on")
+
+			forgedCtx, forgedCancel := shortCtx(30 * time.Second)
+			defer forgedCancel()
+			forgedCtx = metadata.AppendToOutgoingContext(forgedCtx, "authorization", "Bearer "+dex.forgedToken(forgedCtx, "alice-impostor"))
+			gomega.Expect(status.Code(request(forgedCtx))).To(gomega.Equal(codes.Unauthenticated),
+				"gRPC accepted a token signed by an unpublished key")
 		})
 	})
 
