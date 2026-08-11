@@ -417,8 +417,8 @@ The four OIDC flags are identical on `mecak8s`. Two things to be clear about
   records gain an owner; **nothing is refused** on identity grounds. Any
   authenticated caller can still act on any session. Per-caller access control is
   separate, later work — do not deploy these as a tenancy boundary.
-- **Validator and revocation boundary.** The production validator is
-  `toolhive-core/authn` v0.0.39. Its last-good JWKS cache tolerates short IdP
+- **Validator and revocation boundary.** The production validator is a
+  delegated, actively-maintained OIDC/JWT library. Its last-good JWKS cache tolerates short IdP
   outages, but the default one-hour staleness bound fails closed with **503** if
   a refresh still cannot obtain current keys. A malformed, expired, wrong-issuer,
   or wrong-audience token is **401**. When OIDC and rate limiting are both on,

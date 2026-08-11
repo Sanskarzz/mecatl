@@ -293,7 +293,8 @@ deploying it as one would be a mistake. Per-caller access control is later work.
 
 ### Validator and bounded signing-key cache
 
-The production validator is `toolhive-core/authn` **v0.0.39**. A bad OIDC
+The production OIDC/JWT validator is a delegated, actively-maintained library —
+mecatl never hand-rolls token verification. A bad OIDC
 configuration, including an unreachable initial key fetch, fails closed at startup
 rather than serving unauthenticated traffic. After a successful fetch, the last
 good JWKS can cover a short IdP outage. The overlay explicitly sets

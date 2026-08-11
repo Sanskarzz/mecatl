@@ -105,7 +105,7 @@ bin/mecatui connect 127.0.0.1:8080 --auth-token "$MECATL_AUTH_TOKEN" --workspace
 For a non-loopback endpoint, `mecatui` refuses to send a bearer without `--tls`.
 Use `--tls-ca` when the deployment uses a private CA. The workspace is evaluated
 by the **server**, not the TUI host: `/tmp` above is a path inside the selected
-agent pod, not your local checkout. See the [mecak8s caller-identity guide](usage/mecak8s.md#multi-user-caller-identity-opt-in) for the attribution model and its non-tenancy limits.
+agent pod, not your local checkout. See [Security & transport](usage/mecated.md#security--transport-auth-tls-rate-limiting) for the attribution model and its non-tenancy limits.
 
 `ADDRESS` must immediately follow `connect`; a missing or flag-first `ADDRESS` is
 a usage error, with one carve-out: `mecatui connect --help` renders the connect

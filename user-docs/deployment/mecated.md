@@ -123,7 +123,8 @@ identity grounds. Any authenticated caller can still list and act on any
 session — per-caller access control is a separate, later piece of work. Do not
 deploy these flags as a tenancy boundary.
 
-The production validator is `toolhive-core/authn` **v0.0.39**. A bad OIDC
+The production OIDC/JWT validator is a delegated, actively-maintained library —
+mecatl never hand-rolls token verification. A bad OIDC
 configuration, including an unreachable initial key fetch, fails closed at startup
 rather than falling back to unauthenticated traffic. After a successful fetch, the
 last good JWKS can cover a brief IdP outage. `--oidc-max-jwks-staleness=1h` bounds
