@@ -7,7 +7,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/stacklok/mecatl/internal/app"
 	"github.com/stacklok/mecatl/internal/cliconfig"
@@ -114,12 +117,17 @@ type config struct {
 	// #262), applied onto app.Config alongside providerFlags when the
 	// embedded server is built.
 	toolhiveLLMFlags *cliconfig.ToolhiveLLMFlags
-	openAIKey        string
-	openRouterKey    string
-	anthropicKey     string
-	openCodeKey      string
-	mock             bool
-	noBash           bool
+	// providerKeys is resolved once at parse time. Keeping the result on the config
+	// lets startup validation see auth.yaml without reading it again when the
+	// embedded server is assembled.
+	providerKeys         cliconfig.ResolvedKeys
+	providerKeysResolved bool
+	openAIKey            string
+	openRouterKey        string
+	anthropicKey         string
+	openCodeKey          string
+	mock                 bool
+	noBash               bool
 
 	// Embedded-server LLM resilience timeouts (used only when hosting an
 	// in-process server; ignored under `mecatui connect`). They mirror
@@ -472,11 +480,18 @@ func finalizeParsedConfig(fs *flag.FlagSet, cfg *config) error {
 			cfg.terminalTitleOff = true
 		}
 	}
-	// Provider credentials from the environment, via the shared cliconfig reader (one
-	// definition of the env-var names across the mains). Used by the no-provider guard
-	// below and wired onto app.Config (with the base URLs) by providerFlags.Apply in
-	// main.go.
-	keys := cliconfig.ReadProviderKeys()
+	// Provider credentials are not needed for connect or --list-themes. Avoiding
+	// Resolve there also avoids touching the conventional auth file on paths that
+	// cannot host an embedded provider. Embedded runs retain one resolution result.
+	var keys cliconfig.ResolvedKeys
+	if cfg.transportMode != modeConnect && !cfg.listThemes {
+		keys = cfg.providerFlags.Resolve()
+		if warning := conventionalAuthFileWarning(*cfg, keys); warning != "" {
+			keys.AuthFileWarning = warning
+		}
+	}
+	cfg.providerKeys = keys
+	cfg.providerKeysResolved = true
 	cfg.openAIKey = keys.OpenAI
 	cfg.openRouterKey = keys.OpenRouter
 	cfg.anthropicKey = keys.Anthropic
@@ -490,6 +505,42 @@ func finalizeParsedConfig(fs *flag.FlagSet, cfg *config) error {
 		cfg.workspace = ws
 	}
 	return nil
+}
+
+// conventionalAuthFileWarning is deliberately a mecatui policy, not part of the
+// shared credential resolver. Other command mains must not turn an ordinary absent
+// conventional file into a warning, and mecatui must not warn when another usable
+// startup path (mock or ToolHive) exists.
+func conventionalAuthFileWarning(c config, keys cliconfig.ResolvedKeys) string {
+	if !c.mayEmbed() || c.listThemes || c.mock || keys.Any() {
+		return ""
+	}
+	var probe app.Config
+	c.toolhiveLLMFlags.Apply(&probe)
+	if app.ToolhiveAvailable(probe) {
+		return ""
+	}
+	path, explicit := c.providerFlags.AuthFilePath()
+	if explicit || path == "" {
+		return ""
+	}
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return fmt.Sprintf("auth file %s: file not found and no provider credentials were resolved", path)
+	}
+	return ""
+}
+
+// wrapAuthFileWarning keeps startup diagnostics readable without changing the
+// value-free warning returned by the auth-file adapter. The rendered prefix and
+// continuation indentation are included in the width budget.
+func wrapAuthFileWarning(warning string) string {
+	const wrapWidth = 80
+	wrapped := ansi.Wrap(warning, wrapWidth, "")
+	lines := strings.Split(wrapped, "\n")
+	for i := 1; i < len(lines); i++ {
+		lines[i] = "  " + lines[i]
+	}
+	return strings.Join(lines, "\n")
 }
 
 // transportUsage returns the fs.Usage closure for the resolved transport mode:
@@ -557,7 +608,8 @@ func (c config) validate() error {
 		if !app.ToolhiveAvailable(probe) {
 			return errors.New("no LLM provider configured — mecatui has nothing to talk to: " +
 				"to host an embedded server set one of ANTHROPIC_API_KEY (Claude), OPENAI_API_KEY, " +
-				"OPENROUTER_API_KEY (one key, many models — a good first choice), or OPENCODE_API_KEY (OpenCode Go); " +
+				"OPENROUTER_API_KEY (one key, many models — a good first choice), or OPENCODE_API_KEY (OpenCode Go) " +
+				"— or put the matching providers.<name>.api_key in ~/.config/mecatl/auth.yaml; " +
 				"for a compatible/proxy endpoint add " +
 				"--openai-base-url / --anthropic-base-url / --openrouter-base-url / --opencode-base-url with the matching key; " +
 				"for a ToolHive LLM gateway proxy make sure it is running (or pass --toolhive-llm-base-url); " +
