@@ -34,8 +34,11 @@ var staleSessionSweepInterval = 5 * time.Minute
 //
 // Unconditional at wiring time: unlike startChildGC there is no operator-facing
 // policy to disable, and the candidate enumeration (svc.ListSessions) already
-// degrades to an empty slice for a store that can't list — a no-op sweep, not
-// a posture worth narrating. Each PASS can still no-op via
+// degrades to an empty slice, nil error, for a store that legitimately can't
+// list — a silent no-op sweep, not a posture worth narrating. A GENUINE list
+// failure (a real store error, not the degrade) is a different condition and
+// gets its own WARN so an operator isn't left with zero diagnostic trail (see
+// sweepStaleSessions). Each PASS can still no-op via
 // svc.LeaseSweepDisabled() (see sweepStaleSessions) once SessionStale has
 // stickily disabled the sweep for a lease backend that doesn't support
 // leasing — that is a backend-capability fact, not an operator toggle. One
@@ -84,11 +87,14 @@ func startStaleSessionReconcile(cfg Config, svc *server.Service) func() {
 // signal) is exactly what makes that safe for ids IsLive can never see live
 // (a mid-run child, invisible to the top-level run registry).
 //
-// Best-effort throughout: ListSessions failing/degrading is silently a
-// no-op sweep (matching its own degrade-to-empty contract for an
-// unsupported store); a SettleIfStale failure is tallied into one WARN for
-// the whole pass and never aborts the rest of the candidates. Stays quiet on
-// an all-clean sweep, matching childgc's posture.
+// Best-effort throughout: ListSessions degrading to an empty slice with a nil
+// error (an unsupported store) is silently a no-op sweep, matching its own
+// degrade-to-empty contract; a GENUINE ListSessions error gets its own WARN
+// (distinct from the degrade case — an operator needs to see when the sweep
+// couldn't even attempt its job) and the pass aborts. A SettleIfStale failure
+// is tallied into one WARN for the whole pass and never aborts the rest of
+// the candidates. Stays quiet on an all-clean sweep, matching childgc's
+// posture.
 func sweepStaleSessions(ctx context.Context, svc *server.Service, diag port.Diagnostics) {
 	if svc.LeaseSweepDisabled() {
 		// SessionStale already logged the sticky-disable transition once; stay
@@ -96,11 +102,15 @@ func sweepStaleSessions(ctx context.Context, svc *server.Service, diag port.Diag
 		return
 	}
 	rows, err := svc.ListSessions(ctx)
-	if err != nil || len(rows) == 0 {
+	if err != nil {
+		diag.Log(ctx, port.LevelWarn, "stale-session sweep: list failed; skipping sweep", "err", err.Error())
+		return
+	}
+	if len(rows) == 0 {
 		return
 	}
 	var settled, failed int
-	var firstErr error
+	var firstErr string
 	for _, row := range rows {
 		if row.State != string(session.StateRunning) {
 			continue // StateAwaiting and everything else is never a candidate.
@@ -120,8 +130,8 @@ func sweepStaleSessions(ctx context.Context, svc *server.Service, diag port.Diag
 		ok, settleErr := svc.SettleIfStale(ctx, id)
 		if settleErr != nil {
 			failed++
-			if firstErr == nil {
-				firstErr = settleErr
+			if firstErr == "" {
+				firstErr = settleErr.Error()
 			}
 			continue
 		}

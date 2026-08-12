@@ -46,24 +46,10 @@ func TestStartRunContentAbandonsStaleRunningSession(t *testing.T) {
 	// (see TestStartRunContentRejectsDelegationChildSessionID), so a crash-
 	// orphaned TOP-LEVEL session is what this repair path actually needs to
 	// handle here.
-	const id session.SessionID = "crash-orphan-475"
-	sess := session.New(id, session.ModeDefault, "/ws", session.Limits{}, time.Unix(0, 0))
-	if err := sess.RecordUserPrompt("do the thing", nil); err != nil {
-		t.Fatalf("RecordUserPrompt: %v", err)
-	}
-	if err := sess.BeginTurn(); err != nil {
-		t.Fatalf("BeginTurn: %v", err)
-	}
-	call := session.NewToolCall("call-a", "Grep", nil)
-	if err := sess.RecordAssistant(session.NewAssistantMessage("", "", []session.ToolCall{call})); err != nil {
-		t.Fatalf("RecordAssistant: %v", err)
-	}
-	// Leave the session StateRunning with a dangling tool_use — the confirmed
+	// crashOrphanedSession (settle_test.go) builds the exact StateRunning
 	// crash-orphan shape (issue #475): no Cancel, no Fail observed it.
-	if sess.State != session.StateRunning {
-		t.Fatalf("precondition: state = %q, want running", sess.State)
-	}
-	if err := store.Save(context.Background(), sess); err != nil {
+	const id session.SessionID = "crash-orphan-475"
+	if err := store.Save(context.Background(), crashOrphanedSession(t, id)); err != nil {
 		t.Fatalf("seed Save: %v", err)
 	}
 
@@ -262,8 +248,15 @@ func TestStartRunContentLeavesLiveRunningSessionAlone(t *testing.T) {
 // lease/lock, before the StateRunning repair branch can even be reached. This
 // test seeds a subagent-family session in the exact StateRunning
 // crash-orphan shape the repair above targets and proves it is rejected
-// outright, with ZERO extra Store.Save (the repair's Abandon+Save path is
-// never entered — the guard fires before any store I/O).
+// outright, with ZERO extra Store.Save — wired through the SAME countingStore
+// TestStartRunContentLeavesLiveRunningSessionAlone uses, so the "no store
+// write occurred" claim is actually counted rather than merely inferred from
+// the reloaded state (the reloaded-state check alone only proves no state
+// change was PERSISTED as running→idle, not that Save was never called at
+// all — e.g. a would-be no-op re-Save of the identical snapshot would pass it
+// silently). The load-bearing assertion remains errors.Is(err,
+// ErrInvalidArgument): without the guard, err would be nil and the test would
+// fail there regardless of the save count.
 func TestStartRunContentRejectsDelegationChildSessionID(t *testing.T) {
 	for _, id := range []session.SessionID{
 		"subagent-crash-orphan-475",
@@ -271,27 +264,36 @@ func TestStartRunContentRejectsDelegationChildSessionID(t *testing.T) {
 		"team-abc123-worker",
 	} {
 		t.Run(string(id), func(t *testing.T) {
+			cs := &countingStore{inner: memstore.New()}
 			llm := mockllm.New(mockllm.TextTurn("should never run"))
-			svc, store := newServiceWithEngine(t, llm, tool.NewCatalog())
+			engine := agent.NewEngine(agent.Deps{
+				LLM:     llm,
+				Catalog: tool.NewCatalog(),
+				Policy:  permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil),
+				Model:   "test-model",
+				Store:   cs,
+			})
+			svc, err := server.NewService(server.Config{
+				Engine:     engine,
+				Store:      cs,
+				Workspaces: func(root string) tool.Workspace { return memfs.NewWorkspace(root) },
+				Now:        func() time.Time { return time.Unix(0, 0) },
+			})
+			if err != nil {
+				t.Fatalf("new service: %v", err)
+			}
 
-			sess := session.New(id, session.ModeDefault, "/ws", session.Limits{}, time.Unix(0, 0))
-			if err := sess.RecordUserPrompt("do the thing", nil); err != nil {
-				t.Fatalf("RecordUserPrompt: %v", err)
-			}
-			if err := sess.BeginTurn(); err != nil {
-				t.Fatalf("BeginTurn: %v", err)
-			}
-			call := session.NewToolCall("call-a", "Grep", nil)
-			if err := sess.RecordAssistant(session.NewAssistantMessage("", "", []session.ToolCall{call})); err != nil {
-				t.Fatalf("RecordAssistant: %v", err)
-			}
-			if err := store.Save(context.Background(), sess); err != nil {
+			if err := cs.Save(context.Background(), crashOrphanedSession(t, id)); err != nil {
 				t.Fatalf("seed Save: %v", err)
 			}
+			savesBeforeCall := cs.saveCount()
 
-			_, err := svc.StartRunContent(context.Background(), id, "hijack this child session", nil)
+			_, err = svc.StartRunContent(context.Background(), id, "hijack this child session", nil)
 			if !errors.Is(err, server.ErrInvalidArgument) {
 				t.Fatalf("StartRunContent(%q) = %v, want ErrInvalidArgument", id, err)
+			}
+			if got := cs.saveCount(); got != savesBeforeCall {
+				t.Fatalf("Store.Save called %d times by the rejected call, want %d (no extra write)", got, savesBeforeCall)
 			}
 
 			reloaded, err := svc.GetSession(context.Background(), id)

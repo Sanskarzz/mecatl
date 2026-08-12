@@ -2932,9 +2932,10 @@ func (s *Service) LookupRun(id session.SessionID) (*agent.Run, bool) {
 // protected from the sweep by age horizon + snapshot freshness instead: they
 // persist at their terminal AND a resumed child re-persists at resume start,
 // so an in-flight child's snapshot is always fresh (see the invariant note in
-// internal/app/childgc.go). The predicate still genuinely protects an
-// API-CLIENT-driven session that happens to carry a child prefix — StartRun
-// on such an id registers it here like any other.
+// internal/app/childgc.go). A client-driven id carrying a delegation-child
+// prefix (subagent-*/parallel-*/team-*) can no longer register here at all —
+// StartRunContent's isDelegationChildSessionID guard rejects it with
+// ErrInvalidArgument before it ever reaches this registry.
 func (s *Service) IsLive(id session.SessionID) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -3959,7 +3960,7 @@ func (s *Service) LeaseSweepDisabled() bool {
 func (s *Service) SettleIfStale(ctx context.Context, id session.SessionID) (bool, error) {
 	sess, err := s.cfg.Store.Load(ctx, id)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("server: load session for stale settle: %w", err)
 	}
 	if sess.State != session.StateRunning {
 		return false, nil
@@ -3972,10 +3973,10 @@ func (s *Service) SettleIfStale(ctx context.Context, id session.SessionID) (bool
 		return false, nil
 	}
 	if err := sess.Abandon(); err != nil {
-		return false, err
+		return false, fmt.Errorf("server: abandon stale running session: %w", err)
 	}
 	if err := s.cfg.Store.Save(ctx, sess); err != nil {
-		return false, err
+		return false, fmt.Errorf("server: persist abandoned session: %w", err)
 	}
 	return true, nil
 }
