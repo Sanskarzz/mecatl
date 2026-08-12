@@ -766,6 +766,17 @@ type Service struct {
 	// ErrPruneUnsupported sticky-disable precedent). Guarded by s.mu.
 	leaseDisabled bool
 
+	// leaseSweepDisabled is the SessionStale-specific sibling of leaseDisabled:
+	// set (once) when a staleness-sweep trial lease Acquire reports
+	// ErrLeaseUnsupported, it stickily disables the whole staleness sweep (not
+	// just the one candidate) for the process lifetime, per issue #475 — a
+	// per-candidate fallback to local-only liveness would reintroduce the
+	// cross-replica unsoundness the lease check exists to prevent. Kept
+	// separate from leaseDisabled because it gates a DIFFERENT seam (the
+	// staleness sweep, not run-entry acquisition) with its own diagnostic.
+	// Guarded by s.mu.
+	leaseSweepDisabled bool
+
 	// draining is the cloud-native drain gate (ADR 0048, mecak8s): once armed by
 	// Drain, acquireLease rejects new run-entries with ErrUnavailable so a
 	// shutting-down replica steers new traffic to a survivor within the
@@ -3715,6 +3726,163 @@ func (s *Service) releaseLease(id session.SessionID) {
 		s.cfg.Diagnostics.Log(ctx, port.LevelWarn, "session lease release failed",
 			"session", string(id), "owner", s.cfg.LeaseOwner, "err", err.Error())
 	}
+}
+
+// staleSessionWindow is the staleness age horizon for a persisted "running"
+// snapshot (issue #475): a snapshot younger than this is never a candidate,
+// regardless of any liveness signal (mirrors
+// internal/adapter/scheduler/scheduler.go's staleFireWindow/staleFireThreshold
+// idiom — a package var so a test can shrink it). It exists because it is the
+// ONLY defense that covers subagent-*/parallel-*/team-* child sessions at all:
+// IsLive's own doc comment says it never knows about engine children, so a
+// liveness-only oracle would be blind to exactly the population issue #475's
+// confirmed bug came from. It is also why this whole design is honestly
+// "last-write-wins narrowed by a window," not atomic — Store.Save has no
+// fencing/CAS, so nothing here actually stops an already-in-flight e.save from
+// a genuinely live run landing after a sweep's repair; the wide age window is
+// the only thing making that acceptable.
+var staleSessionWindow = 30 * time.Minute
+
+// staleTrialLeaseSuffix names this process's OWN trial-Acquire owner for
+// SessionStale's secondary lease refinement — suffixed onto the real
+// s.cfg.LeaseOwner (never a new unrelated string) so the trial is
+// self-attributable in lease-backend diagnostics.
+const staleTrialLeaseSuffix = "-stale-trial"
+
+// SessionStale reports whether meta's persisted StateRunning snapshot is a
+// crash-orphan (issue #475) rather than a genuinely in-flight run. It decides;
+// it does not write — SettleIfStale performs the actual repair once a caller
+// has decided a candidate is stale. Exported for internal/app's composition-
+// level sweep (Step 4) to consume, mirroring IsLive/Diagnostics.
+//
+// The order matters and mirrors internal/adapter/scheduler/scheduler.go's
+// shouldReconcileStaleFire/isPriorFireLive (age gate first, lease as a
+// secondary refinement, trial lease released immediately, never held across
+// a write) — an earlier draft of this fix inverted that order and is why the
+// design history in the accompanying plan calls this out explicitly:
+//
+//  1. Age horizon (staleSessionWindow) is a HARD PRECONDITION: a fresh
+//     snapshot is never stale, no matter what liveness/lease signals say.
+//  2. IsLive(id): a same-process live run is never stale.
+//  3. If a port.SessionLease is wired, a bounded TRIAL Acquire is the
+//     secondary refinement:
+//     - ErrLeaseHeld, but s.heldLeases[id] shows THIS process already holds
+//     the REAL lease for id: that is the self-held-lease correction — a
+//     run that died without releasing its own lease is evidence of
+//     staleness, not liveness. Treat it as stale.
+//     - ErrLeaseHeld otherwise (a genuinely different, live owner holds it):
+//     not stale.
+//     - success (nobody held it): release the trial immediately (this
+//     function only decides; it never holds a lease across the caller's
+//     later write) and report stale.
+//     - ErrLeaseUnsupported: sticky-disable the WHOLE sweep for the process
+//     lifetime (see LeaseSweepDisabled) rather than silently falling back
+//     to local-only liveness for this one candidate — the fallback would
+//     reintroduce the exact cross-replica unsoundness the lease branch
+//     exists to prevent, for the one backend where this error is actually
+//     reachable. Report not stale.
+//     - any other error/timeout: fail-safe, not stale.
+//  4. No lease wired at all: age + IsLive is the complete policy — a
+//     not-live, past-window candidate IS stale (the single-process/file-
+//     storage default path).
+func (s *Service) SessionStale(ctx context.Context, meta port.SessionMeta) bool {
+	// 1. Age horizon — a hard precondition, checked before anything else.
+	if s.cfg.Now().Sub(meta.ModifiedAt) < staleSessionWindow {
+		return false
+	}
+	// 2. Local liveness.
+	if s.IsLive(meta.ID) {
+		return false
+	}
+	// No lease wired: age + IsLive is the complete policy.
+	if s.cfg.SessionLease == nil {
+		return true
+	}
+	s.mu.Lock()
+	disabled := s.leaseSweepDisabled
+	s.mu.Unlock()
+	if disabled {
+		return false
+	}
+	trialCtx, cancel := context.WithTimeout(ctx, leaseAcquireTimeout)
+	lease, err := s.cfg.SessionLease.Acquire(trialCtx, meta.ID, s.cfg.LeaseOwner+staleTrialLeaseSuffix)
+	cancel()
+	switch {
+	case errors.Is(err, port.ErrLeaseHeld):
+		s.mu.Lock()
+		_, selfHeld := s.heldLeases[meta.ID]
+		s.mu.Unlock()
+		// The self-held-lease correction: ErrLeaseHeld against our OWN trial
+		// call (a different owner string than the real hold, so the backend
+		// sees a genuine conflict) is NOT evidence of a live peer when this
+		// process itself is the one holding the real lease — it is evidence
+		// this process's own prior run died without releasing it.
+		return selfHeld
+	case errors.Is(err, port.ErrLeaseUnsupported):
+		s.mu.Lock()
+		firstTime := !s.leaseSweepDisabled
+		s.leaseSweepDisabled = true
+		s.mu.Unlock()
+		if firstTime {
+			s.cfg.Diagnostics.Log(ctx, port.LevelInfo, "session staleness sweep: lease backend does not support leasing; disabling the sweep",
+				"owner", s.cfg.LeaseOwner)
+		}
+		return false
+	case err != nil:
+		// Infra error or timeout — fail-safe: never mass-abandon on a flaky
+		// lease backend.
+		s.cfg.Diagnostics.Log(ctx, port.LevelWarn, "session staleness sweep: trial lease acquire failed; treating as not stale (fail-safe)",
+			"session", string(meta.ID), "err", err.Error())
+		return false
+	}
+	// Success: nobody held it. Release the trial immediately — this function
+	// only decides staleness, it performs no write, so there is nothing to
+	// hold the lease across.
+	relCtx, relCancel := context.WithTimeout(context.WithoutCancel(ctx), leaseAcquireTimeout)
+	_ = s.cfg.SessionLease.Release(relCtx, lease)
+	relCancel()
+	return true
+}
+
+// LeaseSweepDisabled reports whether SessionStale has stickily disabled the
+// staleness sweep for the process lifetime (an ErrLeaseUnsupported backend).
+// Exported for internal/app's Step 4 sweep to check before scanning, mirroring
+// SessionStale/IsLive/Diagnostics.
+func (s *Service) LeaseSweepDisabled() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.leaseSweepDisabled
+}
+
+// SettleIfStale repairs a session id that a caller has ALREADY decided is
+// stale (via SessionStale, or — for Step 3's run-entry funnel — via a
+// successful real lease acquire standing as its own proof): it loads the raw
+// snapshot, re-checks State==StateRunning (closing the TOCTOU between whatever
+// decided staleness and this load — the snapshot may have moved on since),
+// and if it is genuinely still running, abandons it via Session.Abandon() and
+// persists the repair. It performs NO staleness decision of its own — both
+// the sweep (Step 4) and the funnel (Step 3) route their repair through this
+// one function so there is exactly one implementation of "how a stale running
+// session gets settled."
+//
+// Returns whether it actually settled something (false, nil is the honest
+// no-op result for a session that already moved on, e.g. a race with a
+// genuinely live re-entry or a peer's own settle).
+func (s *Service) SettleIfStale(ctx context.Context, id session.SessionID) (bool, error) {
+	sess, err := s.cfg.Store.Load(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	if sess.State != session.StateRunning {
+		return false, nil
+	}
+	if err := sess.Abandon(); err != nil {
+		return false, err
+	}
+	if err := s.cfg.Store.Save(ctx, sess); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // register records run (and the live session it drives) as the in-flight run
