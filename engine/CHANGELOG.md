@@ -576,6 +576,24 @@ The covered surface is the seven core packages (`session`, `governance`, `tool`,
   Removing a method from an exported interface is breaking for implementors;
   under the pre-v1 policy it ships in a minor bump. See ADR 0104.
 
+- **Schedule-origin binding is now run-context attribution**
+  ([ADR 0104](../docs/adr/0104-schedule-origin-run-context.md)) — removed the
+  exported `agent.OriginBinder` interface, `agent.Deps.OriginBinder` field,
+  `agent.SessionOriginScheduleManager` (its constructor and all ten methods), and
+  the `BindSessionOrigin` method that type carried. `Engine.Run` stamps the
+  executing session id onto the run context, and `ScheduleTool.create` reads it
+  there when it builds the `ScheduleSpec` — so the origin is set at the single
+  site that constructs the spec, and there is no wrapper a composition root can
+  forget to apply. An unbound context yields the empty origin (no delivery),
+  never a borrowed one. Migrate custom engine composition by deleting the
+  `Deps.OriginBinder` assignment and passing the `port.ScheduleManager` straight
+  to `agent.NewScheduleTool` / `agent.NewScheduleQueryTool`; no replacement call
+  is needed. Nothing exported replaces the removed surface: an origin is acquired
+  by running under `Engine.Run`, and an out-of-band create is originless by
+  design (ADR 0075 decision #1). These removals are breaking pre-v1 changes,
+  classified Changed per COMPATIBILITY.md; the engine's exported surface NET
+  SHRINKS by fourteen symbols and gains none.
+
 - **`agent.Engine.Run` consolidated to a single request-struct entry point** (issue #461) — the three exported prompt entry points `Engine.Run(ctx, sess, ws, userText string)`, `Engine.RunContent(ctx, sess, ws, userText string, parts []session.Content)`, and `Engine.RunContentWith(ctx, sess, ws, userText string, parts []session.Content, opts RunOptions)` are REMOVED and replaced by exactly one normal entry point: `Engine.Run(ctx context.Context, sess *session.Session, ws tool.Workspace, req RunRequest) *Run`. The per-run override type `agent.RunOptions` is REMOVED; its fields (`MaxRunTokensOverride`, `ExtraTools`, `AskIDDiscriminator`) move onto the new `agent.RunRequest` alongside the prompt (`Text string`, `Parts []session.Content`). No aliases or deprecated wrappers are retained. `Engine.ResumeApproval` keeps its public signature unchanged (it is the awaiting-only run-entry seam, not a prompt entry) and internally starts with a zero `RunRequest`. This is a breaking signature change on the exported engine prompt surface (the three removed methods + the removed type), classified Changed per COMPATIBILITY.md; it is an API consolidation only — every existing behaviour and invariant is preserved. The single in-repo production caller (`internal/adapter/server.Service.StartRunContent`) and all adapter/demo/perf/test callers are updated. See issue #461.
 
 - **`agent.Supervisor.MemberRouting`** (issue #397) — widened from `(category, model string)` to `(category, model, reason string)` so the Team tool can read back the routing reason alongside the routed category/model for the EvTeamStart roster. This is a signature change on an exported method (breaking pre-v1, classified Changed per COMPATIBILITY.md). The single in-repo caller (the Team tool roster loop) is updated; the read-back is metadata-only.

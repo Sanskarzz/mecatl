@@ -2036,10 +2036,6 @@ func sessionEngineFactory(
 		// provider never contaminates compaction/counting.
 		deps := engineDepsForProvider(cfg, resolvedProvider, resolvedModel, windowFn, store, policy, hooks, mcpProvider, instructions)
 		deps.Catalog = cat
-		// Origin capture (ADR 0075): bind the Schedule tool's session-origin wrapper
-		// (created by registerScheduleTool) so every per-run startRun stamps the
-		// executing session's id. nil when scheduling is off.
-		deps.OriginBinder = assets.scheduleOriginBinder
 		// Fire-result delivery drain (ADR 0075): the per-session engine's Step 2a
 		// drain reads the SAME durable queue as the main engine. nil (no
 		// schedule-capable store) is the byte-identical no-delivery path.
@@ -2834,10 +2830,6 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 	// a per-session engine; a store that backs no ScheduleStore withholds the
 	// note (the model is never told about a tool it cannot call).
 	deps.PromptConfig = applySchedulePosture(deps.PromptConfig, scheduleManagerPresent(assets))
-	// Origin capture (ADR 0075): bind the Schedule tool's session-origin wrapper
-	// (created by registerScheduleTool) so every per-run startRun stamps the
-	// executing session's id. nil when scheduling is off.
-	deps.OriginBinder = assets.scheduleOriginBinder
 	// Fire-result delivery drain (ADR 0075): the loop's Step 2a drain reads
 	// pending fire-result notes for the running session off the durable queue.
 	// nil (no schedule-capable store) is the byte-identical no-delivery path.
