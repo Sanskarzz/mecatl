@@ -70,6 +70,14 @@ type reconcileFixture struct {
 }
 
 func newReconcileFixture(t *testing.T) *reconcileFixture {
+	return newReconcileFixtureWithLease(t, nil)
+}
+
+// newReconcileFixtureWithLease is newReconcileFixture with an OPTIONAL
+// port.SessionLease wired into the Service, so a test can drive
+// Service.SessionStale into the ErrLeaseUnsupported sticky-disable path (nil
+// mirrors the default no-lease fixture byte-for-byte).
+func newReconcileFixtureWithLease(t *testing.T, lease port.SessionLease) *reconcileFixture {
 	t.Helper()
 	f := &reconcileFixture{now: time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)}
 	f.store = memstore.New(memstore.WithNow(func() time.Time { return f.now }))
@@ -81,10 +89,11 @@ func newReconcileFixture(t *testing.T) *reconcileFixture {
 		Model:   "test-model",
 	})
 	svc, err := server.NewService(server.Config{
-		Engine:     engine,
-		Store:      f.store,
-		Workspaces: func(root string) tool.Workspace { return memfs.NewWorkspace(root) },
-		Now:        func() time.Time { return f.now },
+		Engine:       engine,
+		Store:        f.store,
+		Workspaces:   func(root string) tool.Workspace { return memfs.NewWorkspace(root) },
+		Now:          func() time.Time { return f.now },
+		SessionLease: lease,
 	})
 	if err != nil {
 		t.Fatalf("new service: %v", err)
@@ -93,6 +102,25 @@ func newReconcileFixture(t *testing.T) *reconcileFixture {
 	f.svc = svc
 	return f
 }
+
+// stubUnsupportedLease is a minimal port.SessionLease whose Acquire always
+// returns port.ErrLeaseUnsupported — the sticky-disable trigger — mirroring
+// internal/adapter/server's own fakeLease (a different package, so this test
+// needs its own tiny stub rather than importing the unexported test type).
+type stubUnsupportedLease struct{ acquires int }
+
+func (s *stubUnsupportedLease) Acquire(context.Context, session.SessionID, string) (port.Lease, error) {
+	s.acquires++
+	return port.Lease{}, port.ErrLeaseUnsupported
+}
+
+func (*stubUnsupportedLease) Renew(_ context.Context, l port.Lease) (port.Lease, error) {
+	return l, nil
+}
+
+func (*stubUnsupportedLease) Release(context.Context, port.Lease) error { return nil }
+
+var _ port.SessionLease = (*stubUnsupportedLease)(nil)
 
 func (f *reconcileFixture) save(t *testing.T, sess *session.Session) {
 	t.Helper()
@@ -181,6 +209,48 @@ func TestStaleSessionReconcileLeavesFreshRunningAlone(t *testing.T) {
 
 	if got := f.state(t, id); got != session.StateRunning {
 		t.Fatalf("state after sweep = %q, want running (fresh, inside the age window)", got)
+	}
+}
+
+// TestSweepStaleSessionsSkipsWhenLeaseSweepDisabled pins Finding 2 of the
+// Step-4 follow-up (issue #475): once SessionStale has stickily disabled the
+// sweep for a lease backend that answers ErrLeaseUnsupported,
+// sweepStaleSessions must skip its ENTIRE pass — not merely let each
+// per-candidate SessionStale call fail safe internally. It seeds a candidate
+// that is DEFINITELY stale (past the age window, StateRunning) and proves the
+// guard actually skips work: the candidate is left completely untouched,
+// which only holds if the sweep never reaches ListSessions/SettleIfStale for
+// it.
+func TestSweepStaleSessionsSkipsWhenLeaseSweepDisabled(t *testing.T) {
+	lease := &stubUnsupportedLease{}
+	f := newReconcileFixtureWithLease(t, lease)
+
+	// Trigger the sticky-disable: one SessionStale call against a past-window,
+	// not-live candidate reaches the lease branch and gets ErrLeaseUnsupported.
+	triggerID := session.SessionID("trigger")
+	f.save(t, crashOrphanedSessionFixture(t, triggerID, f.now))
+	f.now = f.now.Add(2 * time.Hour)
+	stale := f.svc.SessionStale(context.Background(), port.SessionMeta{
+		ID:         triggerID,
+		ModifiedAt: f.now.Add(-2 * time.Hour),
+		State:      session.StateRunning,
+	})
+	if stale {
+		t.Fatal("SessionStale on ErrLeaseUnsupported = true, want false")
+	}
+	if !f.svc.LeaseSweepDisabled() {
+		t.Fatal("LeaseSweepDisabled() = false after ErrLeaseUnsupported, want true")
+	}
+
+	// Seed a SECOND, definitely-stale candidate and run a sweep pass.
+	const id session.SessionID = "definitely-stale"
+	f.save(t, crashOrphanedSessionFixture(t, id, f.now))
+	f.now = f.now.Add(2 * time.Hour)
+
+	sweepStaleSessions(context.Background(), f.svc, port.NopDiagnostics{})
+
+	if got := f.state(t, id); got != session.StateRunning {
+		t.Fatalf("state after sweep = %q, want running (LeaseSweepDisabled must skip the whole pass)", got)
 	}
 }
 

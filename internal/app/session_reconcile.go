@@ -10,6 +10,7 @@ package app
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/stacklok/mecatl/engine/port"
@@ -31,10 +32,14 @@ var staleSessionSweepInterval = 5 * time.Minute
 // child id) — exactly the population the confirmed real bug came from. This
 // sweep finds and settles them even if nobody ever re-opens them.
 //
-// Unconditional: unlike startChildGC there is no policy to disable, and the
-// candidate enumeration (svc.ListSessions) already degrades to an empty slice
-// for a store that can't list — a no-op sweep, not a posture worth narrating.
-// One startup sweep, then a ticker every staleSessionSweepInterval, on one
+// Unconditional at wiring time: unlike startChildGC there is no operator-facing
+// policy to disable, and the candidate enumeration (svc.ListSessions) already
+// degrades to an empty slice for a store that can't list — a no-op sweep, not
+// a posture worth narrating. Each PASS can still no-op via
+// svc.LeaseSweepDisabled() (see sweepStaleSessions) once SessionStale has
+// stickily disabled the sweep for a lease backend that doesn't support
+// leasing — that is a backend-capability fact, not an operator toggle. One
+// startup sweep, then a ticker every staleSessionSweepInterval, on one
 // goroutine, until the returned close func cancels it.
 //
 // Deliberately NOT tied to Build's own ctx (unlike childGC's — childGC is a
@@ -47,7 +52,10 @@ var staleSessionSweepInterval = 5 * time.Minute
 func startStaleSessionReconcile(cfg Config, svc *server.Service) func() {
 	diag := cfg.diag()
 	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		sweepStaleSessions(ctx, svc, diag)
 		ticker := time.NewTicker(staleSessionSweepInterval)
 		defer ticker.Stop()
@@ -60,7 +68,10 @@ func startStaleSessionReconcile(cfg Config, svc *server.Service) func() {
 			}
 		}
 	}()
-	return cancel
+	return func() {
+		cancel()
+		wg.Wait()
+	}
 }
 
 // sweepStaleSessions runs one pass: list every stored session, narrow to the
@@ -79,6 +90,11 @@ func startStaleSessionReconcile(cfg Config, svc *server.Service) func() {
 // the whole pass and never aborts the rest of the candidates. Stays quiet on
 // an all-clean sweep, matching childgc's posture.
 func sweepStaleSessions(ctx context.Context, svc *server.Service, diag port.Diagnostics) {
+	if svc.LeaseSweepDisabled() {
+		// SessionStale already logged the sticky-disable transition once; stay
+		// silent here rather than double-logging every tick.
+		return
+	}
 	rows, err := svc.ListSessions(ctx)
 	if err != nil || len(rows) == 0 {
 		return
