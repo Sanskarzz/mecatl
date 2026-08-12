@@ -670,9 +670,9 @@ show the plain prompt-hint card.
 | `enter` (idle, **paused queue**, empty input) | resume — send the merged staged follow-ups |
 | `esc` (idle, **paused queue**) | clear staged input → else clear the queue |
 | `ctrl+c` | graceful quit (double-press): with a non-empty prompt the first press **clears the input**; on an empty prompt it **arms** the guard and shows a footer hint — press `ctrl+c` again within 3s to exit. Any other key disarms. The fatal (dead-connection) screen exits on a single press. |
-| in the permission modal: `a`/`y` | allow once |
-| in the permission modal: `w` | always allow (this session; offered for the main agent's asks only, not surfaced subagent asks) |
-| in the permission modal: `d`/`n`/`esc` | deny |
+| in the permission modal: `a`/`y` | allow once (rebindable via `Allow`; the button label reflects the live chord — `[A]llow` for the default `a`, `[Y] allow` for an override) |
+| in the permission modal: `w` | always allow (this session; offered for the main agent's asks only, not surfaced subagent asks; rebindable via `AllowAlways`) |
+| in the permission modal: `d`/`n`/`esc` | deny (rebindable via `Deny`) |
 | in the permission modal: `←`/`→`/`tab` | cycle the focused button; `enter` activates it |
 | `pgup` / `pgdn` | scroll the conversation up / down |
 | `home` / `end` | jump to the top / bottom of the conversation (`end` resumes auto-follow) |
@@ -689,8 +689,9 @@ show the plain prompt-hint card.
 | `x` (agents overlay, on a **running** lane) | **cancel that child agent** (sends `CancelChild` with the lane's child id; the run itself keeps streaming). Works on all three tabs: a **Subagents** lane (roster or focus pane), a **Parallel branch** (inside a focused group — `↑/↓` selects the branch), and a **team member** (Teams roster or focus pane; mid-drive OR idle between rounds — the member is de-scheduled and its claimed tasks released). Confirm-less, because it is recoverable: the child is persisted (a subagent stays **resumable** by its `agentId`; a cancelled branch reads `[FAILED] cancelled by user`; a cancelled member shows `stopped — cancelled`). Inert on a done lane. If the child was parked on a surfaced permission ask, the server retracts it (`permission.retract`) and the approval modal dismisses itself. |
 | `@` | file-mention menu — complete a workspace path, then attach it on submit (see below) |
 
-**Always-allow (the `w` button).** A main-agent ask offers a third button, **Al[w]ays**,
-alongside allow-once and deny. Choosing it permits the current call AND learns a rule that
+**Always-allow (the always button).** A main-agent ask offers a third button —
+**Al[w]ays** with the default `w` chord (it degrades to `[Q] always allow` under
+an `AllowAlways` override) — alongside allow-once and deny. Choosing it permits the current call AND learns a rule that
 suppresses the re-ask for the **exact same command** for the rest of this session
 (session-scoped, evicted when the session closes). It never overrides a configured
 deny/ask — a deny in any scope is still absolute, and a configured ask is never silenced
@@ -812,8 +813,25 @@ chord to reach the textarea.** With the defaults, `ctrl+a` opens the agents
 overlay and `ctrl+e` opens the effort picker — so the readline line-start /
 line-end chords never reach the input. Rebind the actions away
 (`keymap: {Agents: ctrl+f12, Effort: ctrl+f5}`) and `ctrl+a` / `ctrl+e` start
-jumping the cursor to the line start / end instead. The `?` help overlay and the
-welcome card always show the **live** bindings.
+jumping the cursor to the line start / end instead. The `?` help overlay, the
+welcome card, the footer help/approval lines, the inline-card affordances
+(reasoning/subagent/team trace headers, collapse roll-ups, the team `+N more`
+advertisement), the generic permission-modal buttons, AND every overlay's
+navigation footer (the agents/team/mcp/effort/models/sessions/worktrees/
+schedule/skills/soul/user-model pickers — `↑/↓`, `enter`, `esc`, `tab`, the
+team `t`/`f`, the subagent `x`, the MCP `r`, the models `ctrl+g`, the parallel
+`home/g·end/G`) all show the **live** bindings for any action backed by a
+rebindable keyMap entry. Literal chords remain only for genuinely local controls
+that do NOT consult the keyMap: for example the slash-palette / `@`-mention
+menu's `up`/`down`/`tab`/`enter`/`esc`, raw form/list arrows and tabs (models,
+skills, MCP prompt arguments, schedule creation/inspection), plan-review arrows
+and mouse wheel, and the schedule panel's `c`/`p`/`r`/`f`/`d`/`/` plus the
+create-form `y`/`n`. Those controls are fixed in their handlers, so the literal
+shown is the chord that actually fires. With the default approval chords (`a`/`w`/`d`) the
+permission-modal buttons render the historical word-embedded form (`[A]llow` /
+`Al[w]ays` / `[D]eny`); rebound, they degrade to an honest standalone form
+(`[Y] allow` / `[Q] always allow` / `[N] deny`, or `[ctrl+y] allow` for a
+modified chord) so every displayed chord is the one that actually fires.
 
 #### Validation rules
 
