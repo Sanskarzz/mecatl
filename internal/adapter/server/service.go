@@ -2229,6 +2229,21 @@ func (s *Service) loadAndReopen(ctx context.Context, id session.SessionID) (*ses
 		if serr := s.cfg.Store.Save(ctx, sess); serr != nil {
 			return nil, fmt.Errorf("server: persist recovered session: %w", serr)
 		}
+		// case session.StateAwaiting: intentionally no-op. Awaiting is the
+		// deliberately-preserved Phase 2 cross-process resume point
+		// (resumeFromAwaiting) — repairing it here would clear its still-resolvable
+		// PendingAsk. It stays terminal-for-loadAndReopen's purposes by falling
+		// through this switch untouched.
+		// case session.StateIdle: intentionally no-op. Idle is already the target
+		// state every other case resets TO — nothing to repair.
+		//
+		// case session.StateRunning is intentionally NOT handled here (issue #475):
+		// a crash-orphaned "running" snapshot is repaired by StartRunContent itself,
+		// AFTER it holds the real lease/lock (see the repair beside runEntryMu/
+		// acquireLease below) — never inside this pre-lock funnel, where a trial
+		// lease could collide with a concurrent caller or a peer's genuine
+		// acquireLease. loadAndReopen has no lock/lease of its own to make that
+		// repair safe.
 	}
 	return sess, nil
 }
@@ -2395,6 +2410,36 @@ func (s *Service) StartRunContent(ctx context.Context, id session.SessionID, tex
 	// SessionLease is the byte-identical no-lease default.
 	if err := s.acquireLease(ctx, id); err != nil {
 		return nil, err
+	}
+	// Crash-orphan repair (issue #475): loadAndReopen's switch deliberately does
+	// NOT handle StateRunning (see its no-op comment) because repairing it there
+	// would run before this process holds the real lease/lock, racing a
+	// concurrent caller or rejecting a peer's genuine acquireLease with a trial
+	// lease. Here, by contrast, runEntryMu.lock(id) + the real acquireLease above
+	// have BOTH already succeeded, so this process holds the actual exclusive
+	// right to drive the session — no trial lease, no age-horizon oracle needed:
+	// the successful acquire IS the proof.
+	//
+	// One remaining hazard: runEntryMu only serializes the RUN-ENTRY section, not
+	// a run's full lifetime (it is unlocked as soon as this function returns,
+	// long before the registered run finishes). A second StartRunContent for the
+	// SAME id can therefore enter here while a run this process itself started
+	// earlier is still genuinely live and re-saving StateRunning snapshots
+	// (resumeFromAwaiting cannot collide here — it rejects everything but
+	// StateAwaiting before it ever reaches this repair). Abandoning a genuinely
+	// live session's history out from under it would corrupt an active run, so
+	// IsLive(id) is checked FIRST and, if true, the repair is refused outright
+	// rather than racing it.
+	if sess.State == session.StateRunning {
+		if s.IsLive(id) {
+			return nil, fmt.Errorf("%w: session %q already has an active run", ErrFailedPrecondition, id)
+		}
+		if err := sess.Abandon(); err != nil {
+			return nil, fmt.Errorf("server: abandon stale running session: %w", err)
+		}
+		if err := s.cfg.Store.Save(ctx, sess); err != nil {
+			return nil, fmt.Errorf("server: persist abandoned session: %w", err)
+		}
 	}
 	engine, ws, err := s.engineAndWorkspaceFor(ctx, sess)
 	if err != nil {
