@@ -1,6 +1,9 @@
 package session
 
-import "errors"
+import (
+	"errors"
+	"strings"
+)
 
 // GrantType names how a Principal was authenticated. It is a closed enum of
 // exactly three values (ADR 0100 decision 1); the zero value is deliberately
@@ -66,6 +69,68 @@ func (p *Principal) Clone() *Principal {
 	}
 	c := *p
 	return &c
+}
+
+// PrincipalFromClaims projects an already-verified token claim set into the
+// narrow caller identity used by the engine. It does not verify claims or
+// credentials; callers must do that before calling it. Missing, empty, or
+// non-string iss/sub claims yield nil. Claim strings are preserved byte-exactly.
+func PrincipalFromClaims(claims map[string]any) *Principal {
+	issuer, issuerOK := claims["iss"].(string)
+	subject, subjectOK := claims["sub"].(string)
+	if !issuerOK || issuer == "" || !subjectOK || subject == "" {
+		return nil
+	}
+	name, _ := claims["name"].(string)
+	return &Principal{
+		Issuer:    issuer,
+		Subject:   subject,
+		GrantType: GrantTypeFromClaims(claims),
+		Name:      name,
+	}
+}
+
+// GrantTypeFromClaims derives the conservative attribution grant from an
+// already-verified token claim set. The first non-empty explicit claim wins
+// (`grant_type` before `gty`): a recognised user or client grant is decisive.
+// An unknown explicit value is not itself classification evidence, so the
+// equal-client-identity fallback may still identify a machine. With no such
+// fallback, unknown and malformed signals default to user. It never returns
+// system.
+func GrantTypeFromClaims(claims map[string]any) GrantType {
+	switch normalizeGrantClaim(claimString(claims, "grant_type"), claimString(claims, "gty")) {
+	case "client_credentials":
+		return GrantTypeClientCredentials
+	case "authorization_code", "implicit", "password", "refresh_token", "device_code":
+		return GrantTypeUser
+	}
+	if sub := claimString(claims, "sub"); sub != "" {
+		for _, key := range []string{"azp", "client_id", "cid"} {
+			if claimString(claims, key) == sub {
+				return GrantTypeClientCredentials
+			}
+		}
+	}
+	return GrantTypeUser
+}
+
+func normalizeGrantClaim(candidates ...string) string {
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		value := strings.ToLower(strings.TrimSpace(candidate))
+		if i := strings.LastIndex(value, ":"); i >= 0 {
+			value = value[i+1:]
+		}
+		return strings.ReplaceAll(value, "-", "_")
+	}
+	return ""
+}
+
+func claimString(claims map[string]any, key string) string {
+	value, _ := claims[key].(string)
+	return value
 }
 
 // Authority is Track C's placeholder label on the Session aggregate. It is

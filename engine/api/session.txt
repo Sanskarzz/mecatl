@@ -141,6 +141,7 @@ const VerdictStringDeny untyped string = "deny"
 func ClampTitle(s string) string
 func CloneMessages(msgs []Message) []Message
 func ForkSnapshot(c *Conversation) []Message
+func GrantTypeFromClaims(claims map[string]any) GrantType
 func IsGenuineUserPrompt(m Message) bool
 func IsSynthesisedSummary(text string) bool
 func New(id SessionID, mode PermissionMode, workspace string, limits Limits, createdAt time.Time) *Session
@@ -163,6 +164,7 @@ func NewToolResultWithParts(callID ToolCallID, content string, parts []Content) 
 func NewUserMessage(text string) Message
 func NewUserMessageWithParts(text string, parts []Content) Message
 func ParseArgs(call ToolCall, dst any) (msg string, ok bool)
+func PrincipalFromClaims(claims map[string]any) *Principal
 func PrincipalFromContext(ctx context.Context) *Principal
 func RepairToolResult(r ToolResult) ToolResult
 func StripProviderState(messages []Message) []Message

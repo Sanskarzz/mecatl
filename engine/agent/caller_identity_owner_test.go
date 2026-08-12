@@ -109,7 +109,7 @@ func TestCallerIdentity_Scenario3_ForkInheritsSourceOwner(t *testing.T) {
 				// The run is driven under a context carrying BOB — a different
 				// principal from the parent session's owner.
 				ctx := session.WithPrincipal(context.Background(), ownerBob)
-				r := e.Run(ctx, sess, memfs.NewWorkspace("/ws"), "go")
+				r := e.Run(ctx, sess, memfs.NewWorkspace("/ws"), RunRequest{Text: "go"})
 				drainRunEvents(t, r)
 
 				child, err := store.Load(context.Background(), path.childID)

@@ -13,6 +13,14 @@ The covered surface is the seven core packages (`session`, `governance`, `tool`,
 
 ### Added
 
+- **`session.PrincipalFromClaims` and `session.GrantTypeFromClaims`**
+  ([ADR 0103](../docs/adr/0103-oidc-authn-module.md)) — stdlib-only projection
+  helpers for embedders that verify credentials outside the engine. Projection
+  requires non-empty string `iss` and `sub`, preserves strings byte-exactly,
+  never fabricates anonymous identity or derives the `system` grant, and keeps
+  JWT/OIDC dependencies out of the engine. New exported functions: Added (a
+  minor bump).
+
 - **Caller-identity labels on the session aggregate** (issue #367,
   [ADR 0100](../docs/adr/0100-caller-identity-threading.md)) — the joint
   field-prep addition for the caller-identity track (`Owner`) and Track C
