@@ -676,15 +676,19 @@ Named residuals (accepted gaps, not silently omitted):
   `sched--` family (this reconciler owns it), and this reconciler itself never
   looks that far back.
 - A genuinely-live `subagent-*`/`parallel-*`/`team-*` child session id could in
-  principle be repaired out from under a CONCURRENT second `StartRunContent`
-  call at the SAME child id: the funnel's repair relies on "a successful
-  lease acquire is its own proof," not an age horizon, for that specific path
-  — distinct from the sweep, which DOES gate every child candidate (these
-  families included) on the age horizon first. No caller in the current call
-  graph `StartRunContent`s a child id directly (children are driven
-  in-process by the parent's own dispatch, never through the wire funnel), so
-  the hazard is theoretical today rather than exercised — but the framing gap
-  in the funnel's own doc comment is real, and it is exactly why
+  principle be repaired out from under a SINGLE `StartRunContent` call at
+  that child id — unlike the main-session case, there is no "first" funnel
+  call that registered the live run for `IsLive` to see: the child is driven
+  in-process by its parent's own dispatch, so `IsLive` is structurally blind
+  to it (see the doc comment on `IsLive` itself) and any `StartRunContent`
+  reaching a live child's id would find `IsLive` false and proceed. The
+  funnel's repair relies on "a successful lease acquire is its own proof,"
+  not an age horizon, for that specific path — distinct from the sweep, which
+  DOES gate every child candidate (these families included) on the age
+  horizon first. No caller in the current call graph `StartRunContent`s a
+  child id directly (there is no wire-level entry point that targets a child
+  id), so the hazard is theoretical today rather than exercised — but the
+  framing gap in the funnel's own doc comment is real, and it is exactly why
   `SessionStale`'s age-first ordering, not "successful lease acquire alone,"
   is the sweep's own defense for this population.
 
