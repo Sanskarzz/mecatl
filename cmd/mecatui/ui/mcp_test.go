@@ -351,7 +351,7 @@ func TestMCPResourceInsertIntoInput(t *testing.T) {
 func TestMCPResourcePreviewCollapse(t *testing.T) {
 	th := aztec()
 	hk := defaultHelpKeys()
-	const expandMark = "ctrl+t"
+	expandMark := hk.expandTools
 	// A body of maxToolResultLines+5 lines trips the cap; the marker names the
 	// 5 dropped lines and the live expand chord.
 	var sb strings.Builder
