@@ -3855,15 +3855,23 @@ func (s *Service) LeaseSweepDisabled() bool {
 }
 
 // SettleIfStale repairs a session id that a caller has ALREADY decided is
-// stale (via SessionStale, or — for Step 3's run-entry funnel — via a
-// successful real lease acquire standing as its own proof): it loads the raw
-// snapshot, re-checks State==StateRunning (closing the TOCTOU between whatever
-// decided staleness and this load — the snapshot may have moved on since),
-// and if it is genuinely still running, abandons it via Session.Abandon() and
-// persists the repair. It performs NO staleness decision of its own — both
-// the sweep (Step 4) and the funnel (Step 3) route their repair through this
-// one function so there is exactly one implementation of "how a stale running
-// session gets settled."
+// stale (via SessionStale): it loads the raw snapshot, re-checks
+// State==StateRunning and !IsLive(id) (closing the TOCTOU between whatever
+// decided staleness and this load — the snapshot may have moved on since, or
+// a genuinely live run may have started in the gap), and if it is genuinely
+// still running and not locally live, abandons it via Session.Abandon() and
+// persists the repair. It performs NO staleness decision of its own.
+//
+// This is the SWEEP's (Step 4) repair path ONLY: the sweep discovers a
+// candidate id from a metadata scan with no in-memory session for it, so it
+// must Load fresh from the store. A caller that already holds an in-memory
+// *session.Session (Step 3's run-entry funnel, `loadAndReopen`) must NOT call
+// this function — repairing the on-disk copy via a fresh Load would leave the
+// funnel's OWN in-memory sess (already loaded, about to be handed to
+// engine.Run) untouched and still carrying its unpaired tool_use, so the
+// HTTP-400 this whole fix exists to prevent would survive unnoticed. The
+// funnel instead calls sess.Abandon() + Store.Save directly on the session it
+// already holds.
 //
 // Returns whether it actually settled something (false, nil is the honest
 // no-op result for a session that already moved on, e.g. a race with a
@@ -3874,6 +3882,13 @@ func (s *Service) SettleIfStale(ctx context.Context, id session.SessionID) (bool
 		return false, err
 	}
 	if sess.State != session.StateRunning {
+		return false, nil
+	}
+	// ponytail: narrows, doesn't close, the TOCTOU window between the sweep's
+	// staleness decision and this write — a real run could still register
+	// between this check and the Save below. Store.Save has no CAS; closing
+	// it fully needs one. See ADR write-up (Step 5).
+	if s.IsLive(id) {
 		return false, nil
 	}
 	if err := sess.Abandon(); err != nil {
