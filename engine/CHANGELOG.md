@@ -101,6 +101,15 @@ The covered surface is the seven core packages (`session`, `governance`, `tool`,
   unchanged, so "no identity" can never be laundered into a present-but-empty
   principal. The stored principal is a copy, so a caller cannot mutate what the
   context reports. Added (a minor bump).
+- **`session.Session.Abandon`** (issue #475) — a 4th terminal-recovery seam,
+  sibling of `Reopen`/`Interrupt`/`Recover`, for a session left `StateRunning`
+  by a process that exited mid-turn (a crash-orphaned snapshot never reaches a
+  terminal state, so it reports "in progress" forever). Legal only from
+  `StateRunning`; it closes out any trailing unanswered `tool_use` via the
+  shared `closeOutInterruptedTurn` repair with a new, abandonment-accurate
+  close-out message (never claiming a cancellation or a run failure, neither
+  of which was observed), then `resetToIdle()`s exactly like the other three
+  seams (`Counters` reset, `Usage` preserved). Classified Added (minor).
 
 - **Version-aware file/Edit foundation (ADR 0104, issue #462)** — the
   `tool.Workspace` surface gains explicit, unambiguous mutation operations and
