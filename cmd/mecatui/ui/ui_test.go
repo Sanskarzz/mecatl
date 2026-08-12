@@ -14,6 +14,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/exp/teatest/v2"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/stacklok/mecatl/cmd/mecatui/client"
 	"github.com/stacklok/mecatl/cmd/mecatui/theme"
@@ -757,5 +759,254 @@ func TestStreamedEmojiMarkdownNotScrambled(t *testing.T) {
 	}
 	if first >= 0 && second >= 0 && first > second {
 		t.Errorf("list items rendered out of order (first=%d second=%d):\n%s", first, second, frame)
+	}
+}
+
+// newSeedProgramModel builds the gated fake stream + onPhase observer the seed
+// e2e drives, wiring Deps.InitialPrompt so applySessionReady auto-submits it on
+// the first session bind. It mirrors newProgramModel but threads the seed.
+func newSeedProgramModel(t *testing.T, th theme.Theme, script []*mecatlv1.ConverseResponse, seed string) programDeps {
+	t.Helper()
+	recv := &fakeRecver{
+		script:      script,
+		gateType:    "",
+		gate:        make(chan struct{}),
+		reachedGate: make(chan struct{}),
+	}
+	send := &fakeSender{}
+	conv := &fakeConv{recv: recv, send: send, sessionReady: make(chan struct{})}
+	prog := newProgress()
+	m := New(Deps{
+		Session:       conv,
+		Conv:          conv,
+		Theme:         th,
+		Server:        "127.0.0.1:8080",
+		Workspace:     "/workspace",
+		Mode:          "default",
+		Model:         "mock-model",
+		Ctx:           context.Background(),
+		NoAltScreen:   true,
+		onPhase:       prog.record,
+		InitialPrompt: seed,
+	})
+	return programDeps{recv: recv, send: send, conv: conv, prog: prog, model: m}
+}
+
+// TestSeedPromptIsSubmittedOnFirstSession asserts a CLI seed prompt (-p/--prompt)
+// is auto-submitted EXACTLY ONCE on the first session ready, with NO typed input
+// from the test driver. It proves the seed flows through the identical
+// typed-prompt path: exactly one ConverseRequest.Prompt frame carrying the seed
+// text reaches the server, the run streams to a terminal result, and the
+// reducer settles back to idle.
+func TestSeedPromptIsSubmittedOnFirstSession(t *testing.T) {
+	pd := newSeedProgramModel(t, theme.New("aztec", theme.AztecPalette()),
+		simpleRunScript("seed"), "Read greeting.txt")
+	tm := teatest.NewTestModel(t, pd.model, teatest.WithInitialTermSize(100, 30))
+
+	// The seed fires on the first SessionReadyMsg; wait for the run to complete
+	// (phaseRunning → phaseIdle) — the deterministic completion signal. No
+	// tm.Type / tm.Send here: the seed is the ONLY driver.
+	pd.prog.wait(t, phaseIdle, 3*time.Second)
+	pd.prog.waitRunComplete(t, 1, 5*time.Second)
+
+	// Exactly ONE Prompt frame was sent, carrying the seed text verbatim.
+	var prompts []*mecatlv1.ConverseRequest
+	for _, fr := range pd.send.frames() {
+		if p := fr.GetPrompt(); p != nil {
+			prompts = append(prompts, fr)
+		}
+	}
+	if len(prompts) != 1 {
+		t.Fatalf("sent %d Prompt frames, want exactly 1 (the seed, no re-fire)", len(prompts))
+	}
+	if got := prompts[0].GetPrompt().GetText(); got != "Read greeting.txt" {
+		t.Errorf("seed Prompt text = %q, want %q", got, "Read greeting.txt")
+	}
+
+	// Graceful quit (double ctrl+c), THEN assert final state on the deterministic
+	// FinalModel (FinalModel blocks until the program finishes, so it must come
+	// after WaitFinished).
+	tm.Send(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	tm.Send(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(scaleWait(3*time.Second)))
+	fm := tm.FinalModel(t).(Model)
+	if fm.phase != phaseIdle {
+		t.Errorf("final phase = %d, want phaseIdle", fm.phase)
+	}
+	if fm.pendingInitialPrompt != "" {
+		t.Errorf("pendingInitialPrompt = %q, want empty (seed consumed)", fm.pendingInitialPrompt)
+	}
+}
+
+// TestSeedPromptDoesNotReFireOnModelsRestart asserts the seed fires ONCE even when
+// a second SessionReadyMsg arrives (the /models restart or /clear path). After the
+// first run completes the pending field is cleared, so a rebind never re-submits.
+func TestSeedPromptDoesNotReFireOnModelsRestart(t *testing.T) {
+	pd := newSeedProgramModel(t, theme.New("aztec", theme.AztecPalette()),
+		simpleRunScript("seed"), "Read greeting.txt")
+	tm := teatest.NewTestModel(t, pd.model, teatest.WithInitialTermSize(100, 30))
+
+	// Let the first seed-driven run complete.
+	pd.prog.wait(t, phaseIdle, 3*time.Second)
+	pd.prog.waitRunComplete(t, 1, 5*time.Second)
+
+	// Simulate a /models restart or /clear: feed a fresh SessionReadyMsg (a
+	// rebind). The pending field was cleared on the first bind, so the seed must
+	// NOT re-fire — no new run, no new Prompt frame.
+	before := len(pd.send.frames())
+	tm.Send(client.SessionReadyMsg{SessionID: "sess-test-0002"})
+	pd.prog.wait(t, phaseIdle, 3*time.Second)
+
+	// Give the reducer a beat to (not) fire; assert no new Prompt frame landed.
+	// A re-fire would have opened a run (phaseRunning) — waitRunComplete staying
+	// at 1 is the deterministic proof it did not.
+	pd.prog.waitRunComplete(t, 1, 2*time.Second)
+	after := len(pd.send.frames())
+	if after != before {
+		t.Errorf("a rebind sent %d new frame(s), want 0 (seed must not re-fire); frames: %v",
+			after-before, pd.send.frames()[before:])
+	}
+	if pd.prog.runDone != 1 {
+		t.Errorf("runDone = %d, want 1 (no second run from a rebind)", pd.prog.runDone)
+	}
+
+	tm.Send(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	tm.Send(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(scaleWait(3*time.Second)))
+	fm := tm.FinalModel(t).(Model)
+	if fm.pendingInitialPrompt != "" {
+		t.Errorf("pendingInitialPrompt = %q after rebind, want empty", fm.pendingInitialPrompt)
+	}
+}
+
+// TestSeedPromptWhitespaceOnlyIsNoop asserts that a whitespace-only seed (-p "   ")
+// is a no-op: the TrimSpace gate in applySessionReady skips the submit, so no
+// Prompt frame is sent and no run starts.
+func TestSeedPromptWhitespaceOnlyIsNoop(t *testing.T) {
+	pd := newSeedProgramModel(t, theme.New("aztec", theme.AztecPalette()),
+		simpleRunScript("should-not-run"), "   ")
+	tm := teatest.NewTestModel(t, pd.model, teatest.WithInitialTermSize(100, 30))
+
+	// The seed is whitespace-only; the TrimSpace gate at update.go:364 must skip
+	// the submit. Wait for idle to confirm the connect settled without a run.
+	pd.prog.wait(t, phaseIdle, 3*time.Second)
+
+	// Assert ZERO Prompt frames were sent.
+	var prompts []*mecatlv1.ConverseRequest
+	for _, fr := range pd.send.frames() {
+		if p := fr.GetPrompt(); p != nil {
+			prompts = append(prompts, fr)
+		}
+	}
+	if len(prompts) != 0 {
+		t.Fatalf("sent %d Prompt frames, want 0 (whitespace-only seed must be a no-op)", len(prompts))
+	}
+	// No run started either.
+	if pd.prog.runDone != 0 {
+		t.Errorf("runDone = %d, want 0 (whitespace-only seed must not start a run)", pd.prog.runDone)
+	}
+
+	tm.Send(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	tm.Send(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(scaleWait(3*time.Second)))
+}
+
+// TestSeedPromptSlashCommandIntercepted asserts that a "/"-prefixed seed is
+// intercepted by submitPrompt's built-in dispatch and NOT sent to the server.
+// /clear is ALWAYS present (not caps-gated), so a seed of "/clear" is consumed
+// locally — zero Prompt frames reach the server.
+func TestSeedPromptSlashCommandIntercepted(t *testing.T) {
+	pd := newSeedProgramModel(t, theme.New("aztec", theme.AztecPalette()),
+		simpleRunScript("should-not-run"), "/clear")
+	tm := teatest.NewTestModel(t, pd.model, teatest.WithInitialTermSize(100, 30))
+
+	// Wait for idle; /clear is a bare built-in that submitPrompt intercepts before
+	// opening a stream, so the connect settles without a run.
+	pd.prog.wait(t, phaseIdle, 3*time.Second)
+
+	// Assert ZERO Prompt frames reached the server.
+	var prompts []*mecatlv1.ConverseRequest
+	for _, fr := range pd.send.frames() {
+		if p := fr.GetPrompt(); p != nil {
+			prompts = append(prompts, fr)
+		}
+	}
+	if len(prompts) != 0 {
+		t.Fatalf("sent %d Prompt frames, want 0 (/clear must be intercepted locally)", len(prompts))
+	}
+
+	tm.Send(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	tm.Send(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(scaleWait(3*time.Second)))
+}
+
+// TestSeedPromptConnectFallbackFires asserts the seed prompt fires exactly once
+// when the first session bind arrives via the connect-fallback arm (the
+// server-rejected-selector → zero-selection-retry path, issue #41).
+// The fakeConv is wired with rejectSelector so the non-zero InitialModel create
+// is rejected as InvalidArgument, the zero-selection retry succeeds, and the
+// resulting connectFallbackMsg drives applySessionReady → seed submit.
+func TestSeedPromptConnectFallbackFires(t *testing.T) {
+	th := theme.New("aztec", theme.AztecPalette())
+	recv := &fakeRecver{
+		script:      simpleRunScript("fallback-seed"),
+		gateType:    "",
+		gate:        make(chan struct{}),
+		reachedGate: make(chan struct{}),
+	}
+	send := &fakeSender{}
+	// rejectSelector returns InvalidArgument for any non-zero selector, triggering
+	// createSessionCmd's zero-selection retry which produces connectFallbackMsg.
+	conv := &fakeConv{
+		recv:           recv,
+		send:           send,
+		sessionReady:   make(chan struct{}),
+		rejectSelector: status.Error(codes.InvalidArgument, "unknown model"),
+	}
+	prog := newProgress()
+	m := New(Deps{
+		Session:       conv,
+		Conv:          conv,
+		Theme:         th,
+		Server:        "127.0.0.1:8080",
+		Workspace:     "/workspace",
+		Mode:          "default",
+		Model:         "mock-model",
+		InitialModel:  client.ModelSelection{ProviderID: "bad-proto", ModelID: "bad-model"},
+		Ctx:           context.Background(),
+		NoAltScreen:   true,
+		onPhase:       prog.record,
+		InitialPrompt: "hello from fallback",
+	})
+	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(100, 30))
+
+	// The connect-fallback arrives via createSessionCmd's goroutine, then
+	// applySessionReady fires the seed. Wait for the run to complete.
+	prog.wait(t, phaseIdle, 3*time.Second)
+	prog.waitRunComplete(t, 1, 5*time.Second)
+
+	// Exactly ONE Prompt frame carrying the seed text.
+	var prompts []*mecatlv1.ConverseRequest
+	for _, fr := range send.frames() {
+		if p := fr.GetPrompt(); p != nil {
+			prompts = append(prompts, fr)
+		}
+	}
+	if len(prompts) != 1 {
+		t.Fatalf("sent %d Prompt frames, want exactly 1 (seed on connect-fallback path)", len(prompts))
+	}
+	if got := prompts[0].GetPrompt().GetText(); got != "hello from fallback" {
+		t.Errorf("seed Prompt text = %q, want %q", got, "hello from fallback")
+	}
+
+	tm.Send(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	tm.Send(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(scaleWait(3*time.Second)))
+	fm := tm.FinalModel(t).(Model)
+	if fm.phase != phaseIdle {
+		t.Errorf("final phase = %d, want phaseIdle", fm.phase)
+	}
+	if fm.pendingInitialPrompt != "" {
+		t.Errorf("pendingInitialPrompt = %q after connect-fallback, want empty (seed consumed)", fm.pendingInitialPrompt)
 	}
 }

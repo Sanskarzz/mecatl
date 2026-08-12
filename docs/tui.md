@@ -98,12 +98,31 @@ closed.
 > --subagent-ask-reviewer …` and point `mecatui connect` at it. The `--model-slot
 > ask-reviewer=…` model slot is unaffected.
 
+### Seeding an initial prompt
+
+`-p`/`--prompt` (or `--prompt-file` for a longer body) launches the session with
+a seed prompt auto-submitted as the FIRST turn — the equivalent of typing the
+prompt and pressing enter the moment the session is ready. The TUI then stays
+interactive for follow-ups; this is NOT a print-and-exit one-shot.
+
+```sh
+mecatui -p "Summarize the failing tests in this repo" --workspace "$PWD"
+```
+
+`--prompt-file` reads a file at startup (fail-fast on an unreadable path) and is
+joined AFTER the `--prompt` literal, separated by a blank line, so you can combine
+a short directive with a longer brief. The seed fires ONCE: a `/models` restart or
+`/clear` rebinds the session but never re-submits the seed. A `/`-prefixed seed
+(e.g. `-p /clear`) is intercepted by the input's built-in slash-command handler.
+
 ### Flags
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `--workspace` | cwd | absolute session workspace root |
 | `--mode` | `default` | permission posture: `default` \| `plan` \| `accept-edits` |
+| `-p` / `--prompt` | – | seed prompt auto-submitted once the first session is ready (the CLI task to launch with). The TUI stays interactive for follow-ups; this is NOT a one-shot. Both `--prompt` and `--prompt-file` may be given (literal first, joined by a blank line). Fires ONCE — a `/models` restart or `/clear` never re-submits it |
+| `--prompt-file` | – | path to a file whose contents are the seed prompt body. Read at startup (fail-fast on unreadable). Joined after `--prompt` when both are given. Same once-only semantics as `--prompt` |
 | `--theme` | `aztec` | theme name (also `MECATUI_THEME`) |
 | `--theme-dir` | – | extra directory of `*.json` themes to load |
 | `--auth-token` | – | bearer token for an **external** server (or `MECATL_AUTH_TOKEN`) |
