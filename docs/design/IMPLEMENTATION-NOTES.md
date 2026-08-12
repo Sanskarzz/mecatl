@@ -17,6 +17,26 @@ Prefer updating the relevant design doc + this file over re-growing CLAUDE.md.
 
 ---
 
+## Caller identity embedding and OIDC module boundary
+
+The engine accepts identity only after verification. `session.PrincipalFromClaims`
+projects an already-verified claim map into the narrow `(iss, sub)` identity, rejecting
+missing, empty, or non-string identity claims and deriving only `user` or
+`client_credentials`; it never verifies a token and never mints `system`. An embedder
+puts that principal on the run context with `session.WithPrincipal`. If it constructs a
+session aggregate itself, it also seeds durable ownership through
+`Session.RestoreLabels(principal, "")`; children, forks, and resumed sessions inherit
+that owner.
+
+OIDC/JWKS mechanics live in the opt-in `authn/oidc` module (ADR 0103), not engine and
+not a provider module. Its `Validator` wraps `toolhive-core/authn`, maps validation and
+IdP-availability failures onto module-owned sentinels, fails closed if verified claims
+do not project to a principal, and owns an explicit `Close` for the background refresh.
+`internal/cliconfig` adapts those errors to the unchanged server sentinels and retains
+the server-root system context and all existing flag behavior.
+
+---
+
 ## Domain — `engine/session/` (lifecycle recovery)
 
 A turn always drives the `Session` aggregate to a terminal state within one
@@ -5498,7 +5518,10 @@ on the byte-identical no-scheduling path). The pieces:
   schedule name (control/space/path-separator runes → `-`) so a name with a newline or
   slash cannot produce a multi-line fire id. The OPTIONAL `EmitScheduleEvent` callback (`Service.EmitScheduleEvent`)
   appends the `EvScheduleFired`/`Skipped`/`Failed` event to the fire session's durable
-  `EventLog`.
+  `EventLog` — through the Service's single `appendEvent` chokepoint, so the event is
+  `Event.Actor`-stamped like every other durable append (it takes the scheduler's
+  `ctx`, which carries the system principal, so a `fired` event names
+  `mecatl:internal`/`scheduler`).
 - **Wire API (Phase 2a, #232).** `ScheduleService` — 10 gRPC RPCs
   (`CreateSchedule`/`GetSchedule`/`ListSchedules`/`UpdateSchedule`/`DeleteSchedule`/
   `FireNow`/`PauseSchedule`/`ResumeSchedule`/`GetFire`/`ListFires`) in
@@ -5603,8 +5626,13 @@ type-asserted via the `scheduleStoreProvider` accessor — a now-func, the durab
 for `FireNow`, the model inventory for selector validation) as late-bound atomic
 FIELDS on the manager (`SetScheduler` / `setModelsPointer`), never a reach back
 into the Service. `*server.Service` DELEGATES its nine `port.ScheduleManager`
-verbs + `EmitScheduleEvent` + `GetFire` to the embedded manager, so the RPC
-surface is byte-identical. A store with no `ScheduleStore` (the in-memory
+verbs + `GetFire` to the embedded manager, so the RPC surface is byte-identical.
+`EmitScheduleEvent` is the ONE exception and lives on the **Service**, not the
+manager (ADR 0100 decision 5): a schedule lifecycle event has to be stamped with
+`Event.Actor` by the same single `appendEvent` chokepoint as every other durable
+append, and that chokepoint is the Service's. It takes a `ctx` for exactly that
+reason — the old manager-side body built a fresh `context.Background()`, which
+carries no principal, so a `fired` event would record no actor at all. A store with no `ScheduleStore` (the in-memory
 memstore) yields a NIL manager — the honest no-scheduling path, matching
 `ServerCapabilities.Scheduling` — never a stub.
 
