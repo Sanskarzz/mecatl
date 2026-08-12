@@ -1,0 +1,124 @@
+package app
+
+// session_reconcile.go wires the composition-level sweep that repairs
+// sessions crash-orphaned in StateRunning (issue #475). Step 2
+// (internal/adapter/server.Service.SessionStale/SettleIfStale) already owns
+// the staleness DECISION and the repair WRITE; this file is the composition
+// CALLER that finds candidates and drives them through those two exported
+// seams — the childgc.go idiom (startup sweep + ticker, sharing ctx) applied
+// to a different inventory.
+
+import (
+	"context"
+	"time"
+
+	"github.com/stacklok/mecatl/engine/port"
+	"github.com/stacklok/mecatl/engine/session"
+	"github.com/stacklok/mecatl/internal/adapter/server"
+)
+
+// staleSessionSweepInterval is the ticker cadence for the sweep. A
+// package-level var (mirroring service.go's staleSessionWindow) so a test can
+// shrink it instead of waiting on a real interval.
+var staleSessionSweepInterval = 5 * time.Minute
+
+// startStaleSessionReconcile wires the crash-orphaned-running-session sweep
+// (issue #475 Step 4) — the fix for the "/sessions shows forever in
+// progress" symptom. It complements Step 3's run-entry funnel repair
+// (StartRunContent's own StateRunning check): the funnel only fires when a
+// caller actually re-opens the orphaned session, so it can never reach a
+// subagent-*/parallel-*/team-* child (nothing ever calls StartRunContent on a
+// child id) — exactly the population the confirmed real bug came from. This
+// sweep finds and settles them even if nobody ever re-opens them.
+//
+// Unconditional: unlike startChildGC there is no policy to disable, and the
+// candidate enumeration (svc.ListSessions) already degrades to an empty slice
+// for a store that can't list — a no-op sweep, not a posture worth narrating.
+// One startup sweep, then a ticker every staleSessionSweepInterval, on one
+// goroutine, until the returned close func cancels it.
+//
+// Deliberately NOT tied to Build's own ctx (unlike childGC's — childGC is a
+// no-op-by-default goroutine, since ChildGCInterval defaults to 0/startup-
+// only, so most callers never notice it outlives one Build call; this sweep
+// always runs a persistent ticker, so it needs its OWN cancelable lifetime —
+// the startLiveModelRefresh idiom). Build folds the returned close into
+// Built.Close's closeAll so a caller that never cancels its own ctx (the
+// common test-fixture shape) still gets a clean teardown.
+func startStaleSessionReconcile(cfg Config, svc *server.Service) func() {
+	diag := cfg.diag()
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		sweepStaleSessions(ctx, svc, diag)
+		ticker := time.NewTicker(staleSessionSweepInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				sweepStaleSessions(ctx, svc, diag)
+			}
+		}
+	}()
+	return cancel
+}
+
+// sweepStaleSessions runs one pass: list every stored session, narrow to the
+// ones persisted StateRunning, exclude "sched--" fire ids (the scheduler owns
+// its own stale-fire reconciler — see the note in scheduler_reconcile.go),
+// and settle every remaining candidate Service.SessionStale judges to be a
+// crash orphan rather than a genuinely in-flight run. ANY other id is
+// eligible, top-level or a subagent-*/parallel-*/team-* child alike —
+// SessionStale's age-horizon-first test (checked BEFORE any liveness/lease
+// signal) is exactly what makes that safe for ids IsLive can never see live
+// (a mid-run child, invisible to the top-level run registry).
+//
+// Best-effort throughout: ListSessions failing/degrading is silently a
+// no-op sweep (matching its own degrade-to-empty contract for an
+// unsupported store); a SettleIfStale failure is tallied into one WARN for
+// the whole pass and never aborts the rest of the candidates. Stays quiet on
+// an all-clean sweep, matching childgc's posture.
+func sweepStaleSessions(ctx context.Context, svc *server.Service, diag port.Diagnostics) {
+	rows, err := svc.ListSessions(ctx)
+	if err != nil || len(rows) == 0 {
+		return
+	}
+	var settled, failed int
+	var firstErr error
+	for _, row := range rows {
+		if row.State != string(session.StateRunning) {
+			continue // StateAwaiting and everything else is never a candidate.
+		}
+		id := session.SessionID(row.SessionID)
+		if isScheduleFireSession(id) {
+			continue
+		}
+		meta := port.SessionMeta{
+			ID:         id,
+			ModifiedAt: time.Unix(row.ModifiedAtUnix, 0),
+			State:      session.State(row.State),
+		}
+		if !svc.SessionStale(ctx, meta) {
+			continue
+		}
+		ok, settleErr := svc.SettleIfStale(ctx, id)
+		if settleErr != nil {
+			failed++
+			if firstErr == nil {
+				firstErr = settleErr
+			}
+			continue
+		}
+		if ok {
+			settled++
+		}
+	}
+	if failed > 0 {
+		diag.Log(ctx, port.LevelWarn, "stale-session sweep: some settles failed",
+			"failed", failed, "first_err", firstErr)
+	}
+	if settled > 0 {
+		diag.Log(ctx, port.LevelInfo, "stale-session sweep: settled crash-orphaned running sessions",
+			"settled", settled)
+	}
+}
