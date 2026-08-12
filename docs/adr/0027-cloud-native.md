@@ -685,12 +685,25 @@ Named residuals (accepted gaps, not silently omitted):
   funnel's repair relies on "a successful lease acquire is its own proof,"
   not an age horizon, for that specific path — distinct from the sweep, which
   DOES gate every child candidate (these families included) on the age
-  horizon first. No caller in the current call graph `StartRunContent`s a
-  child id directly (there is no wire-level entry point that targets a child
-  id), so the hazard is theoretical today rather than exercised — but the
-  framing gap in the funnel's own doc comment is real, and it is exactly why
-  `SessionStale`'s age-first ordering, not "successful lease acquire alone,"
-  is the sweep's own defense for this population.
+  horizon first. **This is NOT theoretical** — a child's id is deliberately
+  surfaced to the same caller that owns its parent session (the
+  `agentId:`/`Team id:` result trailer, `InspectSubagent`/`InspectMember`'s
+  `MemberSessionID(teamID, member)` scheme), so any caller with ordinary
+  prompt-endpoint access could `StartRunContent` a live child's id directly
+  and race the parent's own drive. The fix (a panel-review finding on this
+  same issue's Step 3) is `internal/adapter/server/service.go`'s
+  `isDelegationChildSessionID` guard: `StartRunContent` now rejects ANY
+  `subagent-`/`parallel-`/`team-` prefixed id outright with
+  `ErrInvalidArgument`, unconditionally, before `loadAndReopen`, before the
+  lease/lock, and before the `StateRunning` crash-orphan repair branch can
+  even be reached — closing the wire path structurally rather than trying to
+  make the repair itself race-safe. `sched--`-prefixed schedule-fire sessions
+  are deliberately excluded (`scheduler_fire.go`'s own `StartRunContent` call
+  on a fire session IS the legitimate driver for that family). Pinned by
+  `TestStartRunContentRejectsDelegationChildSessionID`
+  (`internal/adapter/server/staterunning_repair_test.go`). `SessionStale`'s
+  age-first ordering remains the sweep's own, independent defense for this
+  population — the two defenses are complementary, not redundant.
 
 ### Sequencing rationale
 

@@ -2376,6 +2376,24 @@ func (s *Service) StartRunContent(ctx context.Context, id session.SessionID, tex
 	if text == "" && len(parts) == 0 {
 		return nil, fmt.Errorf("%w: prompt text or parts is required", ErrInvalidArgument)
 	}
+	// Delegation-child ids (subagent-/parallel-/team-, engine/agent/childregistry.go's
+	// exported id-minting convention) are NEVER a legitimate StartRunContent target
+	// (issue #475 follow-up). A child is driven exclusively by its PARENT's in-process
+	// dispatch (driveChild) — that is precisely why Service.IsLive is structurally
+	// blind to it (see the doc comment there and internal/app/childgc.go's isLive
+	// caveat). A caller who learns a child's id from the `agentId:`/Team-id trailer or
+	// InspectSubagent/InspectMember's MemberSessionID scheme could otherwise call the
+	// prompt endpoint directly against it WHILE the parent is genuinely still driving
+	// it: IsLive(childID) reads false (it only tracks top-level runs), so the
+	// StateRunning crash-orphan repair below would Abandon()+Save the child's history
+	// out from under the parent's live drive — reintroducing the dangling-tool_use/
+	// provider-400 hazard issue #475 exists to close, this time self-inflicted via
+	// direct wire access. `sched--`-prefixed schedule-fire sessions are DELIBERATELY
+	// excluded — scheduler_fire.go's own StartRunContent call IS the legitimate way a
+	// fire session is driven, so that family stays untouched.
+	if isDelegationChildSessionID(id) {
+		return nil, fmt.Errorf("%w: session %q is a delegation-child session (subagent/parallel/team) and cannot be started directly; children are driven only by their parent's run", ErrInvalidArgument, id)
+	}
 	// NOTE (ADR 0062): there is NO prompt-channel scan here. The guardrails
 	// approve-once flow is OUT-OF-BAND — a PreToolUse guardrail block surfaces to the
 	// human as an ordinary permission ask (Allow once / Allow & don't ask / Deny) and
@@ -2448,6 +2466,23 @@ func (s *Service) StartRunContent(ctx context.Context, id session.SessionID, tex
 	run := engine.Run(ctx, sess, ws, agent.RunRequest{Text: text, Parts: parts})
 	s.register(id, run, sess)
 	return run, nil
+}
+
+// isDelegationChildSessionID reports whether id carries one of the delegation
+// families' child-session id prefixes: agent.SubagentSessionPrefix,
+// agent.ParallelSessionPrefix, agent.TeamSessionPrefix — the engine's exported
+// id-minting convention (engine/agent/childregistry.go), the same source
+// internal/app/childgc.go's childSessionPrefixes and
+// internal/app/scheduler_delivery_run.go's isNonDeliverableOrigin both consume
+// (this package cannot import internal/app without a cycle, so the check is
+// duplicated against the SAME upstream constants rather than a shared helper).
+// It deliberately does NOT match the `sched--` schedule-fire prefix: fire
+// sessions ARE legitimately started via StartRunContent (scheduler_fire.go).
+func isDelegationChildSessionID(id session.SessionID) bool {
+	s := string(id)
+	return strings.HasPrefix(s, agent.SubagentSessionPrefix) ||
+		strings.HasPrefix(s, agent.ParallelSessionPrefix) ||
+		strings.HasPrefix(s, agent.TeamSessionPrefix)
 }
 
 // engineAndWorkspaceFor resolves the engine + workspace a loaded session should run

@@ -41,7 +41,12 @@ func TestStartRunContentAbandonsStaleRunningSession(t *testing.T) {
 
 	svc, store := newServiceWithEngine(t, llm, tool.NewCatalog())
 
-	const id session.SessionID = "subagent-crash-orphan-475"
+	// NOTE: this id deliberately does NOT carry a delegation-child prefix
+	// (subagent-/parallel-/team-) — StartRunContent now rejects those outright
+	// (see TestStartRunContentRejectsDelegationChildSessionID), so a crash-
+	// orphaned TOP-LEVEL session is what this repair path actually needs to
+	// handle here.
+	const id session.SessionID = "crash-orphan-475"
 	sess := session.New(id, session.ModeDefault, "/ws", session.Limits{}, time.Unix(0, 0))
 	if err := sess.RecordUserPrompt("do the thing", nil); err != nil {
 		t.Fatalf("RecordUserPrompt: %v", err)
@@ -234,5 +239,68 @@ func TestStartRunContentLeavesLiveRunningSessionAlone(t *testing.T) {
 	}
 	if got := cs.saveCount(); got != savesBeforeSecondCall {
 		t.Fatalf("Store.Save called %d times by the refused repair attempt, want %d (no extra write)", got, savesBeforeSecondCall)
+	}
+}
+
+// TestStartRunContentRejectsDelegationChildSessionID is the ship-blocker fix
+// for the panel-review finding on issue #475's Step 3: a caller with no
+// special privilege — just the SAME access the parent session's owner already
+// has — can learn a child's id from the `agentId:`/`Team id:` result trailer
+// or InspectSubagent/InspectMember's MemberSessionID(teamID, member) scheme,
+// then call the wire prompt endpoint (StartRunContent, or the HTTP/gRPC
+// handlers that route to it) directly against THAT id. Service.IsLive is
+// structurally blind to children (its own doc comment says so — a
+// subagent/parallel/team child is driven inside its PARENT's in-process
+// dispatch, never registered in s.runs), so the StateRunning crash-orphan
+// repair a few lines above this test would see IsLive==false for a
+// GENUINELY-LIVE child and proceed to Abandon() + Save its history out from
+// under the parent — reintroducing, via direct wire access, exactly the
+// dangling-tool_use/provider-400 hazard issue #475 exists to close.
+//
+// The fix rejects ANY subagent-/parallel-/team- prefixed id at the very top
+// of StartRunContent, unconditionally — before loadAndReopen, before the
+// lease/lock, before the StateRunning repair branch can even be reached. This
+// test seeds a subagent-family session in the exact StateRunning
+// crash-orphan shape the repair above targets and proves it is rejected
+// outright, with ZERO extra Store.Save (the repair's Abandon+Save path is
+// never entered — the guard fires before any store I/O).
+func TestStartRunContentRejectsDelegationChildSessionID(t *testing.T) {
+	for _, id := range []session.SessionID{
+		"subagent-crash-orphan-475",
+		"parallel-crash-orphan-475-0",
+		"team-abc123-worker",
+	} {
+		t.Run(string(id), func(t *testing.T) {
+			llm := mockllm.New(mockllm.TextTurn("should never run"))
+			svc, store := newServiceWithEngine(t, llm, tool.NewCatalog())
+
+			sess := session.New(id, session.ModeDefault, "/ws", session.Limits{}, time.Unix(0, 0))
+			if err := sess.RecordUserPrompt("do the thing", nil); err != nil {
+				t.Fatalf("RecordUserPrompt: %v", err)
+			}
+			if err := sess.BeginTurn(); err != nil {
+				t.Fatalf("BeginTurn: %v", err)
+			}
+			call := session.NewToolCall("call-a", "Grep", nil)
+			if err := sess.RecordAssistant(session.NewAssistantMessage("", "", []session.ToolCall{call})); err != nil {
+				t.Fatalf("RecordAssistant: %v", err)
+			}
+			if err := store.Save(context.Background(), sess); err != nil {
+				t.Fatalf("seed Save: %v", err)
+			}
+
+			_, err := svc.StartRunContent(context.Background(), id, "hijack this child session", nil)
+			if !errors.Is(err, server.ErrInvalidArgument) {
+				t.Fatalf("StartRunContent(%q) = %v, want ErrInvalidArgument", id, err)
+			}
+
+			reloaded, err := svc.GetSession(context.Background(), id)
+			if err != nil {
+				t.Fatalf("GetSession after rejected call: %v", err)
+			}
+			if reloaded.State != session.StateRunning {
+				t.Fatalf("rejected StartRunContent mutated the session: state = %q, want unchanged %q", reloaded.State, session.StateRunning)
+			}
+		})
 	}
 }
