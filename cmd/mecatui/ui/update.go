@@ -354,6 +354,19 @@ func (m Model) applySessionReady(msg client.SessionReadyMsg) (tea.Model, tea.Cmd
 	if liveCmd := (&m).armLiveFeed(); liveCmd != nil {
 		cmd = tea.Batch(cmd, liveCmd)
 	}
+	// Seed the CLI prompt on the FIRST session bind only: set the textarea value,
+	// clear the pending field, and submit via the identical typed-prompt path so
+	// the behavior is byte-identical to the operator pressing enter. The pending
+	// field is cleared BEFORE submitPrompt runs (defense-in-depth against re-fire
+	// on a /models restart or /clear, both of which funnel back through here).
+	// A "/"-prefixed seed (e.g. -p /clear) is intercepted by submitPrompt's
+	// built-in intercept — documented behavior.
+	if p := strings.TrimSpace(m.pendingInitialPrompt); p != "" {
+		m.pendingInitialPrompt = ""
+		m.ta.SetValue(p)
+		mm, submitCmd := m.submitPrompt()
+		return mm, tea.Batch(cmd, submitCmd), true
+	}
 	return m, cmd, true
 }
 

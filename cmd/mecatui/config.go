@@ -129,6 +129,16 @@ type config struct {
 	mock                 bool
 	noBash               bool
 
+	// prompt is the literal seed-prompt text supplied via -p/--prompt.
+	// Empty = no seed. Joined ahead of --prompt-file when both are given.
+	prompt string
+	// promptFile is the path supplied via --prompt-file. The file body is read
+	// at parse time into promptFileBody; this field holds the raw flag value.
+	promptFile string
+	// promptFileBody is the content of --prompt-file read at parse time (fail-fast
+	// on unreadable). Joined after the --prompt literal.
+	promptFileBody string
+
 	// Embedded-server LLM resilience timeouts (used only when hosting an
 	// in-process server; ignored under `mecatui connect`). They mirror
 	// mecated's --llm-per-attempt-timeout / --llm-stream-idle-timeout and are
@@ -303,6 +313,9 @@ func parseTransportFlags(mode transportMode, out io.Writer, args []string) (*fla
 	fs.SetOutput(out)
 	fs.StringVar(&cfg.workspace, "workspace", "", "absolute workspace root for the session (default: cwd)")
 	fs.StringVar(&cfg.mode, "mode", "default", "permission mode: default | plan | accept-edits")
+	fs.StringVar(&cfg.prompt, "prompt", "", "seed prompt auto-submitted once the first session is ready (the CLI task to launch with). The TUI stays interactive for follow-ups; this is NOT a one-shot. Both --prompt and --prompt-file may be given (literal first)")
+	fs.StringVar(&cfg.prompt, "p", "", "short form of --prompt")
+	fs.StringVar(&cfg.promptFile, "prompt-file", "", "path to a file whose contents are the seed prompt body. Read at startup (fail-fast on unreadable). Joined after --prompt when both are given")
 	fs.StringVar(&cfg.theme, "theme", "", "theme name (default: aztec)")
 	fs.StringVar(&cfg.themeDir, "theme-dir", "", "extra directory of *.json themes to load")
 	fs.StringVar(&cfg.authToken, "auth-token", "", "bearer token for an external server (or MECATL_AUTH_TOKEN)")
@@ -412,6 +425,13 @@ func parseTransportFlags(mode transportMode, out io.Writer, args []string) (*fla
 
 	if err := finalizeParsedConfig(fs, &cfg); err != nil {
 		return fs, config{}, err
+	}
+	if cfg.promptFile != "" {
+		body, err := os.ReadFile(cfg.promptFile)
+		if err != nil {
+			return fs, config{}, fmt.Errorf("reading --prompt-file %q: %w", cfg.promptFile, err)
+		}
+		cfg.promptFileBody = string(body)
 	}
 	return fs, cfg, nil
 }

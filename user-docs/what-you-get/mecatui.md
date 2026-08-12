@@ -7,6 +7,20 @@ title: Using mecatui
 
 `mecatui` is the terminal client for mecatl — it hosts an embedded `mecated` server in-process by default, so `mecatui` in a repo is enough to get a working session with no separate server to run. This page covers the everyday things worth knowing about: switching model or effort without losing your conversation, sessions surviving a restart, and reading what's on screen while the model works. For the exhaustive reference (every keybinding, theming, MCP overlays), see the link at the bottom.
 
+## Seeding your first prompt from the command line
+
+`-p`/`--prompt` (or `--prompt-file` for a longer body) launches the session with
+a seed prompt auto-submitted as the FIRST turn — the equivalent of typing the
+prompt and pressing enter the moment the session is ready. The TUI then stays
+open for follow-ups; it is not a one-shot:
+
+```sh
+mecatui -p "Summarize the failing tests in this repo" --workspace "$PWD"
+```
+
+The seed fires once: a `/models` restart or `/clear` rebinds the session but never
+re-submits it. See the [`docs/tui.md` flags reference](https://github.com/stacklok/mecatl/blob/main/docs/tui.md#seeding-an-initial-prompt) for the full details.
+
 ## Switching models mid-conversation (`/models`)
 
 Open the model picker with `/models`, move the cursor to a model, and press `enter` to switch **immediately** — the conversation is always kept. Because a session is pinned to one provider for its lifetime, mecatui makes this happen by closing your current session and creating a fresh one on the new model, seeded with everything you've said and done so far. The new session sees the full prior context; only the header changes to reflect it.

@@ -167,6 +167,12 @@ type Deps struct {
 	Workspace string
 	Mode      string
 	Model     string
+	// InitialPrompt is a CLI-supplied seed prompt auto-submitted once the first
+	// session is ready (the equivalent of typing the prompt and pressing enter).
+	// Empty = today's behavior (no seed). Cleared after the first use so a
+	// /models restart or /clear never re-submits it. Populated by main.go from
+	// -p/--prompt + --prompt-file.
+	InitialPrompt string
 
 	// Version is the mecatui build version, shown on the first-run welcome splash
 	// (e.g. "v0.3.1" or "dev"). Threaded from cmd/mecatui's main.version (ldflags-set);
@@ -523,6 +529,16 @@ type Model struct {
 	// back to the plain "connected" status.
 	pendingModelSwitchNote string
 
+	// pendingInitialPrompt is the CLI-supplied seed prompt (-p/--prompt +
+	// --prompt-file) awaiting its first session ready. Seeded from
+	// Deps.InitialPrompt at construction and consumed ONCE by applySessionReady:
+	// it is set into the textarea, the pending field is cleared BEFORE the
+	// submit (defense-in-depth against re-fire), and the identical typed-prompt
+	// path runs. A /models restart or /clear funnels back through
+	// applySessionReady but the field is already empty, so the seed never
+	// re-fires. Empty = no seed (the default; today's behavior).
+	pendingInitialPrompt string
+
 	// restartFailed is true while a /models restart-now handoff's re-create FAILED and
 	// the app is in the RECOVERABLE no-session state (phaseIdle, sessionID==""). It is
 	// NOT phaseFatal: a transient blip on a deliberate model switch must leave a usable
@@ -735,6 +751,9 @@ func New(deps Deps) Model {
 		activeMode:      client.ModeString(client.ModeFromString(deps.Mode)),
 		models:          modelsState{active: deps.InitialModel, globalDefault: deps.GlobalDefault},
 		activeWorkspace: deps.Workspace,
+		// Seed the CLI-supplied seed prompt (-p/--prompt + --prompt-file) for
+		// one-shot auto-submit on the FIRST session ready.
+		pendingInitialPrompt: deps.InitialPrompt,
 		// Detect emoji-presentation capability ONCE at construction (conservative,
 		// env-based) so the header hot path reads a bool, never os.Environ().
 		emojiOK: emojiCapable(),

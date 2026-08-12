@@ -243,6 +243,10 @@ func run(argv []string) error {
 		// Diagnostic: MECATUI_DEBUG_MOUSE=1 shows raw mouse coords + content mapping in
 		// the footer (for diagnosing selection/coordinate issues). Default off.
 		DebugMouse: os.Getenv("MECATUI_DEBUG_MOUSE") != "",
+		// Seed prompt from -p/--prompt + --prompt-file: joined at startup and
+		// auto-submitted once the first session is ready (interactive-seed, NOT a
+		// one-shot — the TUI stays open for follow-ups). Empty = no seed.
+		InitialPrompt: joinPromptBody(cfg.prompt, cfg.promptFileBody),
 	}
 
 	// Apply keymap overrides (CLI for now).

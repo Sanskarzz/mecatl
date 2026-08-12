@@ -995,3 +995,96 @@ func TestValidateAllowAllConnectGuard(t *testing.T) {
 		}
 	}
 }
+
+// TestParseFlagsPromptDefaults asserts the seed-prompt flags default to empty
+// (no seed) — the additive-only promise: nothing changes unless the operator
+// asks for it.
+func TestParseFlagsPromptDefaults(t *testing.T) {
+	cfg, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags(nil): %v", err)
+	}
+	if cfg.prompt != "" {
+		t.Errorf("prompt = %q, want \"\" (no seed by default)", cfg.prompt)
+	}
+	if cfg.promptFile != "" {
+		t.Errorf("promptFile = %q, want \"\" by default", cfg.promptFile)
+	}
+	if cfg.promptFileBody != "" {
+		t.Errorf("promptFileBody = %q, want \"\" by default", cfg.promptFileBody)
+	}
+}
+
+// TestParseFlagsPromptShortAndLong asserts both -p and --prompt bind to the SAME
+// config field (the stdlib flag package tolerates multiple names targeting one
+// variable), so the alias is byte-identical to the long form.
+func TestParseFlagsPromptShortAndLong(t *testing.T) {
+	for _, args := range [][]string{
+		{"-p", "task one"},
+		{"--prompt", "task one"},
+	} {
+		cfg, err := parseFlags(args)
+		if err != nil {
+			t.Fatalf("parseFlags(%v): %v", args, err)
+		}
+		if cfg.prompt != "task one" {
+			t.Errorf("args=%v: prompt = %q, want \"task one\"", args, cfg.prompt)
+		}
+	}
+}
+
+// TestParseFlagsPromptFileRead asserts --prompt-file records the path AND reads
+// the file body into promptFileBody at parse time (fail-fast on unreadable).
+func TestParseFlagsPromptFileRead(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "seed.txt")
+	if err := os.WriteFile(path, []byte("read the greeting file\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	cfg, err := parseFlags([]string{"--prompt-file", path})
+	if err != nil {
+		t.Fatalf("parseFlags(--prompt-file): %v", err)
+	}
+	if cfg.promptFile != path {
+		t.Errorf("promptFile = %q, want %q", cfg.promptFile, path)
+	}
+	if cfg.promptFileBody != "read the greeting file\n" {
+		t.Errorf("promptFileBody = %q, want the file contents", cfg.promptFileBody)
+	}
+}
+
+// TestParseFlagsPromptFileUnreadable asserts an unreadable --prompt-file fails
+// fast with an error naming the path.
+func TestParseFlagsPromptFileUnreadable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing.txt")
+	_, err := parseFlags([]string{"--prompt-file", path})
+	if err == nil {
+		t.Fatalf("parseFlags with a missing --prompt-file should fail")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("error = %q, want it to name the path %q", err.Error(), path)
+	}
+}
+
+// TestJoinPromptBody is the pure table test of joinPromptBody: both empty → empty;
+// literal only; file only; both → literal + blank line + fileBody.
+func TestJoinPromptBody(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, literal, fileBody, want string
+	}{
+		{name: "both empty", literal: "", fileBody: "", want: ""},
+		{name: "literal only", literal: "hello", fileBody: "", want: "hello"},
+		{name: "file only", literal: "", fileBody: "world", want: "world"},
+		{name: "both joined by blank line", literal: "hello", fileBody: "world", want: "hello\n\nworld"},
+		{name: "trailing newlines trimmed", literal: "a\n\n", fileBody: "b\n\n", want: "a\n\nb"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := joinPromptBody(tc.literal, tc.fileBody); got != tc.want {
+				t.Errorf("joinPromptBody(%q, %q) = %q, want %q", tc.literal, tc.fileBody, got, tc.want)
+			}
+		})
+	}
+}
