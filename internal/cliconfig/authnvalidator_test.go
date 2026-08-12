@@ -15,215 +15,144 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/stacklok/toolhive-core/authn"
 
+	oidcauthn "github.com/stacklok/mecatl/authn/oidc"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/internal/adapter/server"
 )
 
-func TestErrToSentinelPreservesUnavailableAndContext(t *testing.T) {
-	unavailable := errToSentinel(&authn.Error{Code: authn.CodeUnavailable})
-	if !errors.Is(unavailable, server.ErrIdentityUnavailable) {
-		t.Fatalf("CodeUnavailable = %v, want ErrIdentityUnavailable", unavailable)
-	}
-	for _, want := range []error{context.Canceled, context.DeadlineExceeded} {
-		if got := errToSentinel(want); !errors.Is(got, want) {
-			t.Fatalf("errToSentinel(%v) = %v, want original context error", want, got)
-		}
-		if errors.Is(errToSentinel(want), server.ErrInvalidToken) {
-			t.Fatalf("errToSentinel(%v) wrapped ErrInvalidToken", want)
-		}
+func TestErrToSentinelPreservesRootContractAndContext(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		err      error
+		want     error
+		opposite error
+	}{
+		{name: "invalid", err: oidcauthn.ErrInvalidToken, want: server.ErrInvalidToken, opposite: server.ErrIdentityUnavailable},
+		{name: "unavailable", err: oidcauthn.ErrIdentityUnavailable, want: server.ErrIdentityUnavailable, opposite: server.ErrInvalidToken},
+		{name: "canceled", err: context.Canceled, want: context.Canceled, opposite: server.ErrInvalidToken},
+		{name: "deadline", err: context.DeadlineExceeded, want: context.DeadlineExceeded, opposite: server.ErrInvalidToken},
+		{name: "unknown fails closed", err: errors.New("unknown"), want: server.ErrInvalidToken, opposite: server.ErrIdentityUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := errToSentinel(tc.err)
+			if !errors.Is(got, tc.want) {
+				t.Fatalf("errToSentinel(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+			if errors.Is(got, tc.opposite) {
+				t.Fatalf("errToSentinel(%v) = %v, unexpectedly wraps %v", tc.err, got, tc.opposite)
+			}
+		})
 	}
 }
-
-// --- the static-JWKS fixture -------------------------------------------------
 
 const (
-	testKID      = "test-key-1"
-	testAudience = "mecatl"
-	testSubject  = "alice"
+	rootTestKID      = "root-test-key-1"
+	rootTestAudience = "mecatl"
+	rootTestSubject  = "alice"
 )
 
-// jwksFixture is an httptest TLS server serving ONE RSA public key as a JWKS, plus
-// the signer for tokens it vouches for.
-//
-// Tokens are signed IN-TEST rather than read from a fixture file, deliberately:
-// a committed token carries a fixed `exp` and the suite would start failing on a
-// calendar date with no code change.
-type jwksFixture struct {
+type rootJWKSFixture struct {
 	srv       *httptest.Server
 	key       *rsa.PrivateKey
-	discovery *atomic.Int64 // hits on the discovery document
-	jwks      *atomic.Int64 // hits on the JWKS endpoint
+	discovery atomic.Int64
+	jwks      atomic.Int64
 }
 
-func newJWKSFixture(t *testing.T) *jwksFixture {
+func newRootJWKSFixture(t *testing.T) *rootJWKSFixture {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatalf("rsa.GenerateKey: %v", err)
 	}
-	f := &jwksFixture{key: key, discovery: &atomic.Int64{}, jwks: &atomic.Int64{}}
-
+	fixture := &rootJWKSFixture{key: key}
 	mux := http.NewServeMux()
-	// The JWKS: one RSA key, hand-rolled rather than pulling a JOSE library in
-	// just to marshal two big-endian integers.
 	mux.HandleFunc("/keys", func(w http.ResponseWriter, _ *http.Request) {
-		f.jwks.Add(1)
+		fixture.jwks.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []map[string]string{{
-			"kty": "RSA",
-			"use": "sig",
-			"alg": "RS256",
-			"kid": testKID,
-			"n":   base64.RawURLEncoding.EncodeToString(key.N.Bytes()),
-			"e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.E)).Bytes()),
+			"kty": "RSA", "use": "sig", "alg": "RS256", "kid": rootTestKID,
+			"n": base64.RawURLEncoding.EncodeToString(key.N.Bytes()),
+			"e": base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.E)).Bytes()),
 		}}})
 	})
-	// The discovery document. AC2.3 asserts this is NEVER hit when the JWKS URI
-	// is pinned, so the counter is the whole point of serving it.
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
-		f.discovery.Add(1)
+		fixture.discovery.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"issuer":   f.srv.URL,
-			"jwks_uri": f.srv.URL + "/keys",
+			"issuer": fixture.srv.URL, "jwks_uri": fixture.srv.URL + "/keys",
 		})
 	})
-	// A TLS server, not a plain one: InsecureAllowHTTP is a CONFIG-level scheme
-	// check on the issuer URL and fires regardless of which HTTP client is
-	// supplied, so an http:// fixture would force relaxing a production default.
-	// Serving over TLS keeps BOTH pinned defaults intact — the scheme check passes,
-	// and f.srv.Client() carries the test CA so the supplied client (which is also
-	// what bypasses the loopback AllowPrivateIP check) trusts it.
-	f.srv = httptest.NewTLSServer(mux)
-	t.Cleanup(f.srv.Close)
-	return f
+	fixture.srv = httptest.NewTLSServer(mux)
+	t.Cleanup(fixture.srv.Close)
+	return fixture
 }
 
-// sign mints an RS256 token for the given issuer/audience/subject.
-func (f *jwksFixture) sign(t *testing.T, iss, aud, sub string) string {
+func (f *rootJWKSFixture) sign(t *testing.T, audience string) string {
 	t.Helper()
 	now := time.Now()
-	tok := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
-		"iss": iss,
-		"aud": aud,
-		"sub": sub,
-		"iat": now.Unix(),
-		"nbf": now.Unix(),
-		"exp": now.Add(10 * time.Minute).Unix(),
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+		"iss": f.srv.URL, "aud": audience, "sub": rootTestSubject, "name": "Alice",
+		"iat": now.Unix(), "nbf": now.Unix(), "exp": now.Add(10 * time.Minute).Unix(),
 	})
-	tok.Header["kid"] = testKID
-	s, err := tok.SignedString(f.key)
+	token.Header["kid"] = rootTestKID
+	signed, err := token.SignedString(f.key)
 	if err != nil {
 		t.Fatalf("sign: %v", err)
 	}
-	return s
+	return signed
 }
 
-// validatorFor builds the validator through the REAL production path
-// (OIDCValidator → defaultNewValidator), so the assertions cover mecatl's own
-// authn.Config construction rather than a config the test wrote itself. That is
-// the entire point of scenario 2: a Config with an empty Audiences and
-// AllowAnyAudience true would leave the library behaving correctly while mecatl
-// accepted tokens minted for another service, and only the real path can catch it.
-func (f *jwksFixture) validatorFor(t *testing.T, audience string) server.PrincipalValidator {
+// validator builds through OIDCValidator's nil-constructor default so these
+// tests pin root composition, not only the reusable adapter beneath it.
+func (f *rootJWKSFixture) validator(t *testing.T) server.PrincipalValidator {
 	t.Helper()
-	v, err := OIDCValidator(context.Background(), OIDCConfig{
-		Issuer:       f.srv.URL,
-		Audience:     audience,
-		JWKSURI:      f.srv.URL + "/keys",
-		NewValidator: defaultNewValidator,
-		// The library's AllowPrivateIP is false by default and blocks loopback;
-		// it governs only the library's own client, so the test supplies one
-		// rather than relaxing a production default.
+	validator, err := OIDCValidator(context.Background(), OIDCConfig{
+		Issuer: f.srv.URL, Audience: rootTestAudience, JWKSURI: f.srv.URL + "/keys",
 		httpClient: f.srv.Client(),
 	})
 	if err != nil {
 		t.Fatalf("OIDCValidator: %v", err)
 	}
-	if v == nil {
-		t.Fatal("OIDCValidator returned no validator with an issuer configured")
+	if closer, ok := validator.(interface{ Close() error }); ok {
+		t.Cleanup(func() { _ = closer.Close() })
 	}
-	if c, ok := v.(interface{ Close() error }); ok {
-		t.Cleanup(func() { _ = c.Close() })
-	}
-	return v
+	return validator
 }
 
-// --- AC2.1 -------------------------------------------------------------------
-
-// TestCallerIdentityE2E_Scenario2_RealTokenYieldsPrincipal pins AC2.1: a
-// genuinely-signed RS256 token from the configured issuer and audience yields a
-// principal carrying the token's (iss, sub) AND a grant that satisfies Valid().
-//
-// The grant half is not incidental. authn.Principal has no GrantType; a
-// field-copy adapter would produce "" which admissiblePrincipal rejects, so
-// EVERY valid token would 401. This is the assertion that catches that.
-func TestCallerIdentityE2E_Scenario2_RealTokenYieldsPrincipal(t *testing.T) {
-	f := newJWKSFixture(t)
-	v := f.validatorFor(t, testAudience)
-
-	p, err := v.Validate(context.Background(), f.sign(t, f.srv.URL, testAudience, testSubject))
+func TestDefaultOIDCValidatorAcceptsSignedToken(t *testing.T) {
+	fixture := newRootJWKSFixture(t)
+	principal, err := fixture.validator(t).Validate(context.Background(), fixture.sign(t, rootTestAudience))
 	if err != nil {
-		t.Fatalf("a correctly-signed token was rejected: %v", err)
+		t.Fatalf("Validate: %v", err)
 	}
-	if p == nil {
-		t.Fatal("validator returned a nil principal with a nil error")
+	want := session.Principal{
+		Issuer: fixture.srv.URL, Subject: rootTestSubject, Name: "Alice", GrantType: session.GrantTypeUser,
 	}
-	if p.Issuer != f.srv.URL || p.Subject != testSubject {
-		t.Fatalf("identity = (%q, %q), want (%q, %q)", p.Issuer, p.Subject, f.srv.URL, testSubject)
-	}
-	if !p.GrantType.Valid() {
-		t.Fatalf("GrantType = %q, which is not Valid() — admissiblePrincipal would 401 every valid token", p.GrantType)
-	}
-	if p.GrantType == session.GrantTypeSystem {
-		t.Fatalf("GrantType = %q: a token must never yield the in-process system grant", p.GrantType)
+	if principal == nil || *principal != want {
+		t.Fatalf("principal = %#v, want %#v", principal, want)
 	}
 }
 
-// --- AC2.2 -------------------------------------------------------------------
-
-// TestCallerIdentityE2E_Scenario2_WrongAudienceRejected pins AC2.2: the same
-// signing key and issuer with a DIFFERENT audience is rejected.
-//
-// This is the insecure-but-green configuration the scenario exists for. If
-// mecatl built authn.Config with an empty Audiences, or with AllowAnyAudience
-// true, the library would happily accept a token minted for another service and
-// every other test here would still pass.
-func TestCallerIdentityE2E_Scenario2_WrongAudienceRejected(t *testing.T) {
-	f := newJWKSFixture(t)
-	v := f.validatorFor(t, testAudience)
-
-	_, err := v.Validate(context.Background(), f.sign(t, f.srv.URL, "some-other-service", testSubject))
-	if err == nil {
-		t.Fatal("a token minted for a DIFFERENT audience was accepted — Audiences is empty or AllowAnyAudience is true")
-	}
-	if !errors.Is(err, server.ErrInvalidToken) {
-		t.Fatalf("err = %v, want ErrInvalidToken (401-class), not a transient", err)
-	}
-	if errors.Is(err, server.ErrIdentityUnavailable) {
-		t.Fatal("a wrong-audience token was reported as an IdP outage")
+func TestDefaultOIDCValidatorMapsWrongAudience(t *testing.T) {
+	fixture := newRootJWKSFixture(t)
+	_, err := fixture.validator(t).Validate(context.Background(), fixture.sign(t, "other-service"))
+	if !errors.Is(err, server.ErrInvalidToken) || errors.Is(err, server.ErrIdentityUnavailable) {
+		t.Fatalf("wrong audience error = %v, want server.ErrInvalidToken only", err)
 	}
 }
 
-// --- AC2.3 -------------------------------------------------------------------
-
-// TestCallerIdentityE2E_Scenario2_StaticJWKSSkipsDiscovery pins AC2.3: with the
-// JWKS URI pinned, OIDC discovery is never attempted — the air-gapped and
-// offline path. The discovery document is served and counted, so a regression
-// that started resolving it would be visible rather than merely slower.
-func TestCallerIdentityE2E_Scenario2_StaticJWKSSkipsDiscovery(t *testing.T) {
-	f := newJWKSFixture(t)
-	v := f.validatorFor(t, testAudience)
-
-	if _, err := v.Validate(context.Background(), f.sign(t, f.srv.URL, testAudience, testSubject)); err != nil {
-		t.Fatalf("validate: %v", err)
+func TestDefaultOIDCValidatorUsesPinnedJWKS(t *testing.T) {
+	fixture := newRootJWKSFixture(t)
+	if _, err := fixture.validator(t).Validate(context.Background(), fixture.sign(t, rootTestAudience)); err != nil {
+		t.Fatalf("Validate: %v", err)
 	}
-	if got := f.discovery.Load(); got != 0 {
-		t.Fatalf("discovery document fetched %d time(s) despite a pinned --oidc-jwks-uri", got)
+	if got := fixture.discovery.Load(); got != 0 {
+		t.Fatalf("discovery fetched %d times with a pinned JWKS URI", got)
 	}
-	if got := f.jwks.Load(); got == 0 {
-		t.Fatal("the pinned JWKS endpoint was never fetched — the test proves nothing about where keys came from")
+	if got := fixture.jwks.Load(); got == 0 {
+		t.Fatal("pinned JWKS endpoint was not fetched")
 	}
 }

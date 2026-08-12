@@ -27,12 +27,12 @@ require (
 	github.com/prometheus/client_model v0.6.2
 	github.com/prometheus/procfs v0.21.1
 	github.com/redis/go-redis/v9 v9.22.0
+	github.com/stacklok/mecatl/authn/oidc v0.0.0-00010101000000-000000000000
 	github.com/stacklok/mecatl/engine v0.9.0
 	github.com/stacklok/mecatl/provider/anthropic v0.0.0-00010101000000-000000000000
 	github.com/stacklok/mecatl/provider/openai v0.0.0-00010101000000-000000000000
 	github.com/stacklok/mecatl/provider/openaichat v0.0.0-00010101000000-000000000000
 	github.com/stacklok/toolhive v0.40.0
-	github.com/stacklok/toolhive-core v0.0.39
 	github.com/tiktoken-go/tokenizer v0.8.0
 	go.opentelemetry.io/contrib/instrumentation/runtime v0.69.0
 	go.opentelemetry.io/otel v1.45.0
@@ -230,6 +230,7 @@ require (
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/spf13/viper v1.21.0 // indirect
 	github.com/stacklok/mecatl/provider/ssefilter v0.0.0 // indirect
+	github.com/stacklok/toolhive-core v0.0.39 // indirect
 	github.com/standard-webhooks/standard-webhooks/libraries v0.0.1 // indirect
 	github.com/stretchr/testify v1.11.1 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
@@ -295,6 +296,8 @@ require (
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.2-0.20260122202528-d9cc6641c482 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
+
+replace github.com/stacklok/mecatl/authn/oidc => ./authn/oidc
 
 replace github.com/stacklok/mecatl/engine => ./engine
 

@@ -584,7 +584,10 @@ grounds. The thread has four segments.
 hand a bearer to a validator and get back a `session.Principal`
 (`engine/session/principal.go`), whose identity is the `(Issuer, Subject)` pair.
 Token mechanics — parse, signature, `iss`/`aud`/`exp`, JWKS rotation — are
-delegated to the validator; mecatl hand-rolls none of it. The operator wires one
+delegated to the validator; mecatl hand-rolls none of it. The reusable implementation
+is the opt-in `github.com/stacklok/mecatl/authn/oidc` module
+([ADR 0103](adr/0103-oidc-authn-module.md)); it keeps ToolHive and JWT dependencies
+outside the engine and exposes no ToolHive types. The operator wires one
 through `--oidc-issuer` / `--oidc-jwks-uri` / `--oidc-audience` /
 `--oidc-max-jwks-staleness` (`internal/cliconfig/oidc.go` (`OIDCConfig`,
 `OIDCValidator`)), and a validator that cannot be constructed is a **fatal**
@@ -609,7 +612,31 @@ subjects.
 
 **It rides a context key, and is never fabricated.** `session.WithPrincipal` /
 `session.PrincipalFromContext` (`engine/session/principal_context.go`) carry the
-verified caller inward. Absent identity is a **nil** principal — no anonymous
+verified caller inward. For direct embedding, verification stays outside the engine;
+a generic verifier's exact wiring is:
+
+```go
+claims, err := verifyCredential(ctx, bearer) // signature, issuer, audience, expiry
+if err != nil {
+    return err
+}
+principal := session.PrincipalFromClaims(claims) // claims are already verified
+if principal == nil {
+    return errUnauthenticated
+}
+ctx = session.WithPrincipal(ctx, principal)      // context passed to Engine.Run
+if err := sess.RestoreLabels(principal, ""); err != nil {
+    return err
+}
+run := eng.Run(ctx, sess, workspace, request)
+```
+
+`authn/oidc.Validator.Validate` can replace the first projection steps and returns the
+same non-nil `*session.Principal`; embedders still apply `WithPrincipal` and, when they
+seed the aggregate themselves, `RestoreLabels`. The restore call must happen before the
+first run so durable ownership is set through the aggregate seam. Children, conversation
+forks, and resumed sessions inherit the source session's owner; do not re-derive or
+replace it at those boundaries. Absent identity is a **nil** principal — no anonymous
 placeholder is ever minted (an `AGENTS.md` invariant, pinned by
 `TestInvariant_no_fabricated_principal`). Internal goroutines have no caller at
 all, so they run under an *explicit* system principal instead of an absent one:

@@ -17,6 +17,26 @@ Prefer updating the relevant design doc + this file over re-growing CLAUDE.md.
 
 ---
 
+## Caller identity embedding and OIDC module boundary
+
+The engine accepts identity only after verification. `session.PrincipalFromClaims`
+projects an already-verified claim map into the narrow `(iss, sub)` identity, rejecting
+missing, empty, or non-string identity claims and deriving only `user` or
+`client_credentials`; it never verifies a token and never mints `system`. An embedder
+puts that principal on the run context with `session.WithPrincipal`. If it constructs a
+session aggregate itself, it also seeds durable ownership through
+`Session.RestoreLabels(principal, "")`; children, forks, and resumed sessions inherit
+that owner.
+
+OIDC/JWKS mechanics live in the opt-in `authn/oidc` module (ADR 0103), not engine and
+not a provider module. Its `Validator` wraps `toolhive-core/authn`, maps validation and
+IdP-availability failures onto module-owned sentinels, fails closed if verified claims
+do not project to a principal, and owns an explicit `Close` for the background refresh.
+`internal/cliconfig` adapts those errors to the unchanged server sentinels and retains
+the server-root system context and all existing flag behavior.
+
+---
+
 ## Domain — `engine/session/` (lifecycle recovery)
 
 A turn always drives the `Session` aggregate to a terminal state within one
