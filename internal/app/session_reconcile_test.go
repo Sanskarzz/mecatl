@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -60,11 +61,45 @@ func awaitingSessionFixture(t *testing.T, id session.SessionID, createdAt time.T
 	return sess
 }
 
+// listCountingStore wraps a *memstore.Store, counting calls to List — the
+// ONE method sweepStaleSessions' svc.LeaseSweepDisabled() guard is meant to
+// prevent from ever running when the guard trips. Mutation-testing the guard
+// (deleting it) showed the pre-existing test couldn't tell "the whole pass
+// was skipped" from "SessionStale declined every candidate anyway", because
+// nothing observed whether ListSessions (and hence this List) was ever
+// called. Embeds *memstore.Store so Save/Load/Delete forward unchanged
+// (mirrors the countingStore pattern in
+// internal/adapter/server/staterunning_repair_test.go, adapted from counting
+// Save to counting List).
+type listCountingStore struct {
+	*memstore.Store
+	mu    sync.Mutex
+	lists int
+}
+
+func (c *listCountingStore) List(ctx context.Context) ([]port.StoredSession, error) {
+	c.mu.Lock()
+	c.lists++
+	c.mu.Unlock()
+	return c.Store.List(ctx)
+}
+
+func (c *listCountingStore) listCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lists
+}
+
+var _ port.PrunableStore = (*listCountingStore)(nil)
+
 // reconcileFixture builds a deterministic sweep harness: a memstore whose
 // Save/ModifiedAt times AND the Service's own staleness clock come from one
-// shared fake clock — mirroring childgc_test.go's gcFixture pattern.
+// shared fake clock — mirroring childgc_test.go's gcFixture pattern. The
+// Service is wired to a listCountingStore over that same memstore so any test
+// can pin whether a sweep pass actually reached ListSessions.
 type reconcileFixture struct {
 	store *memstore.Store
+	lists *listCountingStore
 	svc   *server.Service
 	now   time.Time
 }
@@ -81,6 +116,7 @@ func newReconcileFixtureWithLease(t *testing.T, lease port.SessionLease) *reconc
 	t.Helper()
 	f := &reconcileFixture{now: time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)}
 	f.store = memstore.New(memstore.WithNow(func() time.Time { return f.now }))
+	f.lists = &listCountingStore{Store: f.store}
 	cat := tool.NewCatalog()
 	engine := agent.NewEngine(agent.Deps{
 		LLM:     mockllm.New(mockllm.TextTurn("ok")),
@@ -90,7 +126,7 @@ func newReconcileFixtureWithLease(t *testing.T, lease port.SessionLease) *reconc
 	})
 	svc, err := server.NewService(server.Config{
 		Engine:       engine,
-		Store:        f.store,
+		Store:        f.lists,
 		Workspaces:   func(root string) tool.Workspace { return memfs.NewWorkspace(root) },
 		Now:          func() time.Time { return f.now },
 		SessionLease: lease,
@@ -151,6 +187,12 @@ func TestStaleSessionReconcileSettlesChildCandidate(t *testing.T) {
 
 	sweepStaleSessions(context.Background(), f.svc, port.NopDiagnostics{})
 
+	// The sweep-level guard is OFF here (no lease configured), so the pass
+	// must actually reach ListSessions — the sibling disabled-guard test
+	// pins the contrasting zero count.
+	if got := f.lists.listCount(); got == 0 {
+		t.Fatal("ListSessions was never called during an enabled sweep pass")
+	}
 	if got := f.state(t, id); got != session.StateIdle {
 		t.Fatalf("state after sweep = %q, want idle", got)
 	}
@@ -249,6 +291,14 @@ func TestSweepStaleSessionsSkipsWhenLeaseSweepDisabled(t *testing.T) {
 
 	sweepStaleSessions(context.Background(), f.svc, port.NopDiagnostics{})
 
+	// This is the assertion that actually pins the sweep-level guard: with it
+	// removed, SessionStale still declines every candidate on its OWN
+	// leaseSweepDisabled check, so the candidate would stay untouched either
+	// way — the state assertion below can't tell the two apart. The guard's
+	// only observable effect is that ListSessions is never called at all.
+	if got := f.lists.listCount(); got != 0 {
+		t.Fatalf("ListSessions called %d times, want 0 (LeaseSweepDisabled must skip the whole pass before listing)", got)
+	}
 	if got := f.state(t, id); got != session.StateRunning {
 		t.Fatalf("state after sweep = %q, want running (LeaseSweepDisabled must skip the whole pass)", got)
 	}
