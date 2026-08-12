@@ -330,7 +330,9 @@ func (m Model) renderPlanReviewView(ask pendingAsk, width, height int) string {
 	// button copy strips "auto-accept". The bracketed mnemonics are the LIVE
 	// Allow/AllowAlways/Deny chords so an override propagates (issue #457); with
 	// the default bare-rune chords they render as "[A]pprove & run"/"[W] auto-
-	// accept edits"/"[D] iterate" byte-for-byte.
+	// accept edits"/"[D] iterate" byte-for-byte, and under an override they
+	// degrade to an honest standalone form (planApprovalButtonLabel) rather than
+	// gluing a rebound chord onto the word's stem.
 	hk := m.helpKeyMarkings()
 	btnStyle := func(idx int) string {
 		if ask.focus == idx {
@@ -338,11 +340,11 @@ func (m Model) renderPlanReviewView(ask pendingAsk, width, height int) string {
 		}
 		return "askButton"
 	}
-	approve := th.Style(btnStyle(0)).Render("[" + approvalMnemonic(hk.allow) + "]pprove & run")
-	denyBtn := th.Style(btnStyle(2)).Render("[" + approvalMnemonic(hk.deny) + "] iterate")
+	approve := th.Style(btnStyle(0)).Render(planApprovalButtonLabel(hk.allow, "Allow", "approve & run"))
+	denyBtn := th.Style(btnStyle(2)).Render(planApprovalButtonLabel(hk.deny, "Deny", "iterate"))
 	var buttons string
 	if ask.offerAlways {
-		always := th.Style(btnStyle(1)).Render("[" + approvalMnemonic(hk.allowAlways) + "] auto-accept edits")
+		always := th.Style(btnStyle(1)).Render(planApprovalButtonLabel(hk.allowAlways, "Always", "auto-accept edits"))
 		buttons = lipgloss.JoinHorizontal(lipgloss.Top, approve, "  ", always, "  ", denyBtn)
 	} else {
 		buttons = lipgloss.JoinHorizontal(lipgloss.Top, approve, "  ", denyBtn)

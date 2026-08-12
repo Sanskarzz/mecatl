@@ -349,24 +349,79 @@ func TestPlanReviewActionBarReflectsKeyOverride(t *testing.T) {
 	m.ask = pendingAsk{Tool: "PresentPlan", offerAlways: true, Args: `{"plan":"do the thing"}`}
 	m.openPlanReviewView(m.ask, 0, "")
 	got := stripANSIstr(m.renderPlanReviewView(m.ask, 120, 30))
-	// approvalMnemonic upper-cases the bare rune: y→Y, q→Q, n→N.
-	if !strings.Contains(got, "[Y]pprove & run") {
-		t.Errorf("plan-review approve button should carry the overridden mnemonic [Y]pprove & run: %q", got)
-	}
-	if !strings.Contains(got, "[Q] auto-accept edits") {
-		t.Errorf("plan-review always button should carry the overridden mnemonic [Q] auto-accept edits: %q", got)
-	}
-	if !strings.Contains(got, "[N] iterate") {
-		t.Errorf("plan-review deny button should carry the overridden mnemonic [N] iterate: %q", got)
+	// A bare-rune override degrades to the honest standalone form ("[Y] approve
+	// & run"), not the wordplay stem ("[Y]pprove & run") — approvalMnemonic
+	// upper-cases the bare rune: y→Y, q→Q, n→N.
+	for _, want := range []string{"[Y] approve & run", "[Q] auto-accept edits", "[N] iterate"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("plan-review button should carry the overridden standalone form %q: %q", want, got)
+		}
 	}
 	if strings.Contains(got, "[A]pprove") || strings.Contains(got, "[W] auto-accept") || strings.Contains(got, "[D] iterate") {
 		t.Errorf("plan-review buttons still show a default mnemonic: %q", got)
+	}
+	// The wordplay stem is never glued onto a rebound chord.
+	if strings.Contains(got, "]pprove") || strings.Contains(got, "Y]pprove") {
+		t.Errorf("plan-review button glues a rebound chord onto the word stem: %q", got)
 	}
 	if !strings.Contains(got, "scroll: ↑/↓ · ctrl+f14/ctrl+f15 · ctrl+f28/ctrl+f29 · mouse wheel") {
 		t.Errorf("plan-review scroll hint should carry live scroll/jump chords: %q", got)
 	}
 	if strings.Contains(got, "pgup/pgdn") || strings.Contains(got, "home/end") {
 		t.Errorf("plan-review scroll hint still shows defaults: %q", got)
+	}
+}
+
+// TestPlanReviewActionBarModifiedChordDegrades pins the #457 follow-up fix: a
+// MODIFIED approval chord (e.g. Allow: ctrl+y — legal because the approval keys
+// are not in the validator's globalOpen bare-rune set) must degrade the
+// plan-review action-bar buttons to the honest standalone form
+// ("[ctrl+y] approve & run"), never glue the modified chord onto the word's
+// stem ("[ctrl+y]pprove & run").
+func TestPlanReviewActionBarModifiedChordDegrades(t *testing.T) {
+	km := applyKeyOverrides(defaultKeys(), map[string][]string{
+		"Allow": {"ctrl+y"}, "AllowAlways": {"ctrl+q"}, "Deny": {"ctrl+n"},
+	})
+	m, _, _ := newTestModel(t, theme.New("aztec", theme.AztecPalette()))
+	m.keys = km
+	m.rend = newRenderer(m.deps.Theme, keyMarkings(km))
+	m = applyAll(m,
+		tea.WindowSizeMsg{Width: 160, Height: 30},
+		client.SessionReadyMsg{SessionID: "sess-test-0001", Capabilities: allOnCaps()},
+	)
+	m.phase = phaseAwaitingApproval
+	m.ask = pendingAsk{Tool: "PresentPlan", offerAlways: true, Args: `{"plan":"do the thing"}`}
+	m.openPlanReviewView(m.ask, 0, "")
+	got := stripANSIstr(m.renderPlanReviewView(m.ask, 160, 30))
+	for _, want := range []string{"[ctrl+y] approve & run", "[ctrl+q] auto-accept edits", "[ctrl+n] iterate"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("plan-review button should carry the standalone modified-chord form %q: %q", want, got)
+		}
+	}
+	if strings.Contains(got, "]pprove") {
+		t.Errorf("plan-review button glues a modified chord onto the word stem: %q", got)
+	}
+}
+
+// TestPlanReviewActionBarDefaultBytesUnchanged is the byte-identical guard for
+// the DEFAULT approval chords: with no overrides the plan-review action bar
+// renders the historical word-embedded form ("[A]pprove & run" / "[W]
+// auto-accept edits" / "[D] iterate") so the goldens and pre-#457 output stay
+// byte-for-byte.
+func TestPlanReviewActionBarDefaultBytesUnchanged(t *testing.T) {
+	m, _, _ := newTestModel(t, theme.New("aztec", theme.AztecPalette()))
+	m = applyAll(m,
+		tea.WindowSizeMsg{Width: 120, Height: 30},
+		client.SessionReadyMsg{SessionID: "sess-test-0001", Capabilities: allOnCaps()},
+	)
+	m.phase = phaseAwaitingApproval
+	m.ask = pendingAsk{Tool: "PresentPlan", offerAlways: true, Args: `{"plan":"do the thing"}`}
+	m.openPlanReviewView(m.ask, 0, "")
+	got := stripANSIstr(m.renderPlanReviewView(m.ask, 120, 30))
+	for _, want := range []string{"[A]pprove & run", "[W] auto-accept edits", "[D] iterate"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("plan-review default button should render %q byte-for-byte: %q", want, got)
+		}
 	}
 }
 

@@ -490,6 +490,31 @@ func approvalButtonLabel(chord, word, standalone string) string {
 	return "[" + approvalMnemonic(chord) + "] " + standalone
 }
 
+// planApprovalButtonLabel renders a PLAN-review action-bar button label that is
+// honest about the LIVE approval chord. With the DEFAULT a/w/d chords the
+// historical word-embedded plan form ("[A]pprove & run" / "[W] auto-accept
+// edits" / "[D] iterate") renders byte-for-byte. Under an override the plan
+// wordplay ("[Y]pprove & run") would read as a typo — and for a MODIFIED chord
+// ("ctrl+y") the stem-glued form ("[ctrl+y]pprove & run") is outright broken —
+// so the button degrades to an honest standalone form: the bracketed live chord
+// followed by the plan action phrase ("[Y] approve & run" / "[ctrl+y] approve &
+// run"). This mirrors approvalButtonLabel's default-vs-override split for the
+// generic modal; the plan path needs its own helper because its default labels
+// differ from the generic modal's. Issue #457.
+func planApprovalButtonLabel(chord, word, standalone string) string {
+	if isDefaultApprovalChord(chord, word) {
+		switch word {
+		case "Allow":
+			return "[A]pprove & run"
+		case "Always":
+			return "[W] auto-accept edits"
+		case "Deny":
+			return "[D] iterate"
+		}
+	}
+	return "[" + approvalMnemonic(chord) + "] " + standalone
+}
+
 // approvalAlwaysFootnote renders the "always allows this exact command …"
 // footnote under the always-allow button. With the default chord ("w") it is
 // the historical byte-for-byte "al[w]ays allows …" word-embedded form; under
