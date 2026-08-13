@@ -176,6 +176,20 @@ type parentCaps struct {
 	// OWNERLESS parent (the no-auth path), which yields an ownerless child: never
 	// a fabricated one, and never a rejection.
 	owner *session.Principal
+	// parentSessionID is the PARENT session's own SessionID (review finding 2,
+	// issue #368), handed down so every derived child/branch/member session id
+	// is namespaced under it. A durable delegation id previously derived ONLY
+	// from the provider tool-call id (session.ToolCallID) — a value the LLM API
+	// supplies and does not guarantee unique across independent conversations,
+	// let alone across owners. Two different top-level sessions (necessarily
+	// distinct SessionIDs — session creation is already atomically
+	// owner-scoped) issuing equal or adversarially-chosen call ids would
+	// otherwise derive the IDENTICAL child SessionID and silently overwrite
+	// each other's persisted transcript before any inspect/resume
+	// authorization ever runs. Empty for a caps-less drive (plain
+	// Execute/ExecuteObserved, no parent session threaded) — the legacy
+	// call-id-only id, unaffected outside real dispatch.
+	parentSessionID session.SessionID
 }
 
 // inheritOwner stamps the parent session's owner onto a freshly-minted child
@@ -192,6 +206,12 @@ func (c parentCaps) inheritOwner(child *session.Session) {
 	// owner; a fresh child has no owner, and a resumed child already carries this
 	// same one. Either way the persisted owner stands — the write is write-once by
 	// construction and must never overwrite.
+	//
+	// "a resumed child already carries this same one" is now an enforced invariant,
+	// not merely an assumption: resolveResumeSession's callerOwnsTranscript check
+	// (issue #368) refuses a resume whose loaded owner differs from the caller
+	// before this is ever reached, so the DIFFERENT-owner error case above is
+	// unreachable via the resume path.
 	_ = child.RestoreLabels(c.owner, "")
 }
 
@@ -788,6 +808,11 @@ type SubagentTool struct {
 	// id into a safe filename, so no collision engineering is needed.
 	store port.SessionStore
 
+	// ownershipEnforced records whether the request edge verifies caller identity.
+	// When true, a resume requires the persisted child owner to match the caller;
+	// a missing principal is never treated as an implicit in-process parent.
+	ownershipEnforced bool
+
 	// mu guards inFlight. It is a plain mutex held only for the map's read-modify-write,
 	// never across the child run.
 	mu sync.Mutex
@@ -1023,6 +1048,13 @@ func WithSharedChildWorkspace(f func(root string) tool.Workspace) SubagentOption
 // interface, never a concrete adapter, so no layering rule is crossed.
 func WithSubagentStore(store port.SessionStore) SubagentOption {
 	return func(t *SubagentTool) { t.store = store }
+}
+
+// WithSubagentOwnershipEnforced records whether the request edge verifies caller
+// identity. Enabled deployments require a resume caller to match the persisted
+// child owner; disabled deployments retain legacy ownerless compatibility.
+func WithSubagentOwnershipEnforced(ownershipEnforced bool) SubagentOption {
+	return func(t *SubagentTool) { t.ownershipEnforced = ownershipEnforced }
 }
 
 // WithMaxConcurrentChildren bounds how many Subagent children may run CONCURRENTLY —
@@ -2248,6 +2280,9 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, env tool.
 	if !ok {
 		return errResult, nil
 	}
+	if errResult, ok := t.authorizeResumeLookup(ctx, call.ID, session.SessionID(args.Resume), resuming); !ok {
+		return errResult, nil
+	}
 	routedCategory, routedModel, routingReason = reconcileRoutedModel(
 		routedCategory, routedModel, routingReason, routedAccepted)
 
@@ -2270,7 +2305,7 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, env tool.
 	// is detected even while the second call would otherwise block on the gate. A BACKGROUND
 	// child holds its id until its detached goroutine ends, so `resume` of a still-running
 	// background child is rejected here, unchanged.
-	childID := t.childSessionID(call.ID)
+	childID := t.childSessionID(caps.parentSessionID, call.ID)
 	if resuming {
 		childID = session.SessionID(args.Resume)
 	}
@@ -3721,6 +3756,52 @@ func (t *SubagentTool) releaseChildID(childID session.SessionID) {
 	delete(t.inFlight, childID)
 }
 
+// authorizeResumeLookup performs the read-only ownership gate before the shared
+// in-flight guard, for a `resume` call only — a no-op (ok=true) when resuming is
+// false, so run() carries a single branch here instead of nesting "if resuming"
+// around a separate "if !owns". It makes a foreign or unknown id indistinguishable
+// without recovering or otherwise mutating the loaded session.
+func (t *SubagentTool) authorizeResumeLookup(ctx context.Context, callID session.ToolCallID, id session.SessionID, resuming bool) (session.ToolResult, bool) {
+	if !resuming {
+		return session.ToolResult{}, true
+	}
+	_, res, ok := t.loadOwnedResumeSession(ctx, callID, id)
+	return res, ok
+}
+
+// loadOwnedResumeSession is the read-only load+ownership fold shared by
+// authorizeResumeLookup (the pre-in-flight-guard gate) and resolveResumeSession
+// (the later, authoritative load that actually gets mutated/persisted). Each
+// caller performs its OWN fresh Load at its OWN point in time — this helper
+// shares only the CHECK LOGIC, never a loaded session across calls: the
+// pre-guard Load has no exclusion (tryAcquireChildID has not run yet), while
+// resolveResumeSession's Load runs only after a successful claim, under that
+// id's exclusion, on a session about to be Reopen/Interrupt/Recover'd and
+// re-persisted (and, on the background path, resolved later on a DETACHED
+// goroutine) — threading the pre-guard snapshot forward would be a stale read
+// used for a write. A foreign owner's session is treated as absent, not
+// refused: a distinguishing error would itself leak that the id exists under
+// another owner (this plan's "a refusal is indistinguishable from absence"
+// principle), and a model steered to probe ids could use the distinction as
+// an oracle.
+func (t *SubagentTool) loadOwnedResumeSession(ctx context.Context, callID session.ToolCallID, id session.SessionID) (*session.Session, session.ToolResult, bool) {
+	loaded, err := t.store.Load(ctx, id)
+	if err == nil && !callerOwnsTranscriptWhenEnforced(ctx, loaded, t.ownershipEnforced) {
+		err = port.ErrSessionNotFound
+		loaded = nil
+	}
+	switch {
+	case errors.Is(err, port.ErrSessionNotFound) || (err == nil && loaded == nil):
+		return nil, session.NewToolError(callID,
+			fmt.Sprintf("Subagent: no subagent found for resume id %q; use the id exactly as shown on the 'agentId:' line of a previous Subagent result", id)), false
+	case err != nil:
+		return nil, session.NewToolError(callID,
+			fmt.Sprintf("Subagent: failed to load subagent %q for resume: %v", id, err)), false
+	default:
+		return loaded, session.ToolResult{}, true
+	}
+}
+
 // resolveResumeSession loads a persisted subagent session for a `resume` call, recovers
 // its terminal state to StateIdle so it is runnable again, and tightens its preserved
 // Limits by the per-call args. It runs BEFORE the workspace fork so the common error
@@ -3754,14 +3835,9 @@ func (t *SubagentTool) releaseChildID(childID session.SessionID) {
 // It returns the recovered session on success, or a model-addressable error ToolResult
 // (ok=false) on a load failure or non-resumable state.
 func (t *SubagentTool) resolveResumeSession(ctx context.Context, callID session.ToolCallID, id session.SessionID, args subagentArgs) (*session.Session, session.ToolResult, bool) {
-	loaded, err := t.store.Load(ctx, id)
-	switch {
-	case errors.Is(err, port.ErrSessionNotFound) || (err == nil && loaded == nil):
-		return nil, session.NewToolError(callID,
-			fmt.Sprintf("Subagent: no subagent found for resume id %q; use the id exactly as shown on the 'agentId:' line of a previous Subagent result", id)), false
-	case err != nil:
-		return nil, session.NewToolError(callID,
-			fmt.Sprintf("Subagent: failed to load subagent %q for resume: %v", id, err)), false
+	loaded, res, ok := t.loadOwnedResumeSession(ctx, callID, id)
+	if !ok {
+		return nil, res, false
 	}
 	switch loaded.State {
 	case session.StateCompleted:
@@ -4330,10 +4406,21 @@ func (t *SubagentTool) unknownAgentHint(name string) string {
 	return fmt.Sprintf("unknown agent %q; available agents: %s", name, strings.Join(names, ", "))
 }
 
-// childSessionID derives a stable, unique id for a child session from the parent
-// tool call id.
-func (t *SubagentTool) childSessionID(callID session.ToolCallID) session.SessionID {
-	return session.SessionID(fmt.Sprintf("%s-%s", t.idPrefix, callID))
+// childSessionID derives a stable, unique id for a child session from the
+// PARENT SESSION's id plus the parent tool call id (review finding 2, issue
+// #368): deriving from the call id ALONE let two different top-level sessions
+// (already collision-safe across owners — session creation is atomically
+// owner-scoped) issuing equal or adversarially-chosen call ids collide on the
+// SAME durable child id, silently overwriting each other's persisted
+// transcript. parentID is empty only on a caps-less drive (plain
+// Execute/ExecuteObserved, no parent session threaded — tests and the rare
+// direct-call path), which keeps the pre-fix call-id-only id; every real
+// dispatch path threads a non-empty parentID via parentCaps.
+func (t *SubagentTool) childSessionID(parentID session.SessionID, callID session.ToolCallID) session.SessionID {
+	if parentID == "" {
+		return session.SessionID(fmt.Sprintf("%s-%s", t.idPrefix, callID))
+	}
+	return session.SessionID(fmt.Sprintf("%s-%s-%s", t.idPrefix, parentID, callID))
 }
 
 // Compile-time assertion that SubagentTool satisfies the Tool contract and the

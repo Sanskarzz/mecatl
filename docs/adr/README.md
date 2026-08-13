@@ -28,7 +28,9 @@ Documentation/citation conventions are in [`docs/design/README.md`](../design/RE
 - [0006 — v1 step-chain](./0006-v1-step-chain.md) *(historical)*
 - [0007 — Twelve-patterns audit](./0007-twelve-patterns-audit.md) *(historical)*
 - [0027 — Cloud-native arc](./0027-cloud-native.md)
-- [0104 — Session families get a bounded, injective, non-reversible physical name](./0104-session-family-physical-naming.md)
+- [0104 — Session families get a bounded, injective, non-reversible physical name](./0104-session-family-physical-naming.md) *(NUMBER COLLIDES with the three entries below — renumber on merge)*
+- [0104 — Operator-owned exact context-window overrides](./0104-context-window-overrides.md) *(the file's own heading says "ADR 0103" — a pre-existing origin/main title/filename mismatch, not introduced here; NUMBER COLLIDES with the other three entries)*
+- [0104 — Attribute schedule origins through the run context](./0104-schedule-origin-run-context.md) *(this branch's own ADR, superseding ADR 0075's origin-binding mechanism; NUMBER COLLIDES with the other three entries — renumber on merge)*
 - [0036 — `engine/` is its own Go module (monorepo via `go.work`)](./0036-engine-module.md)
 - [0037 — Engine public-API stability contract](./0037-engine-stability-contract.md)
 - [0038 — Event-sourced SessionStore rehydration (the reference fold)](./0038-event-sourced-rehydration.md)
@@ -59,7 +61,7 @@ Documentation/citation conventions are in [`docs/design/README.md`](../design/RE
 
 ### Core tools & shell
 - [0090 — Background Bash commands](./0090-background-bash.md)
-- [0104 — Execution environments and version-aware file mutation](./0104-execution-environment.md) *(runtime-seam deferral superseded by 0105; version protocol authoritative)*
+- [0104 — Execution environments and version-aware file mutation](./0104-execution-environment.md) *(NUMBER COLLIDES with the three entries under Architecture & implementation above — renumber on merge; runtime-seam deferral superseded by 0105; version protocol authoritative)*
 - [0105 — Execution-environment runtime seam](./0105-execution-environment-runtime-seam.md) *(supersedes 0104 decisions 1–3)*
 
 ### Agents, teams & delegation
@@ -127,6 +129,8 @@ Documentation/citation conventions are in [`docs/design/README.md`](../design/RE
 - [0100 — Caller identity: accept a principal, thread it everywhere, record the owner](./0100-caller-identity-threading.md) *(agent-identity Track A; audit-trail phase)*
 - [0101 — Bound cached JWKS staleness](./0101-bounded-jwks-staleness.md)
 - [0103 — Ship reusable OIDC caller identity as an opt-in module](./0103-oidc-authn-module.md)
+- [0102 — Enforce caller ownership at every application access path](./0102-caller-ownership-enforcement.md) *(agent-identity Track A; application isolation; NUMBER COLLIDES with 0102-toolhive-direct-mode.md from origin/main — renumber on merge)*
+- [0103 — Enforce caller ownership at remote driver boundaries](./0103-driver-caller-ownership.md) *(B-lite follow-up to application isolation; NUMBER COLLIDES with 0103-oidc-authn-module.md above — renumber on merge)*
 - [0024 — System-prompt research](./0024-system-prompt-research.md) *(research)*
 - [0041 — Output-economy default prompt](./0041-output-economy-default-prompt.md)
 - [0054 — Reasoning rebalance of the default-tone prompt](./0054-reasoning-rebalance-default-prompt.md)

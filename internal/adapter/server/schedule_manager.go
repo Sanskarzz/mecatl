@@ -2,8 +2,11 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -68,6 +71,16 @@ type ScheduleManagerConfig struct {
 	Now           func() time.Time
 	Models        *atomic.Pointer[[]*mecatlv1.ModelInfo]
 	Diagnostics   port.Diagnostics
+	// OwnershipEnforced mirrors server.Config.OwnershipEnforced (true only when
+	// the request edge has a verifier wired). It gates whether the manager
+	// namespaces the store-facing schedule key by verified caller (issue #368,
+	// ADR-0102 decision 1): a schedule Name is a caller-chosen, human-readable
+	// key exactly like a memory key, so two DIFFERENT owners may legitimately
+	// pick the identical name without colliding — mirroring
+	// memory.CallerStore's owner-digest scheme. When false (no verifier wired,
+	// or a standalone-constructed manager that leaves this unset), the key is
+	// BYTE-IDENTICAL to today: the bare literal name, one flat namespace.
+	OwnershipEnforced bool
 }
 
 // scheduleManager is the store-shaped schedule create/read/update/fire seam
@@ -123,6 +136,9 @@ type scheduleManager struct {
 	// manager (NewScheduleManager without Models) — selector validation then
 	// admits only the empty selector (an empty inventory).
 	models *atomic.Pointer[[]*mecatlv1.ModelInfo]
+	// ownershipEnforced mirrors ScheduleManagerConfig.OwnershipEnforced — see
+	// its doc. Gates physicalScheduleName's owner-prefixing.
+	ownershipEnforced bool
 }
 
 // scheduleStoreProvider is the accessor the jsonlstore + redisstore expose:
@@ -199,11 +215,12 @@ func NewScheduleManager(cfg ScheduleManagerConfig) *scheduleManager {
 		now = time.Now
 	}
 	m := &scheduleManager{
-		store:      cfg.Store,
-		schedStore: schedStore,
-		now:        now,
-		diag:       cfg.Diagnostics,
-		models:     cfg.Models,
+		store:             cfg.Store,
+		schedStore:        schedStore,
+		now:               now,
+		diag:              cfg.Diagnostics,
+		models:            cfg.Models,
+		ownershipEnforced: cfg.OwnershipEnforced,
 	}
 	// A standalone-constructed manager (no Models pointer) seeds an empty
 	// inventory so selector validation reads *models.Load() safely and admits
@@ -243,6 +260,108 @@ func (m *scheduleManager) scheduleStore() port.ScheduleStore {
 	return m.schedStore
 }
 
+// scheduleOwnerlessNamespace is the reserved sentinel namespace segment
+// ownerScheduleNamespace falls back to if it is ever reached with enforcement
+// on but no verified principal on ctx. Review finding 4 (issue #368) found
+// that reachable from every public verb: a missing principal silently mapped
+// into this SHARED bucket rather than being rejected, so any unauthenticated
+// call path could create/read/mutate any other unauthenticated caller's
+// "ownerless" schedules. requireCaller now gates every public verb BEFORE this
+// helper is reached, so the branch below is unreachable from any of the nine
+// verbs + GetFire — it survives only as an internal fail-safe (never a panic,
+// never a fabricated identity) in case a future caller forgets the gate.
+const scheduleOwnerlessNamespace = "schedule/none\x00"
+
+// requireCaller enforces fail-closed caller presence (review finding 4, issue
+// #368): every public verb calls this FIRST. It returns true when ownership
+// enforcement is off (the byte-identical unenforced path — a nil principal is
+// normal there) or when ctx carries a verified principal; it returns false
+// ONLY when enforcement is on and ctx carries no principal, which the caller
+// must map to an absence-shaped not-found (read/mutate verbs) or a generic
+// refusal (create) — never fall through to ownerScheduleNamespace's shared
+// scheduleOwnerlessNamespace bucket, which any other unauthenticated caller
+// could also reach.
+func (m *scheduleManager) requireCaller(ctx context.Context) bool {
+	return !m.ownershipEnforced || session.PrincipalFromContext(ctx) != nil
+}
+
+// ownerScheduleNamespace derives the store-facing key namespace a schedule
+// name is scoped into (issue #368, ADR-0102 decision 1): a digest of the
+// verified caller's (Issuer, Subject) pair, mirroring
+// memory.CallerStore.scoped's owner-digest scheme. It returns "" when the
+// manager was constructed without ownership enforcement (no verifier wired) —
+// the BYTE-IDENTICAL flat-namespace path required by AC6.4. Every caller of
+// this helper is a public verb that has ALREADY passed requireCaller, so the
+// nil-principal branch below is unreachable in practice; it stays as a
+// fail-safe (never a fabricated identity) rather than a panic.
+func (m *scheduleManager) ownerScheduleNamespace(ctx context.Context) string {
+	if !m.ownershipEnforced {
+		return ""
+	}
+	principal := session.PrincipalFromContext(ctx)
+	if principal == nil {
+		return scheduleOwnerlessNamespace
+	}
+	digest := sha256.Sum256([]byte(principal.Issuer + "\x00" + principal.Subject))
+	return fmt.Sprintf("schedule/%x\x00", digest[:])
+}
+
+// physicalScheduleName maps a caller-visible literal schedule name to the
+// store-facing physical key: the owner namespace (see ownerScheduleNamespace)
+// prepended to name. port.ScheduleStore keeps seeing an opaque name string —
+// it does not change, and neither does either backend (redisstore/jsonlstore);
+// only this manager decides which physical string that opaque name is. Two
+// different owners' schedules of the identical literal name land under
+// different physical keys and therefore never collide (AC6.1), while a
+// same-owner reuse of a name always maps to the SAME physical key (AC6.2).
+func (m *scheduleManager) physicalScheduleName(ctx context.Context, name string) string {
+	return m.ownerScheduleNamespace(ctx) + name
+}
+
+// LiteralScheduleName removes the ownership namespace from a store-facing
+// schedule key. It is the sole physical-to-presentation translation: scheduler
+// callbacks retain physical keys for ScheduleStore operations but use this value
+// in model/client-facing IDs, lifecycle events, and metrics. Unnamespaced keys
+// preserve the ownership-disabled compatibility path unchanged.
+func LiteralScheduleName(name string) string {
+	if strings.HasPrefix(name, scheduleOwnerlessNamespace) {
+		return strings.TrimPrefix(name, scheduleOwnerlessNamespace)
+	}
+	const ownerPrefix = "schedule/"
+	if !strings.HasPrefix(name, ownerPrefix) {
+		return name
+	}
+	rest := strings.TrimPrefix(name, ownerPrefix)
+	if len(rest) < sha256.Size*2+1 || rest[sha256.Size*2] != '\x00' {
+		return name
+	}
+	if _, err := hex.DecodeString(rest[:sha256.Size*2]); err != nil {
+		return name
+	}
+	return rest[sha256.Size*2+1:]
+}
+
+// scheduleNotFoundErr normalizes a ScheduleStore not-found error to name the
+// caller-visible LITERAL schedule name. The store has no notion of
+// literal-vs-physical — it echoes back whatever key it was given verbatim
+// (e.g. redisstore's `%w: %q` on the physical key) — so an unwrapped
+// not-found error leaks the owner-namespace hash embedded in the physical
+// key to the client. Every call site that resolves a schedule by name (Load,
+// SetEnabled, ListFires, FireNow) must normalize through this before
+// returning the error to a caller.
+func scheduleNotFoundErr(err error, literalName string) error {
+	if errors.Is(err, port.ErrScheduleNotFound) {
+		return fmt.Errorf("%w: %q", port.ErrScheduleNotFound, literalName)
+	}
+	return err
+}
+
+// fireNotFoundErr is the absence-shaped error for a fire lookup. A fire's
+// stored parent key is physical and must never appear in a caller-visible error.
+func fireNotFoundErr(fireID string) error {
+	return fmt.Errorf("%w: %q", port.ErrScheduleNotFound, fireID)
+}
+
 // CreateSchedule is the create-seam for a schedule: it validates the spec
 // fail-closed, applies the intended defaults (via applyScheduleDefaults — the
 // SHARED helper UpdateSchedule also calls, so a PUT omitting singleton does not
@@ -252,23 +371,26 @@ func (m *scheduleManager) scheduleStore() port.ScheduleStore {
 // write-capable posture), and Saves the schedule. It returns the saved
 // schedule.
 func (m *scheduleManager) CreateSchedule(ctx context.Context, spec port.ScheduleSpec) (port.Schedule, error) {
+	if !m.requireCaller(ctx) {
+		return port.Schedule{}, fmt.Errorf("%w: unable to create schedule", ErrInvalidArgument)
+	}
 	now := m.now()
 	cronNextFire, originOwner, err := m.validateScheduleSpec(ctx, spec, now)
 	if err != nil {
 		return port.Schedule{}, err
 	}
-	// Collision guard: ScheduleStore.Save is an UPSERT-by-name, so a Create whose
-	// name already exists would SILENTLY CLOBBER the existing schedule's spec. A
-	// "Create" must never destroy an existing task — reject a duplicate name here
-	// (the edit path is UpdateSchedule, a distinct method). There is a tiny
-	// check-then-Save TOCTOU window (the store has no atomic create-if-absent),
-	// but Create is a low-frequency human action, so the racing-duplicate risk is
-	// acceptable and not worth store-level locking.
-	if _, lerr := m.schedStore.Load(ctx, spec.Name); lerr == nil {
-		return port.Schedule{}, fmt.Errorf("%w: a schedule named %q already exists", ErrInvalidArgument, spec.Name)
-	} else if !errors.Is(lerr, port.ErrScheduleNotFound) {
-		return port.Schedule{}, lerr
-	}
+	// Collision guard: a Create whose name already exists must never SILENTLY
+	// CLOBBER the existing schedule's spec (the edit path is UpdateSchedule, a
+	// distinct method).
+	//
+	// The check (and the eventual write) run against the OWNER-NAMESPACED
+	// physical key (issue #368, ADR-0102 decision 1), not the bare literal
+	// name: a name already used by a DIFFERENT owner must be absence-style
+	// (indistinguishable from "name available"), never a distinguishing
+	// "already exists" — the collision guard is scoped to THIS caller's own
+	// namespace, so two different owners may share the identical literal name.
+	literalName := spec.Name
+	physicalName := m.physicalScheduleName(ctx, literalName)
 	applyScheduleDefaults(&spec)
 	// Capture the owner ONCE, here (ADR 0100 decision 6). A caller can never
 	// name it in the request body (protoToScheduleSpec drops any inbound owner,
@@ -290,6 +412,13 @@ func (m *scheduleManager) CreateSchedule(ctx context.Context, spec port.Schedule
 		nextFireAt = spec.Trigger.OneShot
 	}
 	spec.CreatedAt = now
+	// Spec.Name is set to the PHYSICAL key only for the Save call below — the
+	// store keys strictly by Spec.Name (Save "upserts by Spec.Name", no
+	// separate key parameter), so the physical key must ride the field. It is
+	// restored to the literal caller-visible name on the returned value below:
+	// display/events/tool-result text/error messages downstream of Create
+	// always see the literal name the caller supplied, never the physical key.
+	spec.Name = physicalName
 	sched := port.Schedule{
 		Spec: spec,
 		State: port.ScheduleState{
@@ -297,9 +426,32 @@ func (m *scheduleManager) CreateSchedule(ctx context.Context, spec port.Schedule
 			Enabled:    true,
 		},
 	}
-	if err := m.schedStore.Save(ctx, sched); err != nil {
-		return port.Schedule{}, err
+	// Create the record. When the backing store implements the OPTIONAL
+	// ScheduleCreator seam (review finding 5, issue #368), the check-and-write
+	// is ONE atomic backend operation: two concurrent creates of the same name
+	// yield exactly one success and one ErrScheduleAlreadyExists, never a
+	// silent overwrite. A store that does not implement the seam falls back to
+	// the pre-fix check-then-Save (a tiny TOCTOU window across two separate
+	// calls — Create is a low-frequency human action, so the residual race is
+	// accepted on that path only).
+	if creator, ok := m.schedStore.(port.ScheduleCreator); ok {
+		if err := creator.Create(ctx, sched); err != nil {
+			if errors.Is(err, port.ErrScheduleAlreadyExists) {
+				return port.Schedule{}, fmt.Errorf("%w: a schedule named %q already exists", ErrInvalidArgument, literalName)
+			}
+			return port.Schedule{}, err
+		}
+	} else {
+		if _, lerr := m.schedStore.Load(ctx, physicalName); lerr == nil {
+			return port.Schedule{}, fmt.Errorf("%w: a schedule named %q already exists", ErrInvalidArgument, literalName)
+		} else if !errors.Is(lerr, port.ErrScheduleNotFound) {
+			return port.Schedule{}, lerr
+		}
+		if err := m.schedStore.Save(ctx, sched); err != nil {
+			return port.Schedule{}, err
+		}
 	}
+	sched.Spec.Name = literalName
 	return sched, nil
 }
 
@@ -523,12 +675,47 @@ func (m *scheduleManager) validateScheduleOrigin(ctx context.Context, spec port.
 	}
 	origin, lerr := m.store.Load(ctx, spec.OriginSessionID)
 	if lerr != nil {
-		return nil, fmt.Errorf("%w: origin_session_id %q must reference an existing session: %w", ErrInvalidArgument, spec.OriginSessionID, lerr)
+		return nil, errOriginSessionMustExist(spec.OriginSessionID)
 	}
 	if origin == nil {
 		return nil, nil
 	}
+	// Under ownership enforcement, the origin's owner must match the verified
+	// caller (review finding 1, issue #368): a schedule's delivery path
+	// (deliverFireResult/deliverFireStarted, internal/app) drives its fire's
+	// content into OriginSessionID trusting spec.Owner — without this check a
+	// caller who merely KNOWS another caller's session id could name it as the
+	// origin and have every fire enqueue content into that foreign session.
+	// requireCaller (checked by every public verb before this validation runs)
+	// guarantees the ctx principal is non-nil here under enforcement, so the
+	// nil-safe SameIdentity comparison below is defense-in-depth, not the
+	// load-bearing gate. An ownerless origin (Owner == nil) also fails this
+	// check — under enforcement an ownerless session is invisible to every
+	// caller (the same "ownerless resources are not adopted" rule GetSession
+	// applies), so it can never be validly named as a delivery target either.
+	//
+	// The rejection uses the SAME "must reference an existing session" shape a
+	// genuinely-missing origin produces: an existing-but-foreign origin and a
+	// missing one must be indistinguishable, or the error itself becomes an
+	// existence oracle for another caller's session id.
+	if m.ownershipEnforced {
+		caller := session.PrincipalFromContext(ctx)
+		if origin.Owner == nil || !origin.Owner.SameIdentity(caller) {
+			return nil, errOriginSessionMustExist(spec.OriginSessionID)
+		}
+	}
 	return origin.Owner.Clone(), nil
+}
+
+// errOriginSessionMustExist is the ONE error constructor for a rejected
+// OriginSessionID (review finding 1, issue #368): a genuinely-missing session
+// and an existing-but-foreign-owned one under enforcement must produce the
+// BYTE-IDENTICAL message for the same id — no store-internal detail
+// (backend-specific "not found" text, or any other trailing wrap) may leak,
+// or the message itself becomes an existence/ownership oracle for another
+// caller's session id.
+func errOriginSessionMustExist(id session.SessionID) error {
+	return fmt.Errorf("%w: origin_session_id %q must reference an existing session", ErrInvalidArgument, id)
 }
 
 // validateScheduleSelector rejects (fail-closed) a non-empty
@@ -561,14 +748,55 @@ func (m *scheduleManager) scheduleMinInterval() time.Duration {
 	return time.Duration(m.scheduleMinIntervalNanos.Load())
 }
 
-// GetSchedule loads a schedule by name.
+// GetSchedule loads a schedule by name, resolved against THIS context's
+// owner-namespaced physical key (issue #368). The returned Spec.Name is
+// restored to the caller-supplied literal name — never the physical key.
 func (m *scheduleManager) GetSchedule(ctx context.Context, name string) (port.Schedule, error) {
-	return m.schedStore.Load(ctx, name)
+	if !m.requireCaller(ctx) {
+		return port.Schedule{}, scheduleNotFoundErr(port.ErrScheduleNotFound, name)
+	}
+	sched, err := m.schedStore.Load(ctx, m.physicalScheduleName(ctx, name))
+	if err != nil {
+		return port.Schedule{}, scheduleNotFoundErr(err, name)
+	}
+	sched.Spec.Name = name
+	return sched, nil
 }
 
-// ListSchedules returns all stored schedules.
+// ListSchedules returns the schedules visible to this context. With ownership
+// enforcement enabled it filters before exposing any schedule metadata; the
+// ScheduleQuery tool consumes this manager directly rather than the Service.
 func (m *scheduleManager) ListSchedules(ctx context.Context) ([]port.Schedule, error) {
-	return m.schedStore.List(ctx)
+	if !m.requireCaller(ctx) {
+		// Absence-shaped: a caller-less enumeration under enforcement sees no
+		// schedules (the same result the identity filter below would already
+		// produce for a nil caller — see requireCaller's doc for why this
+		// branch is not the only place that fails closed).
+		return []port.Schedule{}, nil
+	}
+	scheds, err := m.schedStore.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !m.ownershipEnforced {
+		return scheds, nil
+	}
+
+	caller := session.PrincipalFromContext(ctx)
+	ns := m.ownerScheduleNamespace(ctx)
+	out := make([]port.Schedule, 0, len(scheds))
+	for _, sched := range scheds {
+		if sched.Spec.Owner == nil || !sched.Spec.Owner.SameIdentity(caller) {
+			continue
+		}
+		literal, ok := strings.CutPrefix(sched.Spec.Name, ns)
+		if !ok {
+			continue
+		}
+		sched.Spec.Name = literal
+		out = append(out, sched)
+	}
+	return out, nil
 }
 
 // UpdateSchedule re-validates the spec (the same create-seam validation) and
@@ -576,6 +804,9 @@ func (m *scheduleManager) ListSchedules(ctx context.Context) ([]port.Schedule, e
 // Loads the existing schedule, validates the new spec, and Saves with the
 // existing State.
 func (m *scheduleManager) UpdateSchedule(ctx context.Context, spec port.ScheduleSpec) (port.Schedule, error) {
+	if !m.requireCaller(ctx) {
+		return port.Schedule{}, scheduleNotFoundErr(port.ErrScheduleNotFound, spec.Name)
+	}
 	now := m.now()
 	// The computed cron next-fire is not needed here (Update preserves the
 	// existing State, including NextFireAt); the call is still made for its
@@ -584,9 +815,11 @@ func (m *scheduleManager) UpdateSchedule(ctx context.Context, spec port.Schedule
 		return port.Schedule{}, err
 	}
 	applyScheduleDefaults(&spec)
-	existing, err := m.schedStore.Load(ctx, spec.Name)
+	literalName := spec.Name
+	physicalName := m.physicalScheduleName(ctx, literalName)
+	existing, err := m.schedStore.Load(ctx, physicalName)
 	if err != nil {
-		return port.Schedule{}, err
+		return port.Schedule{}, scheduleNotFoundErr(err, literalName)
 	}
 	// Preserve the existing State (firing progress) AND the creation timestamp —
 	// only the operator-authored Spec fields change on an Update. CreatedAt is a
@@ -598,43 +831,100 @@ func (m *scheduleManager) UpdateSchedule(ctx context.Context, spec port.Schedule
 	// captured owner forward verbatim, so editing a schedule can never re-own it
 	// to the updating caller.
 	spec.Owner = existing.Spec.Owner
+	// See CreateSchedule: Spec.Name carries the physical key only across the
+	// Save call (the store keys strictly by Spec.Name); it is restored to the
+	// literal name on the returned value below.
+	spec.Name = physicalName
 	updated := port.Schedule{Spec: spec, State: existing.State}
 	if err := m.schedStore.Save(ctx, updated); err != nil {
 		return port.Schedule{}, err
 	}
+	updated.Spec.Name = literalName
 	return updated, nil
 }
 
 // DeleteSchedule removes a schedule by name. It is idempotent (the store's
 // Delete discipline).
 func (m *scheduleManager) DeleteSchedule(ctx context.Context, name string) error {
-	return m.schedStore.Delete(ctx, name)
+	if !m.requireCaller(ctx) {
+		// Absence-shaped + idempotent: a caller-less delete under enforcement
+		// sees nothing to delete (Delete's own idempotent-on-unknown-name
+		// discipline), never a shared-bucket mutation.
+		return nil
+	}
+	return m.schedStore.Delete(ctx, m.physicalScheduleName(ctx, name))
 }
 
 // PauseSchedule disables a schedule (Enabled=false) without deleting it. It
 // calls SetEnabled — the dedicated atomic flag update — because Save CANNOT
 // mutate Enabled (Save preserves the existing State half on a Spec overwrite).
 func (m *scheduleManager) PauseSchedule(ctx context.Context, name string) error {
-	return m.schedStore.SetEnabled(ctx, name, false)
+	if !m.requireCaller(ctx) {
+		return scheduleNotFoundErr(port.ErrScheduleNotFound, name)
+	}
+	return scheduleNotFoundErr(m.schedStore.SetEnabled(ctx, m.physicalScheduleName(ctx, name), false), name)
 }
 
 // ResumeSchedule re-enables a paused schedule (Enabled=true). It calls
 // SetEnabled — see PauseSchedule's doc.
 func (m *scheduleManager) ResumeSchedule(ctx context.Context, name string) error {
-	return m.schedStore.SetEnabled(ctx, name, true)
+	if !m.requireCaller(ctx) {
+		return scheduleNotFoundErr(port.ErrScheduleNotFound, name)
+	}
+	return scheduleNotFoundErr(m.schedStore.SetEnabled(ctx, m.physicalScheduleName(ctx, name), true), name)
 }
 
-// GetFire loads a fire record by id. It is the read-side sibling of
-// ListFires (NOT part of port.ScheduleManager — the agent tool does not need
-// it; the gRPC/REST FireNow surface does). Kept on the manager so the Service
-// delegates the whole schedule surface to ONE truth.
+// GetFire loads a fire record by id. With ownership enforcement enabled, it
+// resolves the fire's stored physical parent key directly and authorizes that
+// parent before translating the key for the caller-visible result.
 func (m *scheduleManager) GetFire(ctx context.Context, fireID string) (port.ScheduleFire, error) {
-	return m.schedStore.LoadFire(ctx, fireID)
+	if !m.requireCaller(ctx) {
+		return port.ScheduleFire{}, fireNotFoundErr(fireID)
+	}
+	fire, err := m.schedStore.LoadFire(ctx, fireID)
+	if err != nil {
+		return port.ScheduleFire{}, err
+	}
+	if !m.ownershipEnforced {
+		return fire, nil
+	}
+
+	physicalName := fire.ScheduleName
+	parent, err := m.schedStore.Load(ctx, physicalName)
+	if err != nil {
+		if errors.Is(err, port.ErrScheduleNotFound) {
+			return port.ScheduleFire{}, fireNotFoundErr(fireID)
+		}
+		return port.ScheduleFire{}, err
+	}
+	caller := session.PrincipalFromContext(ctx)
+	if parent.Spec.Owner == nil || !parent.Spec.Owner.SameIdentity(caller) {
+		return port.ScheduleFire{}, fireNotFoundErr(fireID)
+	}
+	literal, ok := strings.CutPrefix(physicalName, m.ownerScheduleNamespace(ctx))
+	if !ok {
+		return port.ScheduleFire{}, fireNotFoundErr(fireID)
+	}
+	fire.ScheduleName = literal
+	return fire, nil
 }
 
-// ListFires returns the fire records for a schedule.
+// ListFires returns the fire records for a schedule, resolved against THIS
+// context's physical key (see GetFire's doc on why fire records key by the
+// physical name). Each returned record's ScheduleName is restored to the
+// caller-supplied literal name.
 func (m *scheduleManager) ListFires(ctx context.Context, scheduleName string) ([]port.ScheduleFire, error) {
-	return m.schedStore.ListFires(ctx, scheduleName)
+	if !m.requireCaller(ctx) {
+		return nil, scheduleNotFoundErr(port.ErrScheduleNotFound, scheduleName)
+	}
+	fires, err := m.schedStore.ListFires(ctx, m.physicalScheduleName(ctx, scheduleName))
+	if err != nil {
+		return nil, scheduleNotFoundErr(err, scheduleName)
+	}
+	for i := range fires {
+		fires[i].ScheduleName = scheduleName
+	}
+	return fires, nil
 }
 
 // FireNow manually fires a schedule by name. It delegates to the scheduler's
@@ -645,6 +935,9 @@ func (m *scheduleManager) ListFires(ctx context.Context, scheduleName string) ([
 // it (ErrSchedulerNotRunning — the store works fine, there's just nothing to
 // fire a manual request through).
 func (m *scheduleManager) FireNow(ctx context.Context, name string) (port.ScheduleFire, error) {
+	if !m.requireCaller(ctx) {
+		return port.ScheduleFire{}, scheduleNotFoundErr(port.ErrScheduleNotFound, name)
+	}
 	schedPtr := m.scheduler.Load()
 	if schedPtr == nil {
 		// The manager is only ever constructed with a non-nil schedStore, so
@@ -655,7 +948,7 @@ func (m *scheduleManager) FireNow(ctx context.Context, name string) (port.Schedu
 		// reaching here).
 		return port.ScheduleFire{}, ErrSchedulerNotRunning
 	}
-	fire, err := schedPtr.FireNow(ctx, name, m.now())
+	fire, err := schedPtr.FireNow(ctx, m.physicalScheduleName(ctx, name), m.now())
 	if err != nil {
 		switch {
 		case errors.Is(err, scheduler.ErrFireNowDisabled):
@@ -667,9 +960,10 @@ func (m *scheduleManager) FireNow(ctx context.Context, name string) (port.Schedu
 		case errors.Is(err, scheduler.ErrNotLeader):
 			return port.ScheduleFire{}, fmt.Errorf("%w: %v", ErrScheduleNotLeader, err)
 		default:
-			return port.ScheduleFire{}, err
+			return port.ScheduleFire{}, scheduleNotFoundErr(err, name)
 		}
 	}
+	fire.ScheduleName = name
 	return fire, nil
 }
 

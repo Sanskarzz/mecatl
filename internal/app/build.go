@@ -142,6 +142,10 @@ type Config struct {
 	RedisURL string
 	Shell    string
 	NoBash   bool
+	// OwnershipEnforced enables application caller isolation when the command edge
+	// has configured the fail-closed OIDC verifier. Its zero value preserves
+	// existing ownerless deployments and hand-built test configurations.
+	OwnershipEnforced bool
 
 	// DefaultProvider/DefaultModel are the SERVER-CONFIGURED deployment-wide
 	// default (issue #21; --default-provider / --default-model — the wire's
@@ -1495,10 +1499,11 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	commandLister := buildCommandLister(cfg, mcpProvider)
 
 	svcCfg := server.Config{
-		Engine:           engine,
-		Store:            store,
-		Workspaces:       osfsWorkspaceFactory(cfg.diag(), assets.skillReadRoots),
-		DefaultWorkspace: cfg.Workspace, // the launch root; a session on a DIFFERENT root routes through the per-session factory (issue #102, docs/adr/0032)
+		Engine:            engine,
+		Store:             store,
+		OwnershipEnforced: cfg.OwnershipEnforced,
+		Workspaces:        osfsWorkspaceFactory(cfg.diag(), assets.skillReadRoots),
+		DefaultWorkspace:  cfg.Workspace, // the launch root; a session on a DIFFERENT root routes through the per-session factory (issue #102, docs/adr/0032)
 		// CommandRunner (issue #462): the MAIN session's bound runner — the
 		// Environment seam hands it to Tool.Execute so Bash observes the session
 		// namespace. nil when Bash is disabled (the catalog omits Bash and the
@@ -2430,6 +2435,9 @@ func buildScheduler(cfg Config, store port.SessionStore, sessionLease port.Sessi
 		TickInterval:       cfg.SchedulerTickInterval,
 		MinInterval:        cfg.SchedulerMinInterval,
 		MaxConcurrentFires: cfg.SchedulerMaxConcurrentFires,
+		CanProcess: func(s port.Schedule) bool {
+			return !cfg.OwnershipEnforced || s.Spec.Owner != nil
+		},
 	}
 	// Fire is nil here — Build calls SetFire after NewService (the FireFunc closes
 	// over the *server.Service, which does not exist yet at this point).
@@ -2479,6 +2487,13 @@ func startScheduler(ctx context.Context, cfg Config, store port.SessionStore, se
 	// is the package var (test-overridable); a future operator-tier Config knob
 	// would thread through here instead.
 	sched.SetFire(makeFireFunc(svc, fireStore, defaultFireTimeout, deliverFireStarted(svc, deliveryQueue)))
+	// Store keys are owner-namespaced only when caller ownership is enforced;
+	// server.LiteralScheduleName is a total, self-guarding reverse mapping
+	// (identity on any non-namespaced/flat key), so it is wired unconditionally
+	// rather than gated on cfg.OwnershipEnforced. Scheduler callbacks keep the
+	// physical keys for storage, while lifecycle events and metrics receive the
+	// literal name through this adapter-owned reverse mapping.
+	sched.SetPresentScheduleName(server.LiteralScheduleName)
 	// Stale-fire reconciler (issue #386 Phase 4b, acceptance criterion #7): wire
 	// the composition-injected ReconcileStaleFire callback the scheduler invokes
 	// from the tick loop's reconcile scan when it DETECTS a stale in-flight fire
@@ -2738,9 +2753,10 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 		return nil, nil, nil, nil, nil, nil, nil, catalogAssets{}, nil, func() {}, fmt.Errorf("resolve schedule store for tool: %w", err)
 	}
 	scheduleMgr := server.NewScheduleManager(server.ScheduleManagerConfig{
-		Store:         store,
-		ScheduleStore: toolSchedStore,
-		Diagnostics:   cfg.diag(),
+		Store:             store,
+		ScheduleStore:     toolSchedStore,
+		Diagnostics:       cfg.diag(),
+		OwnershipEnforced: cfg.OwnershipEnforced,
 	})
 	scheduleManagerFactory := func() port.ScheduleManager {
 		if scheduleMgr == nil {
@@ -3113,6 +3129,9 @@ func buildUserModelStore(cfg Config) tool.MemoryStore {
 		return nil
 	}
 	cfg.diag().Log(context.Background(), port.LevelInfo, "user model ENABLED (cross-project operator FACTS)", "dir", dir)
+	if cfg.OwnershipEnforced {
+		return memory.NewCallerStore(store, false)
+	}
 	return store
 }
 
@@ -4113,6 +4132,10 @@ func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provid
 	var memStore tool.MemoryStore
 	var memDriverClose func()
 	if cfg.MemoryStoreURL != "" {
+		if cfg.OwnershipEnforced {
+			mcpClose()
+			return nil, catalogAssets{}, nil, nil, nil, fmt.Errorf("caller-partitioned memory requires local MemoryDir; remote memory drivers do not carry a caller namespace")
+		}
 		conn, closeFn, err := cfg.drivers().dial(cfg, cfg.MemoryStoreURL)
 		if err != nil {
 			// FATAL, not fail-soft: the driver URL is an EXPLICIT operator
@@ -4132,8 +4155,13 @@ func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provid
 			cfg.diag().Log(ctx, port.LevelWarn, "could not open memory store; memory tools disabled", "dir", cfg.MemoryDir, "err", err)
 		} else {
 			memStore = st
+			if cfg.OwnershipEnforced {
+				memStore = memory.NewCallerStore(st, true)
+			}
 			cfg.diag().Log(ctx, port.LevelInfo, "memory tools ENABLED (Remember/Recall/SearchMemory); permission: allow (built-in default, overridable to ask/deny via settings)", "dir", cfg.MemoryDir)
-			startMemoryConsolidation(ctx, cfg, st, provider)
+			if !cfg.OwnershipEnforced {
+				startMemoryConsolidation(ctx, cfg, st, provider)
+			}
 		}
 	} else {
 		cfg.diag().Log(ctx, port.LevelInfo, "memory tools DISABLED (memory dir empty)")
@@ -4152,7 +4180,9 @@ func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provid
 	userModelStore := buildUserModelStore(cfg)
 	if userModelStore != nil {
 		cfg.diag().Log(ctx, port.LevelInfo, "user-model tools ENABLED (RememberUser/RecallUser/SearchUserModel; cross-project); permission: allow (built-in default, overridable to ask/deny via settings)")
-		startUserModelConsolidation(ctx, cfg, userModelStore, provider)
+		if !cfg.OwnershipEnforced {
+			startUserModelConsolidation(ctx, cfg, userModelStore, provider)
+		}
 	}
 
 	// The skills seam (Phase C1): FS snapshot or remote driver, resolved once.
@@ -5728,6 +5758,7 @@ func buildSubagentTool(ctx context.Context, cfg Config, provReg *providerRegistr
 		// InspectSubagent tool can load its transcript by the agentId trailer (ids verbatim;
 		// the namespace stays disjoint by prefix convention, not engineering).
 		agent.WithSubagentStore(store),
+		agent.WithSubagentOwnershipEnforced(cfg.OwnershipEnforced),
 	}
 	// Issue #40: when the WORKSPACE-TRUST gate (not --no-bash / an empty shell) is what
 	// nil'd the runner, tell the model honestly via the Spec — otherwise the description
@@ -5894,6 +5925,7 @@ func buildNoFSSubagentTool(ctx context.Context, cfg Config, provReg *providerReg
 	opts := []agent.SubagentOption{
 		agent.WithSubagentStopHook(hooks),
 		agent.WithSubagentStore(store),
+		agent.WithSubagentOwnershipEnforced(cfg.OwnershipEnforced),
 		agent.WithSubagentNoFSNote(),
 		agent.WithSubagentEngineFactory(func(overrideModel string) (*agent.Engine, bool) {
 			overrideModel = strings.TrimSpace(overrideModel)

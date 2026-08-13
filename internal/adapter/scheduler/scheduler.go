@@ -103,6 +103,15 @@ type Config struct {
 	// Fire is the composition-supplied run-entry callback. Composition wires
 	// this in Phase 1f; for Phase 1e's unit tests a stub records fires. Required.
 	Fire FireFunc
+	// CanProcess admits only schedules this scheduler may touch. A nil function
+	// preserves the compatibility path. OIDC composition supplies a predicate that
+	// excludes ownerless pre-cutover schedules before Claim, so a background worker
+	// cannot adopt, fire, or repeatedly mutate an inaccessible resource.
+	CanProcess func(port.Schedule) bool
+	// PresentScheduleName maps the opaque store key to the caller-visible schedule
+	// name for lifecycle events and metric labels. It must never be used for store
+	// operations; nil preserves identity.
+	PresentScheduleName func(string) string
 	// Clock supplies `now` for the tick loop and Claim. Required.
 	Clock port.Clock
 	// Diagnostics is the operational logging seam. A nil value is treated as
@@ -377,6 +386,15 @@ func (s *Scheduler) SetFire(f FireFunc) {
 		panic("scheduler: SetFire after Start")
 	}
 	s.cfg.Fire = f
+}
+
+// SetPresentScheduleName wires the optional physical-to-literal presentation
+// seam before Start. Nil preserves identity.
+func (s *Scheduler) SetPresentScheduleName(fn func(string) string) {
+	if s.started.Load() {
+		panic("scheduler: SetPresentScheduleName after Start")
+	}
+	s.cfg.PresentScheduleName = fn
 }
 
 // SetEmitScheduleEvent sets the OPTIONAL composition-injected emit callback. It
@@ -913,6 +931,9 @@ func (s *Scheduler) tickOnce(ctx context.Context) {
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(s.cfg.MaxConcurrentFires)
 	for _, sched := range due {
+		if s.cfg.CanProcess != nil && !s.cfg.CanProcess(sched) {
+			continue
+		}
 		sched := sched
 		g.Go(func() error {
 			s.fireOne(gctx, sched, now)
@@ -1120,9 +1141,17 @@ func (s *Scheduler) fireClaimed(ctx context.Context, claimed port.Schedule, now 
 // it for fired/failed, fireOne/FireNow call it for skipped. A nil callback is the
 // byte-identical no-emit path.
 func (s *Scheduler) emitSchedule(ctx context.Context, payload session.SchedulePayload) {
+	payload.ScheduleName = s.presentScheduleName(payload.ScheduleName)
 	if s.cfg.EmitScheduleEvent != nil {
 		s.cfg.EmitScheduleEvent(ctx, payload)
 	}
+}
+
+func (s *Scheduler) presentScheduleName(name string) string {
+	if s.cfg.PresentScheduleName == nil {
+		return name
+	}
+	return s.cfg.PresentScheduleName(name)
 }
 
 // emitScheduleMetrics invokes the optional ScheduleMetrics callback (nil-safe).
@@ -1132,6 +1161,7 @@ func (s *Scheduler) emitSchedule(ctx context.Context, payload session.SchedulePa
 // callback is the byte-identical no-metrics path. duration is the fire's
 // wall-clock cost (time.Since(now)); a skipped fire passes 0 (no run).
 func (s *Scheduler) emitScheduleMetrics(payload session.SchedulePayload, duration time.Duration) {
+	payload.ScheduleName = s.presentScheduleName(payload.ScheduleName)
 	if s.cfg.ScheduleMetrics != nil {
 		s.cfg.ScheduleMetrics(payload, duration)
 	}

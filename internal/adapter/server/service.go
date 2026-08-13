@@ -176,6 +176,11 @@ type Config struct {
 	Engine *agent.Engine
 	// Store persists and looks up sessions. Required.
 	Store port.SessionStore
+	// OwnershipEnforced is true only when the request edge has a verifier wired.
+	// Its zero value preserves the ownerless compatibility path. When enabled,
+	// create retries compare the verified issuer/subject pair before exposing an
+	// existing caller-selected ID.
+	OwnershipEnforced bool
 	// Workspaces builds a Workspace for a session root. Required.
 	Workspaces WorkspaceFactory
 	// CommandRunner is the MAIN session's bound command runner (issue #462). It is
@@ -1045,10 +1050,11 @@ func NewService(cfg Config) (*Service, error) {
 		svc.schedMgr.setModelsPointer(&svc.models)
 	} else {
 		svc.schedMgr = NewScheduleManager(ScheduleManagerConfig{
-			Store:       cfg.Store,
-			Now:         cfg.Now,
-			Models:      &svc.models,
-			Diagnostics: cfg.Diagnostics,
+			Store:             cfg.Store,
+			Now:               cfg.Now,
+			Models:            &svc.models,
+			Diagnostics:       cfg.Diagnostics,
+			OwnershipEnforced: cfg.OwnershipEnforced,
 		})
 	}
 	if cfg.Scheduler != nil && svc.schedMgr != nil {
@@ -1311,6 +1317,29 @@ func seedCarryover(sess *session.Session, snap []session.Message) error {
 	return nil
 }
 
+// createRequest is the immutable caller-controlled shape a retried explicit ID
+// must match. It deliberately excludes the owner: that comes only from the
+// verified context and is checked separately.
+type createRequest struct {
+	workspace string
+	mode      session.PermissionMode
+	limits    session.Limits
+	selector  ProviderSelector
+	profile   SessionProfile
+	sourceID  session.SessionID
+}
+
+func (r createRequest) matches(sess *session.Session) bool {
+	return r.sourceID == "" && sess.Workspace == r.workspace && sess.Mode == r.mode &&
+		sess.Limits == r.limits && sess.ProviderID == r.selector.ProviderID &&
+		sess.ModelID == r.selector.ModelID && sess.ReasoningEffort == r.selector.ReasoningEffort &&
+		sess.Profile == string(r.profile)
+}
+
+func sameCreateOwner(a, b *session.Principal) bool {
+	return (a == nil && b == nil) || a.SameIdentity(b)
+}
+
 // reserveSessionID validates a caller-chosen session id (WithSessionID, ADR 0059
 // decision #7 Phase-2) against THREE collision sources and reserves it for the
 // duration of the create, returning a release func the caller MUST defer:
@@ -1328,7 +1357,7 @@ func seedCarryover(sess *session.Session, snap []session.Message) error {
 // fault the reservation is released before returning the error. Once the session
 // is registered (per-session) or persisted (shared) the durable collision sources
 // take over, so the reservation only needs to live for the create.
-func (s *Service) reserveSessionID(ctx context.Context, id session.SessionID) (release func(), err error) {
+func (s *Service) reserveSessionID(ctx context.Context, id session.SessionID, owner *session.Principal, request createRequest) (existing *session.Session, release func(), err error) {
 	s.mu.Lock()
 	_, liveEngine := s.sessionEngines[id]
 	_, reserved := s.reservedIDs[id]
@@ -1336,7 +1365,7 @@ func (s *Service) reserveSessionID(ctx context.Context, id session.SessionID) (r
 		s.mu.Unlock()
 		// Accurate for BOTH cases: a live per-session engine (liveEngine) OR a
 		// concurrent in-flight create holding the id (reserved).
-		return nil, fmt.Errorf("%w: session id %q is already in use", ErrInvalidArgument, id)
+		return nil, nil, fmt.Errorf("%w: session id %q is already in use", ErrInvalidArgument, id)
 	}
 	s.reservedIDs[id] = struct{}{}
 	s.mu.Unlock()
@@ -1350,12 +1379,21 @@ func (s *Service) reserveSessionID(ctx context.Context, id session.SessionID) (r
 	// silently pass, so it is propagated.
 	if existing, lerr := s.cfg.Store.Load(ctx, id); lerr == nil && existing != nil {
 		release()
-		return nil, fmt.Errorf("%w: session id %q already exists", ErrInvalidArgument, id)
+		if !s.cfg.OwnershipEnforced {
+			return nil, nil, fmt.Errorf("%w: session id %q already exists", ErrInvalidArgument, id)
+		}
+		if sameCreateOwner(existing.Owner, owner) {
+			if request.matches(existing) {
+				return existing, nil, nil
+			}
+			return nil, nil, fmt.Errorf("%w: session id %q was retried with a different request", ErrInvalidArgument, id)
+		}
+		return nil, nil, fmt.Errorf("%w: %q", ErrNotFound, id)
 	} else if lerr != nil && !errors.Is(lerr, port.ErrSessionNotFound) {
 		release()
-		return nil, fmt.Errorf("server: probe session id %q: %w", id, lerr)
+		return nil, nil, fmt.Errorf("server: probe session id %q: %w", id, lerr)
 	}
-	return release, nil
+	return nil, release, nil
 }
 
 func (s *Service) createSession(ctx context.Context, workspace string, mode session.PermissionMode, limits session.Limits, sel ProviderSelector, specs []mcp.ServerConfig, profile SessionProfile, opts createSessionOpts) (*session.Session, error) {
@@ -1383,6 +1421,10 @@ func (s *Service) createSession(ctx context.Context, workspace string, mode sess
 	// the unset caps. A zero field means "unset", not "explicitly unlimited".
 	limits = limits.WithDefaults(s.cfg.DefaultLimits)
 
+	// The owner stamped on the new session: the explicit WithOwner injection, else
+	// the verified principal on the context, else nil (the ownerless no-auth path).
+	owner := resolveOwner(ctx, opts)
+
 	// Resolve the session id: the caller's override (WithSessionID, ADR 0059
 	// decision #7 Phase-2) wins; otherwise the Service's NewID generator mints a
 	// fresh one (the byte-identical pre-Phase-2 path). WithSessionID with an EMPTY
@@ -1395,9 +1437,13 @@ func (s *Service) createSession(ctx context.Context, workspace string, mode sess
 		if opts.id == "" {
 			return nil, fmt.Errorf("%w: session id must not be empty", ErrInvalidArgument)
 		}
-		release, err := s.reserveSessionID(ctx, opts.id)
+		request := createRequest{workspace: workspace, mode: mode, limits: limits, selector: sel, profile: profile, sourceID: opts.sourceSessionID}
+		existing, release, err := s.reserveSessionID(ctx, opts.id, owner, request)
 		if err != nil {
 			return nil, err
+		}
+		if existing != nil {
+			return existing, nil
 		}
 		defer release()
 		mintID = func() session.SessionID { return opts.id }
@@ -1415,10 +1461,7 @@ func (s *Service) createSession(ctx context.Context, workspace string, mode sess
 	// DefaultResolvedModel inside validateCarryover); a SAME-provider carryover
 	// replays the history verbatim, a CROSS-provider carryover strips the
 	// provider-private blobs (session.StripProviderState).
-	// The owner stamped on the new session: the explicit WithOwner injection, else
-	// the verified principal on the context, else nil (the ownerless no-auth path).
-	// A carryover fork replaces it with the SOURCE's owner below.
-	owner := resolveOwner(ctx, opts)
+	// A carryover fork replaces the context owner with the source's owner below.
 
 	var carrySnap []session.Message
 	if opts.sourceSessionID != "" {
@@ -1913,7 +1956,7 @@ func (s *Service) StorageReady(ctx context.Context) bool {
 // GetSession returns the persisted session under id, or ErrNotFound.
 func (s *Service) GetSession(ctx context.Context, id session.SessionID) (*session.Session, error) {
 	sess, err := s.cfg.Store.Load(ctx, id)
-	if err != nil {
+	if err != nil || s.authorizeSession(ctx, sess) != nil {
 		return nil, fmt.Errorf("%w: %q", ErrNotFound, id)
 	}
 	return sess, nil
@@ -1933,6 +1976,9 @@ func (s *Service) GetSession(ctx context.Context, id session.SessionID) (*sessio
 func (s *Service) SetMode(ctx context.Context, id session.SessionID, mode session.PermissionMode) (*session.Session, error) {
 	if mode == "" {
 		return nil, fmt.Errorf("%w: mode is required", ErrInvalidArgument)
+	}
+	if _, err := s.GetSession(ctx, id); err != nil {
+		return nil, err
 	}
 	// Prefer the live session the engine drives (if registered) so the change is
 	// observed by the same object; otherwise operate on the stored snapshot.
@@ -2496,6 +2542,7 @@ func (s *Service) StartRunContent(ctx context.Context, id session.SessionID, tex
 	if err != nil {
 		return nil, err
 	}
+	ctx = memory.WithWorkspace(ctx, sess.Workspace)
 	run := engine.Run(ctx, sess, env, agent.RunRequest{Text: text, Parts: parts})
 	s.register(id, run, sess)
 	return run, nil
@@ -3076,6 +3123,11 @@ func (s *Service) Approve(ctx context.Context, id session.SessionID, askID strin
 // follow-up (additive, out of the Phase 2 gate) — see docs/adr/0027-cloud-native.md
 // Phase 2.
 func (s *Service) ApproveRun(ctx context.Context, id session.SessionID, askID string, verdict session.ApprovalVerdict) (*agent.Run, error) {
+	// Authorize before reading the in-memory registry: a mismatch must be
+	// indistinguishable from a missing handle and cannot signal a live run.
+	if _, err := s.GetSession(ctx, id); err != nil {
+		return nil, err
+	}
 	// Fast path (lock-free): a live registered run resolves the ask over its channel.
 	if run, ok := s.LookupRun(id); ok {
 		run.Approve(askID, verdict)
@@ -3152,6 +3204,7 @@ func (s *Service) resumeFromAwaiting(ctx context.Context, id session.SessionID, 
 	if err != nil {
 		return nil, err
 	}
+	ctx = memory.WithWorkspace(ctx, sess.Workspace)
 	run := engine.ResumeApproval(ctx, sess, env, askID, verdict)
 	s.register(id, run, sess)
 	return run, nil
@@ -3196,6 +3249,11 @@ func (s *Service) resumeFromAwaiting(ctx context.Context, id session.SessionID, 
 // cancel the passed ctx once it stops draining, or the run can wedge behind a
 // dead relay (mirrors the run.Cancel() the live relays call on disconnect).
 func (s *Service) ApprovePlan(ctx context.Context, id session.SessionID, targetMode session.PermissionMode, note string) (<-chan session.Event, error) {
+	// Authorize before reading the in-memory registry. A foreign caller must not
+	// learn that a run exists or trigger any live-run side effect.
+	if _, err := s.GetSession(ctx, id); err != nil {
+		return nil, err
+	}
 	// (1) A live run means an approve-mid-run: reject. The operator must use the
 	// Converse ResumeApproval frame for a live run, not this atomic RPC.
 	if _, ok := s.LookupRun(id); ok {
@@ -3345,6 +3403,11 @@ func planVerdictForMode(m session.PermissionMode) (verdict session.ApprovalVerdi
 // Approve: ErrNotFound when the session is unknown, ErrNoActiveRun when it
 // exists only in the store with no live run.
 func (s *Service) Cancel(ctx context.Context, id session.SessionID) error {
+	// Authorize before reading the in-memory registry: cancellation is a live
+	// signal and a foreign request must be absence-equivalent.
+	if _, err := s.GetSession(ctx, id); err != nil {
+		return err
+	}
 	run, ok := s.LookupRun(id)
 	if ok {
 		run.Cancel()
@@ -3361,6 +3424,11 @@ func (s *Service) Cancel(ctx context.Context, id session.SessionID) error {
 // already finished) yields ErrChildNotFound (HTTP 404; the stream-frame path
 // ignores that race by design instead).
 func (s *Service) CancelChild(ctx context.Context, id session.SessionID, childID string) error {
+	// The parent session owns the live child registry; reject a foreign caller
+	// before probing it or sending a child cancellation.
+	if _, err := s.GetSession(ctx, id); err != nil {
+		return err
+	}
 	run, ok := s.LookupRun(id)
 	if ok {
 		if !run.CancelChild(childID) {
@@ -3397,6 +3465,11 @@ func (s *Service) noActiveRun(ctx context.Context, id session.SessionID) error {
 // exited; the state write happened-before the event the caller observed). The
 // flag is a server-layer atomic, never read by the engine loop.
 func (s *Service) Persist(ctx context.Context, id session.SessionID) {
+	// A relay persists a run on behalf of its request caller. Authorize before
+	// consulting the live registry so a foreign persist is a true no-op.
+	if _, err := s.GetSession(ctx, id); err != nil {
+		return
+	}
 	s.mu.Lock()
 	st, ok := s.runs[id]
 	s.mu.Unlock()
@@ -4109,17 +4182,23 @@ func (s *Service) FinishRun(id session.SessionID, run *agent.Run) {
 // and closes the channel exactly once so the subscriber goroutine can exit
 // cleanly.
 //
-// Subscribe is the entry point for the in-process embedded server path (Wave 2,
-// ADR 0075 decision #5): the mecatui embed calls it when the user opens a
-// session's live view, and unsubscribes when the view loses focus / the TUI
-// exits. A wire-transport analogue (gRPC server-streaming, Wave 3) is task 08.
-func (s *Service) Subscribe(id session.SessionID) (<-chan session.Event, func()) {
+// Subscribe's sole entry point is the gRPC StreamSessionLive wire handler — an
+// UNTRUSTED boundary, not a trusted in-process caller. When OwnershipEnforced
+// is set it authorizes via GetSession (issue #368) before registering a
+// subscriber, so a caller who cannot load the session cannot observe its live
+// events either; the check mirrors StreamSessionEvents exactly.
+func (s *Service) Subscribe(ctx context.Context, id session.SessionID) (<-chan session.Event, func(), error) {
+	if s.cfg.OwnershipEnforced {
+		if _, err := s.GetSession(ctx, id); err != nil {
+			return nil, nil, err
+		}
+	}
 	ch := make(chan session.Event, 64)
 	s.subMu.Lock()
 	if s.subscriptionsClosed {
 		close(ch)
 		s.subMu.Unlock()
-		return ch, func() {}
+		return ch, func() {}, nil
 	}
 	s.subNextID++
 	subID := s.subNextID
@@ -4143,7 +4222,7 @@ func (s *Service) Subscribe(id session.SessionID) (<-chan session.Event, func())
 			}
 		})
 	}
-	return ch, unsub
+	return ch, unsub, nil
 }
 
 // PublishSessionEvent fans the event to every subscriber registered for the given
@@ -4555,6 +4634,11 @@ func (s *Service) StreamSessionEvents(ctx context.Context, id session.SessionID)
 	if s.cfg.EventLog == nil {
 		return nil, ErrNoEventLog
 	}
+	if s.cfg.OwnershipEnforced {
+		if _, err := s.GetSession(ctx, id); err != nil {
+			return nil, err
+		}
+	}
 	return s.cfg.EventLog.Read(ctx, id), nil
 }
 
@@ -4595,7 +4679,7 @@ func (s *Service) ListSessions(ctx context.Context) ([]SessionSummary, error) {
 	// FAST PATH: a store that implements MetaLister enumerates picker metadata
 	// cheaply (last-line read, no conversation unmarshal).
 	if ml, ok := s.cfg.Store.(port.MetaLister); ok {
-		return listSessionsMeta(ctx, ml)
+		return s.listSessionsMeta(ctx, ml)
 	}
 	ps, ok := s.cfg.Store.(port.PrunableStore)
 	if !ok {
@@ -4610,11 +4694,20 @@ func (s *Service) ListSessions(ctx context.Context) ([]SessionSummary, error) {
 	}
 	out := make([]SessionSummary, 0, len(rows))
 	for _, r := range rows {
+		if s.cfg.OwnershipEnforced {
+			sess, lerr := s.cfg.Store.Load(ctx, r.ID)
+			if lerr != nil || !s.ownsResource(ctx, sess.Owner) {
+				continue
+			}
+		}
 		summary := SessionSummary{
 			SessionID:      string(r.ID),
 			ModifiedAtUnix: r.ModifiedAt.Unix(),
 		}
 		if sess, lerr := s.cfg.Store.Load(ctx, r.ID); lerr == nil && sess != nil {
+			if !s.ownsResource(ctx, sess.Owner) {
+				continue
+			}
 			summary.State = string(sess.State)
 			summary.Turns = sess.Counters.Turns
 			summary.CreatedAtUnix = sess.CreatedAt.Unix()
@@ -4639,7 +4732,7 @@ func (s *Service) ListSessions(ctx context.Context) ([]SessionSummary, error) {
 // listSessionsMeta builds the SessionSummary slice from a MetaLister's cheap
 // metadata projection (no conversation unmarshal). It is the fast-path
 // implementation of ListSessions for stores that implement port.MetaLister.
-func listSessionsMeta(ctx context.Context, ml port.MetaLister) ([]SessionSummary, error) {
+func (s *Service) listSessionsMeta(ctx context.Context, ml port.MetaLister) ([]SessionSummary, error) {
 	rows, err := ml.MetaList(ctx)
 	if err != nil {
 		if errors.Is(err, port.ErrPruneUnsupported) {
@@ -4649,6 +4742,12 @@ func listSessionsMeta(ctx context.Context, ml port.MetaLister) ([]SessionSummary
 	}
 	out := make([]SessionSummary, 0, len(rows))
 	for _, r := range rows {
+		if s.cfg.OwnershipEnforced {
+			sess, lerr := s.cfg.Store.Load(ctx, r.ID)
+			if lerr != nil || !s.ownsResource(ctx, sess.Owner) {
+				continue
+			}
+		}
 		summary := SessionSummary{
 			SessionID:      string(r.ID),
 			ModifiedAtUnix: r.ModifiedAt.Unix(),

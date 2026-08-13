@@ -51,7 +51,10 @@ func TestFireDelivery_Scenario5_ConnectedTUIRendersDeliveryLive(t *testing.T) {
 	svc.FinishRun(sess.ID, run)
 
 	// Subscribe to the origin session.
-	sub, unsub := svc.Subscribe(sess.ID)
+	sub, unsub, err := svc.Subscribe(ctx, sess.ID)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
 	defer unsub()
 
 	// Collect events from the subscriber in a goroutine.
@@ -150,7 +153,10 @@ func TestFireDelivery_Scenario5_TUIRendersRecordedNoteNotRaw(t *testing.T) {
 	}
 	svc.FinishRun(sess.ID, run)
 
-	sub, unsub := svc.Subscribe(sess.ID)
+	sub, unsub, err := svc.Subscribe(ctx, sess.ID)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
 	defer unsub()
 
 	var (
@@ -246,7 +252,10 @@ func TestFireDelivery_Scenario6_DeadClientDrainsWithoutWedgingHelper(t *testing.
 	svc.FinishRun(sess.ID, run)
 
 	// Subscribe, then immediately unsubscribe (dead client).
-	sub, unsub := svc.Subscribe(sess.ID)
+	sub, unsub, err := svc.Subscribe(ctx, sess.ID)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
 
 	// Drain any events that were buffered during subscription setup, then close.
 	done := make(chan struct{})
@@ -336,7 +345,10 @@ func TestSubscriptionFullBufferPublishHelper(t *testing.T) {
 	svc := newSubscriptionService(t)
 	defer svc.Close()
 	id := session.SessionID("subscription-full-buffer")
-	ch, unsub := svc.Subscribe(id)
+	ch, unsub, err := svc.Subscribe(context.Background(), id)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
 
 	// Verify the subscription is live before filling it and asserting closure.
 	svc.PublishSessionEvent(id, session.Event{Type: session.EvTurnStart})
@@ -418,7 +430,11 @@ func TestSubscriptionConcurrentPublishAndUnsubscribeHelper(t *testing.T) {
 		go func() {
 			defer churnDone.Done()
 			for range subscriptions {
-				ch, unsub := svc.Subscribe(id)
+				ch, unsub, err := svc.Subscribe(context.Background(), id)
+				if err != nil {
+					t.Error("Subscribe:", err)
+					return
+				}
 
 				// A receive proves this individual subscription was live before
 				// the concurrent publisher/unsubscribe phase. It may be a publisher
@@ -485,7 +501,10 @@ func TestSubscriptionCloseOverlapsPublishHelper(t *testing.T) {
 
 	channels := make([]<-chan session.Event, 0, subscribers)
 	for range subscribers {
-		ch, _ := svc.Subscribe(id)
+		ch, _, err := svc.Subscribe(context.Background(), id)
+		if err != nil {
+			t.Fatalf("Subscribe: %v", err)
+		}
 		channels = append(channels, ch)
 	}
 	// Establish every pre-existing channel is live before Close is asserted to
@@ -543,7 +562,10 @@ func TestSubscriptionCloseOverlapsPublishHelper(t *testing.T) {
 		}
 	}
 
-	postClose, unsub := svc.Subscribe(id)
+	postClose, unsub, err := svc.Subscribe(context.Background(), id)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
 	select {
 	case _, ok := <-postClose:
 		if ok {

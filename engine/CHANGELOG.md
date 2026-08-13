@@ -35,6 +35,29 @@ The covered surface is the eight core packages (`session`, `governance`, `learni
     relays the slug onto for clients. Advisory + metadata-only, a string
     passthrough on the wire (no proto enum). Both are Added (a minor bump).
 
+- **`port.ScheduleCreator` and `port.ErrScheduleAlreadyExists`** — an OPTIONAL
+  atomic create-only seam for `port.ScheduleStore` (mirroring
+  `ScheduleOneShotReArmer`'s type-assertion discovery pattern), closing a
+  check-then-Save TOCTOU window where two concurrent same-name schedule
+  creates could both observe absence and one silently overwrite the other.
+  `memschedulestore`, `jsonlstore`, and `redisstore` all implement it; a store
+  that does not degrades to the pre-existing check-then-Save fallback. New
+  exported interface + sentinel: Added (a minor bump).
+
+- **`agent.WithSubagentOwnershipEnforced`** — wires the verified request edge's
+  ownership policy into `Subagent` resume authorization. When enabled, a resume
+  requires the caller to match the persisted child owner, including when the
+  request context is unexpectedly missing a principal; disabled deployments
+  preserve legacy ownerless compatibility. New exported function: Added (a
+  minor bump).
+
+- **`agent.NewInspectMemberToolWithOwnership` and
+  `agent.NewInspectSubagentToolWithOwnership`** — construct persisted-transcript
+  inspection tools with the verified request edge's ownership policy. When enabled,
+  access requires the full `(Issuer, Subject)` identity pair; when disabled, the
+  legacy no-verifier behavior is retained. New exported functions: Added (a minor
+  bump).
+
 - **`session.PrincipalFromClaims` and `session.GrantTypeFromClaims`**
   ([ADR 0103](../docs/adr/0103-oidc-authn-module.md)) — stdlib-only projection
   helpers for embedders that verify credentials outside the engine. Projection
@@ -42,6 +65,12 @@ The covered surface is the eight core packages (`session`, `governance`, `learni
   never fabricates anonymous identity or derives the `system` grant, and keeps
   JWT/OIDC dependencies out of the engine. New exported functions: Added (a
   minor bump).
+- **`session.(*Principal).SameIdentity`** (issue #368,
+  [ADR 0102](../docs/adr/0102-caller-ownership-enforcement.md)) — compares the
+  immutable `(Issuer, Subject)` owner identity without treating presentation or
+  grant metadata as authority. Ownership enforcement uses this single
+  projection for callers, resource owners, and explicitly classified system
+  actors. A new exported method: Added (a minor bump).
 
 - **Caller-identity labels on the session aggregate** (issue #367,
   [ADR 0100](../docs/adr/0100-caller-identity-threading.md)) — the joint
