@@ -93,11 +93,23 @@ func TestBuildSettlesStaleRunningSnapshotAcrossRestart(t *testing.T) {
 
 	// Age the snapshot file's mtime past staleSessionWindow — jsonlstore
 	// derives ModifiedAt from the file mtime, and Service.SessionStale gates
-	// on that age BEFORE any liveness/lease signal (issue #475 Step 2).
-	matches, err := filepath.Glob(filepath.Join(storeDir, "*.session.jsonl"))
-	if err != nil || len(matches) != 1 {
+	// on that age BEFORE any liveness/lease signal (issue #475 Step 2). The
+	// physical file lives under the owner-only "sid-v1" subdirectory
+	// (jsonlstore's opaque-session-id layout, #491); a pre-#491 layout would
+	// place it directly under storeDir, so check both like setSessionMtime
+	// (internal/adapter/server/list_sessions_test.go) does.
+	var matches []string
+	for _, scanDir := range []string{storeDir, filepath.Join(storeDir, "sid-v1")} {
+		found, err := filepath.Glob(filepath.Join(scanDir, "*.session.jsonl"))
+		if err != nil {
+			built1.Close()
+			t.Fatalf("glob %s: %v", scanDir, err)
+		}
+		matches = append(matches, found...)
+	}
+	if len(matches) != 1 {
 		built1.Close()
-		t.Fatalf("find seeded session file: matches=%v err=%v", matches, err)
+		t.Fatalf("find seeded session file: matches=%v", matches)
 	}
 	old := time.Now().Add(-2 * time.Hour)
 	if err := os.Chtimes(matches[0], old, old); err != nil {
