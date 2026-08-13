@@ -1696,12 +1696,19 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	// startMemoryConsolidation lifetime — the goroutine exits on shutdown).
 	startChildGC(ctx, cfg, store, svc.IsLive)
 
+	// Crash-orphaned running-session sweep (issue #475 Step 4): repairs a
+	// StateRunning session a process crash left behind, INCLUDING the
+	// subagent-*/parallel-*/team-* children the run-entry funnel's own repair
+	// (Step 3) never sees. See internal/app/session_reconcile.go.
+	staleSessionReconcileClose := startStaleSessionReconcile(cfg, svc)
+
 	// Close tears down the main MCP manager AND any per-session client-MCP engines
 	// still registered (svc.Close), so a process exit leaks neither. It also cancels
 	// the live-model refresh goroutine and closes the session-store driver
 	// connection (LAST — everything before it may still persist; a no-op for the
 	// local stores, and once-guarded if the memory driver shares the conn).
 	closeAll := func() {
+		staleSessionReconcileClose()
 		schedClose()
 		refreshClose()
 		svc.Close()
