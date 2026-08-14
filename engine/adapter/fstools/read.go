@@ -28,9 +28,7 @@ Output format:
 Arguments:
 - path     (required): workspace-relative path to the file. Absolute paths that
   resolve inside the workspace root are accepted (the same file a relative path
-  reaches); absolute paths under an activated skill's base directory (from the
-  Skill tool's "Base directory" line) are also accepted (read-only). Any other
-  absolute path is rejected.
+  reaches). Any other absolute path is rejected.
 - offset   (optional): 1-based line number to start reading from.
 - limit    (optional): maximum number of lines to return.
 
@@ -65,7 +63,7 @@ func (ReadTool) Spec() tool.ToolSpec {
 		Schema: schema(`{
   "type": "object",
   "properties": {
-    "path": {"type": "string", "description": "Workspace-relative path to the file to read. Absolute paths that resolve inside the workspace root are accepted, as are (read-only) paths under an activated skill's base directory (from the Skill tool); any other absolute path is rejected."},
+    "path": {"type": "string", "description": "Workspace-relative path to the file to read. Absolute paths that resolve inside the workspace root are accepted; any other absolute path is rejected."},
     "offset": {"type": "integer", "description": "1-based line number to start reading from."},
     "limit": {"type": "integer", "description": "Maximum number of lines to return."}
   },

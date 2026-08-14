@@ -15,11 +15,8 @@ import (
 // FSSource is the FILESYSTEM implementation of the tool.SkillSource port: a
 // snapshot of the skills discovered from the composed Source list (explicit
 // dirs + conventional locations), serving each skill as a LOGICAL BUNDLE —
-// metadata, body, and auxiliary payloads addressed by logical name. The port
-// carries no path/dir/root concept; the path business an FS deployment still
-// needs (the per-skill read-root allowlist, the activation base directory) is
-// exposed as adapter-public NON-PORT methods (AssetDir/AssetDirs) consumed
-// only by the composition layer.
+// metadata, body, and auxiliary payloads addressed by logical name. Paths stay
+// entirely inside this adapter; consumers use SkillSource methods only.
 //
 // SNAPSHOT SEMANTICS: discovery runs ONCE at construction (NewMultiSource over
 // the given sources) and the metadata + bodies are retained in memory, so
@@ -35,11 +32,18 @@ type FSSource struct {
 	list   []Skill           // name-sorted snapshot (the discovered value objects)
 	metas  []tool.SkillMeta  // name-sorted port-shaped snapshot
 	dirs   map[string]string // name → canonical per-skill dir ("" when the skill has no source path)
-	roots  []string          // unique canonical per-skill dirs, in name order
 }
 
 // compile-time assertion that FSSource satisfies the port.
 var _ tool.SkillSource = (*FSSource)(nil)
+
+// These bounds intentionally mirror the remote driver inventory contract
+// (internal/adapter/grpcdriver). They are carried here because engine is a
+// standalone module and must not import the root module.
+const (
+	maxSkillInventoryEntries   = 1_024
+	maxSkillInventoryNameBytes = 32 << 10
+)
 
 // NewFSSource resolves the given sources ONCE (highest-precedence first, the
 // NewMultiSource collision rule) and returns the snapshot source plus the
@@ -56,18 +60,13 @@ func NewFSSource(ctx context.Context, sources ...Source) (*FSSource, []SkipError
 		metas:  make([]tool.SkillMeta, 0, len(discovered)),
 		dirs:   make(map[string]string, len(discovered)),
 	}
-	seen := make(map[string]bool, len(discovered))
 	// MultiSource returns the merged set name-sorted and de-duplicated already;
-	// keep that order so the metas snapshot and AssetDirs are deterministic.
+	// keep that order so the metadata snapshot is deterministic.
 	for _, sk := range discovered {
 		src.skills[sk.Name] = sk
 		src.list = append(src.list, sk)
 		dir := skillBaseDir(sk.Path)
 		src.dirs[sk.Name] = dir
-		if dir != "" && !seen[dir] {
-			seen[dir] = true
-			src.roots = append(src.roots, dir)
-		}
 		origin := sk.Origin
 		if origin == "" {
 			// A hand-constructed Source that did not stamp a tier: an
@@ -75,11 +74,14 @@ func NewFSSource(ctx context.Context, sources ...Source) (*FSSource, []SkipError
 			origin = tool.SkillOriginExplicit
 		}
 		assets, aerr := src.listAssets(sk.Name)
+		if aerr != nil {
+			return nil, skips, aerr
+		}
 		src.metas = append(src.metas, tool.SkillMeta{
 			Name:          sk.Name,
 			Description:   sk.Description,
 			Origin:        origin,
-			HasAssets:     aerr == nil && len(assets) > 0,
+			HasAssets:     len(assets) > 0,
 			License:       sk.License,
 			Compatibility: sk.Compatibility,
 			Metadata:      sk.Metadata,
@@ -146,14 +148,23 @@ func (s *FSSource) ReadSkillAsset(_ context.Context, skill, asset string) ([]byt
 	if err != nil || !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("%w: %q/%q", tool.ErrSkillAssetNotFound, skill, asset)
 	}
+	if info.Size() > maxSkillAssetBytes {
+		return nil, fmt.Errorf("skills: asset %q/%q is too large (%d bytes; limit %d bytes)", skill, asset, info.Size(), maxSkillAssetBytes)
+	}
 	f, err := root.Open(rel)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %q/%q (%v)", tool.ErrSkillAssetNotFound, skill, asset, err)
 	}
 	defer func() { _ = f.Close() }() // read-only handle
-	data, err := io.ReadAll(f)
+	// Read at most one byte beyond the model-facing cap. This bounds allocation
+	// even if the file grows after Lstat and lets the caller reject the whole
+	// payload rather than returning a truncated asset.
+	data, err := io.ReadAll(io.LimitReader(f, maxSkillAssetBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("skills: read asset %q/%q: %w", skill, asset, err)
+	}
+	if len(data) > maxSkillAssetBytes {
+		return nil, fmt.Errorf("skills: asset %q/%q is too large (limit %d bytes)", skill, asset, maxSkillAssetBytes)
 	}
 	return data, nil
 }
@@ -173,7 +184,10 @@ func (s *FSSource) listAssets(name string) ([]tool.SkillAsset, error) {
 		return nil, nil //nolint:nilerr // deliberate fail-soft: bundle stays servable without payloads
 	}
 	defer func() { _ = root.Close() }() // read-only handle
-	var assets []tool.SkillAsset
+	var (
+		assets    []tool.SkillAsset
+		nameBytes int
+	)
 	werr := fs.WalkDir(root.FS(), ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -193,6 +207,16 @@ func (s *FSSource) listAssets(name string) ([]tool.SkillAsset, error) {
 		if !tool.ValidSkillAssetName(logical) {
 			return fmt.Errorf("skills: invalid logical asset name %q", logical)
 		}
+		// Enforce the complete-inventory contract while walking, before fetching
+		// metadata or growing the result slice. Any overflow rejects the whole
+		// inventory; callers never observe a partial prefix.
+		if len(assets) >= maxSkillInventoryEntries {
+			return fmt.Errorf("skills: asset inventory of %q exceeds %d entries", name, maxSkillInventoryEntries)
+		}
+		if len(logical) > maxSkillInventoryNameBytes-nameBytes {
+			return fmt.Errorf("skills: asset inventory names of %q exceed %d bytes", name, maxSkillInventoryNameBytes)
+		}
+		nameBytes += len(logical)
 		info, err := d.Info()
 		if err != nil {
 			return err
@@ -221,58 +245,16 @@ func (s *FSSource) Discovered() []Skill {
 	return out
 }
 
-// --- Adapter-public NON-PORT path API (composition-only consumers) ----------
-
-// AssetDir returns the CANONICAL per-skill directory the named skill's bundled
-// files live in (the directory holding its SKILL.md), and whether the skill
-// has one. It is NOT part of the tool.SkillSource port — the port carries no
-// path concept — but FS deployments still serve assets IN PLACE through the
-// existing Read/read-roots contract; its only consumers are the composition
-// layer and the same-package snapshot activator (the base-directory header).
-func (s *FSSource) AssetDir(name string) (string, bool) {
-	dir, ok := s.dirs[name]
-	if !ok || dir == "" {
-		return "", false
-	}
-	return dir, true
-}
-
-// AssetDirs returns the unique, canonicalized PER-SKILL directories of the
-// snapshot — the read-only allowed roots every production osfs Workspace is
-// constructed with (osfs.WithReadRoots), so the model can Read an activated
-// skill's SKILL.md and bundled references/scripts/assets by the absolute path
-// the Skill tool's "Base directory" header advertises, even when the skill
-// lives outside the workspace (~/.claude/skills/…).
-//
-// PER-SKILL dirs, never whole source dirs: a shadowed skill's directory or a
-// random sibling under ~/.claude/skills must never become readable. The input
-// is this source's own snapshot, which went through ResolveSources'
-// project-tier trust gate — an untrusted workspace's project-tier skills are
-// never discovered, so their dirs never enter this allowlist (trust-gating by
-// construction). The SkillDraft quarantine dir can never appear either: it is
-// never a Source, so it never yields a discovered skill. Canonicalization
-// matches the osfs enforcement layer (osfs.ResolveRoot — abs + EvalSymlinks),
-// the same comparison-contract discipline activeSkillDirs follows.
-func (s *FSSource) AssetDirs() []string {
-	out := make([]string, len(s.roots))
-	copy(out, s.roots)
-	return out
-}
-
-// skillBaseDir returns the CANONICAL directory containing the skill's SKILL.md,
-// or "" when the skill has no source path (hand-constructed test values).
-// Canonicalization goes through resolveRoot — the EXACT resolver the
-// Workspace's read-root allowlist is keyed on — so the path the model is told
-// matches the allowlist byte-for-byte even when the discovery path crosses a
-// symlink (e.g. /home → /var/home); a cleaned-but-unresolved Dir would advertise
-// a path the workspace then refuses, reintroducing the bug for symlinked homes.
+// skillBaseDir returns the directory containing the skill's SKILL.md, or ""
+// when the skill has no source path. It is private adapter state used to list
+// and read logical assets; it is never exposed to a consumer.
 func skillBaseDir(path string) string {
 	if path == "" {
 		return ""
 	}
-	dir := filepath.Dir(path)
-	if resolved, err := resolveRoot(dir); err == nil {
-		return resolved
+	dir, err := filepath.Abs(filepath.Dir(path))
+	if err != nil {
+		return ""
 	}
 	return filepath.Clean(dir)
 }

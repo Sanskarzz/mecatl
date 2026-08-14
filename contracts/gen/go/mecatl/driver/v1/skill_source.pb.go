@@ -25,10 +25,11 @@
 //     invalid name MUST be INVALID_ARGUMENT — never content (the harness-
 //     provided Go server wrapper pre-validates via tool.ValidSkillAssetName).
 //
-// CAPACITY: ReadSkillAsset is unary and rides the protocol's 64 MiB required
-// minimum message capacity (internal/adapter/grpcdriver.MaxSnapshotBytes; the
-// harness additionally caps a single materialized asset at 16 MiB and a
-// skill's whole bundle at 64 MiB).
+// CAPACITY: asset inventory and payload calls are unary but use dedicated,
+// surface-sized client receive caps plus wrapper-side count/size guards. They do
+// not inherit the much larger session-snapshot ceiling. The harness reads one
+// asset on demand and rejects a whole payload that cannot fit the model-facing
+// tool result; successful assets are never truncated.
 //
 // Validation: required-field annotations are authored with `buf.validate.field`
 // for documentation and future runtime enforcement; V1 enforces them in the Go
@@ -376,10 +377,10 @@ type SkillAsset struct {
 	// empty/"."/".." segments, no backslashes, no NUL.
 	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	// size is the payload size in bytes (advisory; the harness re-enforces its
-	// own caps when materializing).
+	// model-facing bound before returning content).
 	Size int64 `protobuf:"varint,2,opt,name=size,proto3" json:"size,omitempty"`
-	// executable reports the payload should carry the executable bit if the
-	// harness materializes it to disk.
+	// executable is advisory source metadata. The harness does not materialize
+	// the payload, apply a mode bit, or implicitly make it available to Bash.
 	Executable    bool `protobuf:"varint,3,opt,name=executable,proto3" json:"executable,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
