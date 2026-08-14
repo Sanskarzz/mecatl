@@ -138,4 +138,3 @@ A `.github/dependabot.yml` keeps both `go.mod` files and the SHA-pinned GitHub
 Actions current (weekly, minor+patch grouped to cut noise; the SHA-pin
 `# vX.Y.Z` comments are preserved). See
 [issue #118](https://github.com/stacklok/mecatl/issues/118).
-

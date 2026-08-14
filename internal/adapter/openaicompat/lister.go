@@ -42,9 +42,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
-	"unicode"
+
+	"github.com/stacklok/mecatl/internal/adapter/modeltext"
 )
 
 const (
@@ -87,6 +87,9 @@ type StatusError struct {
 func (e *StatusError) Error() string {
 	return fmt.Sprintf("openaicompat: unexpected status %d", e.Code)
 }
+
+// StatusCode exposes the response code for provider-neutral classification.
+func (e *StatusError) StatusCode() int { return e.Code }
 
 // Lister fetches a live OpenAI-shaped model catalog over an INJECTED
 // *http.Client (tests pass a mock transport; production gets a default client
@@ -162,13 +165,10 @@ func (l *Lister) ListModels(ctx context.Context) ([]Model, error) {
 		return nil, fmt.Errorf("openaicompat: fetch models: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return nil, &StatusError{Code: resp.StatusCode}
 	}
 
-	// Read at most maxResponseBytes+1: if the read reaches the +1th byte the body
-	// exceeded the cap, so fail rather than risk an unbounded allocation (CWE-770).
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("openaicompat: read body: %w", err)
@@ -184,51 +184,15 @@ func (l *Lister) ListModels(ctx context.Context) ([]Model, error) {
 
 	out := make([]Model, 0, len(wire.Data))
 	for _, w := range wire.Data {
-		id := stripControl(w.ID)
+		id := modeltext.StripControls(w.ID)
 		if id == "" {
 			continue // defensive: skip a malformed/hostile entry with no id
 		}
 		out = append(out, Model{
-			ID:           truncateRunes(id, maxIDRunes),
-			DisplayName:  truncateRunes(stripControl(w.DisplayName), maxNameRunes),
+			ID:           modeltext.TruncateRunes(id, maxIDRunes),
+			DisplayName:  modeltext.TruncateRunes(modeltext.StripControls(w.DisplayName), maxNameRunes),
 			ContextLimit: w.ContextWindow,
 		})
 	}
 	return out, nil
-}
-
-// stripControl removes every C0 control character (0x00-0x1F, including ESC),
-// DEL (0x7F), the C1 control range (0x80-0x9F — e.g. U+009B CSI, a
-// terminal-escape equivalent reachable via a UTF-8-encoded byte sequence, not
-// just the 0x1B ESC lead-in), the Unicode line/paragraph separators (U+2028,
-// U+2029 — a log-injection/line-splitting equivalent of \n outside the C0
-// range), and every Bidi_Control code point (U+061C, U+200E/F, U+202A-202E,
-// U+2066-2069 — CWE-116: a bidi-override can visually reorder/spoof a picker
-// row's rendered text without changing its bytes) from s. Applied BEFORE
-// rune-truncation.
-func stripControl(s string) string {
-	return strings.Map(func(r rune) rune {
-		switch {
-		case r < 0x20 || r == 0x7F || (r >= 0x80 && r <= 0x9F):
-			return -1
-		case r == 0x2028 || r == 0x2029:
-			return -1
-		case unicode.Is(unicode.Bidi_Control, r):
-			return -1
-		}
-		return r
-	}, s)
-}
-
-// truncateRunes caps s to at most n runes (never splitting a multi-byte rune).
-// A string already within the cap is returned unchanged.
-func truncateRunes(s string, n int) string {
-	if len(s) <= n { // fast path: byte length <= n ⇒ rune count <= n
-		return s
-	}
-	r := []rune(s)
-	if len(r) <= n {
-		return s
-	}
-	return string(r[:n])
 }

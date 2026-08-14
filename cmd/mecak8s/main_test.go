@@ -3,8 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,7 +18,26 @@ import (
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/internal/adapter/server"
 	"github.com/stacklok/mecatl/internal/app"
+	"github.com/stacklok/mecatl/internal/testutil/codextest"
 )
+
+func TestMecak8sRejectsOpenAICodexCredential(t *testing.T) {
+	expires := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	path := filepath.Join(t.TempDir(), "auth.yaml")
+	body := fmt.Sprintf("providers:\n  openai-codex:\n    oauth:\n      access_token: %s\n      account_id: acct-k8s\n      expires_at: %s\n", codextest.Token(expires, "acct-k8s"), expires.Format(time.RFC3339))
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := parseFlags([]string{"--auth-file", path})
+	if err == nil {
+		t.Fatal("mecak8s accepted an openai-codex credential")
+	}
+	for _, want := range []string{"mecak8s", "openai-codex", "unsupported", "mecated"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not contain %q", err, want)
+		}
+	}
+}
 
 // TestParseFlagsK8sDefaults asserts the k8s-native defaults parse: --headless
 // defaults true, --posture defaults "auto", --session-lease-k8s-namespace

@@ -10,7 +10,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
 )
 
-var testKnownProviders = []string{"anthropic", "openai", "openrouter", "opencode"}
+var testKnownProviders = []string{"anthropic", "openai", "openrouter", "opencode", "openai-codex"}
 
 // fakeEnv builds a xdgconfig.ResolveEnv over a real temp directory (not a
 // pure in-memory fake) so file-permission tests can exercise real os.Stat
@@ -54,6 +54,183 @@ func TestLoadFillsAPIKey(t *testing.T) {
 	}
 	if got := f.APIKey("openai"); got != "" {
 		t.Errorf("APIKey(openai) = %q, want empty (file has no entry)", got)
+	}
+}
+
+func TestAPIKeyCompatibility(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		apiKey   string
+	}{
+		{name: "anthropic", provider: "anthropic", apiKey: "sk-ant-compatible"},
+		{name: "openai", provider: "openai", apiKey: "sk-openai-compatible"},
+		{name: "openrouter", provider: "openrouter", apiKey: "sk-or-compatible"},
+		{name: "opencode", provider: "opencode", apiKey: "sk-opencode-compatible"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			contents := "providers:\n  " + tt.provider + ":\n    api_key: " + tt.apiKey + "\n"
+			path := writeFile(t, dir, contents, 0o600)
+			f, warning := Load(path, false, fakeEnv(dir), testKnownProviders)
+			if warning != "" {
+				t.Fatalf("warning = %q, want empty", warning)
+			}
+			if got := f.APIKey(tt.provider); got != tt.apiKey {
+				t.Errorf("APIKey(%s) = %q, want original key", tt.provider, got)
+			}
+		})
+	}
+}
+
+func TestOpenAICodexOAuthSchema(t *testing.T) {
+	t.Run("valid shape and copy-returning accessor", func(t *testing.T) {
+		dir := t.TempDir()
+		path := writeFile(t, dir, "providers:\n  openai-codex:\n    oauth:\n      access_token: token-raw\n      account_id: account-raw\n      expires_at: 2026-08-04T18:30:00Z\n", 0o600)
+		f, warning := Load(path, false, fakeEnv(dir), testKnownProviders)
+		if warning != "" {
+			t.Fatalf("warning = %q, want empty", warning)
+		}
+		got := f.OAuth("openai-codex")
+		want := (OAuthEntry{AccessToken: "token-raw", AccountID: "account-raw", ExpiresAt: "2026-08-04T18:30:00Z"})
+		if got != want {
+			t.Fatalf("OAuth(openai-codex) = %#v, want %#v", got, want)
+		}
+		got.AccessToken = "mutated-copy"
+		if again := f.OAuth("openai-codex"); again != want {
+			t.Fatalf("OAuth accessor exposed mutable state: %#v", again)
+		}
+	})
+
+	t.Run("structurally invalid file is rejected as a whole", func(t *testing.T) {
+		tests := []struct {
+			name, codex string
+		}{
+			{name: "unknown OAuth field", codex: "    oauth:\n      access_token: codex-secret\n      refresh_token: refresh-secret\n"},
+			{name: "malformed OAuth nesting", codex: "    oauth: codex-secret\n"},
+			{name: "non-string access token", codex: "    oauth:\n      access_token: 123\n"},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				dir := t.TempDir()
+				contents := "providers:\n  anthropic:\n    api_key: sk-ant-valid\n  openai-codex:\n" + tt.codex
+				path := writeFile(t, dir, contents, 0o600)
+				f, warning := Load(path, false, fakeEnv(dir), testKnownProviders)
+				if warning == "" || f != nil {
+					t.Fatalf("Load(invalid schema) = (%v, %q), want (nil, warning)", f, warning)
+				}
+			})
+		}
+	})
+
+	t.Run("empty access token drops only Codex OAuth", func(t *testing.T) {
+		dir := t.TempDir()
+		path := writeFile(t, dir, "providers:\n  anthropic:\n    api_key: sk-ant-survives\n  openai-codex:\n    oauth:\n      access_token: \"  \"\n      account_id: account-secret\n", 0o600)
+		f, warning := Load(path, false, fakeEnv(dir), testKnownProviders)
+		if warning == "" {
+			t.Fatal("empty access token should produce a warning")
+		}
+		if got := f.APIKey("anthropic"); got != "sk-ant-survives" {
+			t.Fatalf("APIKey(anthropic) = %q, want unrelated key preserved", got)
+		}
+		if got := f.OAuth("openai-codex"); got != (OAuthEntry{}) {
+			t.Fatalf("OAuth(openai-codex) = %#v, want zero value", got)
+		}
+	})
+
+	t.Run("OAuth is scoped to openai-codex and API key remains usable", func(t *testing.T) {
+		dir := t.TempDir()
+		path := writeFile(t, dir, "providers:\n  openai:\n    api_key: sk-api-survives\n    oauth:\n      access_token: codex-secret\n", 0o600)
+		f, warning := Load(path, false, fakeEnv(dir), testKnownProviders)
+		if warning == "" {
+			t.Fatal("mis-scoped OAuth should produce a warning")
+		}
+		if got := f.APIKey("openai"); got != "sk-api-survives" {
+			t.Errorf("APIKey(openai) = %q, want existing API key preserved", got)
+		}
+		if got := f.OAuth("openai"); got != (OAuthEntry{}) {
+			t.Errorf("OAuth(openai) = %#v, want zero value", got)
+		}
+	})
+
+	t.Run("API key cannot enable openai-codex", func(t *testing.T) {
+		dir := t.TempDir()
+		path := writeFile(t, dir, "providers:\n  openai-codex:\n    api_key: sk-wrong-billing-identity\n", 0o600)
+		f, warning := Load(path, false, fakeEnv(dir), testKnownProviders)
+		if warning == "" {
+			t.Fatal("Codex API key should produce a warning")
+		}
+		if f != nil && f.APIKey("openai-codex") != "" {
+			t.Fatal("API key must not enable the subscription provider")
+		}
+	})
+}
+
+func TestLoadRejectsSecondYAMLDocument(t *testing.T) {
+	tests := []struct {
+		name   string
+		second string
+	}{
+		{name: "populated", second: "providers:\n  openai:\n    api_key: second-document-secret\n"},
+		{name: "empty", second: ""},
+		{name: "null", second: "null\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			contents := "providers:\n  anthropic:\n    api_key: first-document-secret\n---\n" + tt.second
+			path := writeFile(t, dir, contents, 0o600)
+			f, warning := Load(path, false, fakeEnv(dir), testKnownProviders)
+			if f != nil || warning == "" {
+				t.Fatalf("Load(multiple documents) = (%v, %q), want (nil, warning)", f, warning)
+			}
+			for _, secret := range []string{"first-document-secret", "second-document-secret"} {
+				if strings.Contains(warning, secret) {
+					t.Fatalf("warning leaked document content %q: %q", secret, warning)
+				}
+			}
+		})
+	}
+}
+
+func TestOAuthWarningsAreValueFree(t *testing.T) {
+	const sentinel = "sk-oauth-SENTINEL-MUST-NOT-LEAK"
+	tests := []struct {
+		name     string
+		contents string
+	}{
+		{
+			name:     "mis-scoped OAuth",
+			contents: "providers:\n  openai:\n    oauth:\n      access_token: " + sentinel + "\n",
+		},
+		{
+			name:     "malformed nesting",
+			contents: "providers:\n  openai-codex:\n    oauth: " + sentinel + "\n",
+		},
+		{
+			name:     "unknown OAuth field",
+			contents: "providers:\n  openai-codex:\n    oauth:\n      access_token: valid-token\n      " + sentinel + ": value-must-not-leak\n",
+		},
+		{
+			name:     "Codex API key",
+			contents: "providers:\n  openai-codex:\n    api_key: " + sentinel + "\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := writeFile(t, dir, tt.contents, 0o600)
+			_, warning := Load(path, false, fakeEnv(dir), testKnownProviders)
+			if warning == "" {
+				t.Fatal("invalid OAuth configuration should warn")
+			}
+			for n := 4; n <= len(sentinel); n++ {
+				if strings.Contains(warning, sentinel[:n]) {
+					t.Fatalf("warning leaked a %d-byte secret fragment in %q", n, warning)
+				}
+			}
+		})
 	}
 }
 

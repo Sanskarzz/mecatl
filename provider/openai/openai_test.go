@@ -76,6 +76,26 @@ func TestTranslateFunctionCallTurn(t *testing.T) {
 	assertChunks(t, got, want)
 }
 
+// TestTranslateUnknownMetadataEventIgnored pins the successful Responses
+// translator's forward-compatible policy: an unknown metadata event emits no
+// neutral chunk and does not prevent the terminal response from completing.
+func TestTranslateUnknownMetadataEventIgnored(t *testing.T) {
+	fixture := strings.NewReader(
+		"event: response.synthetic_metadata.updated\n" +
+			`data: {"type":"response.synthetic_metadata.updated","sequence_number":0,"metadata":{"opaque":true}}` + "\n\n" +
+			"event: response.completed\n" +
+			`data: {"type":"response.completed","sequence_number":1,"response":{"status":"completed","usage":{"input_tokens":1,"input_tokens_details":{},"output_tokens":1,"output_tokens_details":{},"total_tokens":2}}}` + "\n\n")
+	got, err := decodeSSE(fixture)
+	if err != nil {
+		t.Fatalf("decodeSSE: %v", err)
+	}
+	want := []port.Chunk{
+		{Kind: port.ChunkUsage, Usage: &session.Usage{InputTokens: 1, OutputTokens: 1}},
+		{Kind: port.ChunkDone, Stop: session.StopEndTurn},
+	}
+	assertChunks(t, got, want)
+}
+
 // TestUsageCacheReadSubsetOfInput is the openai half of the cross-provider
 // parity guard: every Usage chunk produced from the recorded fixtures must
 // satisfy CacheReadTokens <= InputTokens (the engine/session contract that
@@ -1599,6 +1619,42 @@ func collectStreamError(t *testing.T, p *Provider, req port.LLMRequest) error {
 		}
 	}
 	return streamErr
+}
+
+type testRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f testRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+func TestHTTPClientIsFinalAfterGenericRequestOptions(t *testing.T) {
+	var guardedCalls, bypassCalls int
+	guarded := &http.Client{Transport: testRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		guardedCalls++
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body: io.NopCloser(strings.NewReader(
+				"event: response.completed\n" +
+					`data: {"type":"response.completed","sequence_number":0,"response":{"status":"completed"}}` + "\n\n")),
+			Request: req,
+		}, nil
+	})}
+	bypass := &http.Client{Transport: testRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		bypassCalls++
+		return nil, errors.New("guard bypassed")
+	})}
+	provider := New(
+		WithAPIKey("test-key"),
+		WithBaseURL("https://example.invalid/v1"),
+		WithHTTPClient(guarded),
+		WithRequestOption(option.WithHTTPClient(bypass)),
+		WithMaxRetries(0),
+	)
+	if err := collectStreamError(t, provider, port.LLMRequest{Model: "gpt-test", Messages: []session.Message{session.NewUserMessage("hello")}}); err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	if guardedCalls != 1 || bypassCalls != 0 {
+		t.Fatalf("guarded/bypass calls = %d/%d, want 1/0", guardedCalls, bypassCalls)
+	}
 }
 
 func countInputType(items []map[string]any, kind string) int {

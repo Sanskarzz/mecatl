@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -22,7 +23,35 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/skills"
 	"github.com/stacklok/mecatl/internal/adapter/telemetry"
 	"github.com/stacklok/mecatl/internal/app"
+	"github.com/stacklok/mecatl/internal/testutil/codextest"
 )
+
+func TestOpenAICodexCommandRootReusesResolvedSnapshot(t *testing.T) {
+	for _, envName := range []string{"OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "OPENCODE_API_KEY"} {
+		t.Setenv(envName, "")
+	}
+	expires := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	token := codextest.Token(expires, "acct-mecated")
+	path := filepath.Join(t.TempDir(), "auth.yaml")
+	body := fmt.Sprintf("providers:\n  openai-codex:\n    oauth:\n      access_token: %s\n      account_id: acct-mecated\n      expires_at: %s\n", token, expires.Format(time.RFC3339))
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := parseFlags([]string{"--auth-file", path})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	want := cfg.providerCredentials.OpenAICodex
+	for range 2 {
+		got := appConfig(cfg, nil, nil, nil, nil, nil)
+		if got.OpenAICodexCredential != want || got.OpenAICodexCredential.Validate(time.Now()) != nil {
+			t.Fatal("mecated appConfig omitted or re-resolved the parsed credential")
+		}
+	}
+}
 
 // seedQuarantine writes a model-drafted-looking SKILL.md (with origin: model
 // provenance) into <quarantine>/<name>/SKILL.md so the promote CLI has something

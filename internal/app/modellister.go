@@ -9,6 +9,7 @@ import (
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
 	"github.com/stacklok/mecatl/engine/port"
+	"github.com/stacklok/mecatl/internal/adapter/openaicodex"
 	"github.com/stacklok/mecatl/internal/adapter/openaicompat"
 	"github.com/stacklok/mecatl/internal/adapter/openrouter"
 	"github.com/stacklok/mecatl/internal/adapter/providercatalog"
@@ -243,6 +244,63 @@ type openRouterLister struct {
 	inner *openrouter.Lister
 }
 
+// openAICodexLister adapts the account-entitlement response into the one
+// composition-local modelEntry stream. The live list is inventory-authoritative:
+// this wrapper can enrich ONLY ids already returned by Codex. A matching OpenAI
+// catalog row supplies fields the entitlement endpoint omitted; an unknown id
+// remains selectable with the adapter-static modality ceiling and conservative
+// context-window floor.
+type openAICodexLister struct {
+	inner *openaicodex.Lister
+}
+
+func (l openAICodexLister) ListModels(ctx context.Context) ([]modelEntry, error) {
+	raw, err := l.inner.ListModels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	metadata := make(map[string]modelEntry)
+	for _, m := range embeddedModels(providerOpenAI) {
+		metadata[m.ID] = m
+	}
+	out := make([]modelEntry, 0, len(raw))
+	for _, m := range raw {
+		entry := modelEntry{
+			ID:              m.ID,
+			DisplayName:     m.DisplayName,
+			ContextLimit:    m.ContextLimit,
+			InputModalities: append([]string(nil), m.InputModalities...),
+			Reasoning:       m.Reasoning,
+			ToolCall:        m.ToolCall,
+		}
+		catalog, catalogued := metadata[m.ID]
+		if entry.DisplayName == "" && catalogued {
+			entry.DisplayName = catalog.DisplayName
+		}
+		if entry.ContextLimit <= 0 && catalogued {
+			entry.ContextLimit = catalog.ContextLimit
+		}
+		if !m.InputModalitiesKnown {
+			if catalogued && len(catalog.InputModalities) > 0 {
+				entry.InputModalities = append([]string(nil), catalog.InputModalities...)
+			} else {
+				entry.InputModalities = []string{"text"}
+				if openaiStaticCaps.Image {
+					entry.InputModalities = append(entry.InputModalities, "image")
+				}
+				if openaiStaticCaps.Audio {
+					entry.InputModalities = append(entry.InputModalities, "audio")
+				}
+			}
+		}
+		if !m.ReasoningKnown && catalogued {
+			entry.Reasoning = catalog.Reasoning
+		}
+		out = append(out, entry)
+	}
+	return out, nil
+}
+
 func (l openRouterLister) ListModels(ctx context.Context) ([]modelEntry, error) {
 	raw, err := l.inner.ListModels(ctx)
 	if err != nil {
@@ -413,6 +471,17 @@ func embeddedModels(providerID string) []modelEntry {
 	return out
 }
 
+// metadataCatalogProviderID selects a metadata-only catalog namespace. Codex
+// uses OpenAI metadata for an already-entitled or explicitly selected matching
+// id, but embeddedModels intentionally does not call this helper: OpenAI's API
+// inventory must never become Codex subscription inventory.
+func metadataCatalogProviderID(providerID string) string {
+	if providerID == providerOpenAICodex {
+		return providerOpenAI
+	}
+	return providerID
+}
+
 // projectModelEntry is the SINGLE projection of a (provider, modelEntry) into the
 // proto ModelInfo — the ONE place the image intersection, display-name fallback,
 // and field mapping live, shared by the seed (modelSnapshot) and the live refresh
@@ -482,6 +551,12 @@ func liveModelSnapshot(ctx context.Context, d port.Diagnostics, reg *providerReg
 	for _, pid := range reg.Available() { // available (keyed) providers ONLY
 		if pid == providerMock {
 			continue // the mock never advertises selectable models
+		}
+		if models, ok := reg.bootstrapModels[pid]; ok {
+			// Default discovery already fetched this exact live entitlement snapshot
+			// synchronously. Publish it without a duplicate back-to-back request.
+			byProvider[pid] = models
+			continue
 		}
 		byProvider[pid] = resolveProviderModels(ctx, d, reg, pid)
 	}
@@ -632,14 +707,11 @@ func (s *liveOutcomeStore) getStatus(pid string) (providerStatus, bool) {
 	return v, ok
 }
 
-// providerStatusProto projects the outcome store into the v1 wire message,
-// scoped to INTENT-DRIVEN providers ONLY (issue #262: so an ordinary
-// openrouter/anthropic live-listing blip never grows the client-facing
-// status list — v1 is deliberately toolhive-scoped). Sorted by provider id
-// for a deterministic wire shape. Returns nil for a nil registry or when no
-// intent-driven provider has a recorded status yet (e.g. Build hasn't probed
-// it — never reachable in practice, since probeToolhive always records
-// something for a registered toolhive entry).
+// providerStatusProto projects operator-actionable live-inventory outcomes into
+// the v1 wire message. That includes intent-driven gateways and openai-codex,
+// whose live list is the account entitlement boundary; ordinary OpenRouter and
+// Anthropic listing blips remain unprojected. Sorted by provider id for a
+// deterministic wire shape.
 func providerStatusProto(reg *providerRegistry) []*mecatlv1.ProviderStatus {
 	if reg == nil {
 		return nil
@@ -647,7 +719,7 @@ func providerStatusProto(reg *providerRegistry) []*mecatlv1.ProviderStatus {
 	var out []*mecatlv1.ProviderStatus
 	for _, pid := range reg.Available() {
 		entry, ok := reg.Lookup(pid)
-		if !ok || !entry.intentDriven {
+		if !ok || (!entry.intentDriven && pid != providerOpenAICodex) {
 			continue
 		}
 		status, ok := reg.outcomes.getStatus(pid)

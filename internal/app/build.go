@@ -62,6 +62,7 @@ import (
 	mcpsource "github.com/stacklok/mecatl/internal/adapter/mcp/source"
 	"github.com/stacklok/mecatl/internal/adapter/memory"
 	"github.com/stacklok/mecatl/internal/adapter/modelhook"
+	"github.com/stacklok/mecatl/internal/adapter/openaicodex"
 	"github.com/stacklok/mecatl/internal/adapter/osfs"
 	"github.com/stacklok/mecatl/internal/adapter/permconfig"
 	"github.com/stacklok/mecatl/internal/adapter/providercatalog"
@@ -124,7 +125,10 @@ type Config struct {
 	UseOpenAI     bool
 	OpenAIBaseURL string
 	OpenAIKey     string
-	UseMock       bool
+	// OpenAICodexCredential is the validated, immutable manual ChatGPT token
+	// snapshot consumed only by the distinct openai-codex registry entry.
+	OpenAICodexCredential openaicodex.Credential
+	UseMock               bool
 	// MockProvider, when non-nil, REPLACES the canned UseMock turn with this
 	// scripted provider — the test-only seam for driving a full Build offline
 	// with scripted tool calls (UseMock scripts a single fixed text turn, which
@@ -934,6 +938,17 @@ type Config struct {
 	// composition detail, not an operator knob.
 	liveModelHTTPClient *http.Client
 
+	// openAICodexNow/openAICodexTransport are composition-only test seams for the
+	// manual-token request policy. Production uses time.Now and the default
+	// transport. Tests inject a fixed clock and capturing transport so every
+	// construction/remint path is exercised fully offline.
+	openAICodexNow       func() time.Time
+	openAICodexTransport http.RoundTripper
+	// hookRunner is the composition-only test seam for observing the real main
+	// engine lifecycle on a fully built provider path. Production leaves it nil,
+	// which preserves the inert hookexec.New(nil) default.
+	hookRunner port.HookRunner
+
 	// toolhiveConfigPath is the composition-only test seam for the ToolHive
 	// config-file path (mirroring envDetector/liveModelHTTPClient): ""
 	// resolves to the real path (xdgconfig.UserConfigDir + the adapter's
@@ -1302,7 +1317,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	// does NOT lower the precedence of key-driven providers. No-op when absent.
 	cfg = foldOperatorDefaultProvider(cfg)
 
-	reg, provider, err := buildProvider(cfg)
+	reg, provider, err := buildProvider(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -1700,10 +1715,11 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	}
 
 	// LIVE model listing: Build seeded svcCfg.Models with the EMBEDDED snapshot
-	// synchronously above (so the ModelSelection cap is honest from t=0 and Build
-	// NEVER touches the network). Now kick a SINGLE background refresh that fetches
-	// each available provider's live catalog (only providers WITH a lister actually
-	// fetch — openrouter today) and atomically SWAPS the merged result into the
+	// synchronously above (so the ModelSelection cap is honest from t=0). A default
+	// Codex provider without an explicit model may already have performed its one
+	// bounded entitlement lookup; that result is reused below. Now kick a SINGLE
+	// background refresh that fetches each remaining available provider's live
+	// catalog and atomically SWAPS the merged result into the
 	// service via SetModels. The refresh is owned by COMPOSITION (it holds the
 	// registry + listers); the service just stores the projected proto slice. It is
 	// cancelled by Close so a shutdown mid-fetch does not leak the goroutine (the
@@ -2187,7 +2203,7 @@ func catalogContextWindow(providerID, modelID string) int {
 	if providerID == "" || modelID == "" {
 		return 0
 	}
-	p, ok := providercatalog.Default().Provider(providerID)
+	p, ok := providercatalog.Default().Provider(metadataCatalogProviderID(providerID))
 	if !ok {
 		return 0
 	}
@@ -2218,8 +2234,8 @@ func catalogContextWindow(providerID, modelID string) int {
 // consumer (buildEngine's shared engine, child/fork/team/dream/reviewer engines)
 // keeps receiving the single default provider exactly as before — one construction,
 // no second env probe.
-func buildProvider(cfg Config) (*providerRegistry, port.LLMProvider, error) {
-	reg, err := buildProviderRegistry(cfg, cfg.envDetector)
+func buildProvider(ctx context.Context, cfg Config) (*providerRegistry, port.LLMProvider, error) {
+	reg, err := buildProviderRegistryContext(ctx, cfg, cfg.envDetector)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -2715,7 +2731,10 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 	// learned rules; a nil resolver makes NewPolicyWithResolver behave exactly
 	// like NewPolicy (built-ins + learned only).
 	policy := permpolicy.NewPolicyWithResolver(mainRules(cfg), learned, cfg.permResolver, mainEvaluatorOptions(cfg)...)
-	hooks := hookexec.New(nil) // no hooks by default; map is the injection seam
+	hooks := cfg.hookRunner
+	if hooks == nil {
+		hooks = hookexec.New(nil) // no hooks by default; map is the injection seam
+	}
 
 	// Schedule manager (ADR 0076, task 02 eager bind): the schedule capability
 	// is STORE-shaped, so the manager is resolvable from the store ALONE —
@@ -2851,7 +2870,7 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 
 	// Guardrails decorate the ordinary hook chain. Completion learning has its own
 	// synchronous engine seam and no longer shares Stop-hook ownership.
-	var mainHooks port.HookRunner = hooks
+	mainHooks := hooks
 	// Guardrails (issue #27): decorate the MAIN engine's hooks with the LLM-backed
 	// PreToolUse/PostToolUse content checker. modelhook wraps the userModelReview
 	// chain so the inner hooks run FIRST and the checker SECOND (decision 5). It is
@@ -3949,7 +3968,7 @@ func validateDefaultModel(cfg Config, reg *providerRegistry) error {
 // catalogContextWindow). Used ONLY by validateDefaultModel's fail-fast gate —
 // the request path never gates a model string on the catalog.
 func modelCatalogued(providerID, modelID string) bool {
-	p, ok := providercatalog.Default().Provider(providerID)
+	p, ok := providercatalog.Default().Provider(metadataCatalogProviderID(providerID))
 	if !ok {
 		return false
 	}

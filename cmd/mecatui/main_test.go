@@ -6,22 +6,41 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/stacklok/mecatl/internal/testutil/testhome"
 )
 
 // TestMain dispatches to run([]string{}) when the MECATUI_TEST_SIGNAL_HANDLER env
 // var is set (child-process signal-test harness). Otherwise it runs the normal test
 // suite.
 func TestMain(m *testing.M) {
-	if os.Getenv("MECATUI_TEST_SIGNAL_HANDLER") != "" {
-		run([]string{})
-		os.Exit(0)
+	os.Exit(testhome.Run("mecatui", func() int {
+		if os.Getenv("MECATUI_TEST_SIGNAL_HANDLER") != "" {
+			run([]string{})
+			return 0
+		}
+		return m.Run()
+	}))
+}
+
+func TestConventionalAuthFileIsIsolated(t *testing.T) {
+	authPath := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "mecatl", "auth.yaml")
+	if _, err := os.Stat(authPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("isolated conventional auth path must not exist: %v", err)
 	}
-	os.Exit(m.Run())
+	cfg, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags(nil): %v", err)
+	}
+	if cfg.providerKeys.HasOpenAICodex() {
+		t.Fatal("ordinary mecatui tests retained a conventional Codex credential")
+	}
 }
 
 // syncBuffer is a bytes.Buffer guarded by a mutex, safe for concurrent writes

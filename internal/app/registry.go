@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/internal/adapter/llmresilience"
+	"github.com/stacklok/mecatl/internal/adapter/openaicodex"
 	"github.com/stacklok/mecatl/internal/adapter/openaicompat"
 	"github.com/stacklok/mecatl/internal/adapter/openrouter"
 	"github.com/stacklok/mecatl/internal/adapter/providercatalog"
@@ -26,12 +28,17 @@ import (
 )
 
 // Provider id strings. These are WIRE-STABLE once they reach the wire (S3's
-// CreateSession provider_id field): they MUST match models.dev's provider ids
-// so the S2 catalog join is a direct key lookup. Lowercase, never localized.
+// CreateSession provider_id field). Public catalog providers match models.dev's
+// ids so the S2 join is direct; mecatl-specific routes (openai-codex, toolhive,
+// mock) are explicit exceptions. Lowercase, never localized.
 const (
-	providerOpenAI     = "openai"
-	providerOpenRouter = "openrouter"
-	providerAnthropic  = "anthropic"
+	providerOpenAI = "openai"
+	// providerOpenAICodex is the manual ChatGPT-subscription credential route.
+	// It speaks the same Responses protocol as providerOpenAI but is a distinct
+	// billing identity with a fixed, policy-enforced backend endpoint.
+	providerOpenAICodex = "openai-codex"
+	providerOpenRouter  = "openrouter"
+	providerAnthropic   = "anthropic"
 	// providerOpenCode is OpenCode Go (https://opencode.ai/zen/go/v1), an
 	// OpenAI-compatible subscription gateway that speaks the Chat Completions wire
 	// protocol uniformly. Unlike openai/openrouter (Responses API) it rides the
@@ -141,7 +148,7 @@ func providerEnvVars(providerID string) []string {
 // resolved from the environment (availability), and its base URL for logging
 // only. Composition-only — the agent/server never see this type.
 type providerEntry struct {
-	id        string           // "openai", "openrouter", or "mock"
+	id        string           // wire-stable provider id
 	provider  port.LLMProvider // resilience-wrapped, ready to hand to an engine
 	available bool             // ≥1 of the provider's env[] keys resolved
 	baseURL   string           // for logging/diagnostics ONLY; never wired
@@ -176,8 +183,9 @@ type providerEntry struct {
 	defaultCaps port.ProviderCapabilities
 	// intentDriven marks a registry entry that exists by CONFIG-DETECTED INTENT
 	// (issue #262: the ToolHive LLM gateway) rather than a resolved credential.
-	// It tiers preferredDefaultProvider (below every key-driven provider) and
-	// filters the v1 provider_status projection to intent-driven entries only.
+	// It tiers preferredDefaultProvider (below every credential-driven provider)
+	// and drives the client's "org" classification. provider_status is broader:
+	// it also carries manually configured Codex entitlement outcomes.
 	intentDriven bool
 	// intentGatewayURL is the UPSTREAM the proxy forwards to, captured for
 	// DIAGNOSTIC DISPLAY ONLY (R5.1/R5.2 — never used to build a request) when
@@ -236,6 +244,11 @@ type providerRegistry struct {
 	// /models-open refresh). nil-tolerant like meta (a hand-built test
 	// registry that never sets it behaves as a permanently-empty store).
 	outcomes *liveOutcomeStore
+	// bootstrapModels carries a synchronous default-discovery result into the
+	// one-shot initial live publish. It is immutable after construction and is
+	// consumed only by liveModelSnapshot; on-demand refreshes still hit the
+	// entitlement endpoint normally.
+	bootstrapModels map[string][]modelEntry
 	// defaultModelAutoSelected is true when defaultModel was AUTO-SELECTED (a
 	// first-listed heal/probe pick, issue #262 review finding 7/R2.4) rather
 	// than operator-configured (--model/--default-model). Set ONLY at the two
@@ -462,13 +475,16 @@ var errNoProvider = errors.New(
 // not selected. Startup logging emits one line per available provider with the
 // provider id and base URL ONLY — NEVER the key (CWE-200; S5 verifies).
 func buildProviderRegistry(cfg Config, detect envDetector) (*providerRegistry, error) {
-	if detect == nil {
-		detect = osGetenv
-	}
+	return buildProviderRegistryContext(context.Background(), cfg, detect)
+}
+
+func buildProviderRegistryContext(ctx context.Context, cfg Config, detect envDetector) (*providerRegistry, error) {
+	ctx = providerRegistryContext(ctx)
+	detect = providerRegistryDetector(detect)
 
 	// UseMock short-circuit: a single synthetic entry, offline, regardless of env.
 	if cfg.UseMock || cfg.MockProvider != nil {
-		cfg.diag().Log(context.Background(), port.LevelWarn, "LLM provider: mock (canned, offline) — for smoke tests only")
+		cfg.diag().Log(ctx, port.LevelWarn, "LLM provider: mock (canned, offline) — for smoke tests only")
 		mock := port.LLMProvider(mockllm.New(
 			mockllm.TextTurn("Mock provider: no real model is configured. Set OPENAI_API_KEY for live use."),
 		))
@@ -513,6 +529,12 @@ func buildProviderRegistry(cfg Config, detect envDetector) (*providerRegistry, e
 	// NOT gate the registry (a key alone suffices — env auto-detection is the S1 model).
 	if key := providerKey(cfg.OpenAIKey, providerOpenAI, detect); key != "" {
 		entries[providerOpenAI] = newOpenAICompatEntry(cfg, providerOpenAI, key, cfg.OpenAIBaseURL)
+	}
+
+	if entry, err := newOpenAICodexEntry(cfg); err != nil {
+		return nil, err
+	} else if entry.available {
+		entries[providerOpenAICodex] = entry
 	}
 
 	// openrouter: same stateless openai adapter, OpenRouter base URL, keyed by
@@ -604,6 +626,9 @@ func buildProviderRegistry(cfg Config, detect envDetector) (*providerRegistry, e
 	// Seed the live-metadata store from the embedded catalog for every available
 	// provider — the t=0 floor every resolver reads before the background live swap.
 	meta.seedFromCatalog(reg.Available())
+	if err := bootstrapOpenAICodexDefault(ctx, reg, cfg); err != nil {
+		return nil, err
+	}
 	// T7 post-assembly fixup: stamp each real adapter entry's shared .provider
 	// with the DEFAULT model's capability intersection (catalog ∩ adapter) and
 	// record it as defaultCaps so the per-session factory can re-mint ONLY when a
@@ -636,6 +661,99 @@ func buildProviderRegistry(cfg Config, detect envDetector) (*providerRegistry, e
 	return reg, nil
 }
 
+func providerRegistryContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
+}
+
+func providerRegistryDetector(detect envDetector) envDetector {
+	if detect == nil {
+		return osGetenv
+	}
+	return detect
+}
+
+// newOpenAICodexEntry returns an unavailable zero entry when no manual token is
+// configured. A configured token is revalidated at registry construction because
+// it can expire after the command root's one-time snapshot resolution. The request
+// policy is captured as an extra adapter option so initial construction,
+// capability/default fixups, and per-session re-mints retain the same fixed
+// endpoint, headers, expiry check, redirect refusal, and retry setting.
+//
+// Deliberately do not route this through providerKey/providerEnvVars: a ChatGPT
+// subscription and an OpenAI API key are separate billing identities.
+func newOpenAICodexEntry(cfg Config) (providerEntry, error) {
+	if !cfg.OpenAICodexCredential.Configured() {
+		return providerEntry{}, nil
+	}
+	now := cfg.openAICodexNow
+	if now == nil {
+		now = time.Now
+	}
+	if err := cfg.OpenAICodexCredential.Validate(now()); err != nil {
+		return providerEntry{}, err
+	}
+	policy, err := openaicodex.NewRequestPolicy(
+		cfg.OpenAICodexCredential,
+		now,
+		cfg.openAICodexTransport,
+	)
+	if err != nil {
+		return providerEntry{}, err
+	}
+	entry := newOpenAICompatEntry(
+		cfg,
+		providerOpenAICodex,
+		"policy-owned",
+		openaicodex.BaseURL,
+		openai.WithHTTPClient(policy.HTTPClient()),
+		openai.WithMaxRetries(0),
+	)
+	entry.lister = openAICodexLister{inner: openaicodex.NewLister(policy)}
+	return entry, nil
+}
+
+const openAICodexBootstrapTimeout = 5 * time.Second
+
+// bootstrapOpenAICodexDefault performs the one synchronous entitlement lookup
+// required when Codex is the resolved default and the operator supplied no model.
+// Explicit models and a different preferred provider bypass it entirely. The
+// selected row is written through the same outcome/meta facts later background
+// refreshes use, before the registry remints the default provider.
+func bootstrapOpenAICodexDefault(parent context.Context, reg *providerRegistry, cfg Config) error {
+	if reg == nil || reg.defaultID != providerOpenAICodex || reg.defaultModel != "" {
+		return nil
+	}
+	entry, ok := reg.Lookup(providerOpenAICodex)
+	if !ok || entry.lister == nil {
+		return errors.New("openai-codex: default model discovery is unavailable")
+	}
+	ctx, cancel := context.WithTimeout(parent, openAICodexBootstrapTimeout)
+	defer cancel()
+	models, err := entry.lister.ListModels(ctx)
+	if err != nil {
+		state := classifyLiveListError(err)
+		reg.outcomes.recordFailure(providerOpenAICodex, state, "")
+		if state == statusUnauthorized {
+			return fmt.Errorf("openai-codex: default model discovery unauthorized: %w", err)
+		}
+		return fmt.Errorf("openai-codex: default model discovery unreachable: %w", err)
+	}
+	reg.outcomes.recordSuccess(providerOpenAICodex, models)
+	if len(models) == 0 {
+		return errors.New("openai-codex: account returned no picker-visible models; replace the manual token or choose an explicit model")
+	}
+	reg.defaultModel = models[0].ID
+	reg.defaultModelAutoSelected = true
+	reg.bootstrapModels = map[string][]modelEntry{providerOpenAICodex: models}
+	reg.meta.mergeSwap(map[string][]modelEntry{providerOpenAICodex: models})
+	cfg.diag().Log(ctx, port.LevelInfo, "openai-codex default model auto-selected from account entitlements",
+		"provider", providerOpenAICodex, "model", reg.defaultModel)
+	return nil
+}
+
 // providerKey resolves the credential for a provider: an explicit cfg-supplied key
 // wins (it was read from the env by the cmd layer), otherwise the first non-empty
 // value among the provider's catalog-driven env vars (providerEnvVars — the
@@ -654,10 +772,10 @@ func providerKey(cfgKey, providerID string, detect envDetector) string {
 }
 
 // newOpenAICompatEntry constructs a resilience-wrapped openai-adapter provider
-// entry. It is shared by the openai, openrouter, and (issue #262) toolhive-gateway
-// ids (each is the SAME adapter with a different base URL + key/token), so they
-// cannot drift on resilience wrapping. It logs the provider id and base URL ONLY —
-// never the key. extra carries additional openai.Options appended to EVERY
+// entry. It is shared by openai, openrouter, openai-codex, and (issue #262)
+// toolhive-gateway (each is the SAME adapter with a different base URL + key/token),
+// so they cannot drift on resilience wrapping. It logs the provider id and base URL
+// ONLY — never the key. extra carries additional openai.Options appended to EVERY
 // construct() call (default AND per-session/heal re-mints), so a caller-supplied
 // option rides every re-mint too, never just the initial build. openai passes none —
 // byte-identical; the gateway entry passes its redirect-refusing WithHTTPClient (F3);
@@ -932,7 +1050,8 @@ func anthropicOutputLimit(model string) int {
 //     provider.
 //
 // The provider preference among available providers is openai first (back-compat
-// with the single-provider default), then sorted order — overridden by a
+// with the single-provider default), then the established keyed-provider order,
+// then openai-codex, then intent-driven gateways — overridden by a
 // configured cfg.DefaultProvider (--default-provider) when that provider is
 // AVAILABLE. The unavailable case is caught fail-fast by validateDefaultModel at
 // Build; this resolver stays total/non-erroring (a hand-built registry or a
@@ -960,20 +1079,30 @@ func resolveDefaultModel(cfg Config, reg *providerRegistry) (providerID, modelID
 	return defID, builtinDefaultModel[defID]
 }
 
-// preferredDefaultProvider picks the default provider id from the available
-// entries: openai when present (preserving the single-provider default); else
-// the first KEY-DRIVEN provider in sorted order (issue #262, D2 R2.1 — an
-// intent-driven entry like toolhive sits at an explicit LOWEST-preference
-// tier: any keyed provider present means toolhive is never the default); else
-// the first INTENT-DRIVEN provider in sorted order (so a ToolHive-only,
-// zero-API-key operator still gets a usable default); else "" (zero
-// available).
+// preferredDefaultProvider picks the default provider id from explicit tiers.
+// OpenAI remains first. The providers that pre-date the manual subscription route
+// retain their former sorted order (anthropic, opencode, openrouter), followed by
+// openai-codex. Any future/hand-built key-driven entry remains above an
+// intent-driven gateway. Intent-driven providers stay the lowest tier, so a
+// ToolHive-only, zero-API-key operator still gets a usable default.
 func preferredDefaultProvider(reg *providerRegistry) string {
 	if _, ok := reg.Lookup(providerOpenAI); ok {
 		return providerOpenAI
 	}
+	for _, id := range []string{providerAnthropic, providerOpenCode, providerOpenRouter} {
+		if entry, ok := reg.Lookup(id); ok && !entry.intentDriven {
+			return id
+		}
+	}
+	if entry, ok := reg.Lookup(providerOpenAICodex); ok && !entry.intentDriven {
+		return providerOpenAICodex
+	}
 	var firstIntentDriven string
 	for _, id := range reg.Available() { // sorted
+		if id == providerOpenAI || id == providerAnthropic || id == providerOpenCode ||
+			id == providerOpenRouter || id == providerOpenAICodex {
+			continue
+		}
 		entry, ok := reg.Lookup(id)
 		if !ok {
 			continue
@@ -1257,13 +1386,14 @@ func newDirectGatewayEntry(cfg Config, id string, intent toolhiveIntent, configP
 			"provider", id, "base_url", intent.baseURL, "error", err.Error())
 		tokenSource = func(context.Context) (string, error) { return "", err }
 	}
-	rt := &bearerRoundTripper{base: http.DefaultTransport, token: tokenSource, id: id}
+	rt := &bearerRoundTripper{base: http.DefaultTransport, token: tokenSource}
 	client := &http.Client{
 		Transport:     rt,
 		CheckRedirect: openaicompat.RefuseRedirects,
 	}
 	entry := newOpenAICompatEntry(cfg, id, toolhivellm.PlaceholderToken, intent.baseURL,
-		openai.WithHTTPClient(client))
+		openai.WithHTTPClient(client),
+		openai.WithMaxRetries(0))
 	// The direct-mode lister shares the SAME bearer-authenticated client so
 	// the Build-time probe (probeToolhive) and the live refresh authenticate
 	// against the gateway with the real token, not the placeholder. The lister
@@ -1294,7 +1424,6 @@ func newDirectGatewayEntry(cfg Config, id string, intent toolhiveIntent, configP
 type bearerRoundTripper struct {
 	base  http.RoundTripper
 	token toolhivellm.TokenSourceFunc
-	id    string // provider id, for a log-safe diagnostic label only
 }
 
 // RoundTrip implements http.RoundTripper. It is the single point the token
@@ -1339,20 +1468,29 @@ var toolhiveStatusHints = map[string]string{
 	statusEmpty:        "your ToolHive gateway credential lists no models — ask your platform admin or re-run `thv llm setup`",
 }
 
-// statusHintFor returns the ToolHive remediation hint for state, scoped to
-// pid == providerToolhive ONLY — every other provider (e.g. an openrouter
-// outage) gets "" (cleanup: toolhiveStatusHints had become the generic
-// remediation map for ALL providers via the pre-cleanup classifyListError,
-// so an openrouter outage recorded the "start it with `thv llm proxy start`"
-// hint — latent-wrong-vendor, currently masked only because the v1 wire
-// projection (providerStatusProto) filters to intentDriven entries). TRIP-
-// WIRE: a SECOND gateway-shaped intent-driven provider needs a per-vendor
-// hint table here, not a second `pid ==` branch bolted on.
+// openAICodexStatusHints keeps manual-token remediation distinct from the
+// ToolHive gateway. Codex is the only non-intent-driven provider whose live
+// inventory is also the account entitlement boundary, so its listing outcome
+// is operator-actionable and is projected through provider_status.
+var openAICodexStatusHints = map[string]string{
+	statusUnreachable:  "check connectivity to chatgpt.com and retry",
+	statusUnauthorized: "replace the manual token in auth.yaml and restart mecatl",
+	statusEmpty:        "the ChatGPT account lists no selectable Codex models; replace the manual token or check the subscription",
+}
+
+// statusHintFor returns provider-specific remediation only for providers whose
+// listing outcome is operator-actionable on provider_status. Ordinary provider
+// outages (for example OpenRouter) get "". Keep each vendor's copy in its own
+// table so gateway and manual-token remedies cannot cross-contaminate.
 func statusHintFor(pid, state string) string {
-	if pid != providerToolhive {
+	switch pid {
+	case providerToolhive:
+		return toolhiveStatusHints[state]
+	case providerOpenAICodex:
+		return openAICodexStatusHints[state]
+	default:
 		return ""
 	}
-	return toolhiveStatusHints[state]
 }
 
 // errToolhiveNoModels is the actionable Build-fail error (D2 R2.3): toolhive
@@ -1374,8 +1512,8 @@ var errToolhiveNoModels = errors.New(
 // is not up / not listening yet) — the common case for a ToolHive user who
 // simply hasn't started the proxy.
 func classifyLiveListError(err error) string {
-	var statusErr *openaicompat.StatusError
-	if errors.As(err, &statusErr) && (statusErr.Code == http.StatusUnauthorized || statusErr.Code == http.StatusForbidden) {
+	var statusErr interface{ StatusCode() int }
+	if errors.As(err, &statusErr) && (statusErr.StatusCode() == http.StatusUnauthorized || statusErr.StatusCode() == http.StatusForbidden) {
 		return statusUnauthorized
 	}
 	return statusUnreachable

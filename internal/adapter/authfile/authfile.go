@@ -1,7 +1,7 @@
 // Package authfile is the adapter-layer leaf for mecatl's credentials file: a
 // settings.yaml-sibling YAML file (conventionally $XDG_CONFIG_HOME/mecatl/auth.yaml)
-// holding per-provider secrets — today an api_key, with room to grow into an OAuth
-// token set (access/refresh token, expiry) without a schema break.
+// holding per-provider secrets: an api_key for the existing keyed providers or
+// a manually supplied OAuth access-token snapshot for openai-codex.
 //
 // LAYERING: adapter-layer LEAF — stdlib + internal/adapter/xdgconfig only (mirrors
 // xdgconfig's own leaf shape: "Adapters MAY import it; no domain package ever may").
@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -35,18 +36,64 @@ const maxFileBytes = 16 * 1024
 // permconfig's "mecatl/settings.yaml".
 const relPath = "mecatl/auth.yaml"
 
-// ProviderEntry is one provider's entry in the file. APIKey is the only field
-// today; it is already a struct (not a bare string) because an OAuth token set
-// is the anticipated next field here, not a schema break.
-type ProviderEntry struct {
-	APIKey string `yaml:"api_key"`
+// OAuthEntry is the raw, immutable-at-runtime OAuth shape accepted at the file
+// boundary. Parsing routing metadata and expiry is deliberately left to the
+// provider adjunct; authfile keeps these fields as strings and never refreshes
+// or writes them.
+type OAuthEntry struct {
+	AccessToken string `yaml:"access_token"`
+	AccountID   string `yaml:"account_id"`
+	ExpiresAt   string `yaml:"expires_at"`
+}
+
+// providerEntry is one provider's stored entry. The whole parsed map remains
+// private; consumers receive only copied scalar values through accessors.
+type providerEntry struct {
+	APIKey   string `yaml:"api_key"`
+	oauth    OAuthEntry
+	hasOAuth bool
 }
 
 // File is the parsed shape of auth.yaml: a settings.yaml companion that holds
 // credentials. Operator-machine-local only — there is no project-tier
 // equivalent (a project has no business supplying credentials).
 type File struct {
-	Providers map[string]ProviderEntry `yaml:"providers"`
+	providers map[string]providerEntry
+}
+
+type rawFile struct {
+	Providers map[string]rawProviderEntry `yaml:"providers"`
+}
+
+type rawProviderEntry struct {
+	APIKey strictString   `yaml:"api_key"`
+	OAuth  *rawOAuthEntry `yaml:"oauth"`
+}
+
+type rawOAuthEntry struct {
+	AccessToken strictString `yaml:"access_token"`
+	AccountID   strictString `yaml:"account_id"`
+	ExpiresAt   expiryString `yaml:"expires_at"`
+}
+
+type strictString string
+
+func (s *strictString) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.ScalarNode || node.Tag != "!!str" {
+		return errors.New("expected string")
+	}
+	*s = strictString(node.Value)
+	return nil
+}
+
+type expiryString string
+
+func (s *expiryString) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.ScalarNode || (node.Tag != "!!str" && node.Tag != "!!timestamp") {
+		return errors.New("expected timestamp string")
+	}
+	*s = expiryString(node.Value)
+	return nil
 }
 
 // APIKey returns the api_key for name, or "" if f is nil or has no entry for
@@ -56,7 +103,21 @@ func (f *File) APIKey(name string) string {
 	if f == nil {
 		return ""
 	}
-	return f.Providers[name].APIKey
+	return f.providers[name].APIKey
+}
+
+// OAuth returns a copy of name's validated OAuth file entry. The zero value
+// means there is no usable OAuth entry for name. Returning a value keeps
+// callers from mutating the parsed credential snapshot through this accessor.
+func (f *File) OAuth(name string) OAuthEntry {
+	if f == nil {
+		return OAuthEntry{}
+	}
+	entry := f.providers[name]
+	if !entry.hasOAuth {
+		return OAuthEntry{}
+	}
+	return entry.oauth
 }
 
 // DefaultPath returns the conventional auth.yaml location:
@@ -123,48 +184,94 @@ func Load(path string, explicit bool, env xdgconfig.ResolveEnv, knownProviders [
 		return &File{}, permWarning
 	}
 
-	// Strict (KnownFields) decode: an unrecognized key anywhere in the
-	// document (a mistyped "provider:" instead of "providers:", or "apikey"
-	// instead of "api_key" inside an entry) is a parse error rather than a
-	// silently-ignored typo — a credentials file is exactly the place a
-	// silent typo should not degrade to "key not found" at request time.
+	// Strict typed decode: a typo at any supported level rejects the credential
+	// file instead of silently dropping a field. Never surface the decoder error:
+	// YAML type errors can quote the offending scalar, which may itself be a key.
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
-	var f File
-	if err := dec.Decode(&f); err != nil {
-		// Deliberately do NOT include err (or %v of it) here. A structural
-		// type mismatch — a scalar where providers.<name> expects a mapping,
-		// e.g. an operator forgetting the "api_key:" nesting and writing the
-		// key directly — makes go.yaml.in/yaml/v3's TypeError echo the raw
-		// source text of the offending node into its error string. For a file
-		// whose entire purpose is holding secrets, that is a verified,
-		// reproducible way for a fragment of a real key to end up in this
-		// warning and then in a log line. Report only the path and a generic
-		// shape complaint; never the library's rendered error.
-		return nil, fmt.Sprintf(
-			"auth file %s: does not match the expected schema (providers.<name>.api_key) — check indentation and field names",
-			path,
-		)
+	var raw rawFile
+	if err := dec.Decode(&raw); err != nil || raw.Providers == nil {
+		return nil, schemaWarning(path)
 	}
-
+	// Exactly one YAML document is accepted. A second document is ambiguous
+	// credential input even when it is empty or null, so fail closed with the
+	// same generic, value-free warning used for other whole-file shape errors.
+	var trailing yaml.Node
+	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil, schemaWarning(path)
+	}
 	// Count, never the names: an unknown provider name is an arbitrary YAML
 	// key, and a key typed where the provider name belongs (inverted nesting)
 	// would otherwise be echoed verbatim into the warning — the same CWE-532
 	// class as the decode-error branch above. "Value-free" is a property of
 	// the whole warning surface, not just that one branch.
+	f := File{providers: make(map[string]providerEntry, len(raw.Providers))}
 	unknown := 0
-	for name := range f.Providers {
+	invalidSemantics := 0
+	for name, rawEntry := range raw.Providers {
 		if !slices.Contains(knownProviders, name) {
 			unknown++
+			continue
 		}
+		entry := providerEntry{APIKey: string(rawEntry.APIKey)}
+		if rawEntry.OAuth != nil {
+			entry.oauth = OAuthEntry{
+				AccessToken: string(rawEntry.OAuth.AccessToken),
+				AccountID:   string(rawEntry.OAuth.AccountID),
+				ExpiresAt:   string(rawEntry.OAuth.ExpiresAt),
+			}
+			entry.hasOAuth = true
+		}
+		entry, invalid := validateProviderEntry(name, entry)
+		if invalid {
+			invalidSemantics++
+		}
+		f.providers[name] = entry
 	}
+	contentWarnings := make([]string, 0, 2)
 	if unknown > 0 {
-		return &f, joinWarnings(permWarning, fmt.Sprintf(
+		contentWarnings = append(contentWarnings, fmt.Sprintf(
 			"auth file %s: %d unknown provider(s) ignored (expected one of %s) — check provider names in the file",
 			path, unknown, strings.Join(knownProviders, ", "),
 		))
 	}
-	return &f, permWarning
+	if invalidSemantics > 0 {
+		contentWarnings = append(contentWarnings, fmt.Sprintf(
+			"auth file %s: %d provider credential entry/entries contained ignored fields (OAuth is only valid for openai-codex with a non-empty access_token; API keys do not enable openai-codex)",
+			path, invalidSemantics,
+		))
+	}
+	warning := joinWarnings(append([]string{permWarning}, contentWarnings...)...)
+	return &f, warning
+}
+
+func schemaWarning(path string) string {
+	return fmt.Sprintf(
+		"auth file %s: does not match the expected schema (providers.<name>.api_key or providers.openai-codex.oauth) — check indentation and field names",
+		path,
+	)
+}
+
+func validateProviderEntry(name string, entry providerEntry) (providerEntry, bool) {
+	invalid := false
+	if name == "openai-codex" {
+		if entry.APIKey != "" {
+			entry.APIKey = ""
+			invalid = true
+		}
+		if entry.hasOAuth && strings.TrimSpace(entry.oauth.AccessToken) == "" {
+			entry.oauth = OAuthEntry{}
+			entry.hasOAuth = false
+			invalid = true
+		}
+		return entry, invalid
+	}
+	if entry.hasOAuth {
+		entry.oauth = OAuthEntry{}
+		entry.hasOAuth = false
+		invalid = true
+	}
+	return entry, invalid
 }
 
 // joinWarnings accumulates the non-empty warnings into the single return
