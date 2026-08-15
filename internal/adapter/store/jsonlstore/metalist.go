@@ -21,12 +21,15 @@ import (
 // pinned by TestMetaSnapshotTagsAreSessnapSubset (a reflection tripwire so the
 // mirror cannot silently drift).
 type metaSnapshot struct {
-	ID        session.SessionID `json:"id"`
-	State     session.State     `json:"state"`
-	Counters  session.Counters  `json:"counters"`
-	ModelID   string            `json:"model_id,omitempty"`
-	Title     string            `json:"title,omitempty"`
-	CreatedAt time.Time         `json:"created_at"`
+	ID           session.SessionID           `json:"id"`
+	State        session.State               `json:"state"`
+	Counters     session.Counters            `json:"counters"`
+	ModelID      string                      `json:"model_id,omitempty"`
+	Title        string                      `json:"title,omitempty"`
+	Kind         session.SessionKind         `json:"kind,omitempty"`
+	Relationship session.SessionRelationship `json:"relationship,omitzero"`
+	Workspace    string                      `json:"workspace"`
+	CreatedAt    time.Time                   `json:"created_at"`
 	// Owner is the session's verified owner (ADR 0100). Decoding it here is
 	// what keeps the cheap fast path's row IDENTICAL to the Load-per-row
 	// fallback's; a pre-owner snapshot simply has no key and stays nil.
@@ -63,8 +66,11 @@ var knownStates = map[session.State]bool{
 // silently truncated.
 const lastLineSeekWindow = 64 * 1024
 
-// compile-time assertion that Store satisfies the optional MetaLister seam.
-var _ port.MetaLister = (*Store)(nil)
+// compile-time assertions that Store satisfies the optional metadata seams.
+var (
+	_ port.MetaLister           = (*Store)(nil)
+	_ port.SessionMetadataPager = (*Store)(nil)
+)
 
 // MetaList returns every stored session's picker metadata by reading ONLY the
 // last snapshot line of each *.session.jsonl file and decoding into a small
@@ -89,32 +95,65 @@ var _ port.MetaLister = (*Store)(nil)
 // behaviour ListSessions had when Load failed per row. So a corrupt snapshot
 // file is visible in the picker with its id/mtime even if it can't be opened,
 // exactly as before.
-func (st *Store) MetaList(_ context.Context) ([]port.SessionMeta, error) {
+func (st *Store) MetaList(ctx context.Context) ([]port.SessionMeta, error) {
+	rows, err := st.discoveryMetaList(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]port.SessionMeta, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, port.SessionMeta{
+			ID: row.ID, ModifiedAt: row.ModifiedAt, State: row.State, Turns: row.Turns,
+			ModelID: row.ModelID, CreatedAt: row.CreatedAt, Title: row.Title, Owner: row.Owner,
+		})
+	}
+	return out, nil
+}
+
+func (st *Store) discoveryMetaList(_ context.Context) ([]port.SessionDiscoveryMeta, error) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	files, err := st.resolver.snapshotFiles()
 	if err != nil {
 		return nil, err
 	}
-	out := make([]port.SessionMeta, 0, len(files))
+	out := make([]port.SessionDiscoveryMeta, 0, len(files))
 	for _, file := range files {
-		meta := port.SessionMeta{ID: file.id, ModifiedAt: file.modified}
+		meta := port.SessionDiscoveryMeta{ID: file.id, ModifiedAt: file.modified}
 		var m metaSnapshot
 		if err := json.Unmarshal(file.last, &m); err == nil && knownStates[m.State] {
+			kind := m.Kind
+			if kind == "" {
+				kind = session.SessionKindUnknown
+			}
+			if session.ValidateSessionMetadata(kind, m.Relationship) != nil {
+				out = append(out, meta)
+				continue
+			}
 			meta.State = m.State
 			meta.Turns = m.Counters.Turns
 			meta.ModelID = m.ModelID
 			meta.Title = m.Title
+			meta.Workspace = m.Workspace
+			meta.Kind = kind
+			meta.Relationship = m.Relationship
 			meta.Owner = m.Owner
-			// A zero CreatedAt (a snapshot with no created_at, or the zero time)
-			// must surface as the zero time — NOT .Unix() of the zero time, which
-			// is -62135596800 and would misreport as 0001-01-01. The caller maps
-			// a zero time to CreatedAtUnix=0 (matching the Load-fails zeroed path).
 			meta.CreatedAt = m.CreatedAt
 		}
 		out = append(out, meta)
 	}
 	return out, nil
+}
+
+// PageSessionMetadata scans the latest-line metadata projection, then applies
+// the shared owner-filtered keyset contract. The response is bounded even
+// though this v1 adapter may scan all snapshot files.
+func (st *Store) PageSessionMetadata(ctx context.Context, request port.SessionMetadataPageRequest) (port.SessionMetadataPage, error) {
+	rows, err := st.discoveryMetaList(ctx)
+	if err != nil {
+		return port.SessionMetadataPage{}, err
+	}
+	return port.PaginateSessionMetadata(rows, request), nil
 }
 
 // readLastLine returns the last complete line of the file at path. It seeks

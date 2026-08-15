@@ -83,6 +83,8 @@ func (m Model) View() tea.View {
 // view (a plan ask), or the conversation.
 func (m Model) renderBody() string {
 	switch {
+	case m.sessionDetailsOpen:
+		return renderSessionDetails(m.deps.Theme, m.sessionDetails(), m.helpKeyMarkings(), m.width, m.vp.Height())
 	case m.showHelp:
 		return renderHelpOverlay(m.deps.Theme, m.caps, m.width, m.vp.Height(), m.helpKeyMarkings())
 	case m.phase == phaseAwaitingApproval:
@@ -118,7 +120,7 @@ func (m Model) renderBody() string {
 	case m.worktrees.view != worktreesNone:
 		return renderWorktreesOverlay(m.deps.Theme, m.worktrees, m.caps, m.helpKeyMarkings(), m.width, m.vp.Height())
 	case m.schedule.view != scheduleNone:
-		return renderScheduleOverlay(m.deps.Theme, m.schedule, m.caps, m.deps.Replayer != nil, m.helpKeyMarkings(), m.width, m.vp.Height())
+		return renderScheduleOverlay(m.deps.Theme, m.schedule, m.caps, m.deps.Transcript != nil, m.helpKeyMarkings(), m.width, m.vp.Height())
 	case m.sessions.view != sessionsNone:
 		return renderSessionsOverlay(m.deps.Theme, m.sessions, m.caps, m.sessionID, m.rend.vpView(m.vp), m.helpKeyMarkings(), m.width, m.vp.Height())
 	case m.phase == phaseIdle && m.conv.isEmpty() && !m.restartedThisRun:
@@ -133,6 +135,8 @@ func (m Model) renderHeader() string {
 	sid := m.sessionID
 	if sid == "" {
 		sid = "connecting…"
+	} else {
+		sid = "#" + sessionDigest(sid)[:8]
 	}
 	// next: badge — the pendingNext (apply-on-next-create) selection, shown ONLY when
 	// it is set AND differs from the effective model this session runs on (same model

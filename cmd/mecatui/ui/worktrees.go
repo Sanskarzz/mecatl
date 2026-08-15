@@ -179,7 +179,7 @@ func (m Model) switchToWorktree(wt client.Worktree) (tea.Model, tea.Cmd, bool) {
 	m.restartedThisRun = true
 	m = m.resetSession()
 
-	m.sessionID = ""
+	m = m.bindSessionID("")
 	m.effectiveModel = client.ResolvedModel{}
 	m.caps = client.Capabilities{}
 	m.restartFailed = false
@@ -241,8 +241,8 @@ func (m Model) updateInventoryMsgs(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 	if mm, cmd, handled := m.updateScheduleMsg(msg); handled {
 		return mm, cmd, true
 	}
-	if mm, handled := m.updateSessionsMsg(msg); handled {
-		return mm, nil, true
+	if mm, cmd, handled := m.updateSessionsMsg(msg); handled {
+		return mm, cmd, true
 	}
 	return m, nil, false
 }

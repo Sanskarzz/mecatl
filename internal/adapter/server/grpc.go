@@ -97,6 +97,18 @@ func (h *HarnessServer) GetSession(ctx context.Context, req *mecatlv1.GetSession
 	return &mecatlv1.GetSessionResponse{Session: proto}, nil
 }
 
+// GetSessionTranscript returns the owned session's snapshot-derived transcript.
+func (h *HarnessServer) GetSessionTranscript(ctx context.Context, req *mecatlv1.GetSessionTranscriptRequest) (*mecatlv1.GetSessionTranscriptResponse, error) {
+	if req.GetSessionId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "session_id is required")
+	}
+	transcript, err := h.svc.GetTranscript(ctx, session.SessionID(req.GetSessionId()))
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	return toProtoTranscript(transcript), nil
+}
+
 // SetMode changes the permission posture of the requested session.
 func (h *HarnessServer) SetMode(ctx context.Context, req *mecatlv1.SetModeRequest) (*mecatlv1.SetModeResponse, error) {
 	if req.GetSessionId() == "" {
@@ -650,12 +662,17 @@ func isDeliveryNoteText(text string) bool {
 // ListSessions returns the stored-session inventory — the picker metadata a
 // client renders to let an operator open an EXISTING session by id (issue #245
 // Phase 1).
-func (h *HarnessServer) ListSessions(ctx context.Context, _ *mecatlv1.ListSessionsRequest) (*mecatlv1.ListSessionsResponse, error) {
-	rows, err := h.svc.ListSessions(ctx)
+func (h *HarnessServer) ListSessions(ctx context.Context, req *mecatlv1.ListSessionsRequest) (*mecatlv1.ListSessionsResponse, error) {
+	page, err := h.svc.ListSessionPage(ctx, ListSessionsPageRequest{
+		PageSize: int(req.GetPageSize()), Cursor: req.GetCursor(),
+	})
 	if err != nil {
 		return nil, toStatus(err)
 	}
-	return &mecatlv1.ListSessionsResponse{Sessions: toProtoSessionSummaries(rows)}, nil
+	return &mecatlv1.ListSessionsResponse{
+		Sessions: toProtoSessionSummaries(page.Sessions), NextCursor: page.NextCursor,
+		TotalCount: ClampInt32(page.TotalCount),
+	}, nil
 }
 
 // toStatus maps service sentinel errors to gRPC status codes.
@@ -713,6 +730,8 @@ func toStatus(err error) error {
 		// No durable EventLog (cloud-native Phase 3a) is configured: the
 		// StreamSessionEvents read-back surface is not available on this
 		// deployment. Unimplemented (HTTP 501).
+		return status.Error(codes.Unimplemented, err.Error())
+	case errors.Is(err, port.ErrSessionMetadataPagingUnsupported):
 		return status.Error(codes.Unimplemented, err.Error())
 	case errors.Is(err, ErrSchedulerNotRunning):
 		// A ScheduleStore is available but no in-process scheduler is wired to

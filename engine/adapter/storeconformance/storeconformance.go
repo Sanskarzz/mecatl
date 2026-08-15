@@ -52,6 +52,54 @@ func Run(t *testing.T, newStore func(t *testing.T) port.SessionStore) {
 		assertSessionEqual(t, got, want)
 	})
 
+	t.Run("kind relationship round trip", func(t *testing.T) {
+		cases := []struct {
+			id   session.SessionID
+			kind session.SessionKind
+			rel  session.SessionRelationship
+		}{
+			{id: "conf-kind-main", kind: session.SessionKindMain},
+			{id: "conf-kind-scheduled", kind: session.SessionKindScheduled, rel: session.SessionRelationship{ScheduleName: "nightly", OriginSessionID: "origin"}},
+			{id: "conf-kind-subagent", kind: session.SessionKindSubagent, rel: session.SessionRelationship{ParentSessionID: "parent", CallID: "call-sub"}},
+			{id: "conf-kind-parallel", kind: session.SessionKindParallelBranch, rel: session.SessionRelationship{ParentSessionID: "parent", CallID: "call-par", BranchIndex: intPointer(2)}},
+			{id: "conf-kind-team", kind: session.SessionKindTeamMember, rel: session.SessionRelationship{TeamID: "team", MemberName: "reviewer", ParentSessionID: "parent"}},
+		}
+		for _, tc := range cases {
+			t.Run(string(tc.kind), func(t *testing.T) {
+				st := newStore(t)
+				want := newSession(tc.id)
+				if err := want.RestoreSessionMetadata(tc.kind, tc.rel); err != nil {
+					t.Fatalf("RestoreSessionMetadata: %v", err)
+				}
+				got := roundTrip(t, st, want)
+				if got.Kind != tc.kind || !reflect.DeepEqual(got.Relationship, tc.rel) {
+					t.Errorf("metadata = (%q, %+v), want (%q, %+v)", got.Kind, got.Relationship, tc.kind, tc.rel)
+				}
+			})
+		}
+	})
+
+	t.Run("save isolates relationship branch index", func(t *testing.T) {
+		st := newStore(t)
+		want := newSession("conf-kind-isolated")
+		if err := want.RestoreSessionMetadata(session.SessionKindParallelBranch, session.SessionRelationship{
+			ParentSessionID: "parent", CallID: "call", BranchIndex: intPointer(2),
+		}); err != nil {
+			t.Fatalf("RestoreSessionMetadata: %v", err)
+		}
+		if err := st.Save(ctx, want); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		*want.Relationship.BranchIndex = 3
+		got, err := st.Load(ctx, want.ID)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if got.Relationship.BranchIndex == nil || *got.Relationship.BranchIndex != 2 {
+			t.Errorf("loaded BranchIndex = %v, want 2", got.Relationship.BranchIndex)
+		}
+	})
+
 	t.Run("lifecycle-state fidelity", func(t *testing.T) {
 		t.Run("idle", func(t *testing.T) {
 			st := newStore(t)
@@ -274,6 +322,12 @@ func Run(t *testing.T, newStore func(t *testing.T) port.SessionStore) {
 	t.Run("isolation", func(t *testing.T) {
 		st := newStore(t)
 		s := newSession("conf-isolation")
+		branchIndex := 2
+		mustOK(t, "RestoreSessionMetadata", s.RestoreSessionMetadata(session.SessionKindParallelBranch, session.SessionRelationship{
+			ParentSessionID: "parent",
+			CallID:          "call",
+			BranchIndex:     &branchIndex,
+		}))
 		mustOK(t, "RecordUserPrompt", s.RecordUserPrompt("original", nil))
 		if err := st.Save(ctx, s); err != nil {
 			t.Fatalf("Save: %v", err)
@@ -281,6 +335,7 @@ func Run(t *testing.T, newStore func(t *testing.T) port.SessionStore) {
 		// Mutate the ORIGINAL after Save; the store must have captured the
 		// state AT Save time (marshal/copy on Save), not retained the caller's
 		// pointer.
+		*s.Relationship.BranchIndex = 7
 		mustOK(t, "RecordUserPrompt(original mutation)", s.RecordUserPrompt("mutation on the original", nil))
 		loaded, err := st.Load(ctx, s.ID)
 		if err != nil {
@@ -288,6 +343,9 @@ func Run(t *testing.T, newStore func(t *testing.T) port.SessionStore) {
 		}
 		if got := len(loaded.Conversation.Messages); got != 1 {
 			t.Errorf("Load saw %d messages, want 1 (the original's post-Save mutation must not reach the store)", got)
+		}
+		if got := *loaded.Relationship.BranchIndex; got != 2 {
+			t.Errorf("Load branch index = %d, want 2 (relationship must not alias the original)", got)
 		}
 		// Mutate the LOADED copy through the aggregate; the stored state must
 		// not alias it either.
@@ -469,6 +527,72 @@ func RunPrunable(t *testing.T, newStore func(t *testing.T) port.SessionStore) {
 	})
 }
 
+// RunMetadataPager executes the shared optional metadata-pager contract against
+// every store that advertises port.SessionMetadataPager.
+func RunMetadataPager(t *testing.T, newStore func(t *testing.T) port.SessionStore) {
+	t.Helper()
+	ctx := context.Background()
+	st := newStore(t)
+	pager, ok := st.(port.SessionMetadataPager)
+	if !ok {
+		t.Fatalf("store %T does not implement port.SessionMetadataPager", st)
+	}
+	alice := &session.Principal{Issuer: "https://issuer.example", Subject: "alice"}
+	bob := &session.Principal{Issuer: "https://issuer.example", Subject: "bob"}
+	for _, fixture := range []struct {
+		id    session.SessionID
+		owner *session.Principal
+	}{
+		{id: "b", owner: alice},
+		{id: "a", owner: alice},
+		{id: "foreign", owner: bob},
+		{id: "ownerless"},
+	} {
+		s := newSession(fixture.id)
+		if err := s.RestoreLabels(fixture.owner, session.Authority("")); err != nil {
+			t.Fatalf("RestoreLabels(%q): %v", fixture.id, err)
+		}
+		if err := st.Save(ctx, s); err != nil {
+			t.Fatalf("Save(%q): %v", fixture.id, err)
+		}
+	}
+
+	first, err := pager.PageSessionMetadata(ctx, port.SessionMetadataPageRequest{
+		Limit: 1, OwnershipEnforced: true, Owner: alice,
+	})
+	if err != nil {
+		t.Fatalf("PageSessionMetadata(first): %v", err)
+	}
+	if len(first.Sessions) != 1 || first.TotalCount != 2 || first.NextCursor == nil {
+		t.Fatalf("first page = %+v, want one of two owned rows plus a cursor", first)
+	}
+	second, err := pager.PageSessionMetadata(ctx, port.SessionMetadataPageRequest{
+		Limit: 1, OwnershipEnforced: true, Owner: alice, Cursor: first.NextCursor,
+	})
+	if err != nil {
+		t.Fatalf("PageSessionMetadata(second): %v", err)
+	}
+	if len(second.Sessions) != 1 || second.TotalCount != 2 || second.NextCursor != nil {
+		t.Fatalf("second page = %+v, want final owned row", second)
+	}
+	if first.Sessions[0].ID == second.Sessions[0].ID {
+		t.Fatalf("cursor repeated %q", first.Sessions[0].ID)
+	}
+	if first.Sessions[0].ModifiedAt.Equal(second.Sessions[0].ModifiedAt) && first.Sessions[0].ID > second.Sessions[0].ID {
+		t.Fatalf("equal-time IDs ordered %q then %q, want ascending", first.Sessions[0].ID, second.Sessions[0].ID)
+	}
+	for _, page := range []port.SessionMetadataPage{first, second} {
+		for _, row := range page.Sessions {
+			if row.ID == "foreign" || row.ID == "ownerless" {
+				t.Fatalf("ownership filtering happened after paging: leaked %q", row.ID)
+			}
+			if row.Workspace != "/work/space" || row.Kind != session.SessionKindMain {
+				t.Fatalf("discovery metadata for %q = workspace %q kind %q", row.ID, row.Workspace, row.Kind)
+			}
+		}
+	}
+}
+
 // newSession constructs an idle session with non-default limits, workspace,
 // mode and a fixed (whole-nanosecond, UTC) creation time so timestamp
 // round-trip equality is well-defined.
@@ -572,6 +696,9 @@ func assertSessionEqual(t *testing.T, got, want *session.Session) {
 	if got.ReasoningEffort != want.ReasoningEffort {
 		t.Errorf("ReasoningEffort = %q want %q", got.ReasoningEffort, want.ReasoningEffort)
 	}
+	if got.Kind != want.Kind || !reflect.DeepEqual(got.Relationship, want.Relationship) {
+		t.Errorf("session metadata = (%q, %+v) want (%q, %+v)", got.Kind, got.Relationship, want.Kind, want.Relationship)
+	}
 	if got.Usage != want.Usage {
 		t.Errorf("Usage = %+v want %+v", got.Usage, want.Usage)
 	}
@@ -588,6 +715,8 @@ func assertSessionEqual(t *testing.T, got, want *session.Session) {
 		}
 	}
 }
+
+func intPointer(v int) *int { return &v }
 
 // mustOK fails the test when a session-aggregate transition errors.
 func mustOK(t *testing.T, op string, err error) {

@@ -345,12 +345,26 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 }
 
+func (m Model) finishStartupResume() (tea.Model, tea.Cmd) {
+	cmd := (&m).maybeKittyTransmit()
+	if liveCmd := (&m).armLiveFeed(); liveCmd != nil {
+		cmd = tea.Batch(cmd, liveCmd)
+	}
+	if p := strings.TrimSpace(m.pendingInitialPrompt); p != "" {
+		m.pendingInitialPrompt = ""
+		m.ta.SetValue(p)
+		mm, submitCmd := m.submitPrompt()
+		return mm, tea.Batch(cmd, submitCmd)
+	}
+	return m, cmd
+}
+
 // applySessionReady binds an established session into the model: the
 // SessionReadyMsg arm's body, extracted so the connectFallbackMsg arm (the
 // server-rejected-selection fallback, issue #41) can reuse it before layering its
 // warning on top.
 func (m Model) applySessionReady(msg client.SessionReadyMsg) (tea.Model, tea.Cmd, bool) {
-	m.sessionID = msg.SessionID
+	m = m.bindSessionID(msg.SessionID)
 	m.caps = msg.Capabilities // stored for Phase B; unrendered this phase
 	// The EFFECTIVE provider+model the server resolved this session to (echoed
 	// verbatim). The header shows it from turn zero. The model is FIXED per session,
@@ -388,7 +402,7 @@ func (m Model) applySessionReady(msg client.SessionReadyMsg) (tea.Model, tea.Cmd
 	// the title is always "" server-side too, so the refetch is a no-op for the
 	// title — it still may raise the footer window denominator, which is the
 	// existing footer-heal path's concern.)
-	if m.sessionTitle == "" && m.sessionID != "" && m.deps.Session != nil {
+	if m.sessionID != "" && m.deps.Session != nil {
 		heal := client.RefreshResolvedModelCmd(m.deps.Ctx, m.deps.Session, m.sessionID)
 		cmd = tea.Batch(cmd, heal)
 	}
@@ -422,8 +436,13 @@ func (m Model) applySessionReady(msg client.SessionReadyMsg) (tea.Model, tea.Cmd
 // split out of update so the top-level dispatcher stays under the cyclomatic cap;
 // handled=false means the msg is none of these and the caller continues its
 // fall-through chain (MCP/skills/agents overlays → stream events).
+//
+//nolint:gocyclo // one flat lifecycle message classifier; splitting it would duplicate the handled contract.
 func (m Model) updateLifecycle(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 	switch msg := msg.(type) {
+	case startupResumeReadyMsg:
+		mm, cmd := m.finishStartupResume()
+		return mm, cmd, true
 	case reconnectMsg:
 		// Live-feed reconnect loop msgs (issue #387): degraded-state markers and
 		// the catch-up event msgs ride the reconnect channel. Handled here (a
@@ -470,7 +489,7 @@ func (m Model) updateLifecycle(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		// on the /effort path the source session (and transcript) SURVIVES — see
 		// restartFailedForkID.
 		m.phase = phaseIdle
-		m.sessionID = ""
+		m = m.bindSessionID("")
 		m.restartFailed = true
 		// A carryover create's failure means enter-to-retry re-fires a FRESH
 		// (non-carryover) create (see onIdleSubmit), so the note armed by
@@ -493,6 +512,10 @@ func (m Model) updateLifecycle(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		m.refreshView()
 		return m, nil, true
 	case client.StreamErrMsg:
+		if m.startupFirstPromptPending {
+			m = m.failStartupRunEntry()
+			return m, nil, true
+		}
 		// A HARD stream error PAUSES the queue: the staged follow-ups are kept intact
 		// and marked paused (m.queuePaused) so the queue card says why, not auto-sent
 		// into a broken run. A TRANSIENT stream error (msg.Transient — an idle/stalled
@@ -507,6 +530,8 @@ func (m Model) updateLifecycle(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 	case clipboardResultMsg:
 		mm, cmd := m.onClipboardResult(msg)
 		return mm, cmd, true
+	case sessionIDCopyResultMsg:
+		return m.onSessionIDCopyResult(msg), nil, true
 	case shellWriteResultMsg:
 		// Best-effort shell-clipboard WRITE result: intentionally swallowed. OSC52
 		// (tea.SetClipboard) is the primary copy path and the copy already reported
@@ -590,6 +615,9 @@ func (m Model) onResolvedModelMsg(msg client.ResolvedModelMsg) (Model, tea.Cmd, 
 	if msg.Mode != "" {
 		m.activeMode = client.ModeString(client.ModeFromString(msg.Mode))
 	}
+	m.sessionState = msg.State
+	m.sessionCreatedAt = msg.CreatedAt
+	m.activeWorkspace = msg.Workspace
 	// Model identity changed (e.g. plan model → execute model): full replace.
 	// The model is normally fixed per session, so this only fires on a
 	// server-driven mode transition (plan approval). When identity is unchanged
@@ -633,6 +661,11 @@ func (m Model) onRenderTick() (tea.Model, tea.Cmd) {
 func (m Model) updateStreamEvent(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case client.SessionInitMsg:
+		if m.startupFirstPromptPending {
+			m.startupFirstPromptPending = false
+			m.startupAdopted = false
+			m.startupRetryPrompt = ""
+		}
 		return m, m.waitCmd()
 	case client.TurnStartMsg:
 		m.conv.startAssistant()
@@ -1349,6 +1382,7 @@ func (m Model) dispatchPhaseKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // / esc-only. Returns handled=false when no overlay is open so onKey falls through.
 func (m Model) onOverlayKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 	overlays := []func(tea.KeyPressMsg) (tea.Model, tea.Cmd, bool){
+		m.onSessionDetailsKey,
 		m.onMCPKey,
 		m.onAgentsKey,
 		m.onAgentsInvKey,
@@ -2267,6 +2301,27 @@ func (m Model) afterInputEdit(cmd tea.Cmd) (tea.Model, tea.Cmd) {
 	return mm, tea.Batch(cmd, fetch)
 }
 
+var errStartupRunEntry = &sessionTranscriptError{"the chat could not be attached for a new turn"}
+
+func (m Model) failStartupRunEntry() Model {
+	m = m.endRun("")
+	m.conv = conversationFromTranscript(m.deps.Resume.Transcript.Messages)
+	m.sessions = sessionsState{
+		selected:   m.deps.Resume.Row,
+		inspect:    true,
+		loadErr:    errStartupRunEntry,
+		transcript: conversationFromTranscript(m.deps.Resume.Transcript.Messages),
+		view:       sessionsTranscript,
+	}
+	m.phase = phaseReplay
+	m.startupFirstPromptPending = false
+	m.startupRunEntryFailed = true
+	m.ta.SetValue(m.startupRetryPrompt)
+	m.ta.Blur()
+	m.refreshView()
+	return m
+}
+
 // submitPrompt opens a fresh Converse run for the textarea text, sends the
 // mandatory prompt frame, starts the reader goroutine, and arms WaitForMsg.
 func (m Model) submitPrompt() (tea.Model, tea.Cmd) {
@@ -2376,6 +2431,10 @@ func (m Model) submitPrompt() (tea.Model, tea.Cmd) {
 	// truly empty submit (no text AND no parts) is the no-op early-return.
 	if text == "" && len(media.Parts) == 0 {
 		return m, nil
+	}
+	if m.startupAdopted {
+		m.startupRetryPrompt = m.ta.Value()
+		m.startupFirstPromptPending = true
 	}
 	if len(media.Descriptors) > 0 {
 		m.conv.addUserWithMedia(text, media.Descriptors)
@@ -3146,20 +3205,35 @@ func compactionArchiveNotice(msg client.CompactionArchiveMsg) string {
 	return "history compacted — " + plural(n, "turn") + " archived"
 }
 
-// onReplayKey routes keys while a read-only transcript replay is open
-// (phaseReplay — reached for CHILD sessions opened from the Children tab, and
-// transiently for TOP-LEVEL sessions while their history loads before the
-// phaseIdle handoff). Esc closes the transcript view
-// (closeSessionsTranscript): stop the replay, clear replay state, resetSession,
-// return to idle with NO live session — read-only inspection ends honestly.
-// The bare `c` key / continueSession have been REMOVED: top-level sessions
-// continue by default (loading history then transitioning to phaseIdle), and a
-// child session cannot be continued as a top-level live session (no parent
-// context), so there is no Continue action to offer. Any key other than esc is
-// swallowed.
+// onReplayKey routes keys while an authoritative transcript is loading or being
+// inspected. Escape returns to the inventory without changing the active chat;
+// retry reloads the same opaque session id after a failed request.
 func (m Model) onReplayKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.startupRunEntryFailed {
+		if key.Matches(msg, m.keys.Close) {
+			m.sessions = sessionsState{}
+			m.startupRunEntryFailed = false
+			m.phase = phaseIdle
+			cmd := m.ta.Focus()
+			m.refreshView()
+			return m, cmd
+		}
+		if msg.String() == "r" {
+			m.sessions = sessionsState{}
+			m.startupRunEntryFailed = false
+			m.phase = phaseIdle
+			m.ta.SetValue(m.startupRetryPrompt)
+			return m.submitPrompt()
+		}
+		return m, nil
+	}
 	if key.Matches(msg, m.keys.Close) {
 		return m.closeSessionsTranscript()
+	}
+	if msg.String() == "r" && m.sessions.loadErr != nil && m.deps.Transcript != nil {
+		m.sessions.loading = true
+		m.sessions.loadErr = nil
+		return m, client.GetSessionTranscriptCmd(m.deps.Ctx, m.deps.Transcript, m.sessions.selected.ID)
 	}
 	return m, nil
 }

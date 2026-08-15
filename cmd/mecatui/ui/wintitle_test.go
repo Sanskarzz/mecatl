@@ -277,26 +277,23 @@ func TestWindowTitleDropsStaleSessionResolvedModelMsg(t *testing.T) {
 	}
 }
 
-// TestWindowTitleSwitchToSessionAdoptsTitle asserts switchToSession adopts the
-// picker's stored title verbatim (the full unclamped title).
-func TestWindowTitleSwitchToSessionAdoptsTitle(t *testing.T) {
-	fl := &fakeSessionLister{sessions: []client.SessionListItem{
-		{ID: "sess-stored-0001", ModifiedAt: nowMinusMinutes(2), State: "completed", Turns: 2, ModelID: "m"},
-	}}
-	fr := &fakeSessionReplayer{stream: client.NewFakeEventStream()}
-	conv := newSessionsConv()
-	m := newSessionsModel(t, conv, fl, fr)
-
-	longTitle := strings.Repeat("z", windowTitleRunes+10) // over the render cap
-	fl.sessions[0].Title = longTitle
-	mm, _, _ := m.switchToSession(fl.sessions[0])
-	m = mm.(Model)
-	if m.sessionTitle != longTitle {
-		t.Errorf("after switchToSession sessionTitle = %q, want the full stored title verbatim", m.sessionTitle)
+// TestWindowTitleContinueSessionAdoptsTitle asserts authoritative continuation
+// adopts the inventory title verbatim while the rendered window title clamps it.
+func TestWindowTitleContinueSessionAdoptsTitle(t *testing.T) {
+	longTitle := strings.Repeat("z", windowTitleRunes+10)
+	row := client.SessionListItem{
+		ID: "sess-stored-0001", Title: longTitle, Kind: client.SessionKindMain,
+		Capabilities: client.SessionInventoryCapabilities{PublicChat: true},
 	}
-	// And the render path clamps it (the stored title is unclamped; windowTitle clamps).
-	got := m.windowTitle()
-	if !strings.Contains(got, "…") {
+	loader := &fakeSessionTranscriptLoader{transcript: client.SessionTranscript{SessionID: row.ID, Complete: true}}
+	m := newSessionsModel(t, newSessionsConv(), &fakeSessionLister{sessions: []client.SessionListItem{row}}, loader)
+	m.sessions.filtered = []client.SessionListItem{row}
+	mm, cmd, _ := m.chooseSession()
+	m = applyAll(mm.(Model), cmd())
+	if m.sessionTitle != longTitle {
+		t.Errorf("continued sessionTitle = %q, want the full stored title verbatim", m.sessionTitle)
+	}
+	if got := m.windowTitle(); !strings.Contains(got, "…") {
 		t.Errorf("windowTitle() = %q, want it to clamp the over-cap stored title with an ellipsis", got)
 	}
 }
@@ -341,14 +338,27 @@ func TestWindowTitleHealRefetchRoundTrip(t *testing.T) {
 		t.Errorf("windowTitle() = %q, want the healed title at idle", got)
 	}
 
-	// 3) A SECOND session-ready (a rebind) with the title now set must NOT refetch.
+	// 3) A SECOND session-ready (a rebind) refreshes the session metadata. The
+	// refetch must preserve the locally adopted title: titles are set-once so a
+	// later snapshot cannot clobber the user's current tab identity.
 	before := conv.getSessionCalls()
 	_, cmd = m.Update(client.SessionReadyMsg{SessionID: "sess-fork-0001"})
-	if cmd != nil {
-		drainBatch(t, cmd())
+	if cmd == nil {
+		t.Fatal("session rebind emitted no metadata refresh")
 	}
-	if n := conv.getSessionCalls(); n != before {
-		t.Errorf("GetSession called again (total %d) with the title already set, want no refetch", n)
+	drainBatch(t, cmd())
+	if n := conv.getSessionCalls(); n != before+1 {
+		t.Errorf("GetSession calls = %d, want %d after session rebind metadata refresh", n, before+1)
+	}
+	m = applyAll(m, client.ResolvedModelMsg{
+		SessionID: "sess-fork-0001",
+		Title:     "newer server title",
+		State:     "idle",
+		Workspace: "/workspace",
+		CreatedAt: 1_700_000_000,
+	})
+	if m.sessionTitle != "forked carryover task" {
+		t.Errorf("metadata refresh overwrote set-once sessionTitle = %q", m.sessionTitle)
 	}
 }
 

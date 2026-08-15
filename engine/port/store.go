@@ -3,6 +3,7 @@ package port
 import (
 	"context"
 	"errors"
+	"sort"
 	"time"
 
 	"github.com/stacklok/mecatl/engine/session"
@@ -35,8 +36,9 @@ var ErrSessionNotFound = errors.New("port: session not found")
 //     permanently-failed session reconstructs with FailurePermanence()==true and the
 //     recover advisory fires), cumulative Usage (the SUM of every per-run EvResult.Usage
 //     — the budget brake reads it), and the creation metadata the events do not carry
-//     (id, mode, limits, workspace, profile, provider/model selector, createdAt —
-//     supplied out-of-band, e.g. eventsource.SessionMeta).
+//     (id, mode, limits, workspace, profile, provider/model selector, reasoning
+//     effort, session kind/relationship, createdAt — supplied out-of-band, e.g.
+//     eventsource.SessionMeta).
 //   - Run-scoped: Counters reflect only the LATEST run segment (they reset on Reopen);
 //     the run plumbing (diagnostics binding, askID serials) is rebuilt fresh.
 //
@@ -68,9 +70,10 @@ type StoredSession struct {
 // fields a session LISTING (the /sessions picker) needs to render a row WITHOUT
 // loading the full conversation. It is a PROJECTION of the latest snapshot —
 // state, turn count, model id, title, and creation time — with the large
-// conversation (messages array) skipped entirely. The store adapter populates
-// it by reading ONLY the last snapshot line and decoding into a small struct,
-// so listing N sessions is O(N × last-line-read) rather than O(N × filesize).
+// conversation (messages array) skipped entirely. Kind and Relationship preserve
+// the validated producer taxonomy needed to classify the row without parsing its ID.
+// The store adapter populates it by reading ONLY the last snapshot line into a
+// small struct, so listing N sessions is O(N × last-line-read) rather than O(N × filesize).
 //
 // It is owned by the PORT (so the server adapter references the shape without
 // importing any concrete store) and implemented by a store via the optional
@@ -110,12 +113,25 @@ type SessionMeta struct {
 	// the lazy deriveTitle walk via a full Load if it needs the derived value.
 	Title string
 	// Owner is the verified caller the session is attributed to (ADR 0100), or
-	// nil when the session is ownerless (the no-auth path, or a session
-	// persisted before the owner label existed — nothing backfills it). It is
-	// carried here so the cheap MetaLister listing renders the owner IDENTICALLY
-	// to the Load-per-row fallback; a store that cannot decode it leaves it nil,
-	// which renders as unowned rather than as somebody else.
+	// nil when the session is ownerless.
 	Owner *session.Principal
+}
+
+// SessionDiscoveryMeta is the additive bounded-inventory projection. It keeps
+// SessionMeta source-compatible while carrying the trusted taxonomy and workspace
+// needed by discovery clients.
+type SessionDiscoveryMeta struct {
+	ID           session.SessionID
+	ModifiedAt   time.Time
+	State        session.State
+	Turns        int
+	ModelID      string
+	CreatedAt    time.Time
+	Title        string
+	Owner        *session.Principal
+	Workspace    string
+	Kind         session.SessionKind
+	Relationship session.SessionRelationship
 }
 
 // MetaLister is the OPTIONAL cheap-listing seam a SessionStore adapter may
@@ -138,6 +154,95 @@ type MetaLister interface {
 	// MetaList returns every stored session's picker metadata, reading only the
 	// last snapshot line of each (never the full conversation).
 	MetaList(ctx context.Context) ([]SessionMeta, error)
+}
+
+// ErrSessionMetadataPagingUnsupported is returned by a metadata pager whose
+// backend cannot enumerate bounded inventory pages. It is a permanent
+// capability posture, distinct from a transient storage failure.
+var ErrSessionMetadataPagingUnsupported = errors.New("port: store does not support session metadata paging")
+
+// SessionMetadataCursor is the structured store-side keyset position. Public
+// transports encode it as an opaque token; adapters compare ModifiedAt
+// descending and ID ascending.
+type SessionMetadataCursor struct {
+	ModifiedAt time.Time
+	ID         session.SessionID
+}
+
+// SessionMetadataPageRequest asks an optional pager for one bounded metadata
+// page. Ownership is part of the storage query so filtering happens before page
+// formation and TotalCount; a nil Owner with OwnershipEnforced selects no rows.
+type SessionMetadataPageRequest struct {
+	Limit             int
+	Cursor            *SessionMetadataCursor
+	OwnershipEnforced bool
+	Owner             *session.Principal
+}
+
+// SessionMetadataPage is one best-effort keyset page. Concurrent saves may move
+// rows to an earlier page; the response remains bounded and owner-filtered.
+type SessionMetadataPage struct {
+	Sessions   []SessionDiscoveryMeta
+	NextCursor *SessionMetadataCursor
+	TotalCount int
+}
+
+// SessionMetadataPager is the OPTIONAL bounded inventory seam. SessionStore
+// remains the required Save/Load pair. Implementations order rows by
+// (ModifiedAt DESC, ID ASC), filter ownership before paging/counting, return at
+// most request.Limit rows, and use strict keyset continuation after Cursor.
+type SessionMetadataPager interface {
+	PageSessionMetadata(ctx context.Context, request SessionMetadataPageRequest) (SessionMetadataPage, error)
+}
+
+// PaginateSessionMetadata applies the shared owner-filter, ordering, and keyset
+// rules to an adapter's metadata scan. It intentionally bounds only the returned
+// page; an adapter may scan its backend in v1.
+func PaginateSessionMetadata(rows []SessionDiscoveryMeta, request SessionMetadataPageRequest) SessionMetadataPage {
+	filtered := make([]SessionDiscoveryMeta, 0, len(rows))
+	for _, row := range rows {
+		if request.OwnershipEnforced && (request.Owner == nil || !request.Owner.SameIdentity(row.Owner)) {
+			continue
+		}
+		row.Owner = row.Owner.Clone()
+		if row.Relationship.BranchIndex != nil {
+			index := *row.Relationship.BranchIndex
+			row.Relationship.BranchIndex = &index
+		}
+		filtered = append(filtered, row)
+	}
+	sort.Slice(filtered, func(i, j int) bool {
+		if !filtered[i].ModifiedAt.Equal(filtered[j].ModifiedAt) {
+			return filtered[i].ModifiedAt.After(filtered[j].ModifiedAt)
+		}
+		return filtered[i].ID < filtered[j].ID
+	})
+
+	start := 0
+	if request.Cursor != nil {
+		start = len(filtered)
+		for i, row := range filtered {
+			if row.ModifiedAt.Before(request.Cursor.ModifiedAt) ||
+				(row.ModifiedAt.Equal(request.Cursor.ModifiedAt) && row.ID > request.Cursor.ID) {
+				start = i
+				break
+			}
+		}
+	}
+	limit := request.Limit
+	if limit < 0 {
+		limit = 0
+	}
+	end := start + limit
+	if end > len(filtered) {
+		end = len(filtered)
+	}
+	page := SessionMetadataPage{Sessions: filtered[start:end], TotalCount: len(filtered)}
+	if end < len(filtered) && end > start {
+		last := filtered[end-1]
+		page.NextCursor = &SessionMetadataCursor{ModifiedAt: last.ModifiedAt, ID: last.ID}
+	}
+	return page
 }
 
 // ErrPruneUnsupported is the port-level sentinel a PrunableStore's List or

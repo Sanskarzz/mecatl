@@ -21,6 +21,44 @@ mecatui -p "Summarize the failing tests in this repo" --workspace "$PWD"
 The seed fires once: a `/models` restart or `/clear` rebinds the session but never
 re-submits it. See the [`docs/tui.md` flags reference](https://github.com/stacklok/mecatl/blob/main/docs/tui.md#seeding-an-initial-prompt) for the full details.
 
+## Continue a chat when mecatui starts
+
+Pass `--resume SESSION_ID` to open one exact owned main chat, or `--resume-latest`
+to open the newest eligible one. Both selectors work when mecatui hosts its embedded
+server and in `mecatui connect` mode, and cannot be combined:
+
+```sh
+mecatui --resume 01JOPAQUESESSIONID
+mecatui connect 127.0.0.1:8080 --resume-latest
+```
+
+mecatui loads the authoritative stored transcript and adopts that same chat; it does
+not create a throwaway session. The chat keeps its stored workspace, mode, model, and
+capabilities. Latest skips active or awaiting chats, scheduled and child runs, unknown
+rows, and rows without a complete transcript. An exact selector reports why the chosen
+row cannot be continued.
+
+The first new prompt still goes through the server's atomic attachment and lease checks.
+If that fails, the prior transcript remains read-only and no fallback chat is created:
+press `r` to retry the preserved prompt, or `esc` to go Back and edit it. You can combine
+a resume selector with `--prompt` or `--prompt-file`; mecatui adopts the old transcript
+first, then sends the seed exactly once as the next turn.
+
+While mecatui is open, `/session` then `c` is the quickest way to copy the exact active
+ID. If you quit normally instead, mecatui restores the terminal and then prints one stable
+line to stderr:
+
+```text
+mecatui: final-session-id="01JOPAQUESESSIONID"
+```
+
+Everything after `=` is a JSON string. Decode it with a JSON decoder to recover the
+byte-exact final active ID, including after you continued another chat, changed model or
+effort, or switched worktrees. Save that ID and pass it to `--resume` next time. The line
+is deliberately absent if no session was established, startup/the TUI failed, or a signal
+interrupted or forced the exit; normal stdout remains available to scripts. See the
+[`docs/tui.md` startup continuation reference](https://github.com/stacklok/mecatl/blob/main/docs/tui.md#continue-a-chat-at-startup).
+
 ## Changing completed-trajectory learning (`/learning`)
 
 `/learning` cycles the operator setting through **Off → Review → Auto** in
@@ -70,7 +108,11 @@ If your current model doesn't support reasoning effort, the picker warns you tha
 
 Every session persists to disk as append-only JSONL — the conversation, the tool-call history, and the event timeline — under a per-workspace directory, mode `0700` (owner-only; it stores the raw conversation in plaintext). Quit mecatui and come back later and your work is still there.
 
-`/sessions` opens a picker over past sessions in the current workspace. Each row shows a relative timestamp, the turn count, a title (taken from your first prompt, or the session id if there isn't one yet), and the model it ran on. Opening one replays its durable history — this is a pure read of what already happened, not a live reconnect, so a session that's still `running` or parked awaiting your approval can't be opened this way (mecatui tells you so rather than showing you a partial, misleading transcript).
+`/sessions` opens a searchable inventory in four tabs: **Chats**, **Scheduled runs**, **Child runs**, and **Other**. Unknown legacy or custom rows appear under Other instead of being mislabeled as children. Rows show state, time, turns, title, model, and a short digest handle; the chat you are currently using is marked **`[current]`**. The search applies to the selected tab and matches the row's title, model, workspace, digest, and available relationship details.
+
+The main header uses that same compact digest instead of exposing the full opaque ID. Type `/session` to see the active chat's safely quoted full ID and metadata (title, state, workspace, known timestamps, provider, and model), then press `c` to copy the exact ID. Clipboard failure or a session switch is reported rather than shown as a successful stale copy.
+
+Press `enter` on a Chat to **Continue** it when the server says it is publicly continuable. mecatui loads the authoritative snapshot transcript first, then makes that chat the active prompt target. Scheduled, Child, and inspect-capable Other runs are normally **Inspect** instead: their same authoritative snapshot transcript opens read-only, without changing your active chat. This is deliberately non-destructive — `esc` is **Back** to the inventory. If a transcript cannot be loaded completely, mecatui does not continue it; the error view offers **`r` Retry** or **Back**. The durable event log may help live delivery catch-up, but it is not used as the conversation transcript or as proof that a transcript is complete.
 
 ## Suspending and quitting like a terminal app
 

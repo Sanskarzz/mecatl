@@ -126,15 +126,15 @@ type Deps struct {
 	// (issue #245 Phase 2); nil disables it (the overlay is honestly absent). It is
 	// the lister the picker calls to enumerate stored sessions. Unlike the
 	// caps-gated overlays it is NOT gated on a ServerCapabilities bit — the picker
-	// is available whenever a lister + replayer are wired (a no-FS/cloud server
-	// with a durable SessionStore still has stored sessions to list).
+	// is available whenever a lister + authoritative transcript loader are wired
+	// (a no-FS/cloud server with a durable SessionStore still has stored sessions).
 	Sessions client.SessionLister
-	// Replayer is the durable-event-log replay surface for the /sessions transcript
-	// viewer (issue #245 Phase 2/3, cloud-native Phase 3a read-back); nil disables
-	// the /sessions overlay (the picker needs BOTH a lister AND a replayer — gating
-	// on both keeps the overlay honest: a lister without a replayer could list
-	// sessions it cannot open). The ui holds the interface (not a *Client) so it is
-	// injectable with a fake for offline tests.
+	// Transcript is the authoritative snapshot-derived conversation surface used
+	// by /sessions for both continuation and read-only inspection. Event replay is
+	// optional activity and never substitutes for this seam.
+	Transcript client.SessionTranscripter
+	// Replayer is the optional durable-event-log activity surface used by live
+	// delivery catch-up. It never attests conversation completeness.
 	Replayer client.SessionReplayer
 	// LiveStream is the LIVE per-session event feed (ADR 0075 Scenario 5): the server
 	// pushes fire-result delivery notes for the active session as they occur. The ui
@@ -175,6 +175,10 @@ type Deps struct {
 	Workspace string
 	Mode      string
 	Model     string
+	// Resume is a statically validated existing chat selected before Bubble Tea
+	// starts. Its authoritative transcript is adopted without CreateSession; nil
+	// preserves the new-session default.
+	Resume *client.ResumeSelection
 	// InitialPrompt is a CLI-supplied seed prompt auto-submitted once the first
 	// session is ready (the equivalent of typing the prompt and pressing enter).
 	// Empty = today's behavior (no seed). Cleared after the first use so a
@@ -315,6 +319,13 @@ type Model struct {
 
 	phase     phase
 	sessionID string
+	// sessionDetailsOpen is the read-only /session surface. The metadata fields
+	// below are refreshed from the current session snapshot; zero timestamps are
+	// rendered as unknown rather than guessed.
+	sessionDetailsOpen bool
+	sessionState       string
+	sessionCreatedAt   int64
+	sessionModifiedAt  int64
 	// sessionTitle is the session's human label for the terminal window/tab title
 	// (the "<title> — …" head of windowTitle). Set-once from the first genuine
 	// user prompt (submitPrompt), adopted on a session switch (switchToSession
@@ -578,6 +589,14 @@ type Model struct {
 	// re-fires. Empty = no seed (the default; today's behavior).
 	pendingInitialPrompt string
 
+	// Startup-adopted chats remain protected until their first prompt reaches the
+	// server stream. A pre-SessionInit failure restores the authoritative transcript
+	// as a read-only retry/back view; no fallback session is ever created.
+	startupAdopted            bool
+	startupFirstPromptPending bool
+	startupRunEntryFailed     bool
+	startupRetryPrompt        string
+
 	// restartFailed is true while a /models restart-now handoff's re-create FAILED and
 	// the app is in the RECOVERABLE no-session state (phaseIdle, sessionID==""). It is
 	// NOT phaseFatal: a transient blip on a deliberate model switch must leave a usable
@@ -772,7 +791,7 @@ func New(deps Deps) Model {
 	// high-contrast block (luminance-derived foreground), legible on dark and light
 	// themes alike — styleSelection reads it via m.deps.Theme.Style("selection").
 
-	return Model{
+	m := Model{
 		deps:  deps,
 		keys:  keys,
 		rend:  newRenderer(th, keyMarkings(keys)),
@@ -799,6 +818,24 @@ func New(deps Deps) Model {
 		// env-based) so the header hot path reads a bool, never os.Environ().
 		emojiOK: emojiCapable(),
 	}
+	if resume := deps.Resume; resume != nil {
+		m.phase = phaseIdle
+		m.sessionID = resume.Row.ID
+		m.sessionTitle = resume.Row.Title
+		m.sessionState = resume.Snapshot.State
+		m.sessionCreatedAt = resume.Snapshot.CreatedAt
+		m.sessionModifiedAt = resume.Row.ModifiedAt
+		m.activeWorkspace = resume.Snapshot.Workspace
+		m.activeMode = client.ModeString(client.ModeFromString(resume.Snapshot.Mode))
+		m.effectiveModel = resume.Snapshot.ResolvedModel
+		m.caps = resume.Snapshot.Capabilities
+		m.conv = conversationFromTranscript(resume.Transcript.Messages)
+		m.startupAdopted = true
+		m.restartedThisRun = true
+		m.statusMsg = "continuing chat " + sanitizeTerminal(resume.Row.Title) + " — type to add a turn"
+		m.refreshView()
+	}
+	return m
 }
 
 // recordFileChange folds a workspace path touched by a file-mutating tool into
@@ -928,6 +965,10 @@ func (m Model) resetSession() Model {
 	return m
 }
 
+// startupResumeReadyMsg starts post-adoption work only after Bubble Tea owns the
+// model, preserving transcript-before-seed ordering.
+type startupResumeReadyMsg struct{}
+
 // Init starts the spinner and kicks off connect.
 //
 // Connect SEQUENCING (§4 key-removed safety): when a model lister is wired, it
@@ -940,6 +981,9 @@ func (m Model) resetSession() Model {
 // fallback leg. With no lister wired (old server / persistence off) it fires
 // CreateSession directly (the historical path, with an empty selection).
 func (m Model) Init() tea.Cmd {
+	if m.deps.Resume != nil {
+		return tea.Batch(m.sp.Tick, func() tea.Msg { return startupResumeReadyMsg{} })
+	}
 	if m.deps.Models != nil {
 		return tea.Batch(m.sp.Tick, client.ListModelsCmd(m.deps.Ctx, m.deps.Models))
 	}

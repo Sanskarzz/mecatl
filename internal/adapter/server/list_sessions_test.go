@@ -485,6 +485,10 @@ func (f *failingListStore) List(_ context.Context) ([]port.StoredSession, error)
 	return nil, f.listErr
 }
 
+func (f *failingListStore) PageSessionMetadata(context.Context, port.SessionMetadataPageRequest) (port.SessionMetadataPage, error) {
+	return port.SessionMetadataPage{}, f.listErr
+}
+
 func (f *failingListStore) Delete(ctx context.Context, id session.SessionID) error {
 	if ps, ok := f.SessionStore.(port.PrunableStore); ok {
 		return ps.Delete(ctx, id)
@@ -587,5 +591,26 @@ func TestListSessionsHTTPMapsListErrorTo500(t *testing.T) {
 	defer srv.Close()
 	if code := httpGet(t, srv, "/v1/sessions", nil); code != http.StatusInternalServerError {
 		t.Fatalf("GET /v1/sessions status = %d, want 500 (ErrInternal → Internal Server Error)", code)
+	}
+}
+
+type corruptSessionIDStore struct {
+	port.SessionStore
+	sess *session.Session
+}
+
+func (s *corruptSessionIDStore) Load(context.Context, session.SessionID) (*session.Session, error) {
+	return s.sess, nil
+}
+
+// TestGetSessionRejectsInvalidUTF8IDBeforeProtoMapping pins opaque identity:
+// malformed persisted bytes must not be repaired into a different clipboard handle.
+func TestGetSessionRejectsInvalidUTF8IDBeforeProtoMapping(t *testing.T) {
+	inner := memstore.New()
+	corrupt := session.New("bad\xffid", session.ModeDefault, "/workspace", session.Limits{}, time.Unix(1, 0))
+	svc := listSessionsServiceOverStore(t, &corruptSessionIDStore{SessionStore: inner, sess: corrupt})
+
+	if _, err := svc.GetSession(context.Background(), "lookup-id"); !errors.Is(err, server.ErrInternal) {
+		t.Fatalf("GetSession invalid UTF-8 id error = %v, want ErrInternal", err)
 	}
 }

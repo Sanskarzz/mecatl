@@ -137,6 +137,49 @@ closed.
 > --subagent-ask-reviewer …` and point `mecatui connect` at it. The `--model-slot
 > ask-reviewer=…` model slot is unaffected.
 
+### Continue a chat at startup
+
+`--resume SESSION_ID` adopts an existing owned main chat before Bubble Tea starts.
+`--resume-latest` instead chooses the newest eligible owned main chat whose authoritative
+snapshot transcript is available. Both flags work with the embedded server and with
+`mecatui connect`, and they are mutually exclusive:
+
+```sh
+mecatui --resume 01JOPAQUESESSIONID
+mecatui connect 127.0.0.1:8080 --resume-latest
+```
+
+Adoption does not create a temporary session: mecatui loads and displays the stored
+transcript, workspace, mode, model, and capabilities, then targets the same opaque ID.
+`--workspace` and `--mode` therefore describe only a newly created session; an adopted
+chat keeps its stored values. Scheduled runs, child runs, unknown legacy rows, chats
+awaiting approval, active chats, and rows without a complete authoritative transcript
+are not eligible. Exact `--resume` reports why its row cannot be continued;
+`--resume-latest` skips ineligible or unreadable rows and tries the next one.
+
+The read-only startup lookup does not reopen, recover, abandon, or acquire a lease.
+Those checks remain atomic at the ordinary run-entry funnel when the first new prompt
+is sent. If that attachment fails, the stored transcript remains visible and no
+fallback session is created: press `r` to retry the preserved prompt or `esc` to go
+Back and edit it. Combining a resume selector with `--prompt` or `--prompt-file`
+adopts the transcript first and then submits the seed exactly once as the next turn.
+
+On an ordinary clean exit, after the terminal has left the alternate screen and cleanup
+has completed, mecatui writes exactly one handoff line to **stderr**:
+
+```text
+mecatui: final-session-id="01JOPAQUESESSIONID"
+```
+
+The value after `=` is a JSON string, not display text: a JSON decoder recovers the
+byte-exact valid-UTF-8 ID even when it contains spaces, quotes, or line separators. The ID
+is the final active chat after any startup continuation, `/sessions` continuation, model
+carryover, effort fork, or worktree switch—not necessarily the ID created at startup. The
+line is absent when no session was established, startup or the TUI failed, or a signal
+interrupted/forced exit. stdout is unchanged. This makes the normal workflow: copy the ID
+inside `/session` with `c` while the TUI is open, or retain this stderr line and pass its
+decoded value to `--resume` later.
+
 ### Seeding an initial prompt
 
 `-p`/`--prompt` (or `--prompt-file` for a longer body) launches the session with
@@ -158,8 +201,10 @@ a short directive with a longer brief. The seed fires ONCE: a `/models` restart 
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--workspace` | cwd | absolute session workspace root |
-| `--mode` | `default` | permission posture: `default` \| `plan` \| `accept-edits` |
+| `--workspace` | cwd | absolute workspace root for a new session; an adopted chat keeps its stored workspace |
+| `--mode` | `default` | permission posture for a new session: `default` \| `plan` \| `accept-edits`; an adopted chat keeps its stored mode |
+| `--resume` | – | continue the owned main chat with this exact opaque session ID; loads its authoritative transcript without creating a throwaway session; mutually exclusive with `--resume-latest` |
+| `--resume-latest` | off | continue the newest eligible owned main chat with an available authoritative transcript; excludes active, awaiting, scheduled, child, and unknown sessions; mutually exclusive with `--resume` |
 | `-p` / `--prompt` | – | seed prompt auto-submitted once the first session is ready (the CLI task to launch with). The TUI stays interactive for follow-ups; this is NOT a one-shot. Both `--prompt` and `--prompt-file` may be given (literal first, joined by a blank line). Fires ONCE — a `/models` restart or `/clear` never re-submits it |
 | `--prompt-file` | – | path to a file whose contents are the seed prompt body. Read at startup (fail-fast on unreadable). Joined after `--prompt` when both are given. Same once-only semantics as `--prompt` |
 | `--theme` | `aztec` | theme name (also `MECATUI_THEME`) |
@@ -242,7 +287,10 @@ Exiting mecatui (double Ctrl+C on an empty prompt, or an OS `SIGINT`/`SIGTERM`)
 runs a **bounded** graceful shutdown — it cannot hang indefinitely on an in-flight
 scheduled fire, a stuck MCP server, or a wedged gRPC stream (issue #388). The first
 signal quits Bubble Tea and starts cleanup; a **second** signal during cleanup forces
-an immediate hard exit (`os.Exit(130)`).
+an immediate hard exit (`os.Exit(130)`). Signal-driven exits print no final-session handoff.
+After an ordinary clean keyboard exit, mecatui first restores the normal screen and finishes
+cleanup, then emits the JSON-safe `mecatui: final-session-id=<JSON string>` line documented
+under [Continue a chat at startup](#continue-a-chat-at-startup).
 
 Cleanup is bounded at each layer (mirroring the `mecak8s` bounded-shutdown
 precedent), worst case ≈ 45s:
@@ -1011,7 +1059,11 @@ whether the input is focused or blurred. The panel carries a tinted top-pad row 
 the top border, and one blank spacer row sits above the panel so it isn't jammed against the
 conversation history.
 
-**Header bar.** `mecatui · session <id> · <model> · mode <mode> · <server>`.
+**Header bar.** `mecatui · session #<digest> · <model> · mode <mode> · <server>`.
+The session segment uses the same terminal-safe eight-character SHA-256 digest as the
+`/sessions` inventory; it never prints the full opaque ID. Type **`/session`** for the
+safe quoted full ID and active-session metadata, or press **`c`** there to copy the exact
+ID through the clipboard.
 The **mode segment** shows the server-confirmed permission posture for the current session;
 when a mid-turn switch has been deferred it shows `mode <target> pending` until the retry
 succeeds at the next prompt boundary. The **model segment** shows the EFFECTIVE model the server resolved THIS session to —
@@ -1078,12 +1130,51 @@ prompt preview, selector, mode, mutating, singleton, misfire, timezone,
 max_fires) + the durable state (enabled, fire_count, next/last fire,
 last_fire_session) + the fire records (id, fired_at, stop, err); `esc` returns
 to the panel. In the inspect sub-view the fire records are cursor-navigable
-(`↑`/`↓`, clamped): **`enter`** or **`t`** on a fire jumps straight to that
-fire's read-only transcript (issue #235) — a fire is just a top-level
-`sched--` session, so this reuses the `/sessions` replay handoff. The
-jump-to-fire footer hint (`↑↓: select fire  enter/t: open transcript  esc:
-back`) appears only when a session replayer is wired; a fire whose
-`SessionID` is empty reports "fire has no session id" and stays in inspect.
+(`↑`/`↓`, clamped): **`enter`** or **`t`** on a fire opens that fire's
+read-only authoritative transcript. The jump-to-fire footer hint (`↑↓: select
+fire  enter/t: open transcript  esc: back`) appears only when the transcript
+client is wired; a fire whose `SessionID` is empty reports "fire has no session
+id" and stays in inspect.
+
+**`/session` (active session details).** This read-only overlay shows the current
+chat's safely quoted full opaque ID, title, lifecycle state, workspace, known creation
+and modification timestamps, provider, and model. The header intentionally shows only
+the compact digest. Press **`c`** to copy the exact full ID byte-for-byte; mecatui reports
+clipboard failure or a session change instead of claiming a stale copy. `esc` closes it.
+
+**`/sessions` (session continuity).** The session inventory has four tabs:
+**Chats**, **Scheduled runs**, **Child runs**, and **Other**. The Other tab keeps
+unknown legacy/custom rows inspect-only without mislabeling them as delegation children.
+`tab` switches tabs; the
+search box filters the current tab. Search matches the title, full session ID,
+its terminal-safe digest handle, model, workspace, and the available
+relationship metadata (parent/call, schedule/origin, team/member). This keeps
+scheduled fires and delegation children discoverable without making their IDs
+part of the UI contract.
+
+Each row shows a state badge, relative modification time, turn count, title,
+digest handle, and model. The active chat is explicitly marked **`[current]`**;
+a team member row also identifies its member. The digest is a lowercase SHA-256
+prefix (`#…`): it starts at eight hex characters and expands only if another
+visible row collides, while the full opaque ID remains what the client sends
+back to the server.
+
+Pressing `enter` follows server-authored capabilities. A public Chat is
+**Continue**: mecatui first loads the authoritative snapshot-derived
+conversation, then rebinds the prompt to that session so the next text adds a
+turn. Scheduled, Child, and inspect-capable Other runs are normally **Inspect**: their authoritative
+snapshot transcript is displayed read-only, and the active chat is left
+unchanged. A row with neither capability explains why it is unavailable (for
+example, awaiting approval, active elsewhere, unavailable transcript, or
+unavailable environment).
+
+The snapshot transcript is the conversation source of truth. Durable event
+replay may support live delivery catch-up, but is not used to establish a
+conversation's completeness or to reconstruct it for Continue/Inspect. An
+inspection is non-destructive: `esc` is **Back** to the inventory, never a
+session reset or rebind. If the authoritative load fails or is incomplete,
+continuation stays disabled and the transcript view offers **`r` Retry** and
+**Back**.
 
 **Create form (Phase 3b).** The **`c`** action key opens an in-overlay Create
 form (peer of the inspect/confirm sub-views): fields for name, prompt, trigger
@@ -1099,26 +1190,6 @@ arrival). `esc` returns to the panel without creating. The form is a
 common-path authoring surface — the REST/gRPC `CreateSchedule` API (and the
 in-chat `Schedule` tool) covers the full flag surface (provider/model, mode,
 max-fires, misfire, timezone, singleton, limits); the form keeps it simple.
-
-**Row format.** Each `/sessions` picker row renders as
-`<state-badge> <relative-time> <turns>t <label> (<model-id>)`, where `<label>`
-is the session **title** (seeded once from the first genuine user prompt, clamped
-to 120 runes) and falls back to the session id when no title is set. The
-confirm card keeps the session id (precise identification) and shows the title
-when present. A session with no genuine prompt yet (e.g. a freshly-created,
-still-empty session, which is also excluded from the list) shows the id.
-
-**State gate (open-a-session).** The `/sessions` picker and the schedule
-jump-to-fire both open a session via the replay RPC (`StreamSessionEvents`),
-which is a **pure durable-log read with no live-tail** — it streams what has
-been appended so far and ends at the log's current tail. Opening a session
-that is currently **`running`** or **`awaiting`** (parked on a permission ask)
-would therefore show a *partial* transcript with no terminal result, so the
-UI **blocks** it with a "session <id> is currently <state> — cannot open
-read-only while active" notice. This is a best-effort client-side gate: a
-session that transitions to running between the `ListSessions` call and the
-open will still replay successfully (a partial transcript ending at the log's
-current tail).
 
 **v1 limits.** The overlay lists/inspects/manages schedules and creates them
 in-overlay (the `c` Create form + NL→cron compiler), but the gRPC/REST API
