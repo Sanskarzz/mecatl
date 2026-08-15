@@ -171,7 +171,7 @@ func TestBuildSharesLearningAdmissionAcrossSharedAndSelectedProviderEngines(t *t
 			case providerOpenAI:
 				turns = []mockllm.Turn{mockllm.TextTurn("default completion"), mockllm.TextTurn(`{"kind":"abstained"}`)}
 			case providerOpenRouter:
-				turns = []mockllm.Turn{mockllm.TextTurn("selected completion 1"), mockllm.TextTurn("selected completion 2"), mockllm.TextTurn(`{"kind":"abstained"}`)}
+				turns = []mockllm.Turn{mockllm.TextTurn("selected completion 1"), mockllm.TextTurn(`{"kind":"abstained"}`), mockllm.TextTurn("selected completion 2"), mockllm.TextTurn(`{"kind":"abstained"}`)}
 			default:
 				turns = []mockllm.Turn{mockllm.TextTurn("unused")}
 			}
@@ -220,12 +220,74 @@ func TestBuildSharesLearningAdmissionAcrossSharedAndSelectedProviderEngines(t *t
 	}
 
 	runSelected("Remember that I prefer short examples")
-	if got := providers[providerOpenRouter].Calls(); got != 1 {
-		t.Fatalf("selected provider calls after globally skipped completion = %d, want 1 (no reviewer call)", got)
+	if got := waitCalls(providers[providerOpenRouter], 2); got != 2 {
+		t.Fatalf("selected provider calls after hard trigger = %d, want 2 (run + review)", got)
 	}
 	runSelected("Remember that I prefer Go examples")
-	if got := waitCalls(providers[providerOpenRouter], 3); got != 3 {
-		t.Fatalf("selected provider calls after next global admission = %d, want 3 (two runs + one review)", got)
+	if got := waitCalls(providers[providerOpenRouter], 4); got != 4 {
+		t.Fatalf("selected provider calls after second hard trigger = %d, want 4 (two runs + two reviews)", got)
+	}
+}
+
+func TestStartupProjectOffKeepsAlternateRootAutomaticAssets(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		max  int
+		want int
+	}{{"finite", 2, 2}, {"zero disables", 0, 1}} {
+		t.Run(tc.name, func(t *testing.T) {
+			startupRoot, alternateRoot := t.TempDir(), t.TempDir()
+			if err := os.MkdirAll(filepath.Join(startupRoot, ".mecatl"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(startupRoot, ".mecatl", "settings.yaml"), []byte("learning:\n  mode: off\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			operator := filepath.Join(t.TempDir(), "settings.yaml")
+			body := fmt.Sprintf("models:\n  default_provider: openai\nlearning:\n  mode: auto\n  automatic:\n    cooldown: 0s\n    max_reflections: %d\n", tc.max)
+			if err := os.WriteFile(operator, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			provider := mockllm.New(mockllm.TextTurn("completed"), mockllm.TextTurn(`{"kind":"abstained","candidates":[]}`))
+			built, err := Build(context.Background(), Config{
+				Model: "model", DefaultProvider: providerOpenAI, Workspace: startupRoot, TrustProject: true, NoSoul: true,
+				PermissionConfigs: []string{operator}, PermissionsConventional: true,
+				UserModelDir: t.TempDir(), envDetector: fakeEnv(map[string]string{"OPENAI_API_KEY": "test"}), liveModelHTTPClient: offlineHTTPClient(),
+				providerConstructor: func(_ Config, id, _, _ string) port.LLMProvider {
+					if id == providerOpenAI {
+						return provider
+					}
+					return mockllm.New(mockllm.TextTurn("unused"))
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer built.Close()
+			sess, err := built.Service.CreateSession(context.Background(), alternateRoot, session.ModeDefault, defaultLimits())
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, err := built.Service.StartRun(context.Background(), sess.ID, "Remember that I prefer concise answers")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = drainRun(run)
+			if tc.want == 2 {
+				deadline := time.Now().Add(time.Second)
+				for provider.Calls() < 2 && time.Now().Before(deadline) {
+					time.Sleep(time.Millisecond)
+				}
+				if got := provider.Calls(); got != 2 {
+					t.Fatalf("provider calls = %d, want run + alternate-root reflection", got)
+				}
+			} else {
+				time.Sleep(50 * time.Millisecond)
+				if got := provider.Calls(); got != 1 {
+					t.Fatalf("provider calls = %d, want run only under zero limit", got)
+				}
+			}
+		})
 	}
 }
 
@@ -412,6 +474,7 @@ func TestServiceExplicitReflectionReceiptsMatchReviewAndAutoPolicy(t *testing.T)
 			workspace := t.TempDir()
 			provider := mockllm.New(
 				mockllm.TextTurn("completed"),
+				mockllm.TextTurn(`{"kind":"proposed","candidates":[{"kind":"operator_fact","key":"user/output","value":"concise","evidence":["m:0"]}]}`),
 				mockllm.TextTurn(`{"kind":"proposed","candidates":[{"kind":"operator_fact","key":"user/output","value":"concise","evidence":["m:0"]}]}`),
 			)
 			cfg := Config{
