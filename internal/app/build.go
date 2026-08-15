@@ -35,12 +35,14 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
+	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
 	"github.com/stacklok/mecatl/engine/adapter/memorypromotion"
 	"github.com/stacklok/mecatl/engine/adapter/memstore"
 	"github.com/stacklok/mecatl/engine/adapter/nofs"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
 	"github.com/stacklok/mecatl/engine/adapter/permstore"
 	refsearch "github.com/stacklok/mecatl/engine/adapter/search"
+	coreskillfs "github.com/stacklok/mecatl/engine/adapter/skillfs"
 	"github.com/stacklok/mecatl/engine/adapter/wallclock"
 	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/governance"
@@ -73,6 +75,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/scheduler"
 	"github.com/stacklok/mecatl/internal/adapter/server"
 	"github.com/stacklok/mecatl/internal/adapter/skills"
+	"github.com/stacklok/mecatl/internal/adapter/skillstore"
 	"github.com/stacklok/mecatl/internal/adapter/store/jsonlstore"
 	"github.com/stacklok/mecatl/internal/adapter/tokenizer"
 	"github.com/stacklok/mecatl/internal/adapter/toolhivellm"
@@ -503,6 +506,9 @@ type Config struct {
 	// the zero/default. The legacy UserModelReview flag projects to Auto for one
 	// compatibility window; it now follows the same staged/convergent path.
 	LearningMode learning.Mode
+	// SkillEvaluator evaluates evidence-backed procedure drafts. nil installs the
+	// conservative abstaining evaluator; only PASS can activate in auto mode.
+	SkillEvaluator learning.SkillEvaluator
 	// operatorLearningMode retains the pre-project ceiling so per-session engines
 	// can apply their own workspace's tighten-only project setting.
 	operatorLearningMode learning.Mode
@@ -1619,6 +1625,77 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		// snapshot (like Agents), not a live lister. nil/empty when skills are
 		// disabled.
 		Skills: skillSnapshot(skillValues(assets.skills, assets.skillIndex)),
+		LiveSkills: func(ctx context.Context) []*mecatlv1.SkillInfo {
+			if assets.liveSkills == nil {
+				return skillSnapshot(skillValues(assets.skills, assets.skillIndex))
+			}
+			view := assets.liveSkills.View(learnedSkillPartitions(ctx, "", cfg)...)
+			metas := view.Metas
+			out := make([]*mecatlv1.SkillInfo, 0, len(metas))
+			for _, meta := range metas {
+				info := &mecatlv1.SkillInfo{Name: session.ToValidUTF8(meta.Name), Description: session.ToValidUTF8(meta.Description)}
+				if meta.Metadata["mecatl.agent_owned"] == "true" {
+					info.AgentOwned = true
+					info.OwnerAgent = session.ToValidUTF8(meta.Metadata["mecatl.owner_agent"])
+					info.ActiveVersion = session.ToValidUTF8(meta.Metadata["mecatl.active_version"])
+				}
+				out = append(out, info)
+			}
+			return out
+		},
+		LearnedSkills: assets.learnedSkills,
+		PublishLearnedSkills: func(ctx context.Context, partition learning.SkillPartition) error {
+			if assets.liveSkills == nil || assets.learnedSkills == nil {
+				return nil
+			}
+			partitions := []learning.SkillPartition{{Principal: partition.Principal}}
+			if partition.Project != "" {
+				partitions = append(partitions, partition)
+			}
+			return (learnedSkillPublisher{repository: assets.learnedSkills, partitions: partitions, owner: "", catalog: assets.liveSkills}).Publish(ctx)
+		},
+		BeginSkillPublication: func() func() {
+			if assets.skillPublication == nil {
+				return func() {}
+			}
+			assets.skillPublication.mu.Lock()
+			return assets.skillPublication.mu.Unlock
+		},
+		RevokeLearnedSkill: func(partition learning.SkillPartition, name string) {
+			if assets.liveSkills != nil {
+				assets.liveSkills.RevokePartition(partition, name)
+			}
+		},
+		LiveSkillGeneration: func(partition learning.SkillPartition) uint64 {
+			if assets.liveSkills == nil {
+				return 0
+			}
+			parts := []learning.SkillPartition{{Principal: partition.Principal}}
+			if partition.Project != "" {
+				parts = append(parts, partition)
+			}
+			return assets.liveSkills.View(parts...).Generation
+		},
+		SkillActionAvailable: func(partition learning.SkillPartition, owner string) (bool, string) {
+			if assets.liveSkills == nil || assets.learnedSkills == nil {
+				return false, "learned-skill publication target is unavailable"
+			}
+			if owner == "" {
+				return false, "agent identity is required for this publication target"
+			}
+			if partition.Project != "" && (partition.Project != cfg.Workspace || !projectIngestionAdmittedForRoot(cfg, partition.Project)) {
+				return false, "project publication requires the exact trusted launch root"
+			}
+			return true, ""
+		},
+		LearnedSkillNameAvailable: func(name string) bool {
+			for _, meta := range assets.skills {
+				if meta.Name == name {
+					return false
+				}
+			}
+			return true
+		},
 		// GetSoul snapshot: re-run the same selection policy (selectSoulSource) once
 		// here and project the WINNING soul's content + meta into the proto form. The
 		// soul is selected deterministically at build time (USER-wins precedence, trust
@@ -1673,7 +1750,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 				// provider's own default above; cfg.Model belongs to reg.Default().
 				reflectionCfg.Model = cfg.Model
 			}
-			explicitReflection := buildExplicitReflectionObserver(reflectionCfg, reflectionProvider, reflectionCfg.Model, assets.userModelStore, assets.memStore, assets.reflectionRepository, assets.reflectionCoordinator)
+			explicitReflection := buildExplicitReflectionObserver(reflectionCfg, reflectionProvider, reflectionCfg.Model, assets.userModelStore, assets.memStore, assets.reflectionRepository, assets.reflectionCoordinator, buildProcedureProcessor(reflectionCfg, assets))
 			if explicitReflection == nil {
 				return server.ReflectionReceipt{}, errors.New("reflection is not configured")
 			}
@@ -1698,6 +1775,37 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		PromoteProposal: func(ctx context.Context, part learning.ProposalPartition, id learning.ProposalID, version learning.ProposalVersion, approved bool) (learning.ProposalRecord, error) {
 			if cfg.OwnershipEnforced && session.PrincipalFromContext(ctx) == nil {
 				return learning.ProposalRecord{}, server.ErrFailedPrecondition
+			}
+			current, found, err := assets.reflectionRepository.Get(ctx, part, id)
+			if err != nil {
+				return learning.ProposalRecord{}, err
+			}
+			if !found {
+				return learning.ProposalRecord{}, learning.ErrProposalNotFound
+			}
+			if current.Version != version {
+				return learning.ProposalRecord{}, learning.ErrProposalVersionConflict
+			}
+			if current.Candidate.Kind == learning.CandidateProcedure {
+				procedureCfg := cfg
+				if procedureCfg.LearningMode == learning.Off {
+					procedureCfg.LearningMode = learning.Review
+				}
+				processor := buildProcedureProcessor(procedureCfg, assets)
+				if processor == nil {
+					return learning.ProposalRecord{}, server.ErrFailedPrecondition
+				}
+				if err := processor(ctx, current, learning.Review); err != nil {
+					return learning.ProposalRecord{}, err
+				}
+				updated, ok, err := assets.reflectionRepository.Get(ctx, part, id)
+				if err != nil {
+					return learning.ProposalRecord{}, err
+				}
+				if !ok {
+					return learning.ProposalRecord{}, learning.ErrProposalNotFound
+				}
+				return updated, nil
 			}
 			ctx = memory.WithWorkspace(ctx, part.Project)
 			store := assets.userModelStore
@@ -2196,14 +2304,20 @@ func sessionEngineFactory(
 		// Subagent per-def inline managers + the client mgr); assets.globalMgr is
 		// NEVER in it — Build owns its lifecycle (a per-session CloseSession must
 		// never tear down MCP for every other session).
+		// Caller-scoped lazy hydration: rebuild this authenticated session's global
+		// and admitted project generations from durable state before binding the
+		// Skill tool. A failed authoritative read clears only these partitions.
+		skillPartitions := hydrateLearnedSkillPartitions(ctx, cfg, assets, workspace)
+
 		cat, closeFn := assembleCatalog(ctx, cfg, reg, store, hooks, &assets, catalogSession{
-			provider:   resolvedProvider,
-			providerID: resolvedProviderID,
-			model:      resolvedModel,
-			clientMgr:  mgr,
-			narrate:    false,
-			noFS:       noFS,
-			mode:       mode,
+			provider:        resolvedProvider,
+			providerID:      resolvedProviderID,
+			model:           resolvedModel,
+			clientMgr:       mgr,
+			narrate:         false,
+			noFS:            noFS,
+			mode:            mode,
+			skillPartitions: skillPartitions,
 		})
 
 		// Identical to the main engine in every NON-provider Deps field except the
@@ -2217,7 +2331,7 @@ func sessionEngineFactory(
 		deps := engineDepsForProvider(cfg, resolvedProvider, resolvedModel, windowFn, store, policy, hooks, mcpProvider, instructions)
 		attachOperatorProfile(&deps, assets.userModelStore)
 		deps.LearningMode = learningCfg.LearningMode
-		deps.LearningObserver = buildReflectionObserver(learningCfg, resolvedProvider, learningCfg.Model, assets.userModelStore, assets.memStore, assets.reflectionRepository, assets.reflectionCoordinator, assets.learningAdmission)
+		deps.LearningObserver = buildReflectionObserver(learningCfg, resolvedProvider, learningCfg.Model, assets.userModelStore, assets.memStore, assets.reflectionRepository, assets.reflectionCoordinator, assets.learningAdmission, buildProcedureProcessor(learningCfg, assets))
 		deps.Catalog = cat
 		// Fire-result delivery drain (ADR 0075): the per-session engine's Step 2a
 		// drain reads the SAME durable queue as the main engine. nil (no
@@ -3013,7 +3127,7 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 	deps := baseEngineDeps(cfg, reg, provider, store, sharedPolicy, mainHooks, mcpProvider, instructions)
 	attachOperatorProfile(&deps, userModelStore)
 	deps.LearningMode = cfg.LearningMode
-	deps.LearningObserver = buildReflectionObserver(cfg, provider, cfg.Model, userModelStore, memStore, assets.reflectionRepository, assets.reflectionCoordinator, learningAdmission)
+	deps.LearningObserver = buildReflectionObserver(cfg, provider, cfg.Model, userModelStore, memStore, assets.reflectionRepository, assets.reflectionCoordinator, learningAdmission, buildProcedureProcessor(cfg, assets))
 	deps.Catalog = cat
 	// MODEL-VISIBLE Schedule affordance (ADR 0073, the ADR-0070 gate), on the
 	// SHARED engine too — the SAME wiring the per-session factory applies
@@ -4357,6 +4471,39 @@ func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provid
 		return nil, catalogAssets{}, nil, nil, nil, err
 	}
 
+	// Learned skills are a lowest-precedence, body-only live generation layered
+	// over the immutable external seam. The repository is lazy on empty startup.
+	var learnedSkills learning.SkillRepository
+	var liveSkills *coreskillfs.AtomicCatalog
+	skillPartition := learning.SkillPartition{Principal: reflectionPrincipal(nil)}
+	const skillOwner = "reflection"
+	if base := resolveUserModelDir(cfg.UserModelDir); base != "" {
+		learned, openErr := skillstore.New(filepath.Join(base, "learned-skills"))
+		if openErr != nil {
+			mcpClose()
+			return nil, catalogAssets{}, nil, nil, nil, fmt.Errorf("build learned-skill store: %w", openErr)
+		}
+		learnedSkills = learned
+		active, listErr := listActiveLearnedSkills(ctx, learned, skillPartition, "")
+		if listErr == nil && cfg.Workspace != "" && projectIngestionAdmitted(cfg) {
+			projectActive, projectErr := listActiveLearnedSkills(ctx, learned, learning.SkillPartition{Principal: skillPartition.Principal, Project: cfg.Workspace}, "")
+			if projectErr != nil {
+				listErr = projectErr
+			} else {
+				active = append(active, projectActive...)
+			}
+		}
+		if listErr != nil {
+			mcpClose()
+			return nil, catalogAssets{}, nil, nil, nil, fmt.Errorf("load active learned skills: %w", listErr)
+		}
+		liveSkills = coreskillfs.NewAtomicCatalog(seam.metas, seam.source, active)
+	}
+	var skillPublication *learnedSkillPublication
+	if liveSkills != nil {
+		skillPublication = &learnedSkillPublication{}
+	}
+
 	// ONE process-wide preserved-fork LRU shared by every Parallel tool (build-time
 	// AND per-session), so ForkPreservedCap stays a PROCESS bound.
 	var forkReaper *agent.LRUForkReaper
@@ -4377,15 +4524,20 @@ func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provid
 	}
 
 	assets := catalogAssets{
-		globalMgr:      mainMgr,
-		agentReg:       agentReg,
-		memStore:       memStore,
-		userModelStore: userModelStore,
-		skills:         seam.metas,
-		skillSource:    seam.source,
-		skillIndex:     seam.index,
-		forkReaper:     forkReaper,
-		autoMerger:     autoMerger,
+		globalMgr:        mainMgr,
+		agentReg:         agentReg,
+		memStore:         memStore,
+		userModelStore:   userModelStore,
+		skills:           seam.metas,
+		skillSource:      seam.source,
+		skillIndex:       seam.index,
+		liveSkills:       liveSkills,
+		learnedSkills:    learnedSkills,
+		skillPublication: skillPublication,
+		skillPartition:   skillPartition,
+		skillOwner:       skillOwner,
+		forkReaper:       forkReaper,
+		autoMerger:       autoMerger,
 		// WebSearch provider (issue #26): resolved ONCE here via the backend ladder
 		// (kill switch > --websearch-url > SEARXNG_URL > BRAVE_API_KEY > Exa default)
 		// and threaded onto the assets so every per-session catalog reuses the SAME

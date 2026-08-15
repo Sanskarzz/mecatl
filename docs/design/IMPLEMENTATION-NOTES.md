@@ -3535,11 +3535,36 @@ trivial completions spend no provider call and do not consume the debounce caden
 constructs `agent.EvidenceReflector` on the selected session provider/model (or the same-provider
 `reflection` slot), stages through the durable proposal repository under principal/project partitions,
 and applies `memorypromotion.StandardPolicy`. `review` stages without memory writes. `auto` promotes operator facts only from explicit principal-authored remember evidence. Trusted project facts require principal-authored evidence and an exact configured-workspace match; tool/assistant/repository-only evidence remains staged. Project candidates from admitted alternate roots remain staged/reviewable but cannot approve, undo, or read/write launch-root project memory until a safe exact-root lifecycle store exists; untrusted project material is not ingested. Existing project partitions stay listable/rejectable. Conflicts and ambiguous facts remain non-promoted, project material
-requires `projectIngestionAdmitted`, and procedures become `deferred_unsupported`. `off` installs no
+requires `projectIngestionAdmitted`. Procedures first become `deferred_unsupported` as the durable crash-recovery checkpoint, then enter the installed learned-skill pipeline in review/auto. `off` installs no
 automatic observer, started coordinator worker, or eager proposal repository. Explicit reflection synchronously uses the persisted session provider/model, performs a bounded EventLog read, and lazily opens persistence and starts coordinator workers in Off. Approval re-verifies owner-authorized message/event digest, sequence, and tool-call evidence before promotion. The deprecated `--user-model-review` alias maps to this same `auto` path;
 the old exported `UserModelReviewer`, `NewUserModelObserver`, and `Review` remain compatibility APIs but
 standard Build no longer uses their direct-writing child engine. Dream and explicit memory tools remain
 independent CAS writers. The shipped gRPC/HTTP surface provides synchronous explicit reflection plus caller-partitioned proposal list/detail/decision/undo, and mecatui provides windowed review with exact canonical value/scope/description and stale-CAS refresh.
+
+**Evaluated agent-owned skills (#510; ADR 0111):** `engine/adapter/skilllifecycle.Pipeline` is a
+state-aware, idempotent resume over content-addressed versions: it skips already-committed evaluation/stage/
+activation boundaries and reconciles publication for an already-active version. PASS/ABSTAIN stage and FAIL
+rejects; auto+PASS activates only with a real bound publisher, while `SimilarStageHint` always forces review.
+A nil evaluator records ABSTAIN. `Config.SkillEvaluator` is trusted admission control: an embedder must supply
+immutable host fixture IDs, independent baseline/treatment execution, a fenced candidate, no tools/shell/network,
+and explicit limits; mecatl ships no production judge. Candidate inventory drains external metadata plus every
+learned version in the exact partition.
+
+`skillfs.AtomicCatalog` composes the existing path-free `tool.SkillSource` with body-only learned versions behind
+one immutable generation pointer. External filesystem/driver assets retain the ordinary `{name, asset}` schema,
+validation, and bounds; learned asset requests fail explicitly, and no path/read-root/materialization seam exists.
+External names win. Shared, selector, and no-fs catalogs register `LiveTool` over the same pointer. Only the
+ownerless deployment partition and exact trusted launch-root project can bind that shared publication target;
+unrelated caller/project state remains staged. Service mutation authorization is skill-specific and independent
+of memory convergence.
+
+Archive accepts only Active. Rollback additionally requires durable proof that the PASS target was previously
+active. Post-commit publication uses a bounded cancel-detached context and reports `published` versus
+`pending_reconciliation` alongside committed state; failure revokes the learned entry fail-safe, while startup and
+live-list refresh reconstruct from durable active state. Lifecycle `SkillDraft` derives verified caller identity,
+exact live workspace root, and main-agent ownership at execution, refusing identity-free calls. API/TUI requests
+preserve project and correlate generation plus skill/version; list and receipt consumers drain every page, with
+receipt-count pagination. See `docs/adr/0111-hardened-agent-owned-skill-publication.md`.
 
 `agent.terminateComplete` invokes the existing Observer after state establishment and excludes
 error/cancelled terminals. Project settings apply only as a minimum ceiling (`off < review < auto`).

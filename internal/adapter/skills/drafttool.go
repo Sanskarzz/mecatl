@@ -32,11 +32,14 @@ When NOT to use (the over-eager anti-pattern — these are REJECTED):
   the code.
 - Procedural "how-to" ONLY. For a durable FACT or preference, use Remember instead.
 
-IMPORTANT — a drafted skill is NOT active this session:
-- It is written to a QUARANTINE review queue, never to the live skill catalog.
-- An operator must review and promote it before any session can activate it.
-- So drafting is cheap to get wrong (it only costs quarantine disk), but do not
-  spam it — an over-eager draft is rejected at review.
+IMPORTANT — a drafted skill is a versioned agent-owned DRAFT, not active:
+- It is validated and stored in the learned-skill lifecycle; it cannot edit prompts,
+  code, AGENTS.md, lifecycle metadata, or generated assets.
+- Evidence and evaluation are required before activation. In learning mode off it
+  stays draft; review stages evidence-backed PASS/ABSTAIN proposals; auto activates
+  only an evidence-backed PASS. FAIL is rejected.
+- Legacy deployments may still use the deprecated quarantine/promote path; direct
+  model draft promotion is not an activation policy.
 
 How to write the SKILL.md fields:
 - description: ONE line — what it does and WHEN to use it (the applicability
@@ -104,7 +107,7 @@ func (DraftTool) ReadOnly() bool { return false }
 // sanitization failure is returned as a model-addressable error result (never a
 // harness-level Go error), so the model can revise and retry. On success the
 // result names the quarantine path and any near-duplicate warnings.
-func (t DraftTool) Execute(ctx context.Context, in session.ToolCall, _ tool.Environment) (session.ToolResult, error) {
+func (t DraftTool) Execute(ctx context.Context, in session.ToolCall, env tool.Environment) (session.ToolResult, error) {
 	var args draftArgs
 	if msg, ok := toolkit.ParseArgs(in, &args); !ok {
 		return session.NewToolError(in.ID, msg), nil
@@ -113,7 +116,16 @@ func (t DraftTool) Execute(ctx context.Context, in session.ToolCall, _ tool.Envi
 	// draftArgs (the JSON wire shape) and DraftRequest (the seam input) are kept
 	// field-identical so this conversion stays valid; add a field to one and you
 	// MUST add it to the other in the same position.
-	res, err := t.drafter.Draft(ctx, DraftRequest(args))
+	request := DraftRequest(args)
+	var res DraftResult
+	var err error
+	if contextual, ok := t.drafter.(interface {
+		DraftIn(context.Context, tool.Environment, DraftRequest) (DraftResult, error)
+	}); ok {
+		res, err = contextual.DraftIn(ctx, env, request)
+	} else {
+		res, err = t.drafter.Draft(ctx, request)
+	}
 	if err != nil {
 		// A validation/sanitization/write failure: model-addressable, not a fault.
 		return session.NewToolError(in.ID, err.Error()), nil
@@ -121,7 +133,7 @@ func (t DraftTool) Execute(ctx context.Context, in session.ToolCall, _ tool.Envi
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "Drafted skill %q to the review queue at %s.\n", strings.TrimSpace(args.Name), res.Path)
-	b.WriteString("It is NOT active this session — an operator must promote it before any session can activate it.")
+	b.WriteString("It is NOT active this session — evidence and evaluation are required; only an evidence-backed PASS may be activated by policy or an operator.")
 	for _, w := range res.Warnings {
 		fmt.Fprintf(&b, "\nNote: %s", w)
 	}
