@@ -233,6 +233,149 @@ func Run(t *testing.T, factory Factory) {
 	})
 }
 
+// RunValidatedActivation validates the optional lower-assurance activation
+// capability. Repositories that implement only SkillRepository remain conformant.
+//
+//nolint:gocyclo // the optional suite keeps all activation preconditions together
+func RunValidatedActivation(t *testing.T, factory Factory) {
+	t.Helper()
+	ctx, p := context.Background(), partition()
+	newDraft := func(t *testing.T, repo learning.SkillRepository, name string, prov learning.SkillProvenance) learning.SkillVersion {
+		t.Helper()
+		draft, err := repo.CreateDraft(ctx, p, "agent-a", skill(name, "Validated workflow for "+name+"."), prov)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return draft
+	}
+	staged := func(t *testing.T, repo learning.SkillRepository, name string, prov learning.SkillProvenance, verdict learning.EvaluationVerdict) learning.SkillVersion {
+		t.Helper()
+		draft := newDraft(t, repo, name, prov)
+		evaluated, err := repo.RecordEvaluation(ctx, p, "agent-a", draft.ID, draft.Version, draft.Revision, evaluation(verdict))
+		if err != nil {
+			t.Fatal(err)
+		}
+		value, err := repo.Stage(ctx, p, "agent-a", evaluated.ID, evaluated.Version, evaluated.Revision)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	assertTransition := func(t *testing.T, err error) {
+		t.Helper()
+		if !errors.Is(err, learning.ErrSkillTransition) {
+			t.Fatalf("ActivateValidated error = %v, want ErrSkillTransition", err)
+		}
+	}
+
+	t.Run("eligible-abstain-and-rollback", func(t *testing.T) {
+		repo := factory(t)
+		activator, ok := repo.(learning.ValidatedSkillActivator)
+		if !ok {
+			t.Fatal("repository lacks ValidatedSkillActivator")
+		}
+		prov := provenance("validated")
+		prov.ValidationDisposition = learning.ValidationAccept
+		value := staged(t, repo, "validated", prov, learning.EvaluationAbstain)
+		if _, err := activator.ActivateValidated(ctx, p, "agent-a", value.ID, value.Version, "stale"); !errors.Is(err, learning.ErrSkillConflict) {
+			t.Fatalf("stale validated CAS = %v", err)
+		}
+		active, err := activator.ActivateValidated(ctx, p, "agent-a", value.ID, value.Version, value.Revision)
+		if err != nil || active.State != learning.SkillActive || active.Receipts[len(active.Receipts)-1].Operation != "activate_validated" {
+			t.Fatalf("active=%+v err=%v", active, err)
+		}
+		archived, err := repo.Archive(ctx, p, "agent-a", active.ID, active.Version, active.Revision)
+		if err != nil {
+			t.Fatal(err)
+		}
+		newerDraft, err := repo.CreateDraft(ctx, p, "agent-a", skill("validated", "New evaluated workflow."), provenance("validated-newer"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		newer := activateVersion(t, repo, p, newerDraft)
+		rolled, err := repo.Rollback(ctx, p, "agent-a", newer.ID, newer.Revision, archived.Version)
+		if err != nil || rolled.Version != archived.Version || rolled.State != learning.SkillActive {
+			t.Fatalf("rollback validated target=%+v err=%v", rolled, err)
+		}
+	})
+
+	t.Run("negative-preconditions", func(t *testing.T) {
+		t.Run("missing-evidence", func(t *testing.T) {
+			repo := factory(t)
+			prov := learning.SkillProvenance{ProposalIDs: []learning.ProposalID{"proposal-no-evidence"}, ValidationDisposition: learning.ValidationAccept}
+			value := staged(t, repo, "missing-evidence", prov, learning.EvaluationAbstain)
+			_, err := repo.(learning.ValidatedSkillActivator).ActivateValidated(ctx, p, "agent-a", value.ID, value.Version, value.Revision)
+			assertTransition(t, err)
+		})
+		t.Run("legacy-origin", func(t *testing.T) {
+			repo := factory(t)
+			value := staged(t, repo, "legacy", learning.SkillProvenance{Origin: learning.SkillProvenanceLegacyModel, ValidationDisposition: learning.ValidationAccept}, learning.EvaluationAbstain)
+			_, err := repo.(learning.ValidatedSkillActivator).ActivateValidated(ctx, p, "agent-a", value.ID, value.Version, value.Revision)
+			assertTransition(t, err)
+		})
+		t.Run("similar-or-missing-disposition", func(t *testing.T) {
+			for _, disposition := range []learning.ValidationDisposition{learning.ValidationSimilarStageHint, ""} {
+				repo := factory(t)
+				prov := provenance("disposition-" + string(disposition))
+				prov.ValidationDisposition = disposition
+				value := staged(t, repo, "disposition-"+string(disposition), prov, learning.EvaluationAbstain)
+				_, err := repo.(learning.ValidatedSkillActivator).ActivateValidated(ctx, p, "agent-a", value.ID, value.Version, value.Revision)
+				assertTransition(t, err)
+			}
+		})
+		t.Run("pass-uses-ordinary-activate", func(t *testing.T) {
+			repo := factory(t)
+			prov := provenance("pass")
+			prov.ValidationDisposition = learning.ValidationAccept
+			value := staged(t, repo, "pass", prov, learning.EvaluationPass)
+			activator := repo.(learning.ValidatedSkillActivator)
+			_, err := activator.ActivateValidated(ctx, p, "agent-a", value.ID, value.Version, value.Revision)
+			assertTransition(t, err)
+			active, err := repo.Activate(ctx, p, "agent-a", value.ID, value.Version, value.Revision)
+			if err != nil || active.State != learning.SkillActive || active.Receipts[len(active.Receipts)-1].Operation != "activate" {
+				t.Fatalf("ordinary activate=%+v err=%v", active, err)
+			}
+		})
+		t.Run("fail-and-error-are-rejected", func(t *testing.T) {
+			for _, verdict := range []learning.EvaluationVerdict{learning.EvaluationFail, learning.EvaluationError} {
+				repo := factory(t)
+				prov := provenance(string(verdict))
+				prov.ValidationDisposition = learning.ValidationAccept
+				draft := newDraft(t, repo, "rejected-"+string(verdict), prov)
+				rejected, err := repo.RecordEvaluation(ctx, p, "agent-a", draft.ID, draft.Version, draft.Revision, evaluation(verdict))
+				if err != nil || rejected.State != learning.SkillRejected {
+					t.Fatalf("verdict=%s rejected=%+v err=%v", verdict, rejected, err)
+				}
+				_, err = repo.(learning.ValidatedSkillActivator).ActivateValidated(ctx, p, "agent-a", rejected.ID, rejected.Version, rejected.Revision)
+				assertTransition(t, err)
+			}
+		})
+		t.Run("non-staged-direct-draft", func(t *testing.T) {
+			repo := factory(t)
+			prov := provenance("draft")
+			prov.ValidationDisposition = learning.ValidationAccept
+			draft := newDraft(t, repo, "direct-draft", prov)
+			_, err := repo.(learning.ValidatedSkillActivator).ActivateValidated(ctx, p, "agent-a", draft.ID, draft.Version, draft.Revision)
+			assertTransition(t, err)
+		})
+		t.Run("wrong-owner-and-partition", func(t *testing.T) {
+			repo := factory(t)
+			prov := provenance("identity")
+			prov.ValidationDisposition = learning.ValidationAccept
+			value := staged(t, repo, "identity", prov, learning.EvaluationAbstain)
+			activator := repo.(learning.ValidatedSkillActivator)
+			if _, err := activator.ActivateValidated(ctx, p, "agent-b", value.ID, value.Version, value.Revision); !errors.Is(err, learning.ErrSkillOwnerMismatch) {
+				t.Fatalf("wrong owner = %v", err)
+			}
+			other := p
+			other.Project = "other"
+			if _, err := activator.ActivateValidated(ctx, other, "agent-a", value.ID, value.Version, value.Revision); !errors.Is(err, learning.ErrSkillNotFound) {
+				t.Fatalf("wrong partition = %v", err)
+			}
+		})
+	})
+}
+
 func raceCAS(t *testing.T, operation func() error) int {
 	t.Helper()
 	var wg sync.WaitGroup

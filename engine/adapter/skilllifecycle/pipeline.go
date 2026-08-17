@@ -49,11 +49,15 @@ type Pipeline struct {
 	// Evaluator is trusted admission-control code supplied by the host. It must
 	// evaluate host-issued immutable fixture IDs, keep baseline and treatment
 	// independent, expose no tools/shell/network, fence candidate content, and
-	// enforce deterministic time/token/output limits. Nil records ABSTAIN; the
-	// engine deliberately provides no production keyword or model judge.
+	// enforce deterministic time/token/output limits. Nil deliberately records
+	// ABSTAIN. A returned error is durably marked ERROR and can never activate;
+	// the engine deliberately provides no production keyword or model judge.
 	Evaluator learning.SkillEvaluator
-	Publisher Publisher
-	Now       func() time.Time
+	// ActivationPolicy is the assurance required for Auto activation. The zero
+	// value resolves to evaluated for source compatibility with existing embedders.
+	ActivationPolicy learning.SkillActivationPolicy
+	Publisher        Publisher
+	Now              func() time.Time
 }
 
 // Process idempotently resumes one candidate from its durable repository state.
@@ -80,14 +84,16 @@ func (p Pipeline) Process(ctx context.Context, candidate Candidate) (Receipt, er
 		return receiptFor(version), nil
 	}
 
+	var evaluatorErr error
 	if version.State == learning.SkillDraft {
 		evaluation := learning.SkillEvaluation{Verdict: learning.EvaluationAbstain, Reason: "no trusted skill evaluator configured", At: p.now()}
 		if p.Evaluator != nil {
-			evaluation, err = p.Evaluator.Evaluate(ctx, learning.SkillEvaluationRequest{Partition: in.Partition, OwnerAgent: in.OwnerAgent, Version: version})
-			if err != nil {
-				return receiptFor(version), err
-			}
-			if evaluation.At.IsZero() {
+			evaluation, evaluatorErr = p.Evaluator.Evaluate(ctx, learning.SkillEvaluationRequest{Partition: in.Partition, OwnerAgent: in.OwnerAgent, Version: version})
+			if evaluatorErr != nil {
+				// Persist only a closed, non-activatable marker while returning the
+				// original infrastructure error to the caller.
+				evaluation = learning.SkillEvaluation{Verdict: learning.EvaluationError, Reason: "trusted skill evaluator unavailable", At: p.now()}
+			} else if evaluation.At.IsZero() {
 				evaluation.At = p.now()
 			}
 		}
@@ -107,9 +113,15 @@ func (p Pipeline) Process(ctx context.Context, candidate Candidate) (Receipt, er
 			return receiptFor(version), err
 		}
 	}
-	activate := candidate.Mode == learning.Auto && evaluation.Verdict == learning.EvaluationPass && version.Disposition != learning.ValidationSimilarStageHint
-	if version.State == learning.SkillStaged && activate && p.Publisher != nil {
-		version, err = p.Repository.Activate(ctx, in.Partition, in.OwnerAgent, version.ID, version.Version, version.Revision)
+	if evaluatorErr == nil && candidate.Mode == learning.Auto && version.State == learning.SkillStaged && version.Disposition != learning.ValidationSimilarStageHint && p.Publisher != nil {
+		switch {
+		case evaluation.Verdict == learning.EvaluationPass:
+			version, err = p.Repository.Activate(ctx, in.Partition, in.OwnerAgent, version.ID, version.Version, version.Revision)
+		case evaluation.Verdict == learning.EvaluationAbstain && p.ActivationPolicy.Effective() == learning.SkillActivationValidated:
+			if activator, ok := p.Repository.(learning.ValidatedSkillActivator); ok {
+				version, err = activator.ActivateValidated(ctx, in.Partition, in.OwnerAgent, version.ID, version.Version, version.Revision)
+			}
+		}
 		if err != nil {
 			return receiptFor(version), err
 		}
@@ -131,7 +143,7 @@ func (p Pipeline) Process(ctx context.Context, candidate Candidate) (Receipt, er
 			receipt.Published = true
 		}
 	}
-	return receipt, nil
+	return receipt, evaluatorErr
 }
 
 func (p Pipeline) now() time.Time {
