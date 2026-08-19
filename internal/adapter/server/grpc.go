@@ -5,6 +5,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 
@@ -174,6 +175,56 @@ func (h *HarnessServer) ForkSession(ctx context.Context, req *mecatlv1.ForkSessi
 		return nil, toStatus(err)
 	}
 	return &mecatlv1.ForkSessionResponse{SessionId: string(id)}, nil
+}
+
+func adoptionBindingsFromProto(binding *mecatlv1.AdoptionBindings) (AdoptionBindings, error) {
+	if binding == nil {
+		return AdoptionBindings{}, fmt.Errorf("%w: bindings are required", ErrInvalidArgument)
+	}
+	profile, err := ParseSessionProfile(binding.GetProfile())
+	if err != nil {
+		return AdoptionBindings{}, err
+	}
+	return AdoptionBindings{
+		Workspace:      binding.GetWorkspace(),
+		EnvironmentRef: session.EnvironmentRef{Kind: session.EnvironmentKind(binding.GetEnvironmentKind()), ID: binding.GetEnvironmentId()},
+		ProviderID:     binding.GetProviderId(), ModelID: binding.GetModelId(), Profile: profile,
+	}, nil
+}
+
+func adoptionBindingsToProto(binding AdoptionBindings) *mecatlv1.AdoptionBindings {
+	return &mecatlv1.AdoptionBindings{Workspace: binding.Workspace, EnvironmentKind: string(binding.EnvironmentRef.Kind), EnvironmentId: binding.EnvironmentRef.ID, ProviderId: binding.ProviderID, ModelId: binding.ModelID, Profile: string(binding.Profile)}
+}
+
+func (h *HarnessServer) PreflightSessionAdoption(ctx context.Context, req *mecatlv1.PreflightSessionAdoptionRequest) (*mecatlv1.PreflightSessionAdoptionResponse, error) {
+	if req.GetSourceSessionId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "source_session_id is required")
+	}
+	bindings, err := adoptionBindingsFromProto(req.GetBindings())
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	result, err := h.svc.PreflightSessionAdoption(ctx, session.SessionID(req.GetSourceSessionId()), bindings)
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	return &mecatlv1.PreflightSessionAdoptionResponse{Eligible: result.Eligible, ReasonCode: string(result.Reason), Bindings: adoptionBindingsToProto(result.Bindings)}, nil
+}
+
+func (h *HarnessServer) AdoptSession(ctx context.Context, req *mecatlv1.AdoptSessionRequest) (*mecatlv1.AdoptSessionResponse, error) {
+	if req.GetSourceSessionId() == "" || req.GetIdempotencyKey() == "" {
+		return nil, status.Error(codes.InvalidArgument, "source_session_id and idempotency_key are required")
+	}
+	bindings, err := adoptionBindingsFromProto(req.GetBindings())
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	sess, err := h.svc.AdoptSession(ctx, session.SessionID(req.GetSourceSessionId()), req.GetIdempotencyKey(), bindings)
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	caps := h.svc.SessionCapabilities(sess.ID)
+	return &mecatlv1.AdoptSessionResponse{SessionId: string(sess.ID), SourceSessionId: string(adoptionSourceID(sess)), Capabilities: h.svc.capabilities(), SessionCapabilities: &mecatlv1.SessionCapabilities{Image: caps.Image, Audio: caps.Audio}, ResolvedModel: resolvedModelToProto(h.svc.ResolvedModel(sess.ID))}, nil
 }
 
 // Converse drives one run over a bidi stream. The first frame MUST be a Prompt;
@@ -716,11 +767,193 @@ func (h *HarnessServer) ListSessions(ctx context.Context, req *mecatlv1.ListSess
 	}, nil
 }
 
+// GetStorageHealth returns authenticated aggregate storage status.
+func (h *HarnessServer) GetStorageHealth(ctx context.Context, _ *mecatlv1.GetStorageHealthRequest) (*mecatlv1.GetStorageHealthResponse, error) {
+	health, err := h.svc.StorageHealth(ctx)
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	return toProtoStorageHealth(health), nil
+}
+
+func toProtoStorageHealth(h StorageHealth) *mecatlv1.GetStorageHealthResponse {
+	resp := &mecatlv1.GetStorageHealthResponse{
+		Available: h.Available, UnavailableReason: h.UnavailableReason,
+		CurrentBytes: h.CurrentBytes, CurrentBytesAvailable: h.CurrentBytesAvailable,
+		ReclaimableBytes: h.ReclaimableBytes, ReclaimableBytesAvailable: h.ReclaimableBytesAvailable,
+		SessionCount: h.SessionCount, FileCount: h.FileCount, V1Count: h.V1Count, V2Count: h.V2Count,
+		MainCount: h.MainCount, ChildCount: h.ChildCount, ScheduledCount: h.ScheduledCount,
+		UnknownCount: h.UnknownCount, CorruptCount: h.CorruptCount,
+		Policy: &mecatlv1.RetentionPolicy{
+			MainMaxAgeSeconds: int64(h.Policy.MainMaxAge.Seconds()), MainMaxCount: ClampInt32(h.Policy.MainMaxCount),
+			ChildMaxAgeSeconds: int64(h.Policy.ChildMaxAge.Seconds()), ChildMaxCount: ClampInt32(h.Policy.ChildMaxCount),
+			ScheduledMaxAgeSeconds: int64(h.Policy.ScheduledMaxAge.Seconds()), ScheduledMaxCount: ClampInt32(h.Policy.ScheduledMaxCount),
+			SweepCadenceSeconds: int64(h.Policy.SweepCadence.Seconds()),
+		},
+		LastSweepAvailable: h.LastSweepAvailable,
+		NextSweepAvailable: h.NextSweepAvailable,
+		ActiveJob:          h.ActiveJob, LastFailure: h.LastFailure,
+	}
+	if h.LastSweepAvailable {
+		resp.LastSweepUnix = h.LastSweep.Unix()
+	}
+	if h.NextSweepAvailable {
+		resp.NextSweepUnix = h.NextSweep.Unix()
+	}
+	return resp
+}
+
+func toProtoMigrationPlan(plan MigrationPlan) *mecatlv1.SessionMigrationPlan {
+	return &mecatlv1.SessionMigrationPlan{
+		PlanId: plan.ID, Available: plan.Available, UnavailableReason: plan.UnavailableReason,
+		V1Families: plan.V1Families, V2Families: plan.V2Families, InvalidFamilies: plan.InvalidFamilies,
+		SkippedFamilies: plan.SkippedFamilies, CurrentBytes: plan.CurrentBytes,
+		ReclaimableBytes: plan.ReclaimableBytes, TemporaryBytes: plan.TemporaryBytes,
+	}
+}
+
+func toProtoMigrationJob(job MigrationJob) *mecatlv1.SessionMigrationJob {
+	out := &mecatlv1.SessionMigrationJob{
+		JobId: job.ID, State: job.State, V1Families: job.V1Families, V2Families: job.V2Families,
+		InvalidFamilies: job.InvalidFamilies, SkippedFamilies: job.SkippedFamilies,
+		CurrentBytes: job.CurrentBytes, ReclaimableBytes: job.ReclaimableBytes, TemporaryBytes: job.TemporaryBytes,
+		Processed: job.Processed, Migrated: job.Migrated, Failed: job.Failed,
+		Errors: make([]*mecatlv1.SessionMigrationItemError, 0, len(job.Errors)),
+	}
+	for _, item := range job.Errors {
+		out.Errors = append(out.Errors, &mecatlv1.SessionMigrationItemError{ItemHandle: item.ItemHandle, ReasonCode: item.ReasonCode, Message: item.Message})
+	}
+	return out
+}
+
+func (h *HarnessServer) PlanSessionMigration(ctx context.Context, _ *mecatlv1.PlanSessionMigrationRequest) (*mecatlv1.SessionMigrationPlan, error) {
+	plan, err := h.svc.PlanSessionMigration(ctx)
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	return toProtoMigrationPlan(plan), nil
+}
+
+func (h *HarnessServer) ApplySessionMigration(ctx context.Context, req *mecatlv1.ApplySessionMigrationRequest) (*mecatlv1.SessionMigrationJob, error) {
+	job, err := h.svc.ApplySessionMigration(ctx, req.GetPlanId(), int(req.GetBatchSize()))
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	return toProtoMigrationJob(job), nil
+}
+
+func (h *HarnessServer) ResumeSessionMigration(ctx context.Context, req *mecatlv1.ResumeSessionMigrationRequest) (*mecatlv1.SessionMigrationJob, error) {
+	job, err := h.svc.ResumeSessionMigration(ctx, req.GetJobId(), int(req.GetBatchSize()))
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	return toProtoMigrationJob(job), nil
+}
+
+func (h *HarnessServer) CancelSessionMigration(ctx context.Context, req *mecatlv1.CancelSessionMigrationRequest) (*mecatlv1.SessionMigrationJob, error) {
+	job, err := h.svc.CancelSessionMigration(ctx, req.GetJobId())
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	return toProtoMigrationJob(job), nil
+}
+
+func (h *HarnessServer) GetSessionMigrationJob(ctx context.Context, req *mecatlv1.GetSessionMigrationJobRequest) (*mecatlv1.SessionMigrationJob, error) {
+	job, err := h.svc.SessionMigrationJob(ctx, req.GetJobId())
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	return toProtoMigrationJob(job), nil
+}
+
+// PlanSessionCleanup returns a caller-bound read-only retention plan.
+func (h *HarnessServer) PlanSessionCleanup(ctx context.Context, req *mecatlv1.PlanSessionCleanupRequest) (*mecatlv1.PlanSessionCleanupResponse, error) {
+	scope := CleanupScope{}
+	for _, kind := range req.GetKinds() {
+		scope.Kinds = append(scope.Kinds, session.SessionKind(kind))
+	}
+	plan, err := h.svc.PlanSessionCleanup(ctx, scope)
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	return toProtoCleanupPlan(plan), nil
+}
+
+func (h *HarnessServer) ApplySessionCleanup(ctx context.Context, req *mecatlv1.ApplySessionCleanupRequest) (*mecatlv1.CleanupJob, error) {
+	job, err := h.svc.ApplySessionCleanup(ctx, req.GetConfirmationToken())
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	return toProtoCleanupJob(job), nil
+}
+
+func (h *HarnessServer) CancelSessionCleanup(ctx context.Context, req *mecatlv1.CancelSessionCleanupRequest) (*mecatlv1.CleanupJob, error) {
+	job, err := h.svc.CancelSessionCleanup(ctx, req.GetJobId())
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	return toProtoCleanupJob(job), nil
+}
+
+func (h *HarnessServer) GetSessionCleanupJob(ctx context.Context, req *mecatlv1.GetSessionCleanupJobRequest) (*mecatlv1.CleanupJob, error) {
+	job, err := h.svc.SessionCleanupJob(ctx, req.GetJobId())
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	return toProtoCleanupJob(job), nil
+}
+
+func toProtoCleanupPlan(plan CleanupPlan) *mecatlv1.PlanSessionCleanupResponse {
+	resp := &mecatlv1.PlanSessionCleanupResponse{
+		ConfirmationToken: plan.Token, Available: plan.Available, UnavailableReason: plan.UnavailableReason,
+		Generation: plan.Generation, PolicyVersion: plan.PolicyVersion, EstimatedBytes: plan.EstimatedBytes,
+		PlannedJobId:   plan.JobID,
+		EligibleCounts: &mecatlv1.CleanupCounts{Total: ClampInt32(plan.EligibleCounts.Total), ByKind: mapStringInt32(plan.EligibleCounts.ByKind), ByState: mapStringInt32(plan.EligibleCounts.ByState), ByReason: mapStringInt32(plan.EligibleCounts.ByReason)},
+		Protected:      &mecatlv1.CleanupCounts{Total: ClampInt32(plan.Protected.Total), ByKind: mapStringInt32(plan.Protected.ByKind), ByState: mapStringInt32(plan.Protected.ByState), ByReason: mapStringInt32(plan.Protected.ByReason)},
+	}
+	for _, item := range plan.Eligible {
+		resp.Eligible = append(resp.Eligible, &mecatlv1.CleanupCandidate{SessionId: string(item.ID), Kind: string(item.Kind), State: string(item.State), Reason: item.Reason, ModifiedAtUnix: item.ModifiedAt.Unix(), EstimatedBytes: item.EstimatedBytes})
+	}
+	return resp
+}
+
+func mapStringInt32(values map[string]int) map[string]int32 {
+	out := make(map[string]int32, len(values))
+	for key, value := range values {
+		out[key] = ClampInt32(value)
+	}
+	return out
+}
+
+func toProtoCleanupJob(job CleanupJob) *mecatlv1.CleanupJob {
+	out := &mecatlv1.CleanupJob{JobId: job.ID, State: job.State, Processed: ClampInt32(job.Processed), Deleted: ClampInt32(job.Deleted), Skipped: ClampInt32(job.Skipped), Stale: ClampInt32(job.Stale), Failed: ClampInt32(job.Failed)}
+	for _, item := range job.Errors {
+		out.Errors = append(out.Errors, &mecatlv1.CleanupItemError{ItemHandle: item.ItemHandle, ReasonCode: item.ReasonCode, Message: item.Message})
+	}
+	return out
+}
+
 // toStatus maps service sentinel errors to gRPC status codes.
 //
 //nolint:gocyclo // a flat error→code classifier; a switch is the correct shape.
 func toStatus(err error) error {
 	switch {
+	case errors.Is(err, ErrManagementUnauthorized):
+		return status.Error(codes.PermissionDenied, err.Error())
+	case errors.Is(err, ErrStorageHealthBackend):
+		return status.Error(codes.Internal, err.Error())
+	case errors.Is(err, ErrMigrationUnsupported):
+		return status.Error(codes.Unimplemented, err.Error())
+	case errors.Is(err, ErrMigrationConflict):
+		return status.Error(codes.Aborted, err.Error())
+	case errors.Is(err, ErrMigrationBackend):
+		return status.Error(codes.Internal, err.Error())
+	case errors.Is(err, ErrCleanupPlanStale):
+		return status.Error(codes.Aborted, err.Error())
+	case errors.Is(err, ErrCleanupUnsupported):
+		return status.Error(codes.Unimplemented, err.Error())
+	case errors.Is(err, ErrCleanupBackend):
+		return status.Error(codes.Internal, err.Error())
 	case errors.Is(err, ErrInvalidArgument):
 		return status.Error(codes.InvalidArgument, err.Error())
 	case errors.Is(err, ErrNotFound):
@@ -794,6 +1027,8 @@ func toStatus(err error) error {
 		return status.Error(codes.Unimplemented, err.Error())
 	case errors.Is(err, ErrSessionDeleteUnsupported):
 		return status.Error(codes.Unimplemented, err.Error())
+	case errors.Is(err, port.ErrSessionMetadataCursorRestart):
+		return status.Error(codes.Aborted, err.Error())
 	case errors.Is(err, port.ErrSessionMetadataPagingUnsupported):
 		return status.Error(codes.Unimplemented, err.Error())
 	case errors.Is(err, ErrSchedulerNotRunning):

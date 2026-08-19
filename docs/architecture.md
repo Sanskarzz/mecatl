@@ -301,7 +301,12 @@ inventory without first creating a session, then continue/inspect through the ex
 authoritative transcript path or create only when the operator requests a new chat. Each
 inventory row also carries server-authored action capabilities. The TUI uses those bits—not
 ID spelling—to expose exact-ID copy, detached transcript view, peer fork, operator-title
-rename, and confirmed physical deletion. Fork/rename/delete are revalidated under the
+rename, and confirmed physical deletion. The server also exposes authenticated legacy-adoption
+preflight and apply RPCs: an owned, transcript-complete `unknown` source can be copied into a
+new explicit-main session only with explicit workspace/environment and provider/model bindings.
+Apply revalidates under run-entry serialization and the mutation lease, persists a
+caller+source-bound idempotency proof and source audit link, and never rewrites the legacy source.
+The TUI adoption affordance is a separate client workflow. Fork/rename/delete are revalidated under the
 server's run-entry serialization with ownership, kind, state, liveness, and optional lease
 checks; a stale UI row therefore cannot bypass the server gates, and a failed action does
 not rebind the prompt target. The
@@ -354,7 +359,32 @@ shared assembly with **k8s-native defaults** — a **Redis** session store + dur
 (`internal/adapter/k8slease`, the in-cluster multi-replica single-writer path), a dynamic
 `/readyz` (drain-gated + Redis-pinged), and a bounded `GracefulStop`. The agent pods are
 **storage-free**: no PVC, no `--store-dir`, no local state — every piece of state is a
-managed service the pod talks to over the network (Redis + the k8s API server). It defaults
+managed service the pod talks to over the network (Redis + the k8s API server). Redis
+metadata paging and retention are zero-load and work-bounded after index publication; the
+retention worker is owned by `app.Build`, whose idempotent close cancels and joins any
+startup/ticker sweep before Service and store teardown. Every automatic deletion uses
+that same mandatory maintenance lease as manual cleanup (except a genuinely
+process-private in-memory store), so a shareable store with no working lease fails
+closed rather than trusting process-local liveness. Engine-owned delegation children use
+that same lease backend: Subagent and Parallel sessions, plus Team members (including
+queued, between-round, and synthesis lifetimes), acquire before becoming runnable and
+release only after their actual lifecycle teardown, so a remote retention or manual-cleanup
+worker cannot delete a live child. An
+upgraded legacy keyspace stays honestly unavailable until the authenticated, resumable
+storage-migration job CAS-adopts every snapshot row. Each drive carries one required,
+context-bound acquisition shared by both built-in stores. Redis renews its fenced lock,
+cancels the bound operation context on ownership loss, and compares the exact lock token as
+the first operation inside both mutation Lua scripts; a stale holder therefore has no side
+effects. Stable inspection deduplicates `SCAN` results and proves each valid snapshot's exact
+expected global/owner metadata membership, turning missing or stale rows into repair
+candidates without mutating during planning. Invalid snapshots complete the job with failures
+and keep paging unavailable. Before publication, finalization derives the complete expected
+member sets and compares them in both directions with the global and every owner index through
+bounded client-side `SCAN`/`ZSCAN` batches. Orphaned, malformed, and wrong-owner memberships
+therefore fail closed for explicit operator repair. A constant-work Lua CAS then rechecks the
+stable generation, exact lock token, and global cardinality while publishing readiness, so a
+concurrent Save/Delete cannot invalidate the proof and no O(total) key or member list enters
+Lua ([ADR 0231](adr/0231-redis-owner-index-exact-coverage.md)). It defaults
 `--headless=true` and `--posture=auto` (an unattended daemon, inverted from `mecated`'s
 interactive defaults), drops `mecated`'s subcommands + Prometheus/OTel admin surface, and
 exposes `--redis-url` (mutually exclusive with `--store-dir`/`--session-store-url`). The

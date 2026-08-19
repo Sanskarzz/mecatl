@@ -1,4 +1,5 @@
     ifacemethod func (Clock).Now() time.Time
+    ifacemethod func (ConditionalPrunableStore).DeleteSessionIfUnchanged(ctx context.Context, expected SessionDiscoveryMeta) (bool, error)
     ifacemethod func (DeliveryQueue).Enqueue(ctx context.Context, origin session.SessionID, text string) (DeliveryNote, error)
     ifacemethod func (DeliveryQueue).MarkDelivered(ctx context.Context, origin session.SessionID, seq uint64) error
     ifacemethod func (DeliveryQueue).Pending(ctx context.Context, origin session.SessionID) ([]DeliveryNote, error)
@@ -47,7 +48,16 @@
     ifacemethod func (SessionLease).Acquire(ctx context.Context, id session.SessionID, owner string) (Lease, error)
     ifacemethod func (SessionLease).Release(ctx context.Context, l Lease) error
     ifacemethod func (SessionLease).Renew(ctx context.Context, l Lease) (Lease, error)
+    ifacemethod func (SessionLiveness).IsLive(session.SessionID) bool
+    ifacemethod func (SessionLiveness).Register(ctx context.Context, id session.SessionID, cancel context.CancelFunc) (release func(), err error)
     ifacemethod func (SessionMetadataPager).PageSessionMetadata(ctx context.Context, request SessionMetadataPageRequest) (SessionMetadataPage, error)
+    ifacemethod func (SessionMigrationStore).AcquireSessionMigrationJob(context.Context, string) (acquired context.Context, release func() error, err error)
+    ifacemethod func (SessionMigrationStore).CheckSessionMigrationJobOwnership(context.Context) error
+    ifacemethod func (SessionMigrationStore).InspectSessionMigration(context.Context) (SessionMigrationInspection, error)
+    ifacemethod func (SessionMigrationStore).LoadSessionMigrationJob(context.Context, string) (SessionMigrationJob, error)
+    ifacemethod func (SessionMigrationStore).MigrateSessionFamily(context.Context, SessionMigrationFamily) (string, error)
+    ifacemethod func (SessionMigrationStore).SaveSessionMigrationJob(context.Context, SessionMigrationJob) error
+    ifacemethod func (SessionStorageHealthProvider).SessionStorageHealth(ctx context.Context) (SessionStorageHealth, error)
     ifacemethod func (SessionStore).Load(ctx context.Context, id session.SessionID) (*session.Session, error)
     ifacemethod func (SessionStore).Save(ctx context.Context, s *session.Session) error
     ifacemethod func (ToolCallRecorder).ToolCall(id session.SessionID, call session.ToolCall, result session.ToolResult, queued time.Duration, took time.Duration)
@@ -75,16 +85,24 @@ const MisfireFireOnceNow MisfirePolicy = 0
 const MisfireSkip MisfirePolicy = 1
 const PendingFireSessionID session.SessionID = "pending"
 const SchedulerLeaderLeaseID session.SessionID = "__scheduler__"
+const SessionMigrationCancelled SessionMigrationState = "cancelled"
+const SessionMigrationCompleted SessionMigrationState = "completed"
+const SessionMigrationPlanned SessionMigrationState = "planned"
+const SessionMigrationRunning SessionMigrationState = "running"
 const TriggerCron TriggerKind = 1
 const TriggerNone TriggerKind = 0
 const TriggerOneShot TriggerKind = 2
+func CompareSessionMetadataOrder(a SessionDiscoveryMeta, b SessionDiscoveryMeta) int
 func PaginateSessionMetadata(rows []SessionDiscoveryMeta, request SessionMetadataPageRequest) SessionMetadataPage
+func PaginateSessionMetadataBound(rows []SessionDiscoveryMeta, request SessionMetadataPageRequest, generation string) (SessionMetadataPage, error)
 func RouteToolResultParts(tr session.ToolResult, caps ProviderCapabilities) []session.Content
+func SessionDiscoveryMetaEqual(a SessionDiscoveryMeta, b SessionDiscoveryMeta) bool
 func SessionIDFromContext(ctx context.Context) (session.SessionID, bool)
 func WithSessionID(ctx context.Context, id session.SessionID) context.Context
 type Chunk struct{Kind ChunkKind; Text string; ReasoningItemID string; ToolCall *session.ToolCall; Usage *session.Usage; Stop session.StopReason}
 type ChunkKind int
 type Clock interface{Now() time.Time}
+type ConditionalPrunableStore interface{DeleteSessionIfUnchanged(ctx context.Context, expected SessionDiscoveryMeta) (bool, error)}
 type DeliveryNote struct{Seq uint64; SessionID session.SessionID; Text string; EnqueuedAt time.Time}
 type DeliveryQueue interface{Enqueue(ctx context.Context, origin session.SessionID, text string) (DeliveryNote, error); MarkDelivered(ctx context.Context, origin session.SessionID, seq uint64) error; Pending(ctx context.Context, origin session.SessionID) ([]DeliveryNote, error)}
 type Diagnostics interface{Log(ctx context.Context, level Level, msg string, args ...any); With(args ...any) Diagnostics}
@@ -115,13 +133,22 @@ type ScheduleSpec struct{Name string; Prompt string; Parts []session.Content; Tr
 type ScheduleState struct{NextFireAt time.Time; LastFireAt time.Time; FireCount int; Enabled bool; LastFireSessionID session.SessionID; OneShotRetryCount int; LastFireStartedAt time.Time; LastFireProgressAt time.Time; FireDeadline time.Time}
 type ScheduleStore interface{Claim(ctx context.Context, name string, now time.Time, nextFire time.Time) (Schedule, error); ClaimNow(ctx context.Context, name string, now time.Time, nextFire time.Time) (Schedule, error); Delete(ctx context.Context, name string) error; Due(ctx context.Context, now time.Time) ([]Schedule, error); List(ctx context.Context) ([]Schedule, error); ListFires(ctx context.Context, scheduleName string) ([]ScheduleFire, error); Load(ctx context.Context, name string) (Schedule, error); LoadFire(ctx context.Context, fireID string) (ScheduleFire, error); RecordFire(ctx context.Context, f ScheduleFire) error; RecordFireProgress(ctx context.Context, name string, fireID string, at time.Time) error; RecordFireStart(ctx context.Context, name string, fire ScheduleFire) error; Save(ctx context.Context, s Schedule) error; SetEnabled(ctx context.Context, name string, enabled bool) error}
 type SessionDeleteSupport interface{SupportsSessionDelete() bool}
-type SessionDiscoveryMeta struct{ID session.SessionID; ModifiedAt time.Time; State session.State; Turns int; ModelID string; CreatedAt time.Time; Title string; TitleProvenance session.TitleProvenance; Owner *session.Principal; Workspace string; Kind session.SessionKind; Relationship session.SessionRelationship}
+type SessionDiscoveryMeta struct{ID session.SessionID; ModifiedAt time.Time; State session.State; Turns int; ModelID string; CreatedAt time.Time; Title string; TitleProvenance session.TitleProvenance; Owner *session.Principal; Workspace string; Kind session.SessionKind; Relationship session.SessionRelationship; EstimatedBytes int64}
 type SessionLease interface{Acquire(ctx context.Context, id session.SessionID, owner string) (Lease, error); Release(ctx context.Context, l Lease) error; Renew(ctx context.Context, l Lease) (Lease, error)}
+type SessionLiveness interface{IsLive(session.SessionID) bool; Register(ctx context.Context, id session.SessionID, cancel context.CancelFunc) (release func(), err error)}
 type SessionMeta struct{ID session.SessionID; ModifiedAt time.Time; State session.State; Turns int; ModelID string; CreatedAt time.Time; Title string; Owner *session.Principal}
-type SessionMetadataCursor struct{ModifiedAt time.Time; ID session.SessionID}
+type SessionMetadataCursor struct{ModifiedAt time.Time; ID session.SessionID; Generation string; Scope string; Continuation string}
 type SessionMetadataPage struct{Sessions []SessionDiscoveryMeta; NextCursor *SessionMetadataCursor; TotalCount int}
 type SessionMetadataPageRequest struct{Limit int; Cursor *SessionMetadataCursor; OwnershipEnforced bool; Owner *session.Principal}
 type SessionMetadataPager interface{PageSessionMetadata(ctx context.Context, request SessionMetadataPageRequest) (SessionMetadataPage, error)}
+type SessionMigrationError struct{ItemHandle string "json:\"item_handle\""; ReasonCode string "json:\"reason_code\""; Message string "json:\"message\""}
+type SessionMigrationFamily struct{ID session.SessionID "json:\"-\""; Handle string "json:\"handle\""; Fingerprint string "json:\"fingerprint\""; OwnerKey string "json:\"owner_key\""; Kind session.SessionKind "json:\"kind\""; State session.State "json:\"state\""; Bytes int64 "json:\"bytes\""}
+type SessionMigrationInspection struct{Available bool; UnavailableReason string; Generation string; V1Families int64; V2Families int64; InvalidFamilies int64; SkippedFamilies int64; CurrentBytes int64; ReclaimableBytes int64; TemporaryBytes int64; Families []SessionMigrationFamily}
+type SessionMigrationJob struct{ID string "json:\"id\""; PrincipalKey string "json:\"principal_key\""; State SessionMigrationState "json:\"state\""; Generation string "json:\"generation\""; CreatedAt time.Time "json:\"created_at\""; UpdatedAt time.Time "json:\"updated_at\""; V1Families int64 "json:\"v1_families\""; V2Families int64 "json:\"v2_families\""; InvalidFamilies int64 "json:\"invalid_families\""; SkippedFamilies int64 "json:\"skipped_families\""; CurrentBytes int64 "json:\"current_bytes\""; ReclaimableBytes int64 "json:\"reclaimable_bytes\""; TemporaryBytes int64 "json:\"temporary_bytes\""; Processed int64 "json:\"processed\""; Migrated int64 "json:\"migrated\""; Failed int64 "json:\"failed\""; Errors []SessionMigrationError "json:\"errors,omitempty\""; TerminalItems map[string]bool "json:\"terminal_items,omitempty\""}
+type SessionMigrationState string
+type SessionMigrationStore interface{AcquireSessionMigrationJob(context.Context, string) (acquired context.Context, release func() error, err error); CheckSessionMigrationJobOwnership(context.Context) error; InspectSessionMigration(context.Context) (SessionMigrationInspection, error); LoadSessionMigrationJob(context.Context, string) (SessionMigrationJob, error); MigrateSessionFamily(context.Context, SessionMigrationFamily) (string, error); SaveSessionMigrationJob(context.Context, SessionMigrationJob) error}
+type SessionStorageHealth struct{Available bool; UnavailableReason string; CurrentBytes int64; CurrentBytesAvailable bool; ReclaimableBytes int64; ReclaimableBytesAvailable bool; SessionCount int64; FileCount int64; V1Count int64; V2Count int64; MainCount int64; ChildCount int64; ScheduledCount int64; UnknownCount int64; CorruptCount int64}
+type SessionStorageHealthProvider interface{SessionStorageHealth(ctx context.Context) (SessionStorageHealth, error)}
 type SessionStore interface{Load(ctx context.Context, id session.SessionID) (*session.Session, error); Save(ctx context.Context, s *session.Session) error}
 type StoredSession struct{ID session.SessionID; ModifiedAt time.Time}
 type ToolCallRecorder interface{ToolCall(id session.SessionID, call session.ToolCall, result session.ToolResult, queued time.Duration, took time.Duration)}
@@ -134,5 +161,6 @@ var ErrPruneUnsupported error
 var ErrScheduleAlreadyExists error
 var ErrScheduleNotFound error
 var ErrScheduleUnsupported error
+var ErrSessionMetadataCursorRestart error
 var ErrSessionMetadataPagingUnsupported error
 var ErrSessionNotFound error

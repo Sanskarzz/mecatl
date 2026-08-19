@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
@@ -20,8 +22,10 @@ import (
 )
 
 const (
-	canonicalDirName   = "sid-v1"
-	sessionTokenPrefix = "sid-v1-"
+	canonicalDirName      = "sid-v1"
+	sessionTokenPrefix    = "sid-v1-"
+	currentSnapshotSuffix = ".session.json"
+	currentSnapshotFormat = "sessnap-current-json/2"
 )
 
 // maxTokenPrefix bounds the readable half of a session token. The hash half is
@@ -123,7 +127,7 @@ var familyOrder = []sessionKind{kindTools, kindEvents, kindSnapshot}
 var sidecarKinds = []sessionKind{kindTools, kindEvents}
 
 // sessionResolver owns canonical and legacy paths, ownership checks, and
-// write-time migration. Store.mu serializes migration and writes.
+// write-time migration. Callers serialize migration with the stable family flock.
 type sessionResolver struct {
 	dir string
 }
@@ -138,6 +142,203 @@ func (r sessionResolver) canonicalPath(id session.SessionID, kind sessionKind) s
 
 func (r sessionResolver) legacyPath(id session.SessionID, kind sessionKind) string {
 	return filepath.Join(r.dir, legacySafeName(id)+kind.suffix())
+}
+
+func (r sessionResolver) currentSnapshotPath(id session.SessionID) string {
+	return filepath.Join(r.canonicalDir(), encodeSessionToken(id)+currentSnapshotSuffix)
+}
+
+func validResolverName(name string) error {
+	if name == "" || name == "." || !filepath.IsLocal(name) || filepath.Base(name) != name {
+		return fmt.Errorf("jsonlstore: invalid resolver filename %q", name)
+	}
+	return nil
+}
+
+func (sessionResolver) canonicalName(id session.SessionID, kind sessionKind) string {
+	return encodeSessionToken(id) + kind.suffix()
+}
+
+func (r sessionResolver) canonicalRelativeName(id session.SessionID, kind sessionKind) (string, error) {
+	name := r.canonicalName(id, kind)
+	if err := validResolverName(name); err != nil {
+		return "", err
+	}
+	return filepath.Join(canonicalDirName, name), nil
+}
+
+func (sessionResolver) legacyName(id session.SessionID, kind sessionKind) (string, error) {
+	name := legacySafeName(id) + kind.suffix()
+	if err := validResolverName(name); err != nil {
+		return "", err
+	}
+	return name, nil
+}
+
+func (sessionResolver) currentSnapshotName(id session.SessionID) (string, error) {
+	name := encodeSessionToken(id) + currentSnapshotSuffix
+	if err := validResolverName(name); err != nil {
+		return "", err
+	}
+	return filepath.Join(canonicalDirName, name), nil
+}
+
+func (r sessionResolver) openRoot() (*os.Root, error) {
+	root, err := os.OpenRoot(r.dir)
+	if err != nil {
+		return nil, fmt.Errorf("jsonlstore: open store root: %w", err)
+	}
+	info, err := root.Lstat(canonicalDirName)
+	if err != nil {
+		_ = root.Close()
+		return nil, fmt.Errorf("jsonlstore: inspect canonical store dir: %w", err)
+	}
+	if !info.IsDir() {
+		_ = root.Close()
+		return nil, fmt.Errorf("jsonlstore: canonical store path %q is not a directory", canonicalDirName)
+	}
+	return root, nil
+}
+
+func openRegular(root *os.Root, name string) (*os.File, error) {
+	info, err := root.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("jsonlstore: %q is not a regular file", name)
+	}
+	f, err := root.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	info, err = f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, fmt.Errorf("jsonlstore: %q is not a regular file", name)
+	}
+	return f, nil
+}
+
+func rootPathExists(root *os.Root, name string) (bool, error) {
+	info, err := root.Lstat(name)
+	if err == nil {
+		if !info.Mode().IsRegular() {
+			return false, fmt.Errorf("jsonlstore: %q is not a regular file", name)
+		}
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, err
+}
+
+type currentSnapshot struct {
+	Format     string          `json:"v"`
+	ModifiedAt time.Time       `json:"modified_at"`
+	Metadata   metaSnapshot    `json:"metadata,omitzero"`
+	Snapshot   json.RawMessage `json:"snapshot"`
+}
+
+func decodeCurrentSnapshot(data []byte) (currentSnapshot, error) {
+	var current currentSnapshot
+	if err := json.Unmarshal(data, &current); err != nil {
+		return currentSnapshot{}, fmt.Errorf("jsonlstore: decode current snapshot: %w", err)
+	}
+	if current.Format != currentSnapshotFormat {
+		return currentSnapshot{}, fmt.Errorf("jsonlstore: unsupported current snapshot format %q", current.Format)
+	}
+	if current.ModifiedAt.IsZero() {
+		return currentSnapshot{}, fmt.Errorf("jsonlstore: current snapshot carries no modified_at")
+	}
+	if len(current.Snapshot) == 0 {
+		return currentSnapshot{}, fmt.Errorf("jsonlstore: current snapshot carries no payload")
+	}
+	return current, nil
+}
+
+// readCurrentSnapshotHeader reads the bounded metadata prefix written before the
+// snapshot payload. The boolean pair is (file present, header present). Older v2
+// envelopes have no metadata field and deliberately fall back to the compatibility
+// reader; current envelopes return before the decoder reaches conversation bytes.
+func readCurrentSnapshotHeader(root *os.Root, name string) (currentSnapshot, bool, bool, error) {
+	f, err := openRegular(root, name)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return currentSnapshot{}, false, false, nil
+		}
+		return currentSnapshot{}, false, false, err
+	}
+	defer func() { _ = f.Close() }()
+
+	decoder := json.NewDecoder(io.LimitReader(f, maxScannerTokenSize))
+	token, err := decoder.Token()
+	if err != nil {
+		return currentSnapshot{}, true, false, err
+	}
+	if token != json.Delim('{') {
+		return currentSnapshot{}, true, false, fmt.Errorf("jsonlstore: invalid current snapshot header")
+	}
+	var header currentSnapshot
+	for decoder.More() {
+		token, err = decoder.Token()
+		if err != nil {
+			return currentSnapshot{}, true, false, err
+		}
+		key, ok := token.(string)
+		if !ok {
+			return currentSnapshot{}, true, false, fmt.Errorf("jsonlstore: invalid current snapshot header")
+		}
+		switch key {
+		case "v":
+			err = decoder.Decode(&header.Format)
+		case "modified_at":
+			err = decoder.Decode(&header.ModifiedAt)
+		case "metadata":
+			err = decoder.Decode(&header.Metadata)
+			if err == nil && header.Format == currentSnapshotFormat && !header.ModifiedAt.IsZero() && header.Metadata.ID != "" {
+				return header, true, true, nil
+			}
+		case "snapshot":
+			return currentSnapshot{}, true, false, nil
+		default:
+			var ignored json.RawMessage
+			err = decoder.Decode(&ignored)
+		}
+		if err != nil {
+			return currentSnapshot{}, true, false, err
+		}
+	}
+	return currentSnapshot{}, true, false, nil
+}
+
+func readCurrentSnapshot(root *os.Root, name string) (currentSnapshot, bool, error) {
+	f, err := openRegular(root, name)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return currentSnapshot{}, false, nil
+		}
+		return currentSnapshot{}, false, err
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		return currentSnapshot{}, true, err
+	}
+	if info.Size() > maxScannerTokenSize+lastLineSeekWindow {
+		return currentSnapshot{}, true, fmt.Errorf("jsonlstore: current snapshot exceeds %d bytes", maxScannerTokenSize)
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return currentSnapshot{}, true, err
+	}
+	current, err := decodeCurrentSnapshot(data)
+	return current, true, err
 }
 
 func snapshotIDFromLine(line []byte) (session.SessionID, error) {
@@ -158,18 +359,92 @@ func snapshotIDFromLine(line []byte) (session.SessionID, error) {
 
 // readSnapshotLine returns nil, nil only when path does not exist. A present
 // empty or unreadable file is an infrastructure error and never triggers fallback.
-func readSnapshotLine(path string) ([]byte, error) {
-	last, err := readLastLine(path)
+func readSnapshotLine(root *os.Root, name string) ([]byte, error) {
+	f, err := openRegular(root, name)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("jsonlstore: read session file tail: %w", err)
 	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("jsonlstore: read session file tail: %w", err)
+	}
+	last, err := readLastLineAt(f, info.Size())
+	if err != nil {
+		return nil, fmt.Errorf("jsonlstore: read session file tail: %w", err)
+	}
 	if last == nil {
-		return nil, fmt.Errorf("jsonlstore: empty session file: %s", path)
+		return nil, fmt.Errorf("jsonlstore: empty session file: %s", name)
 	}
 	return last, nil
+}
+
+// currentSnapshotFor reads and verifies the v2 snapshot. Presence is
+// authoritative: an invalid v2 file fails loudly and never falls back to v1.
+func (r sessionResolver) currentSnapshotFor(id session.SessionID) (currentSnapshot, bool, error) {
+	name, err := r.currentSnapshotName(id)
+	if err != nil {
+		return currentSnapshot{}, false, err
+	}
+	root, err := r.openRoot()
+	if err != nil {
+		return currentSnapshot{}, false, err
+	}
+	defer func() { _ = root.Close() }()
+	current, present, err := readCurrentSnapshot(root, name)
+	if err != nil || !present {
+		return current, present, err
+	}
+	embedded, err := snapshotIDFromLine(current.Snapshot)
+	if err != nil {
+		return currentSnapshot{}, true, fmt.Errorf("jsonlstore: inspect current snapshot: %w", err)
+	}
+	if embedded != id {
+		return currentSnapshot{}, true, fmt.Errorf("jsonlstore: current session id mismatch: stored %q, requested %q", embedded, id)
+	}
+	if _, err := sessnap.Unmarshal(current.Snapshot); err != nil {
+		return currentSnapshot{}, true, fmt.Errorf("jsonlstore: verify current snapshot: %w", err)
+	}
+	return current, true, nil
+}
+
+func (r sessionResolver) exists(name string) (bool, error) {
+	root, err := r.openRoot()
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = root.Close() }()
+	return rootPathExists(root, name)
+}
+
+func (r sessionResolver) readLastLine(name string) ([]byte, error) {
+	root, err := r.openRoot()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+	f, err := openRegular(root, name)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	return readLastLineAt(f, info.Size())
+}
+
+func (r sessionResolver) readSnapshotLine(name string) ([]byte, error) {
+	root, err := r.openRoot()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+	return readSnapshotLine(root, name)
 }
 
 // canonicalOwnership reports whether this session's canonical family exists,
@@ -197,14 +472,25 @@ func readSnapshotLine(path string) ([]byte, error) {
 // The read is a reverse TAIL read bounded by the latest record, never a full
 // scan: this runs on every Save, Append and ToolCall, and a snapshot file grows as
 // turns x conversation size, so a full scan per appended event was quadratic in
-// run length while holding Store.mu.
+// run length while holding the per-family mutation lock.
 func (r sessionResolver) canonicalOwnership(id session.SessionID) (bool, error) {
-	path := r.canonicalPath(id, kindSnapshot)
-	present, err := pathExists(path)
+	currentName, err := r.currentSnapshotName(id)
+	if err != nil {
+		return false, err
+	}
+	currentPresent, err := r.exists(currentName)
+	if err != nil || currentPresent {
+		return currentPresent, err
+	}
+	name, err := r.canonicalRelativeName(id, kindSnapshot)
+	if err != nil {
+		return false, err
+	}
+	present, err := r.exists(name)
 	if err != nil || !present {
 		return false, err
 	}
-	last, err := readLastLine(path)
+	last, err := r.readLastLine(name)
 	if err != nil || last == nil {
 		return true, nil // present, ownership unproven — ours by path
 	}
@@ -224,7 +510,11 @@ func (r sessionResolver) canonicalOwnership(id session.SessionID) (bool, error) 
 // another session) and leaves the full sessnap decode to Store.Load, which
 // unmarshals the same bytes anyway.
 func (r sessionResolver) canonicalSnapshot(id session.SessionID) ([]byte, bool, error) {
-	line, err := readSnapshotLine(r.canonicalPath(id, kindSnapshot))
+	name, err := r.canonicalRelativeName(id, kindSnapshot)
+	if err != nil {
+		return nil, false, err
+	}
+	line, err := r.readSnapshotLine(name)
 	if err != nil || line == nil {
 		return nil, false, err
 	}
@@ -241,6 +531,10 @@ func (r sessionResolver) canonicalSnapshot(id session.SessionID) ([]byte, bool, 
 // loadSnapshot is read-only. Canonical presence is authoritative; legacy is
 // readable only when its latest embedded id exactly matches the requested id.
 func (r sessionResolver) loadSnapshot(id session.SessionID) ([]byte, error) {
+	current, present, err := r.currentSnapshotFor(id)
+	if err != nil || present {
+		return current.Snapshot, err
+	}
 	line, present, err := r.canonicalSnapshot(id)
 	if err != nil || present {
 		return line, err
@@ -281,6 +575,38 @@ func (r sessionResolver) prepareWrite(id session.SessionID) error {
 	return r.migrateLegacyFamily(id)
 }
 
+// snapshotModifiedAt preserves the v1 file's logical modification time on the
+// first lazy promotion. Later v2 saves advance the logical time.
+func (r sessionResolver) snapshotModifiedAt(id session.SessionID, now time.Time) (time.Time, error) {
+	_, present, err := r.currentSnapshotFor(id)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if present {
+		return now.UTC(), nil
+	}
+	name, err := r.canonicalRelativeName(id, kindSnapshot)
+	if err != nil {
+		return time.Time{}, err
+	}
+	root, err := r.openRoot()
+	if err != nil {
+		return time.Time{}, err
+	}
+	defer func() { _ = root.Close() }()
+	info, err := root.Lstat(name)
+	if err == nil {
+		if !info.Mode().IsRegular() {
+			return time.Time{}, fmt.Errorf("jsonlstore: %q is not a regular file", name)
+		}
+		return info.ModTime().UTC(), nil
+	}
+	if !os.IsNotExist(err) {
+		return time.Time{}, err
+	}
+	return now.UTC(), nil
+}
+
 // readablePath resolves a sidecar without modifying storage. A canonical
 // snapshot's PRESENCE decides whether legacy fallback is allowed; its validity
 // is irrelevant here — a sidecar (the durable event log especially) must stay
@@ -292,7 +618,11 @@ func (r sessionResolver) readablePath(id session.SessionID, kind sessionKind) (s
 		return "", false, err
 	}
 	canonical := r.canonicalPath(id, kind)
-	present, err := pathExists(canonical)
+	canonicalName, err := r.canonicalRelativeName(id, kind)
+	if err != nil {
+		return "", false, err
+	}
+	present, err := r.exists(canonicalName)
 	if err != nil {
 		return "", false, err
 	}
@@ -307,7 +637,17 @@ func (r sessionResolver) readablePath(id session.SessionID, kind sessionKind) (s
 		return "", false, err
 	}
 	legacy := r.legacyPath(id, kind)
-	present, err = pathExists(legacy)
+	legacyName, err := r.legacyName(id, kind)
+	if err != nil {
+		if nameTooLong(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	present, err = r.exists(legacyName)
+	if nameTooLong(err) {
+		return "", false, nil
+	}
 	return legacy, present, err
 }
 
@@ -345,7 +685,14 @@ func nameTooLong(err error) bool {
 //     session's data from being served for another — do not simplify a caller
 //     to `if !ok { return nil }`.
 func (r sessionResolver) legacySnapshot(id session.SessionID) ([]byte, bool, error) {
-	line, err := readSnapshotLine(r.legacyPath(id, kindSnapshot))
+	name, err := r.legacyName(id, kindSnapshot)
+	if nameTooLong(err) {
+		return nil, false, nil // unnameable under the 1:1 legacy scheme ⇒ absent
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	line, err := r.readSnapshotLine(name)
 	if nameTooLong(err) {
 		return nil, false, nil // unnameable under the 1:1 legacy scheme ⇒ absent
 	}
@@ -365,20 +712,36 @@ func (r sessionResolver) legacyOwned(id session.SessionID) (bool, error) {
 }
 
 type snapshotFile struct {
-	id        session.SessionID
-	last      []byte
-	modified  time.Time
-	canonical bool
+	id             session.SessionID
+	last           []byte
+	metadata       *metaSnapshot
+	modified       time.Time
+	estimatedBytes int64
+	priority       int // legacy v1 < canonical v1 < current v2
 }
 
-// snapshotFiles reads logical ids from snapshots, deduplicates canonical and
-// legacy families, and returns bytewise-id order.
+// snapshotFiles reads logical ids from snapshots, deduplicates all readable
+// generations, and returns bytewise-id order.
 func (r sessionResolver) snapshotFiles() ([]snapshotFile, error) {
-	byID := make(map[session.SessionID]snapshotFile)
-	if err := scanSnapshotDir(r.dir, false, byID); err != nil {
+	root, err := r.openRoot()
+	if err != nil {
 		return nil, err
 	}
-	if err := scanSnapshotDir(r.canonicalDir(), true, byID); err != nil {
+	defer func() { _ = root.Close() }()
+	canonicalRoot, err := root.OpenRoot(canonicalDirName)
+	if err != nil {
+		return nil, fmt.Errorf("jsonlstore: open canonical store dir: %w", err)
+	}
+	defer func() { _ = canonicalRoot.Close() }()
+
+	byID := make(map[session.SessionID]snapshotFile)
+	if err := scanSnapshotDir(root, false, byID); err != nil {
+		return nil, err
+	}
+	if err := scanSnapshotDir(canonicalRoot, true, byID); err != nil {
+		return nil, err
+	}
+	if err := scanCurrentSnapshotDir(canonicalRoot, byID); err != nil {
 		return nil, err
 	}
 	out := slices.Collect(maps.Values(byID))
@@ -386,8 +749,8 @@ func (r sessionResolver) snapshotFiles() ([]snapshotFile, error) {
 	return out, nil
 }
 
-func scanSnapshotDir(dir string, canonical bool, byID map[session.SessionID]snapshotFile) error {
-	entries, err := os.ReadDir(dir)
+func scanSnapshotDir(root *os.Root, canonical bool, byID map[session.SessionID]snapshotFile) error {
+	entries, err := fs.ReadDir(root.FS(), ".")
 	if err != nil {
 		return fmt.Errorf("jsonlstore: list store dir: %w", err)
 	}
@@ -395,9 +758,8 @@ func scanSnapshotDir(dir string, canonical bool, byID map[session.SessionID]snap
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), sessionFileSuffix) {
 			continue
 		}
-		path := filepath.Join(dir, entry.Name())
-		last, err := readLastLine(path)
-		if err != nil {
+		last, err := readSnapshotLine(root, entry.Name())
+		if err != nil || last == nil {
 			continue
 		}
 		id, err := snapshotIDFromLine(last)
@@ -417,12 +779,64 @@ func scanSnapshotDir(dir string, canonical bool, byID map[session.SessionID]snap
 		if err != nil {
 			continue
 		}
-		candidate := snapshotFile{id: id, last: last, modified: info.ModTime(), canonical: canonical}
+		priority := 0
+		if canonical {
+			priority = 1
+		}
+		candidate := snapshotFile{id: id, last: last, modified: info.ModTime(), estimatedBytes: info.Size(), priority: priority}
 		current, exists := byID[id]
-		if !exists || candidate.canonical && !current.canonical ||
-			candidate.canonical == current.canonical && candidate.modified.After(current.modified) {
+		if !exists || candidate.priority > current.priority ||
+			candidate.priority == current.priority && candidate.modified.After(current.modified) {
 			byID[id] = candidate
 		}
+	}
+	return nil
+}
+
+func scanCurrentSnapshotDir(root *os.Root, byID map[session.SessionID]snapshotFile) error {
+	entries, err := fs.ReadDir(root.FS(), ".")
+	if err != nil {
+		return fmt.Errorf("jsonlstore: list store dir: %w", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), currentSnapshotSuffix) {
+			continue
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			continue
+		}
+		header, present, hasHeader, err := readCurrentSnapshotHeader(root, entry.Name())
+		if err != nil || !present {
+			continue
+		}
+		if hasHeader {
+			id := header.Metadata.ID
+			if strings.TrimSuffix(entry.Name(), currentSnapshotSuffix) != encodeSessionToken(id) {
+				continue
+			}
+			m := header.Metadata
+			byID[id] = snapshotFile{id: id, metadata: &m, modified: header.ModifiedAt, estimatedBytes: info.Size(), priority: 2}
+			continue
+		}
+
+		current, present, err := readCurrentSnapshot(root, entry.Name())
+		if err != nil || !present {
+			continue
+		}
+		id := current.Metadata.ID
+		if id == "" { // compatibility with v2 snapshots written before inventory headers
+			id, err = snapshotIDFromLine(current.Snapshot)
+		}
+		if err != nil || strings.TrimSuffix(entry.Name(), currentSnapshotSuffix) != encodeSessionToken(id) {
+			continue
+		}
+		var metadata *metaSnapshot
+		if current.Metadata.ID != "" {
+			m := current.Metadata
+			metadata = &m
+		}
+		byID[id] = snapshotFile{id: id, last: current.Snapshot, metadata: metadata, modified: current.ModifiedAt, estimatedBytes: info.Size(), priority: 2}
 	}
 	return nil
 }
@@ -431,8 +845,21 @@ func scanSnapshotDir(dir string, canonical bool, byID map[session.SessionID]snap
 // first and the snapshot last (familyOrder). Missing sources support
 // interrupted retries.
 func (r sessionResolver) migrateLegacyFamily(id session.SessionID) error {
+	root, err := r.openRoot()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
 	for _, kind := range familyOrder {
-		if err := moveLegacyFile(r.legacyPath(id, kind), r.canonicalPath(id, kind)); err != nil {
+		src, err := r.legacyName(id, kind)
+		if err != nil {
+			return fmt.Errorf("jsonlstore: migrate %s: %w", kind.suffix(), err)
+		}
+		dst, err := r.canonicalRelativeName(id, kind)
+		if err != nil {
+			return fmt.Errorf("jsonlstore: migrate %s: %w", kind.suffix(), err)
+		}
+		if err := moveLegacyFile(root, src, dst); err != nil {
 			return fmt.Errorf("jsonlstore: migrate %s: %w", kind.suffix(), err)
 		}
 	}
@@ -441,7 +868,7 @@ func (r sessionResolver) migrateLegacyFamily(id session.SessionID) error {
 
 // moveLegacyFile renames one legacy family file onto its canonical path.
 //
-// The os.Stat(src) is NOT a redundant round-trip that os.Rename's own ENOENT
+// The source lstat is NOT a redundant round-trip that Rename's own ENOENT
 // could replace — it is load-bearing twice, and both uses are easy to lose:
 //
 //   - It must come FIRST, so an absent source returns nil REGARDLESS of the
@@ -453,13 +880,13 @@ func (r sessionResolver) migrateLegacyFamily(id session.SessionID) error {
 //     canonical namespace. os.Rename happily moves a directory, after which
 //     every Load/Save/Append for that id fails with EISDIR forever while List
 //     silently omits it; a FIFO is worse — readSnapshotLine's os.Open blocks
-//     indefinitely waiting for a writer while Store.mu is held, deadlocking
-//     the whole store.
+//     indefinitely waiting for a writer while the family lock is held, blocking
+//     every same-family mutation.
 //
 // A present destination with a present regular source is a genuine clash:
 // error rather than let os.Rename silently clobber already-migrated data.
-func moveLegacyFile(src, dst string) error {
-	info, err := os.Stat(src)
+func moveLegacyFile(root *os.Root, src, dst string) error {
+	info, err := root.Lstat(src)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -469,25 +896,14 @@ func moveLegacyFile(src, dst string) error {
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("source %q is not a regular file", src)
 	}
-	present, err := pathExists(dst)
+	present, err := rootPathExists(root, dst)
 	if err != nil {
 		return err
 	}
 	if present {
 		return fmt.Errorf("destination already exists: %q", dst)
 	}
-	return os.Rename(src, dst)
-}
-
-func pathExists(path string) (bool, error) {
-	_, err := os.Stat(path)
-	if err == nil {
-		return true, nil
-	}
-	if os.IsNotExist(err) {
-		return false, nil
-	}
-	return false, err
+	return root.Rename(src, dst)
 }
 
 func sessionNotFound(id session.SessionID) error {

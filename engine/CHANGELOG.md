@@ -13,6 +13,67 @@ The covered surface is the eight core packages (`session`, `governance`, `learni
 
 ### Added
 
+- **Engine-child lifecycle exclusion** ([ADR 0027](../docs/adr/0027-cloud-native.md)) —
+  `port.SessionLiveness`, `agent.Deps.SessionLiveness`, and
+  `agent.WithMemberLiveness` let a host protect engine-owned Subagent, Parallel,
+  and Team session lifecycles (including direct `RunTeam` supervisors) from destructive
+  maintenance. Composition now backs that inward port with the configured
+  `port.SessionLease`, so queued, running, between-round, and synthesis children hold
+  distributed exclusion until teardown. Added (minor); the final `Register` contract
+  change is classified below.
+
+- **Context-bound session-migration ownership** ([ADR 0230](../docs/adr/0230-redis-migration-atomic-ownership-and-coverage.md)) —
+  `port.SessionMigrationStore.AcquireSessionMigrationJob` binds the exact
+  ownership-checking acquisition to a context required by mutations and durable
+  checkpoints. Redis renews and atomically fences that acquisition; jsonlstore
+  binds its stable flock through the same coherent port contract. Added (minor).
+- **Resumable session-storage migration** (issue #589, [ADR 0226](../docs/adr/0226-session-storage-maintenance.md)) —
+  `port.SessionMigrationStore` and its plan/family/job value objects define an
+  optional server-side v1-to-v2 physical-maintenance capability with durable bounded
+  progress, sanitized item errors, and a stable job-scoped cross-process exclusion
+  around each mutating load-to-checkpoint sequence, without widening `SessionStore`.
+  Added (minor).
+- **Retention byte estimates and atomic cleanup** (issue #590, [ADR 0226](../docs/adr/0226-session-storage-maintenance.md)) —
+  `port.SessionDiscoveryMeta.EstimatedBytes` lets indexed adapters project a
+  content-free deletion estimate to the shared cleanup planner. The optional
+  `port.ConditionalPrunableStore` and `SessionDiscoveryMetaEqual` keep durable
+  metadata revalidation under the backend family exclusion through deletion.
+  The field addition is classified Changed below for unkeyed external literals.
+  The reference `memstore.WithDeleteFailure` option scripts deterministic offline
+  maintenance failures for conformance tests. Added (minor).
+
+- **Bounded session-storage health** (issue #592, [ADR 0226](../docs/adr/0226-session-storage-maintenance.md)) —
+  `port.SessionStorageHealth`, `SessionStorageHealthProvider`, and explicit
+  availability fields let optional backends expose content-free indexed aggregate
+  status without widening `SessionStore` or fabricating zero values. Added (minor).
+- **Legacy-session adoption audit labels** (issue #593, [ADR 0226](../docs/adr/0226-session-storage-maintenance.md)) —
+  optional `session.Session.Adoption` metadata persists the source relationship and
+  caller/source/request-bound retry proof on explicitly adopted main sessions.
+  Existing sessions leave the pointer nil. `session.AdoptionMetadata` and its
+  nil-preserving `Clone` method are Added (minor); replacing the two inline Session
+  fields with the pointer is classified Changed below.
+
+- **Generation-bound session metadata continuation** (issue #587, [ADR 0226](../docs/adr/0226-session-storage-maintenance.md)) —
+  `port.ErrSessionMetadataCursorRestart` makes stale/filter-mismatched continuation
+  explicit, and `PaginateSessionMetadataBound(rows, request, generation string)`
+  gives scan-based adapters the same generation and ownership-scope contract as
+  indexed stores. The caller supplies its own cheap monotonic generation signal
+  (e.g. a counter bumped on mutation) rather than the helper deriving one by
+  JSON-encoding and SHA-256-hashing the full filtered row set on every call — a
+  large constant-factor cost removed from every page after the first on
+  memstore, the one adapter that used this helper (the row copy/sort itself
+  stays O(rows) per call either way, so this is not an asymptotic change).
+  Added (minor).
+
+- **Shared session-metadata ordering and owner-scope hashing** ([ADR 0226](../docs/adr/0226-session-storage-maintenance.md)) —
+  `port.CompareSessionMetadataOrder` is the one comparator for the pagination
+  ordering (`ModifiedAt` DESC, `ID` ASC) that `port`, jsonlstore, and redisstore
+  already had to agree on independently; `session.PrincipalScopeHash` is the raw
+  `sha256(Issuer + "\x00" + Subject)` primitive `port`, jsonlstore, and redisstore
+  build their own prefixed/truncated owner scope keys on top of. Both are
+  extractions of pre-existing, unchanged behavior — no on-disk or wire format
+  changed. Added (minor).
+
 - **Validated automatic learned-skill activation ([ADR 0224](../docs/adr/0224-validated-automatic-skill-activation.md))** —
   `learning.SkillActivationPolicy` adds the closed validated/evaluated assurance vocabulary and
   `learning.ValidatedSkillActivator` adds an optional atomic repository capability for
@@ -743,6 +804,37 @@ The covered surface is the eight core packages (`session`, `governance`, `learni
 - **`session.SubagentPayload.RoutingReason` / `session.ParallelPayload.RoutingReason` / `session.TeamMemberSpec.RoutingReason`, the `session.RoutingReason*` gate constants, and `agent.WithPinnedAgents`** (issue #397) — the three delegation-start events now carry a bounded, bare-metadata reason WHY the OPT-IN semantic model router did not classify a delegation: EMPTY on a routed hit, otherwise one of the gate constants (`RoutingReasonPinnedModel` / `RoutingReasonAgentDefPinned` / `RoutingReasonResume` / `RoutingReasonFork` / `RoutingReasonRouterDisabled` / `RoutingReasonTargetUnavailable` / `RoutingReasonBreakerOpen` / `RoutingReasonAborted`) or a static classifier/composition miss code (`RouterMiss*`, `empty-model`, `category-selector-empty`, …). This lets a UI distinguish router-absent from pinned-model from agent-def-pinned from classifier-failure from breaker-open — previously every miss/gate collapsed to empty `routed_*`. `WithPinnedAgents` carries the composition-computed model-pin set separately from the routable set, so provider-switched and inline-MCP defs are not falsely attributed as model-pinned. If a routed engine factory declines its target, routed fields are cleared and `RoutingReasonTargetUnavailable` records the fallback while `Model` names the engine that actually ran. The Subagent gate attributes the explicit choice gates (resume / fork / per-call `model` / agent-def pin) ahead of the router-absent gate, so a pinned delegation is never mislabeled `router-disabled`. The reason is clamped at the emit site (`routingReasonPayload`, 200-rune cap) AND confined to an event-safe allowlist (`routingReasonEventSafe`): because the missReason channel is open to external engine compositions via the exported `Deps.SubagentModelRouter`, known detailed composition reasons are reduced to their static code and every other non-allowlisted reason (a provider error body, classifier output, a task excerpt) is substituted with the generic `routing-miss` label on the wire while the verbatim text stays in operator diagnostics — gauntlet #7. Classified Added per COMPATIBILITY.md (new struct fields, constants, and option constructor are a minor bump). See ADR 0083.
 
 ### Changed
+
+- **`port.SessionLiveness.Register` lifecycle acquisition** ([ADR 0027](../docs/adr/0027-cloud-native.md)) —
+  `Register` now accepts the lifecycle context and cancellation function and returns
+  an error, allowing a host to acquire distributed exclusion before a child becomes
+  runnable and cancel it on renewal loss. This breaks external implementations and
+  is classified Changed for a pre-v1 minor bump.
+
+- **Session migration job exclusion** (issue #589, [ADR 0226](../docs/adr/0226-session-storage-maintenance.md)) —
+  `port.SessionMigrationStore` adds `LockSessionMigrationJob`, requiring optional
+  migration adapters to hold stable cross-process job exclusion around every mutating
+  load-to-checkpoint sequence. The interface addition is breaking for external
+  implementations and is classified Changed for a pre-v1 minor bump.
+
+- **Session discovery byte estimate** (issue #590, [ADR 0226](../docs/adr/0226-session-storage-maintenance.md)) —
+  `port.SessionDiscoveryMeta` adds `EstimatedBytes`. Keyed literals remain source
+  compatible; external unkeyed literals are breaking, so this is Changed for a
+  pre-v1 minor bump.
+
+- **Optional adoption audit metadata on `session.Session`** (issue #593) —
+  the inline `AdoptionSourceID` and `AdoptionRequestDigest` fields are replaced by
+  `Adoption *AdoptionMetadata`, keeping ordinary sessions on the pre-adoption hot-path
+  layout while preserving the same persisted labels. The field replacement is
+  breaking for external literals and classified Changed for a pre-v1 minor bump.
+
+- **Opaque session metadata continuation** (issue #587, [ADR 0226](../docs/adr/0226-session-storage-maintenance.md)) —
+  `port.SessionMetadataCursor` retains neutral ordering, generation, and ownership-scope
+  bindings while replacing the storage-specific numeric position with an opaque
+  pager-owned `Continuation`. Jsonlstore privately encodes and validates its direct
+  byte continuation; other adapters neither expose nor interpret that representation.
+  The field change is breaking for external literals and is classified Changed for a
+  pre-v1 minor bump; `port.SessionStore` remains unchanged.
 
 - **Learning trajectory current-run metadata ([ADR 0114](../docs/adr/0114-configurable-learning-trigger-policy.md))** —
   `learning.Trajectory` adds `Kind`, `Counters`, and `Current`. The fields are

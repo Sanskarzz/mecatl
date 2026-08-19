@@ -50,6 +50,70 @@ type PrunableStore interface {
 
 A store that does not implement `PrunableStore` is silently skipped by the composition-layer child-session GC — no error, no sweep. A store whose backend cannot enumerate or delete sessions should return an error wrapping `port.ErrPruneUnsupported`; the composition layer treats that sentinel as a permanent signal and disables further sweeps rather than retrying.
 
+### Bounded storage health
+
+A backend may also implement `port.SessionStorageHealthProvider`. The management
+endpoint advertises this capability only when an authorizer is wired, and returns
+aggregate bytes plus format/kind/corruption counts from an existing metadata index
+and cheap object/file metadata—never by loading transcripts. Availability flags
+separate a real zero from unsupported or not-yet-measured data. Jsonlstore supports
+this view; memstore and remote backends that do not implement the seam report the
+feature as unsupported. The view is status-only: it does not run cleanup or migration.
+
+### Resumable v1-to-v2 migration
+
+Jsonlstore and Redis implement the optional `port.SessionMigrationStore` management
+capability. For jsonlstore, an authenticated plan reports v1/v2/invalid/skipped
+families, current and estimated reclaimable bytes, and the maximum temporary space for
+one family. Apply processes a bounded batch and returns a durable job handle; use resume
+to process later batches or continue after a server restart. Each job's complete
+load-to-checkpoint drive is protected by a stable cross-process job exclusion, so
+overlapping resumes cannot replay a batch or regress counters. A stale concurrent
+resume returns conflict. Cancel waits for any committed in-flight batch, then becomes
+monotonic: later resume attempts conflict and cannot restore the running state.
+Already-migrated families remain committed.
+
+Migration preserves the complete snapshot, owner, durable kind (including `unknown`),
+logical modification time, and tool/event sidecars. For jsonlstore it acquires the
+ordinary run-entry lease and the family's cross-process lock, rereads and verifies v2
+before removing v1, and reports corrupt/torn records without discarding them. Redis uses
+the same authenticated, durable, bounded job to adopt the derivative metadata index on
+upgrade: inventory and cleanup remain unavailable while stale; stable inspection verifies
+that every valid snapshot has its exact global/owner index row and makes missing or bad
+coverage a repair candidate; each repair and final publication atomically verifies the job's
+exact lock token before any write. Concurrent Save/Delete advances the source generation,
+and `ready` is published only after clean per-snapshot coverage plus the final
+constant-work cardinality check. Invalid snapshots complete the job with failures while
+keeping paging unavailable; repair or remove them, then create a fresh plan/job. Job errors
+expose stable reason codes and sanitized text only. Memstore and remote stores advertise
+migration as unsupported rather than returning fabricated zero counts.
+
+### Authenticated cleanup planning
+
+The server exposes one retention planner to both automatic sweeps and authenticated
+manual cleanup. A manual dry-run is non-destructive and owner-scoped. On a shared store,
+it samples cross-process lease status at the planning instant with sequential bounded trial
+acquire/immediate-release calls; this does not promise that a candidate remains idle for apply,
+which always reacquires and revalidates. It reports only durable
+kind/state counts, age or cap reasons, modification times, and byte estimates; transcript,
+tool arguments, paths, credentials, and foreign-owner rows are never projected. Unknown,
+invalid, corrupt, running, awaiting, live, and leased sessions are protected and do not
+consume count-cap slots.
+
+Apply requires the opaque confirmation token returned by the dry-run. The token binds the
+caller, exact kind scope, inventory generation, and effective policy version. A changed
+catalog or policy returns a stale-plan result without deleting anything. Cleanup-capable
+backends implement `port.ConditionalPrunableStore`: each candidate is revalidated under
+run-entry serialization and the maintenance lease, then the backend holds its family
+mutation exclusion across a final metadata comparison and sidecar-first/snapshot-last
+deletion. Remotely reachable and multi-writer composition must provide a working
+`port.SessionLease`; missing or backend-unsupported leasing suppresses migration/cleanup capability
+advertisement and fails apply closed. Only private embedded mecatui explicitly proves the local
+single-process posture that may substitute process-local `IsLive` plus family locking. Partial
+failures use stable,
+sanitized reason codes and can be retried by planning again. Unsupported stores report
+`backend_unsupported`; they never claim zero impact.
+
 ### Snapshot mechanics via sessnap
 
 The snapshot format is defined in `engine/adapter/sessnap`. The `sessnap.Snapshot` struct is a stable JSON DTO that the store adapters share:
@@ -157,7 +221,7 @@ and moved into `sid-v1/` the next time that session is written.
 
 ### internal/adapter/redisstore — Redis-backed
 
-The backend for `mecak8s` (the storage-free, Kubernetes-native composition root). Implements `port.SessionStore`, `port.EventLog`, `port.PrunableStore`, and `port.ToolCallRecorder` over a Redis connection. Used for stateless pod deployments where no persistent volume is available. Select it via `--redis-url` (mecak8s only). Validated by the same conformance suites as jsonlstore, running over miniredis.
+The backend for `mecak8s` (the storage-free, Kubernetes-native composition root). Implements `port.SessionStore`, `port.EventLog`, `port.PrunableStore`, `port.SessionMigrationStore`, and `port.ToolCallRecorder` over a Redis connection. Existing snapshot databases without the derivative metadata index remain loadable but report paging and retention unsupported until an authenticated storage-migration job adopts every row and atomically publishes the index. Select it via `--redis-url` (mecak8s only). Validated by the same conformance suites as jsonlstore, running over miniredis.
 
 ---
 

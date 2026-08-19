@@ -132,10 +132,21 @@ type Deps struct {
 	// caps-gated overlays it is NOT gated on a ServerCapabilities bit — the picker
 	// is available whenever a lister + authoritative transcript loader are wired
 	// (a no-FS/cloud server with a durable SessionStore still has stored sessions).
-	Sessions client.SessionLister
+	Sessions client.SessionPager
+	// StorageHealth is the authenticated aggregate health surface. The capability
+	// bit controls whether the Sessions panel advertises its maintenance tab.
+	StorageHealth client.StorageHealthFetcher
+	// Migration and Cleanup are deliberately distinct management seams. Their
+	// server capability bits independently gate the semantics-preserving and
+	// destructive workflows.
+	Migration client.SessionMigrator
+	Cleanup   client.SessionCleaner
 	// SessionManagement mutates stored main-chat metadata. nil leaves rename/delete
 	// undiscoverable even if a custom lister advertises those capabilities.
 	SessionManagement client.SessionManager
+	// Adoption is the authenticated legacy-copy surface. Eligibility is always
+	// taken from its source-correlated preflight, never inferred from row IDs.
+	Adoption client.SessionAdopter
 	// Transcript is the authoritative snapshot-derived conversation surface used
 	// by /sessions for both continuation and read-only inspection. Event replay is
 	// optional activity and never substitutes for this seam.
@@ -343,6 +354,11 @@ type Model struct {
 	// selection cannot race the startup ListModels result.
 	browsingStartupSessions bool
 	modelsReconciled        bool
+	sessionsPageSeq         uint64
+	// Maintenance job handles outlive the Sessions overlay. Reopening uses them
+	// only to refetch server-owned durable progress; the UI owns no job state.
+	maintenanceMigrationJobID string
+	maintenanceCleanupJobID   string
 	// sessionDetailsOpen is the read-only /session surface. The metadata fields
 	// below are refreshed from the current session snapshot; zero timestamps are
 	// rendered as unknown rather than guessed.
@@ -832,9 +848,11 @@ func New(deps Deps) Model {
 		m.modelsReconciled = deps.Models == nil
 		m.sessions = newSessionsPanelState()
 		m.sessions.startup = true
+		m = m.beginSessionPagination()
 		m.ta.Blur()
 		if deps.Sessions == nil {
 			m.sessions.loading = false
+			m.sessions.loadState = sessionsInitialPageError
 			m.sessions.err = errors.New("session inventory unavailable")
 		}
 	}
@@ -1004,7 +1022,7 @@ func (m Model) Init() tea.Cmd {
 			cmds = append(cmds, client.ListModelsCmd(m.deps.Ctx, m.deps.Models))
 		}
 		if m.deps.Sessions != nil {
-			cmds = append(cmds, client.ListSessionsCmd(m.deps.Ctx, m.deps.Sessions), textinput.Blink)
+			cmds = append(cmds, m.sessionPageCmd(), textinput.Blink)
 		}
 		return tea.Batch(cmds...)
 	}

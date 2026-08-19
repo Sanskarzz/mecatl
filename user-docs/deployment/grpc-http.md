@@ -79,6 +79,25 @@ carry-over key.
 | `ListMcpSources` | Resolved MCP source inventory + diagnostics |
 | `ListToolHiveGroups` | Distinct ToolHive groups in the resolved inventory |
 
+### Storage maintenance RPCs
+
+The management-authorized `PlanSessionCleanup`, `ApplySessionCleanup`,
+`CancelSessionCleanup`, and `GetSessionCleanupJob` RPCs expose the cleanup workflow.
+HTTP peers are `POST /v1/storage/cleanup:plan`,
+`POST /v1/storage/cleanup:apply`, `POST /v1/storage/cleanup/jobs/{id}/cancel`, and
+`GET /v1/storage/cleanup/jobs/{id}`. Plan is read-only; apply requires the opaque token
+from that exact caller/scope/catalog/policy plan. Stale plans fail without mutation,
+partial failures return stable sanitized item codes, and unsupported backends report the
+capability as unavailable. Destructive cleanup, migration, and automatic retention mutate only
+when a cross-process session lease is active; the sole exception is a genuinely process-private
+in-memory store. Every local JSONL `StoreDir` automatically uses the existing flock session lease
+beneath its root, so separate local processes sharing that root cannot both mutate one session
+family. Management authority is independent and never proves exclusion. Remote/OIDC and
+multi-replica servers without a working lease fail closed; family mutation holds the lease through
+the complete rewrite or deletion. `GetStorageHealth`
+remains a read-only aggregate view. These surfaces are intended for management clients; they do
+not add a model tool.
+
 ### Agent team RPCs
 
 Teams require `--enable-teams` (the default). See the full field-level reference in [`docs/usage/grpc-api.md`](https://github.com/stacklok/mecatl/blob/main/docs/usage/grpc-api.md).
@@ -241,6 +260,24 @@ The HTTP adapter wraps the same service. Every event is one SSE `data:` line car
 | `POST /v1/sessions/{id}/cancel` | — | `204` |
 | `POST /v1/sessions/{id}/cancel-child` | `{child_id}` | `204`; `404` for unknown/finished child |
 | `POST /v1/sessions/{id}/fork` | `{title?}` | `200` `{session_id}` — fork a peer session from a conversation snapshot |
+
+### Storage management endpoints
+
+These routes require the deployment's authenticated management authority. Unsupported
+backends return `501`; unauthorized, missing, and cross-caller job handles do not reveal
+storage scope or family existence.
+
+| Method + path | Body | Response |
+|---|---|---|
+| `GET /v1/storage/health` | — | Aggregate content-free storage status |
+| `POST /v1/storage/migrations/plan` | — | Read-only v1/v2/error counts and byte estimates plus opaque plan id |
+| `POST /v1/storage/migrations/apply` | `{plan_id,batch_size?}` | Durable job status after one bounded batch |
+| `GET /v1/storage/migrations/{id}` | — | Caller-bound durable job status |
+| `POST /v1/storage/migrations/{id}/resume` | `{batch_size?}` | Status after another bounded batch |
+| `POST /v1/storage/migrations/{id}/cancel` | — | Forward-only cancellation status |
+
+Migration is physical optimization, not retention: it preserves every session and its
+semantic kind, owner, transcript snapshot, logical modification time, and sidecars.
 
 Scheduled-tasks has its own REST surface under `/v1/schedules` — see [Scheduled tasks](/what-you-get/scheduled-tasks.md#managing-schedules-in-chat-grpc-and-rest).
 

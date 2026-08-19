@@ -94,14 +94,114 @@
   > survey](../perf-measurement-survey.md) (the technique reference behind that
   > decision).
 - **SessionStore** — `memstore` (default, in-memory), `jsonlstore`
-  (append-only JSONL replay log:
-  `<dir>/sid-v1/<versioned-token>.session.jsonl` snapshots plus `.tools.jsonl`
-  and `.events.jsonl` sidecars), and `grpcdriver.SessionStore` (a **remote store
-  driver** — see below). The logical session id is an opaque valid-UTF-8 string
-  stored inside each snapshot; the reversible `sid-v1-` filename token is not
+  (one atomically replaced v2 current snapshot at
+  `<dir>/sid-v1/<versioned-token>.session.json`, with readable historical v1
+  `.session.jsonl` snapshots plus unchanged append-only `.tools.jsonl` and
+  `.events.jsonl` sidecars), and `grpcdriver.SessionStore` (a **remote store
+  driver** — see below). The v2 envelope contains bounded inventory metadata ahead
+  of the complete `sessnap` payload plus logical modification time. Jsonlstore also
+  maintains an adapter-private, atomically replaced metadata catalog containing only
+  the session-discovery projection—never messages, tool arguments, or event content.
+  It pre-sorts deterministic `(modified_at DESC, session_id ASC)` global and
+  owner-specific scopes. A ready metadata page privately decodes its opaque
+  backend continuation, seeks directly to the corresponding catalog position, and
+  decodes at most the requested rows plus one lookahead; it does not traverse prior
+  pages or open snapshot/transcript payloads. The optional
+  `port.SessionStorageHealthProvider` uses that already-ready catalog plus cheap
+  file metadata to report aggregate bytes and format/kind/corruption counts. A
+  stale or absent index is `unavailable`, never a measured zero, and unsupported
+  backends do not advertise the management capability. Process-wide health,
+  migration, and cleanup are disabled unless composition has an explicit management
+  authority. Destructive migration/cleanup capability additionally requires a working
+  cross-process `port.SessionLease` for remotely reachable or multi-writer composition;
+  missing or stickily unsupported leasing suppresses both bits and mutations fail closed.
+  The private embedded mecatui Unix-socket server is the sole explicit single-process
+  exception: composition marks that proven posture, allowing process-local liveness plus
+  family locks. Lease absence by itself never selects the exception. That embedded
+  server explicitly grants its
+  local operator; an OIDC daemon grants only exact operator-tier
+  `storage_management.principals` issuer/subject pairs. Ordinary authenticated tenants,
+  unlisted system principals, anonymous remote callers, and project/request-supplied
+  identity data never grant authority, and denial occurs before backend inspection.
+  Authenticated migration
+  planning is a separate read-only scan that reports v1/v2/invalid/skipped family
+  counts, current/reclaimable bytes, and the largest one-family temporary-space
+  requirement. Its opaque plan binds the verified management caller and source
+  generation without writing. Apply creates a durable caller-bound job and processes
+  at most one bounded batch per call; cancel stops future families, while resume after
+  restart retains committed progress. Each family takes run-entry serialization and
+  the maintenance lease before the stable family flock, revalidates owner/kind/state/
+  liveness and source fingerprint, promotes one verified v2 snapshot, and removes v1
+  only after rereading that v2. Sidecars, complete sessnap bytes, unknown kind, owner,
+  and logical modification time are preserved. Public errors contain only stable
+  reason codes, bounded messages, and non-reversible item handles. The authenticated cleanup
+  API runs a non-destructive dry-run over the store-wide generation after the explicit
+  management-authority gate. On a shared store, lease status is sampled at the planning instant
+  through sequential bounded trial acquire/immediate-release operations because the lease port has
+  no inspect verb; apply makes no future-validity claim and reacquires/revalidates every candidate. It
+  returns age/cap candidates oldest-first by `(modified_at ASC, session_id ASC)`,
+  protected and eligible kind/state/reason counts, mtimes, and byte estimates—never transcript,
+  tool arguments, paths, secrets, or foreign-owner rows. Automatic sweeps and manual
+  plans call the same planner. Unknown/invalid/corrupt/running/awaiting/live/leased
+  records are protected and excluded from cap slots. Apply accepts only a signed
+  caller/scope/generation/policy-bound token, rejects stale generations explicitly,
+  then revalidates owner/kind/state/liveness under run-entry serialization and a
+  maintenance lease before `port.ConditionalPrunableStore` takes its family lock,
+  compares the exact durable metadata again, and keeps all exclusions held while
+  deleting sidecars before the snapshot. Partial failures use stable sanitized codes and remain
+  retryable; unsupported backends report unsupported, not zero impact. Shared health
+  tracks retention, migration, and cleanup independently, renders concurrent active
+  kinds with counts instead of last-writer-wins, reattaches durable running migration
+  truth on job inspection/resume, clears each terminal job independently, and retains
+  only stable sanitized last-failure text. Cursors retain neutral ordering and
+  bind the catalog fingerprint generation and ownership/filter scope; the backend
+  token itself is issued and validated only by the pager. A stale, mismatched, or
+  foreign cursor returns `port.ErrSessionMetadataCursorRestart`, requiring page-one restart
+  rather than mixing generations or owner scopes. Ready-state inventory checks an
+  O(1) source stamp from the authoritative snapshot directories before reading the
+  catalog; the catalog's private child directory keeps its own replacements out of
+  that stamp. Missing, corrupt, or stale catalogs rebuild from
+  v2 metadata headers or bounded v1 tail projections; a fresh directory fingerprint
+  before and after rebuild detects concurrent and other-`Store` family changes instead
+  of trusting process-local state. Catalog rebuild/publication uses a dedicated
+  process mutex plus a stable cross-process catalog flock; it never holds a
+  store-wide session-operation lock, so a blocked rebuild cannot delay another
+  family's Save, Load, event append, or tool audit. Obsolete generations and
+  interrupted catalog temporaries are reconciled only under that catalog lock.
+  The catalog is derivative: snapshots remain the
+  sole transcript authority, and `port.SessionStore` is unchanged. Redisstore follows
+  the same projection contract with atomically co-written snapshot and metadata rows
+  in global and owner-specific lexicographic indexes. Its pager performs one direct
+  exclusive-cursor range read of at most the limit plus one lookahead and never loads
+  snapshot blobs. Save and Delete atomically update the snapshot, index membership,
+  owner-scoped generations, and existing event/tool sidecar lifecycle. A Redis store
+  first opened with legacy snapshots but no derivative index reports metadata paging
+  unsupported instead of scanning transcript records per page.
+  For jsonlstore, a successful save lazily promotes only that
+  session; the verified v2 snapshot is authoritative while a v1 file coexists,
+  and first promotion preserves the v1 file's logical modification time and all
+  sidecar bytes. Save, Delete, verified legacy-family promotion/removal,
+  EventLog.Append, and ToolCall all take the same stable per-family flock identity;
+  sidecar-first/snapshot-last deletion therefore cannot race a same-family append,
+  while unrelated families proceed independently. Snapshot replacement holds that
+  owner-only flock
+  from inactive-temp recovery through same-directory write, file sync, atomic rename,
+  and directory sync. Replacement temp names carry a random process-owner token and
+  monotonic generation; only names that validate against that private protocol are
+  cleanup candidates. Startup skips a family whose lock is live, while the next
+  successful Save waits for the lock and removes all prior inactive generations
+  before creating its own. Thus another process's active temp and the committed
+  snapshot are never reaped, and repeated crashes do not accumulate an unbounded
+  temp set. `Store.SnapshotDurability` exposes those three verified primitives: an unsupported
+  sync primitive is reported as weaker durability rather than overclaiming host-crash
+  safety. Failures before rename preserve the prior snapshot; a failure after rename
+  is loud while the new snapshot remains authoritative.
+  The logical session id is an opaque valid-UTF-8 string
+  stored inside each snapshot; the bounded hash-suffixed `sid-v1-` filename token is not
   an operator API. The owner-only `sid-v1/` directory keeps canonical names
-  disjoint from legacy root-level names. Reads prefer the canonical family. A
-  legacy lossy-name family is used only when its latest snapshot embeds the
+  disjoint from legacy root-level names. Reads prefer verified v2, then canonical
+  v1, then an ownership-verified legacy family. A legacy lossy-name family is
+  used only when its latest snapshot embeds the
   exact requested id, and a subsequent write migrates that verified family
   sidecars-first/snapshot-last without rewriting its bytes. Mismatched legacy
   files are never read or deleted.
@@ -115,12 +215,19 @@
   continues across restart (see `docs/adr/0027-cloud-native.md`).
   A store may additionally implement the optional **`port.PrunableStore`**
   (`List`/`Delete`; `ErrPruneUnsupported` otherwise) — the retention MECHANISM.
-  The POLICY lives in composition (`internal/app/childgc.go`, issue #38):
-  persisted CHILD session snapshots (the `subagent-*`/`parallel-*`/`team-*` ids
-  behind `InspectSubagent`/`InspectMember`/`resume:`) are GC-swept by age
-  (`--child-retention`, default 7d) and per-family count
-  (`--child-retention-max-per-family`, default 500), skipping in-flight runs;
-  main sessions are never touched.
+  Automatic retention consumes `SessionMetadataPager`, and stale-session
+  reconciliation consumes the catalog-backed `MetaList`; neither reloads full
+  conversations for discovery. Candidate deletion/settlement still rechecks the
+  existing durable state, process liveness, and lease protections after discovery.
+  The POLICY lives in composition (`internal/app/childgc.go`) and all automatic
+  and manual selection uses `internal/sessionretention/planner.go`. The strict
+  operator-only `retention.version: 1` settings block exposes main/child/scheduled
+  age and count limits plus sweep cadence; explicit legacy CLI flags win. Zero
+  disables a limit, invalid/negative/unknown config fails, and project-tier
+  retention is ignored. Main deletion defaults off and requires an explicit
+  acknowledgement after the planner summary is logged. Durable unknown/invalid
+  taxonomy, running/awaiting, live, and leased rows remain protected. The effective
+  secret-free `retention/v1` policy is projected by authenticated storage health.
 - **EventLog** (`port.EventLog`, cloud-native Phase 3) — a DURABLE per-session
   event timeline, SEPARATE from `EventSink` (the sink mirrors live; the log is
   storage a later consumer reads back). **The loop never calls it** — persistence
@@ -169,9 +276,11 @@
   assertion, the `PrunableStore` precedent): `memlease` (in-memory reference;
   `memstore` also implements it), `flocklease` (single-host flock), `grpcdriver`
   `SessionLeaseService` (`--session-lease-url`, multi-host), `k8slease`
-  (`coordination.k8s.io` Lease, `--session-lease-k8s-namespace`, in-cluster). Wired
-  ONLY when an operator selects a backend (`internal/app` (`buildSessionLease`));
-  nil otherwise — byte-identical default (single-writer-by-affinity). The
+  (`coordination.k8s.io` Lease, `--session-lease-k8s-namespace`, in-cluster).
+  Explicit backends win; every local JSONL StoreDir otherwise auto-wires
+  `flocklease` beneath the store root, then composition falls back to a
+  store-provided lease (`internal/app` (`buildSessionLease`)). Other stores remain
+  nil/single-writer-by-affinity. The
   conformance contract is `leaseconformance`. See `docs/adr/0027-cloud-native.md`
   Phase 4.
 

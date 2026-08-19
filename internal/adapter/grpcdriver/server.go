@@ -185,11 +185,13 @@ func (s *sessionStoreServer) PageMetadata(ctx context.Context, req *driverv1.Pag
 		Limit: int(req.GetLimit()), OwnershipEnforced: req.GetOwnershipEnforced(),
 	}
 	if cursor := req.GetCursor(); cursor != nil {
-		if cursor.GetModifiedAt() == nil || cursor.GetSessionId() == "" || cursor.GetModifiedAt().CheckValid() != nil {
-			return nil, status.Error(codes.InvalidArgument, "cursor requires a valid modified_at and session_id")
+		if cursor.GetModifiedAt() == nil || cursor.GetSessionId() == "" || cursor.GetModifiedAt().CheckValid() != nil ||
+			!legacyOrBoundCursorFields(cursor.GetGeneration(), cursor.GetScope(), cursor.GetContinuation()) {
+			return nil, status.Error(codes.InvalidArgument, "cursor requires a valid key, and either all of generation/scope/continuation or none")
 		}
 		request.Cursor = &port.SessionMetadataCursor{
 			ModifiedAt: cursor.GetModifiedAt().AsTime(), ID: session.SessionID(cursor.GetSessionId()),
+			Generation: cursor.GetGeneration(), Scope: cursor.GetScope(), Continuation: cursor.GetContinuation(),
 		}
 	}
 	if req.GetOwnerIssuer() != "" || req.GetOwnerSubject() != "" {
@@ -199,6 +201,9 @@ func (s *sessionStoreServer) PageMetadata(ctx context.Context, req *driverv1.Pag
 	if err != nil {
 		if errors.Is(err, port.ErrSessionMetadataPagingUnsupported) {
 			return nil, status.Error(codes.Unimplemented, err.Error())
+		}
+		if errors.Is(err, port.ErrSessionMetadataCursorRestart) {
+			return nil, status.Error(codes.Aborted, err.Error())
 		}
 		return nil, storeStatus(err)
 	}
@@ -217,6 +222,7 @@ func (s *sessionStoreServer) PageMetadata(ctx context.Context, req *driverv1.Pag
 	if page.NextCursor != nil {
 		resp.NextCursor = &driverv1.SessionMetadataCursor{
 			ModifiedAt: timestamppb.New(page.NextCursor.ModifiedAt), SessionId: string(page.NextCursor.ID),
+			Generation: page.NextCursor.Generation, Scope: page.NextCursor.Scope, Continuation: page.NextCursor.Continuation,
 		}
 	}
 	return resp, nil
@@ -229,7 +235,7 @@ func metadataToProto(meta port.SessionDiscoveryMeta) (*driverv1.SessionMetadataE
 	entry := &driverv1.SessionMetadataEntry{
 		SessionId: string(meta.ID), State: string(meta.State), Turns: int32(meta.Turns),
 		ModelId: meta.ModelID, Title: meta.Title, TitleProvenance: string(meta.TitleProvenance),
-		Workspace: meta.Workspace, Kind: string(meta.Kind),
+		Workspace: meta.Workspace, Kind: string(meta.Kind), EstimatedBytes: meta.EstimatedBytes,
 		ParentSessionId: string(meta.Relationship.ParentSessionID), CallId: string(meta.Relationship.CallID),
 		ScheduleName: meta.Relationship.ScheduleName, OriginSessionId: string(meta.Relationship.OriginSessionID),
 		TeamId: meta.Relationship.TeamID, MemberName: meta.Relationship.MemberName,

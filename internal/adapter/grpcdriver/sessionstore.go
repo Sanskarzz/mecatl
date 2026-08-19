@@ -180,6 +180,25 @@ func metadataAfter(row port.SessionDiscoveryMeta, cursor *port.SessionMetadataCu
 		(row.ModifiedAt.Equal(cursor.ModifiedAt) && row.ID > cursor.ID)
 }
 
+// legacyOrBoundCursorFields reports whether Generation/Scope/Continuation are
+// either all absent (an older peer's pre-generation-binding cursor, still a
+// legitimate value per port.PaginateSessionMetadata) or all present (this
+// protocol's generation-bound cursor) -- never a partial mix, which would
+// indicate a corrupt or forged cursor. A version-skewed peer that never
+// populates these fields degrades to ErrSessionMetadataCursorRestart on the
+// next page rather than a hard reject; see docs/adr/0226-session-storage-maintenance.md.
+func legacyOrBoundCursorFields(generation, scope, continuation string) bool {
+	if generation == "" && scope == "" && continuation == "" {
+		return true
+	}
+	return generation != "" && scope != "" && continuation != ""
+}
+
+func validPortMetadataCursor(cursor *port.SessionMetadataCursor) bool {
+	return cursor != nil && cursor.ID != "" && utf8.ValidString(string(cursor.ID)) &&
+		legacyOrBoundCursorFields(cursor.Generation, cursor.Scope, cursor.Continuation)
+}
+
 func validateMetadataPage(page port.SessionMetadataPage, request port.SessionMetadataPageRequest) error {
 	if len(page.Sessions) > request.Limit {
 		return fmt.Errorf("returned %d rows for limit %d", len(page.Sessions), request.Limit)
@@ -205,7 +224,7 @@ func validateMetadataPage(page port.SessionMetadataPage, request port.SessionMet
 		}
 	}
 	if page.NextCursor != nil {
-		if len(page.Sessions) == 0 || page.NextCursor.ID == "" || !utf8.ValidString(string(page.NextCursor.ID)) {
+		if len(page.Sessions) == 0 || !validPortMetadataCursor(page.NextCursor) {
 			return fmt.Errorf("invalid next cursor")
 		}
 		last := page.Sessions[len(page.Sessions)-1]
@@ -232,6 +251,9 @@ func (st *SessionStore) PageSessionMetadata(ctx context.Context, request port.Se
 		if status.Code(err) == codes.Unimplemented {
 			return port.SessionMetadataPage{}, fmt.Errorf("grpcdriver: page metadata: %w: %v", port.ErrSessionMetadataPagingUnsupported, err)
 		}
+		if status.Code(err) == codes.Aborted {
+			return port.SessionMetadataPage{}, fmt.Errorf("grpcdriver: page metadata: %w", port.ErrSessionMetadataCursorRestart)
+		}
 		return port.SessionMetadataPage{}, rpcErr(ctx, "page metadata", err)
 	}
 	page, err := metadataPageFromProto(resp)
@@ -250,13 +272,16 @@ func pageMetadataRequest(request port.SessionMetadataPageRequest) (*driverv1.Pag
 	}
 	req := &driverv1.PageSessionMetadataRequest{Limit: int32(request.Limit), OwnershipEnforced: request.OwnershipEnforced}
 	if request.Cursor != nil {
-		if request.Cursor.ID == "" || !utf8.ValidString(string(request.Cursor.ID)) {
-			return nil, fmt.Errorf("grpcdriver: page metadata: cursor session id is invalid")
+		if !validPortMetadataCursor(request.Cursor) {
+			return nil, fmt.Errorf("grpcdriver: page metadata: cursor is invalid")
 		}
 		if err := timestamppb.New(request.Cursor.ModifiedAt).CheckValid(); err != nil {
 			return nil, fmt.Errorf("grpcdriver: page metadata: cursor modified time: %w", err)
 		}
-		req.Cursor = &driverv1.SessionMetadataCursor{ModifiedAt: timestamppb.New(request.Cursor.ModifiedAt), SessionId: string(request.Cursor.ID)}
+		req.Cursor = &driverv1.SessionMetadataCursor{
+			ModifiedAt: timestamppb.New(request.Cursor.ModifiedAt), SessionId: string(request.Cursor.ID),
+			Generation: request.Cursor.Generation, Scope: request.Cursor.Scope, Continuation: request.Cursor.Continuation,
+		}
 	}
 	if request.Owner != nil {
 		req.OwnerIssuer = request.Owner.Issuer
@@ -280,10 +305,14 @@ func metadataPageFromProto(resp *driverv1.PageSessionMetadataResponse) (port.Ses
 		page.Sessions = append(page.Sessions, metadataFromProto(entry))
 	}
 	if cursor := resp.GetNextCursor(); cursor != nil {
-		if cursor.GetModifiedAt() == nil || cursor.GetModifiedAt().CheckValid() != nil || cursor.GetSessionId() == "" {
+		if cursor.GetModifiedAt() == nil || cursor.GetModifiedAt().CheckValid() != nil || cursor.GetSessionId() == "" ||
+			!legacyOrBoundCursorFields(cursor.GetGeneration(), cursor.GetScope(), cursor.GetContinuation()) {
 			return port.SessionMetadataPage{}, fmt.Errorf("grpcdriver: page metadata: driver returned an invalid next cursor")
 		}
-		page.NextCursor = &port.SessionMetadataCursor{ID: session.SessionID(cursor.GetSessionId()), ModifiedAt: cursor.GetModifiedAt().AsTime()}
+		page.NextCursor = &port.SessionMetadataCursor{
+			ID: session.SessionID(cursor.GetSessionId()), ModifiedAt: cursor.GetModifiedAt().AsTime(),
+			Generation: cursor.GetGeneration(), Scope: cursor.GetScope(), Continuation: cursor.GetContinuation(),
+		}
 	}
 	return page, nil
 }
@@ -298,6 +327,7 @@ func metadataFromProto(entry *driverv1.SessionMetadataEntry) port.SessionDiscove
 		TitleProvenance: session.TitleProvenance(entry.GetTitleProvenance()),
 		Workspace:       entry.GetWorkspace(),
 		Kind:            session.SessionKind(entry.GetKind()),
+		EstimatedBytes:  entry.GetEstimatedBytes(),
 		Relationship: session.SessionRelationship{
 			ParentSessionID: session.SessionID(entry.GetParentSessionId()),
 			CallID:          session.ToolCallID(entry.GetCallId()),

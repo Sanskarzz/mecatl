@@ -248,6 +248,11 @@ a short directive with a longer brief. The seed fires ONCE: a `/models` restart 
 | `--no-memory` | off | **embedded** server: disable cross-session memory (Remember/Recall) |
 | `--store-dir` | – (auto) | **embedded** server: durable JSONL session/event store dir; empty = a per-workspace default under `$XDG_STATE_HOME/mecatui/sessions`, so sessions survive restart. **Privacy:** stores the raw conversation (prompts, model output, tool args/results) in **plaintext**; the dir is created mode `0700` (owner-only) |
 | `--no-store` | off | **embedded** server: disable the durable session store (use an in-memory store, persisting nothing to disk) |
+| `--child-retention` / `--child-retention-max-per-family` | `168h` / `500` | **embedded only:** local child age/count policy; `0` disables each limit |
+| `--main-retention` / `--main-retention-max-total` | `0` / `0` | **embedded only:** destructive local main policy, off by default; enabling either also requires explicit acknowledgement |
+| `--schedule-fire-retention` / `--schedule-fire-retention-max-total` | `168h` / `0` | **embedded only:** local scheduled-fire age/count policy; `0` disables each limit |
+| `--retention-sweep-cadence` | `1h` | **embedded only:** local repeat cadence; `0` disables repeats while preserving the compatibility startup sweep |
+| `--acknowledge-main-retention` | off | **embedded only:** explicit consent after reviewing the logged destructive main planner summary |
 | `--commands-dir` | – (auto) | **embedded** server: slash-command template dir; empty = the conventional `.mecatl/commands`, `.claude/commands` |
 | `--no-commands` | off | **embedded** server: disable slash-command expansion |
 | `--skills-dir` | – (auto) | **embedded** server: skill-unit dir (`<name>/SKILL.md`); empty = the conventional dirs (e.g. `.claude/skills`) |
@@ -682,9 +687,14 @@ $ ls ~/.local/state/mecatui/sessions/   # each subdir is one workspace
 model's output, and tool arguments/results — in **plaintext** on disk; the dir is
 created mode `0700` (owner-only). Pass `--no-store` to keep everything in memory
 (persisting nothing), or `--store-dir` to relocate it. To keep the durable store
-from growing without bound, a retention GC reaps stale sessions: child snapshots
-(subagent/parallel/team) after 7 days or 500-per-family, and top-level sessions
-after 30 days or 200 store-wide, always skipping an in-flight run. **Concurrency:**
+from growing without bound, embedded mode exposes an explicit local retention
+policy: child snapshots default to 7 days / 500 per family, scheduled fires to 7
+days, and destructive main cleanup defaults off. Set the retention flags above or
+the operator `retention.version: 1` settings block. Enabling a main limit requires
+explicit acknowledgement and logs the planner summary. The Sessions storage-health
+view shows the effective policy. Connected mode rejects local retention flags and
+can only display a remote policy advertised by the authenticated management
+capability; it never claims to configure that server. **Concurrency:**
 the per-workspace default assumes a single `mecatui` per workspace; a second
 instance hosting an embedded server on the same workspace shares the dir, and its
 retention GC may prune the other instance's idle sessions early — give a second
@@ -1237,20 +1247,56 @@ and modification timestamps, provider, and model. The header intentionally shows
 the compact digest. Press **`c`** to copy the exact full ID byte-for-byte; mecatui reports
 clipboard failure or a session change instead of claiming a stale copy. `esc` closes it.
 
-**`/sessions` (session continuity).** The session inventory has four tabs:
-**Chats**, **Scheduled runs**, **Child runs**, and **Other**. The same inventory is
+**`/sessions` (session continuity).** The session inventory has four session tabs:
+**Chats**, **Scheduled runs**, **Child runs**, and **Other**. When the server
+advertises authenticated bounded storage health or either maintenance operation, a fifth
+**Maintenance** tab appears. Its status view shows current/reclaimable availability,
+aggregate bytes/files/formats/kinds/corruption, effective retention policy, sweep timing,
+active-job state, and last failure without session IDs, owners, paths, or content.
+
+The two actions are deliberately separate and independently capability-gated. **`o` Optimize
+storage** starts with a read-only v1/v2/invalid/skipped and byte estimate, including required
+temporary space, and states that every session is preserved. Applying starts a durable bounded
+job; its screen supports status, cancel, and resume and shows progress plus bounded sanitized
+per-item failures. **`x` Clean up sessions** is destructive: its read-only plan partitions
+eligible and protected main/child/scheduled/unknown/live/awaiting rows, keeps unknown protected
+by default, and requires typing `CLEAN UP`. The single-row `y`/`enter` delete consent is inert in
+this bulk form. Apply-time stale/skipped/failed counts remain visible; retry begins a fresh dry
+run against the current generation.
+
+Closing the panel never cancels a maintenance job. Reopening refetches the server-owned durable
+handle and progress. Explicit cancellation stops future items; completed migrations or deletions
+stay committed. Older or unsupported servers hide unavailable actions rather than showing zero
+impact. The same inventory is
 the initial view for `mecatui sessions` and `mecatui connect ADDRESS sessions`;
 those launch forms establish no session until the operator continues a chat or
 presses `n` for a new one. At startup, `esc` quits; after opening an inspection,
 `esc` returns to this inventory.
-The Other tab keeps
-unknown legacy/custom rows inspect-only without mislabeling them as delegation children.
+The Other tab keeps unknown legacy/custom rows inspect-only and visibly labels each
+one **`Legacy session — inspect only`** without classifying it from the opaque ID.
+For a selected legacy row, mecatui asks the authenticated server to preflight the
+explicit current workspace/environment and provider/model target. Only an eligible,
+source-correlated preflight adds **`a: adopt as chat`**; otherwise the footer keeps
+the action disabled and renders the server's stable reason. Missing target values
+stay unresolved until the operator explicitly selects them—there is no server-default
+fallback.
 `tab` switches tabs; the
 search box filters the current tab. Search matches the title, full session ID,
 its terminal-safe digest handle, model, workspace, and the available
 relationship metadata (parent/call, schedule/origin, team/member). This keeps
 scheduled fires and delegation children discoverable without making their IDs
 part of the UI contract.
+
+Inventory is progressive in both launch and in-chat forms. Mecatui renders the
+first bounded page before it asks for the next one, then appends deterministic,
+ID-deduplicated rows without changing the active tab, search text, exact-ID
+selection, or scroll position. The footer distinguishes **loading more** from a
+complete inventory. Press **`c`** while pages are loading to stop pagination;
+**`r`** restarts after cancellation or retries a failed page. A later-page failure
+keeps every row already shown. If the server reports that the cursor generation is
+stale, the panel says it is restarting and replaces the old generation only when
+the new first page arrives. Closing the panel or quitting the startup browser
+cancels the outstanding request and never creates or rebinds a session.
 
 Each row shows a state badge, relative modification time, turn count, title,
 digest handle, and model. The active chat is explicitly marked **`[current]`**;
@@ -1279,6 +1325,16 @@ first. Rename/delete/fork are revalidated by the server, so a stale row can fail
 without rebinding the active chat. Scheduled, child, active, awaiting, and
 unknown rows show only the subset the server reports; hidden actions are also
 rejected if invoked.
+
+The adoption review names the source ID and title, states that adoption creates a
+new main chat while leaving the legacy source inspect-only, and shows the target
+workspace/environment and provider/model. It also warns that future tool writes
+operate in the target workspace. `esc` cancels without disturbing progressive
+paging, selection, or scroll state. Confirmation revalidates the preflight under
+the server's mutation authority; a stale, cancelled, or caller-safe error remains
+on the stable review. Success does not trust the mutation response as conversation
+content: mecatui refetches the authoritative new snapshot and transcript, then opens
+that new chat writable. Adoption never deletes or relabels the source.
 
 The snapshot transcript is the conversation source of truth. Durable event
 replay may support live delivery catch-up, but is not used to establish a

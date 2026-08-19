@@ -26,6 +26,21 @@ const (
 	// decision (ownsResource/authorizeSession/authorizeSchedule, or an
 	// equivalent per-kind check such as memory.CallerStore's context-derived
 	// namespace) on every call, denying a foreign caller as absence.
+	//
+	// MANAGEMENT-AUTHORITY SUB-CASE (the storage-maintenance boundaries:
+	// StorageHealth, Plan/Apply/Resume/CancelSessionMigration,
+	// SessionMigrationJob, Plan/Apply/CancelSessionCleanup,
+	// SessionCleanupJob): the boundary still resolves a real per-caller
+	// identity decision — "is this the verified management principal", and
+	// for the ones that mint a job/plan/token, "does this handle belong to
+	// THIS caller" — so KindCallerOwned's structural contract (a real ctx
+	// check, no bypass) holds. But unlike an ordinary caller-owned boundary,
+	// the underlying DATA these operate over is store-wide (every session),
+	// never narrowed to "this caller's own rows". Don't read their entries'
+	// "caller-owned" kind as data-scoping; read the rationale text for what
+	// is actually decided. A future 5th AccessKind naming this sub-case
+	// explicitly would need its own ADR (per ADR 0212's closed 4-kind
+	// taxonomy) — not done here.
 	KindCallerOwned AccessKind = iota
 	// KindDerived means the boundary carries no independent decision of its
 	// own: it operates on an identifier a caller can only obtain from an
@@ -235,9 +250,21 @@ var serviceAccessTable = map[string]ClassificationEntry{
 	"RenameSession":             {KindCallerOwned, "authorizes via GetSession, then revalidates ownership, kind, state, liveness, and lease under runEntryMu before persisting"},
 	"DeleteSession":             {KindCallerOwned, "authorizes via GetSession, then revalidates ownership, kind, state, liveness, and lease under runEntryMu before physical deletion"},
 	"ForkSession":               {KindCallerOwned, "authorizes the SOURCE session (authorizeSession) before copying its history to a new owned session"},
+	"PreflightSessionAdoption":  {KindCallerOwned, "loads and authorizes the legacy source from the verified caller context before reporting eligibility"},
+	"AdoptSession":              {KindCallerOwned, "revalidates the caller-owned legacy source under run-entry serialization and the mutation lease before publishing a new owned main session"},
 	"EndSession":                {KindCallerOwned, "authorizes via GetSession before CloseSession"},
 	"ListSessions":              {KindCallerOwned, "filters to the caller's own rows before any pagination/count is computed"},
 	"ListSessionPage":           {KindCallerOwned, "passes caller ownership into the store query before keyset page formation and counting"},
+	"StorageHealth":             {KindCallerOwned, "gates on the trusted-context management authorizer, NOT caller ownership — the aggregate it reads is store-wide (every session), never scoped to the caller's own rows; see the AccessKind doc comment note on management-authority boundaries"},
+	"PlanSessionMigration":      {KindCallerOwned, "gates on management authorization over the ENTIRE store, not the caller's own sessions; only the returned generation handle is bound to the verified caller for later Apply/Resume/Cancel binding"},
+	"ApplySessionMigration":     {KindCallerOwned, "gates on management authorization over the entire store; only the created job is caller-bound, so a foreign-caller job lookup is denied identically to a missing job"},
+	"ResumeSessionMigration":    {KindCallerOwned, "gates on management authorization; the same caller-bound job-handle check applies before processing another bounded batch — the underlying migration data remains store-wide, never caller-owned"},
+	"CancelSessionMigration":    {KindCallerOwned, "gates on management authorization; the same caller-bound job-handle check applies before stopping future items — the underlying migration data remains store-wide, never caller-owned"},
+	"SessionMigrationJob":       {KindCallerOwned, "gates on management authorization and conceals missing and cross-caller job handles identically; the underlying migration data is store-wide, not the caller's own sessions"},
+	"PlanSessionCleanup":        {KindCallerOwned, "gates on management authority, NOT caller ownership — the metadata pager plans over the ENTIRE store (owner scope is nil); the decision resolved here is 'is this caller a management principal', never per-session ownership"},
+	"ApplySessionCleanup":       {KindCallerOwned, "gates on management authority over the entire store; only the confirmation token/plan is bound to the verified caller, so a stolen or foreign token is rejected before any deletion"},
+	"CancelSessionCleanup":      {KindCallerOwned, "gates on management authority; matches the verified principal against the bounded job registry — the underlying cleanup scope is store-wide, never caller-owned"},
+	"SessionCleanupJob":         {KindCallerOwned, "gates on management authority and returns only a caller-bound sanitized job projection; the underlying cleanup data is store-wide, not the caller's own sessions"},
 	"StreamSessionEvents":       {KindCallerOwned, "event log/live stream resolves through the owning session's authorizeSession check"},
 	"Subscribe":                 {KindCallerOwned, "authorizes via GetSession before registering a live subscriber (issue #368)"},
 
@@ -274,18 +301,19 @@ var serviceAccessTable = map[string]ClassificationEntry{
 	"CleanupTeam":         {KindCallerOwned, "authorizes via ownsResource before dropping the registry entry (issue #368 task 06 fix — CleanupTeam previously ignored its ctx)"},
 
 	// --- derived: resolve ownership through an already-classified caller-owned call ---
-	"SessionCapabilities":   {KindDerived, "reads the per-session engine registry keyed on an id the caller only holds from an authorized CreateSession*/GetSession* echo; carries no ctx to re-check"},
-	"ResolvedModel":         {KindDerived, "mirrors SessionCapabilities: identity read off the per-session engine registry for an id the caller already authorized to obtain"},
-	"LookupRun":             {KindDerived, "in-memory run registry read; every caller-facing entry point (Cancel, Persist, Approve*, MaybeAutoApprovePlan) authorizes the session FIRST and only then consults this"},
-	"IsLive":                {KindDerived, "same in-flight registry as LookupRun; consumed by the composition-owned child-GC liveness predicate, not a caller-facing verb"},
-	"FinishRun":             {KindDerived, "deregisters an id the wire adapter already finished draining from its own authorized run"},
-	"PublishSessionEvent":   {KindDerived, "publishes to subscribers already registered via the (caller-owned) Subscribe for this id; PublishSessionEvent itself takes no ctx and makes no independent decision"},
-	"AppendRunEvent":        {KindDerived, "durable-append passthrough to the single appendEvent chokepoint for an id the in-process caller (the scheduler fire loop) already owns via its own run"},
-	"RecoverNotice":         {KindDerived, "pops a notice keyed by id that only the relay's own immediately-preceding, already-authorized StartRunContent call could have set"},
-	"SetSessionEnvironment": {KindDerived, "called only with the id CreateSession* just returned to the same caller (internal/adapter/acp); renamed from SetSessionWorkspace by the execution-environments refactor"},
-	"CloseSession":          {KindDerived, "internal cleanup for an id the caller (EndSession, already authorized) or the owning connection has already established as its own; takes no ctx"},
-	"EmitScheduleEvent":     {KindDerived, "stamps the fire's ALREADY-established actor (the scheduler's system principal for a tick fire, or FireNow's caller) captured at fire time; makes no independent ownership decision"},
-	"MaybeAutoApprovePlan":  {KindDerived, "invoked from relayEvent only for an id the SAME request's already-authorized StartRunContent/ApprovePlan call is streaming"},
+	"SessionCapabilities":          {KindDerived, "reads the per-session engine registry keyed on an id the caller only holds from an authorized CreateSession*/GetSession* echo; carries no ctx to re-check"},
+	"ResolvedModel":                {KindDerived, "mirrors SessionCapabilities: identity read off the per-session engine registry for an id the caller already authorized to obtain"},
+	"LookupRun":                    {KindDerived, "in-memory run registry read; every caller-facing entry point (Cancel, Persist, Approve*, MaybeAutoApprovePlan) authorizes the session FIRST and only then consults this"},
+	"IsLive":                       {KindDerived, "combined Service-run and engine-child process-local registry; consumed by destructive maintenance, not a caller-facing verb"},
+	"MaintenanceMutationAvailable": {KindDerived, "read-only capability truth consumed by composition before scheduling automatic retention"},
+	"FinishRun":                    {KindDerived, "deregisters an id the wire adapter already finished draining from its own authorized run"},
+	"PublishSessionEvent":          {KindDerived, "publishes to subscribers already registered via the (caller-owned) Subscribe for this id; PublishSessionEvent itself takes no ctx and makes no independent decision"},
+	"AppendRunEvent":               {KindDerived, "durable-append passthrough to the single appendEvent chokepoint for an id the in-process caller (the scheduler fire loop) already owns via its own run"},
+	"RecoverNotice":                {KindDerived, "pops a notice keyed by id that only the relay's own immediately-preceding, already-authorized StartRunContent call could have set"},
+	"SetSessionEnvironment":        {KindDerived, "called only with the id CreateSession* just returned to the same caller (internal/adapter/acp); renamed from SetSessionWorkspace by the execution-environments refactor"},
+	"CloseSession":                 {KindDerived, "internal cleanup for an id the caller (EndSession, already authorized) or the owning connection has already established as its own; takes no ctx"},
+	"EmitScheduleEvent":            {KindDerived, "stamps the fire's ALREADY-established actor (the scheduler's system principal for a tick fire, or FireNow's caller) captured at fire time; makes no independent ownership decision"},
+	"MaybeAutoApprovePlan":         {KindDerived, "invoked from relayEvent only for an id the SAME request's already-authorized StartRunContent/ApprovePlan call is streaming"},
 
 	// --- shared infrastructure: process-wide catalog/config, same for every caller by design ---
 	"ListMcpResources":        {KindSharedInfrastructure, "MCP servers are process-wide composition config, not a caller-owned record; every caller may list a wired server's resources"},
@@ -341,10 +369,11 @@ var serviceAccessTable = map[string]ClassificationEntry{
 	"ScheduleManager":        {KindExempt, "composition-time accessor for the context-free manager handle; Schedule and ScheduleQuery are separately classified caller-owned consumers"},
 
 	// --- exempt: composition-owned session staleness sweep (issue #475), process-wide by design ---
-	"SessionStale":              {KindExempt, "decides staleness for a metadata-scan candidate inside internal/app's composition-owned sweep, never a per-request caller-facing verb (mirrors IsLive)"},
-	"LeaseSweepDisabled":        {KindExempt, "reads the process-wide sticky sweep-disabled flag SessionStale sets, consumed only by the composition-owned sweep"},
-	"SettleIfStale":             {KindExempt, "repairs a stale session found by the composition-owned sweep's own metadata scan across every session, not a caller-supplied id from a caller-owned boundary"},
-	"DeleteSessionForRetention": {KindExempt, "composition-owned retention callback over system-scoped metadata candidates; revalidates durable taxonomy/state and acquires the session mutation lease before deletion"},
+	"SessionStale":                       {KindExempt, "decides staleness for a metadata-scan candidate inside internal/app's composition-owned sweep, never a per-request caller-facing verb (mirrors IsLive)"},
+	"LeaseSweepDisabled":                 {KindExempt, "reads the process-wide sticky sweep-disabled flag SessionStale sets, consumed only by the composition-owned sweep"},
+	"SettleIfStale":                      {KindExempt, "repairs a stale session found by the composition-owned sweep's own metadata scan across every session, not a caller-supplied id from a caller-owned boundary"},
+	"DeleteSessionForRetention":          {KindExempt, "legacy composition retention callback; revalidates durable taxonomy/state and acquires the session mutation lease before deletion"},
+	"DeleteSessionForRetentionCandidate": {KindExempt, "composition-owned retention callback over planner metadata; holds run-entry, lease, and backend family exclusions through conditional deletion"},
 }
 
 // callerStoreAccessTable classifies memory.CallerStore's exported methods —

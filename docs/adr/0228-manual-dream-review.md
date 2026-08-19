@@ -1,14 +1,14 @@
-# ADR 0227 — Manual dream review
+# ADR 0228 — Manual dream review
 
 - Status: Accepted
 - Date: 2026-08-17
 - Scope: manual project-memory and user-model consolidation review, server APIs, and mecatui `/dream`.
-- Supersedes: only [ADR 0226](./0226-dream-consolidation-safety-boundary.md)'s statement that inspectable manual review is future work.
+- Supersedes: only [ADR 0227](./0227-dream-consolidation-safety-boundary.md)'s statement that inspectable manual review is future work.
 - Superseded by: none
 
 ## Context
 
-ADR 0226 made unattended consolidation safe by limiting automatic mutation to exact-duplicate
+ADR 0227 made unattended consolidation safe by limiting automatic mutation to exact-duplicate
 retirement, but deliberately deferred inspection and approval of useful non-identical proposals.
 Operators need a separate maintenance workflow that shows exactly what a model proposed before any
 model-authored replacement reaches durable memory. This is not completed-trajectory reflection or
@@ -38,7 +38,7 @@ they never apply synthesized replacements.
 On human-approved apply, use the authoritative retained plan rather than client-supplied operation
 material. For each synthesis operation, atomically compare the bound inspected versions for the
 displayed survivor and sources, rewrite that displayed survivor to the displayed replacement, and tombstone all displayed
-sources. Exact duplicates retain the ADR 0226 operation. Operations are independent: conflicts or
+sources. Exact duplicates retain the ADR 0227 operation. Operations are independent: conflicts or
 failures in one do not roll back successful operations in another. Apply and dismiss are whole-plan
 decisions; v1 has no per-source toggles and claims neither grouped atomicity nor grouped undo.
 
@@ -76,4 +76,4 @@ frequency does not influence planning because no recall counters are collected.
 - [Implementation notes](../design/IMPLEMENTATION-NOTES.md)
 - [Production readiness](../design/PRODUCTION-READINESS.md)
 - [Cloud-native resource inventory](./0027-cloud-native.md)
-- [ADR 0226 — Dream consolidation safety boundary](./0226-dream-consolidation-safety-boundary.md)
+- [ADR 0227 — Dream consolidation safety boundary](./0227-dream-consolidation-safety-boundary.md)

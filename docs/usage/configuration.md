@@ -226,13 +226,55 @@ their relationship schema, or claims `main` under a reserved non-chat prefix are
 protected rather than guessed from the absence of a reserved prefix. **Child** sessions (`subagent-*`/`parallel-*`/`team-*`
 families, written by the delegation paths so `InspectSubagent`/`InspectMember`/
 `resume:` work) are bounded by `--child-retention` /
-`--child-retention-max-per-family` (defaults 168h / 500). **Main** (top-level)
-sessions are bounded by `--main-retention` / `--main-retention-max-total` — **both
-off by default for `mecated`** (main sessions are then never swept), and on for
-`mecatui` (30 days / 200 store-wide). The sweep re-runs every `--child-gc-interval`
-(default 1h) and always skips persisted running/awaiting sessions, an in-flight
-run, and a session leased by another process; deleting a session removes all of
-its files.
+`--child-retention-max-per-family` (defaults 168h / 500). The same policy is available as a strict, versioned operator-only block:
+
+```yaml
+retention:
+  version: 1
+  main: {max_age: 0, max_count: 0}
+  child: {max_age: 168h, max_count: 500}
+  scheduled: {max_age: 168h, max_count: 0}
+  sweep_cadence: 1h
+  acknowledge_main_deletion: false
+```
+
+Each zero limit disables that pass; a zero cadence disables repeat sweeps while
+preserving the compatibility startup sweep. Negative durations/counts, unknown
+subkeys, and unknown versions fail startup. Precedence is built-in defaults <
+operator `settings.yaml` < explicitly supplied compatibility flags. A project
+`.mecatl/settings.yaml` retention block is ignored with a warning.
+
+Main retention is destructive and defaults off in both `mecated` and embedded
+`mecatui`. Enabling either main limit requires `acknowledge_main_deletion: true`
+or `--acknowledge-main-retention`; startup logs the effective planner summary,
+including that unknown records remain protected. The authenticated storage-health
+projection exposes the content-free effective `retention/v1` policy. Embedded
+mecatui configures only its local server with the same explicit flags; connect mode
+rejects them and displays remote policy only when the remote management capability
+advertises it.
+
+Remote OIDC deployments do not grant storage management to every authenticated
+caller. Configure exact verified manager identities only in operator-tier
+`settings.yaml` (never a project file):
+
+```yaml
+storage_management:
+  version: 1
+  principals:
+    - issuer: https://idp.example/realms/operators
+      subject: storage-admin
+```
+
+Both issuer and subject must match the verified request context exactly. An empty
+or absent list advertises no remote management capability; grant type, display
+name, request owner fields, and system-principal status are not shortcuts. Remote
+and multi-writer deployments advertise destructive migration/cleanup only with a
+working cross-process session lease (`--session-lease-url`,
+`--session-lease-k8s-namespace`, or a single-host `--session-lease-dir` where
+appropriate). A missing, disabled, held, or backend-unsupported lease fails the
+mutation closed; unsupported leasing also clears the capability echo. The private
+embedded mecatui server is the sole principal-less and lease-less exception because
+composition explicitly proves its local single-process Unix-socket posture.
 
 ### Remote store drivers
 
@@ -295,8 +337,10 @@ background (`--session-lease-renew-interval`, default `--session-lease-ttl`/3),
 and released on session end / shutdown. A crashed holder's lease lapses after
 `--session-lease-ttl` (or, for the flock backend, releases immediately on process
 death), after which a survivor takes over. Losing the lease mid-run cancels the
-run cleanly (recoverable). The three backends are **mutually exclusive**; empty =
-no leasing (the byte-identical default).
+run cleanly (recoverable). The three explicit backends are **mutually exclusive**.
+With no lease flag, a local `--store-dir` automatically uses a flock lease under
+`<store-dir>/.session-leases`; other stores use a store-provided lease or remain
+unleased.
 
 - **`--session-lease-dir` (flock):** SINGLE-HOST only. Several mecated processes
   on ONE machine sharing the dir contend via `flock(2)`, with free crash recovery

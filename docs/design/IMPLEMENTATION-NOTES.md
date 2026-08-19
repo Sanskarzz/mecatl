@@ -119,6 +119,19 @@ non-main kinds. `engine/adapter/sessnap/sessnap.go`, every SessionStore adapter
 Restore rejects invalid combinations; a legacy absent kind becomes fail-closed
 `unknown` rather than gaining main-session continuation posture.
 
+Explicit legacy adoption (issue #593) remains a server/composition authority boundary,
+not an aggregate transition. `PreflightSessionAdoption` accepts only an authenticated,
+caller-owned `unknown` snapshot with a complete tool-paired transcript at an idle/terminal
+boundary and no reserved child/team/parallel/scheduled prefix or relationship. It reports
+stable reason codes and requires explicit workspace/`EnvironmentRef` plus provider/model
+bindings; resolution failures never fall through to defaults. `AdoptSession` repeats the
+checks while holding the source's `runEntryMu` and mutation lease, copies through the
+existing cross-provider state-stripping discipline, and saves one fresh main aggregate with
+optional `Adoption` metadata containing the source ID and a caller/source/request-bound digest. The deterministic opaque target
+ID makes a lost-response retry return that complete snapshot. Foreign and absent sources are
+both `ErrNotFound`; the source is never reopened, relabelled, or saved. There is no bulk,
+automatic, or client-transcript-upload path.
+
 ---
 
 ## Domain — `engine/session/` (lifecycle recovery)
@@ -5840,26 +5853,226 @@ yet (a replay consumer is Phase 3b). See `CLOUD-NATIVE.md` (Phase 3, ledger row 
 - **The jsonlstore adapter (the local reference).**
   `internal/adapter/store/jsonlstore/jsonlstore.go` (`Store`) — the ONE instance that
   serves `SessionStore` + `ToolCallRecorder` + `EventLog` — stores one family as
-  `<store>/sid-v1/<sid-v1-token>.session.jsonl` plus parallel `.tools.jsonl` and
-  `.events.jsonl` sidecars. The owner-only version directory makes canonical names
-  physically disjoint from root-level legacy and schedule names.
+  `<store>/sid-v1/<sid-v1-token>.session.json` (one v2 current snapshot), an
+  optional readable `.session.jsonl` v1 history, and parallel `.tools.jsonl` /
+  `.events.jsonl` sidecars. Save writes a same-directory owner-only temporary,
+  syncs it, atomically renames it over the v2 current snapshot, and syncs the
+  directory. Every snapshot family has a stable owner-only `.family.lock` flock
+  sentinel. Save holds that cross-process lock from orphan-temp cleanup through
+  legacy preparation, file sync, atomic rename, and directory sync. Temporaries
+  carry a random process-owner token plus a monotonic generation; startup takes
+  each discovered family's lock non-blockingly and reaps only names that validate
+  against that protocol, while a successful Save takes the lock and reaps every
+  prior inactive generation before creating its own. A live holder therefore keeps
+  its active temp, committed snapshots are never cleanup candidates, and repeated
+  crashes converge to at most the current in-progress temp on the next startup/save.
+  The v2 envelope carries a format tag, complete `sessnap` JSON, and logical
+  modification time; first lazy promotion preserves the v1 mtime, aggregate bytes
+  after restore, and sidecars, while later saves replace only the v2 current file.
+  `Store.SnapshotDurability` exposes the three verified replacement primitives;
+  unsupported sync primitives are an explicit weaker capability rather than a
+  host-crash-safety claim. A write, file-sync, or rename failure leaves the prior
+  snapshot authoritative and fails loudly; a directory-sync failure after rename
+  reports an error with the new snapshot already authoritative.
+  The owner-only version directory makes canonical names physically disjoint
+  from root-level legacy and schedule names.
   `internal/adapter/store/jsonlstore/resolve.go` (`sessionResolver`) is the single
-  physical-name authority: `sid-v1-` + strict raw URL-base64 reversibly encodes the
-  complete opaque valid-UTF-8 id (the JSON/protobuf string boundary), while the logical
-  id is always read from stored snapshot data, never inferred from a filename. Reads are canonical-first and read-only. A
-  lossy legacy-name family is eligible for snapshot/event fallback, migration, or
-  deletion only when its latest snapshot embeds the exact requested id; mismatches
-  leave every legacy byte untouched. The first write migrates a verified legacy family
-  by renaming tools/events first and snapshot last, preserving bytes and append order.
-  Canonical+legacy coexistence never concatenates histories: canonical is authoritative;
-  List/MetaList deduplicate by embedded logical id and use canonical metadata/mtime;
-  Delete removes canonical sidecars/snapshot and additionally removes only an
-  ownership-verified legacy family, preventing resurrection without deleting a
-  colliding session.
+  physical-name authority: its bounded hash-suffixed token maps the complete
+  opaque valid-UTF-8 id, while the logical id is always read from stored snapshot
+  data, never inferred from a filename. Reads are v2-first and read-only; a
+  present invalid v2 fails loudly rather than falling back to stale v1. A lossy
+  legacy-name family is eligible for snapshot/event fallback, migration, or
+  deletion only when its latest snapshot embeds the exact requested id;
+  mismatches leave every legacy byte untouched. The first write migrates a
+  verified root-level legacy family by renaming tools/events first and its v1
+  snapshot last, then commits v2. V2+v1 coexistence never concatenates histories:
+  v2 is authoritative; List/MetaList deduplicate by embedded logical id and use
+  v2 metadata/logical time; Delete removes canonical sidecars and both snapshot
+  generations, and additionally removes only an ownership-verified legacy family,
+  preventing resurrection without deleting a colliding session.
+
+  `internal/adapter/store/jsonlstore/inventory_catalog.go` owns the derivative
+  inventory catalog's physical format and persistence. The catalog contains only
+  `port.SessionDiscoveryMeta` projections, a durable current-writer generation
+  marker, and source metadata; it is never transcript authority. Rows are pre-sorted by `(modified_at DESC,
+  session_id ASC)` into a global scope and owner-specific scope files. A ready
+  `PageSessionMetadata` opens only the selected scope, privately decodes the
+  cursor's opaque continuation to its catalog byte position, and decodes at most
+  `Limit+1` rows; page two neither traverses page one nor opens/decodes snapshots
+  or transcripts. The transport cursor carries only an opaque pager-issued token
+  plus neutral ordering, source-fingerprint generation, and exact ownership/filter
+  scope bindings. A changed generation, scope, or foreign/malformed pager token returns `port.ErrSessionMetadataCursorRestart`; generations are never
+  mixed and foreign-owner rows never enter page formation or `TotalCount`.
+  `MetaList` may consume the complete global derivative projection for its legacy
+  all-rows contract. Ready calls validate an O(1) source stamp from the two
+  authoritative snapshot directories and the durable marker advanced by current
+  Save/Delete mutations under the family lock. A v2-only store therefore stays on
+  the O(1) validation fast path. Manifests additionally record each historical v1
+  snapshot's size, modification time, and mode; while v1 compatibility files
+  remain, ready reads stat those bounded sources without reading or decoding their
+  transcript tails. This detects latest-line-wins appends that do not alter parent
+  directory metadata. Catalog files live in a private child directory, so their atomic replacement does not perturb
+  that stamp; snapshot creation/removal/replacement and promotion do. Missing,
+  malformed, semantically invalid, or fingerprint-stale catalogs rebuild from the v2 envelope's top-level `metadata`
+  projection or the existing bounded v1 tail reader. Fingerprinting before and
+  after rebuild rejects a view changed concurrently by another `Store`; every
+  later read revalidates the shared directory rather than trusting an unchecked
+  process-local cache. Older v2 envelopes without the additive header remain
+  readable and are projected once through their bounded current payload during
+  rebuild. Catalog manifests and scope files are owner-only atomic replacements
+  and can always be discarded and reconstructed. Rebuild/publication is serialized
+  by a dedicated process mutex and stable cross-process catalog flock, never the
+  session-operation path; blocked inventory work therefore does not delay unrelated
+  Save, Load, EventLog.Append, or ToolCall. After publishing a manifest, that lock
+  also protects removal of obsolete generation files and interrupted catalog
+  temporaries. Composition consumes this same cheap projection for both automatic
+  retention (`SessionMetadataPager`) and stale-session reconciliation (`MetaList`),
+  while preserving their downstream state, liveness, and lease rechecks.
+
+  `engine/port/sessionmigration.go` defines the OPTIONAL physical-maintenance
+  capability consumed only by the authenticated server. `PlanSessionMigration`
+  performs a read-only physical scan and returns a principal+generation-bound opaque
+  plan with format/error counts and byte estimates. Apply mints a separate random
+  durable job under the adapter-private `sid-v1/migration-jobs/` registry; records
+  contain one-way principal/item handles, bounded counters, and stable sanitized
+  errors—never session ids, paths, backend errors, or content. Every apply/resume/cancel
+  load-to-checkpoint sequence holds a stable job-ID-scoped cross-process exclusion;
+  overlapping resumes compare their pre-lock checkpoint with the locked durable record,
+  so one advances and a stale peer receives a closed conflict instead of replaying a
+  batch. Every apply/resume call processes at most 100 families (25 by default),
+  checkpointing after each committed family. Redis reuses this server-owned job
+  lifecycle to adopt metadata indexes on upgrade: only an explicit plan scans legacy
+  snapshot keys, each batch CAS-installs derivative rows, and a stable source-generation
+  check atomically publishes `ready` only after every extant snapshot is covered.
+  Redis inspection deduplicates `SCAN` output and retries boundedly until its before/after
+  rebuild generation agrees; sustained drift returns `inventory_changed_restart` with no
+  mixed counters or candidates. The base migration port requires a context-carrying,
+  ownership-checking acquisition; jsonlstore binds its stable flock and Redis binds a
+  per-acquisition monotonic fence plus nonce. Redis renews the expiring lock and cancels the
+  bound operation context on renewal/token loss. Checkpoint, family repair, readiness
+  publication, ownership checks, and release bind that exact acquisition. Both mutation Lua
+  scripts compare the exact lock key/token before any write, so loss between the server's
+  precheck and Lua has zero side effects and cannot affect a successor.
+  Stable inspection derives each valid snapshot's exact metadata member and verifies its
+  hash metadata plus expected global/owner index memberships. Missing or stale coverage
+  becomes a bounded repair candidate; inspection remains read-only, while repair removes
+  stale memberships and atomically installs the derived row. Invalid snapshots are not
+  countable coverage: they complete the job with a failure count while keeping paging
+  unavailable, and operator repair requires a fresh plan. After every candidate is processed,
+  finalization re-derives the complete expected global and per-owner member sets from snapshots
+  and compares them in both directions against every index using bounded client-side
+  `SCAN`/`ZSCAN` commands. An orphan, malformed, or wrong-owner membership is therefore an
+  explicit coverage failure rather than an implicit planning mutation. The final readiness
+  Lua script remains constant-work: it atomically rechecks the exact lock token, stable rebuild
+  generation, and global cardinality before setting ready, and never receives an O(total-store)
+  key or member list. Concurrent Redis Save/Delete operations update their indexes and advance
+  that generation in one script, so mutation after the proof makes publication fail closed
+  while paging and cleanup remain unsupported.
+  Cancellation is monotonic: once persisted,
+  resume conflicts and no stale checkpoint can restore `running`. Completed jobs are idempotent.
+
+  Per-family lock order is `Service.runEntryMu` → mandatory maintenance
+  `SessionLease` (unless the store is genuinely process-private) → jsonlstore
+  `.family.lock`. Management authorization is deliberately not an exclusion proof.
+  Automatic retention and manual cleanup use the same mutation path and therefore
+  fail closed when a shareable store has no working lease. Every local JSONL
+  `StoreDir` keeps local usability by automatically composing the existing flock
+  lease beneath its root; two local processes sharing that root consequently
+  contend on the same per-session lease. Under those exclusions the service and
+  adapter revalidate liveness, owner identity digest, durable kind (including
+  `unknown`), state, and source fingerprint. Jsonlstore moves legacy sidecars first,
+  writes one same-directory v2 replacement temp, verifies the complete v2 envelope and
+  sessnap payload by rereading it, and only then removes v1. An ENOSPC/write/sync/rename
+  failure therefore leaves canonical v1 or an already-readable v2 authoritative; a
+  lost checkpoint converges on resume. Logical mtime and sidecar bytes are preserved.
+
+  **Retention planner invariant (`retention-requires-durable-taxonomy`).**
+  `internal/sessionretention/planner.go` is the one deterministic, side-effect-free
+  selector used by `internal/app/childgc.go` and the authenticated manual cleanup
+  surface in `internal/adapter/server/cleanup.go`. It accepts only bounded durable
+  metadata plus snapshotted live/lease facts. Missing/unknown/invalid taxonomy,
+  corrupt rows, running/awaiting state, and live/leased sessions are protected and
+  excluded from cap slots. Candidates are age-first and then cap-selected within
+  durable-kind partitions, globally emitted oldest-first by `(ModifiedAt, ID)`.
+  Manual dry-run enters the store-wide pager only after explicit management
+  authorization. For a shared store it then checks each otherwise-retainable
+  terminal row's lease status sequentially with bounded, cancellation-aware trial
+  acquire/release calls (the lease port has no inspect verb); every successful
+  probe is released immediately with a cancel-detached bounded context. The
+  live/leased partition is truthful only at that planning instant—apply never
+  assumes it remains current and reacquires/revalidates each candidate. No session
+  family or maintenance job is mutated by planning. Its opaque HMAC token binds
+  principal, canonical kind scope, exact generation, effective policy version,
+  candidate count, and estimated bytes. Dry-run reports
+  both eligible and protected durable-kind/state/reason counts. Apply re-plans
+  before mutation, then takes `runEntryMu` → mutation lease → adapter family lock;
+  `port.ConditionalPrunableStore` compares exact owner/kind/state/relationship/
+  modification metadata under that lock and holds every exclusion through the
+  adapter's sidecar-first/snapshot-last deletion. Failures expose bounded stable
+  codes/messages only and a new plan safely retries survivors. The management
+  authorizer gates plan/apply/cancel/job/health before support, token, or scope is
+  disclosed, but never contributes to the separate single-writer proof.
+  `TestInvariant_retention_requires_durable_taxonomy` pins the fail-closed
+  taxonomy and cap-slot rule.
+
+  **Storage-management authority and health.** `storage_management.version: 1`
+  is a strict operator-tier-only list of exact verified OIDC issuer/subject pairs;
+  absence grants nobody in a remote ownership-enforced deployment. The authorizer
+  never consults request owner fields, display/grant claims, or system-principal
+  status. The private embedded mecatui Unix-socket server explicitly selects the
+  principal-less local-operator path; no remotely reachable root does. The one gate
+  applies before health, migration plan/apply/resume/cancel/status, and cleanup
+  plan/apply/cancel/status can inspect support or store scope. Cleanup is store-wide
+  only after that gate and revalidates each candidate's indexed owner against the
+  authoritative snapshot under the mutation exclusions.
+
+  `internal/app/storage_health.go` owns a mutex-protected active-key map shared by
+  retention, migration, and cleanup lifecycle callbacks. Health renders sorted
+  closed job kinds, adding counts for same-kind concurrency instead of silently
+  overwriting one string. Durable running migration jobs reattach on inspection or
+  resume; each terminal transition removes only its own key. Retention records
+  `LastSweep` only after a completed pass. A transient failure keeps the worker's
+  next retry visible, while runtime unsupported metadata disables the worker,
+  clears active/next-sweep availability, and reports `retention sweep unavailable`
+  through `LastFailure`; cancellation and shutdown clear active/next without
+  overwriting the last success or failure. Stable sanitized
+  migration/cleanup/health failures replace and retain `LastFailure`; backend errors,
+  paths, ids, and content never enter the state.
+
+  **Versioned automatic retention configuration (issue #591).** The strict
+  operator-only `retention:` subtree (`version: 1`) configures main, child, and
+  scheduled age/count limits plus the shared sweep cadence. Built-in defaults are
+  below operator settings and each explicitly supplied compatibility flag remains
+  highest precedence. Zero disables its limit (zero cadence disables repeats while
+  retaining the historical startup sweep); negative values, unknown keys, and
+  unknown versions fail startup. Project-tier blocks are warning-ignored and cannot
+  weaken protection. Main deletion defaults off; enabling either main limit logs the
+  effective `retention/v1` planner summary (including `unknown=protected`) and
+  requires `acknowledge_main_deletion: true` or `--acknowledge-main-retention`.
+  `server.StorageHealth` remains the authenticated, secret-free effective-policy
+  projection. Embedded mecatui exposes the same local-only knobs and defaults main
+  deletion off; connect mode rejects them rather than pretending to configure a
+  remote server.
+
+  `cmd/mecatui/client/sessions_list.go` (`ListSessionPage`) is the single
+  proto-to-client paging boundary. It fetches exactly one 100-row page and maps
+  the gRPC `ABORTED` stale-cursor signal to a client sentinel; only non-interactive
+  `--resume-latest` consumes all pages synchronously. Both `mecatui sessions` and
+  `/sessions` use `cmd/mecatui/ui/sessions.go` (`applySessionPage`): page one is
+  rendered before the returned Bubble Tea command requests page two, pages merge
+  in deterministic metadata order with exact-ID deduplication, and tab/filter/
+  exact-ID selection/scroll state survive each append. A later error retains rows
+  and its cursor for retry. A stale cursor keeps the visible rows while page one is
+  requested against a fresh generation, then atomically replaces the old set.
+  Closing, leaving, or cancelling the panel cancels its generation-scoped context;
+  late messages are ignored and cannot create or rebind a session.
 
   `Append` writes a per-record format-tagged line
-  `{"v":"eventlog-json/1","ev":<session.Event JSON>}` via the shared `mu`/`appendLine`;
-  `Read` scans ALL lines cumulatively (NOT latest-line-wins like the snapshot read),
+  `{"v":"eventlog-json/1","ev":<session.Event JSON>}` via `appendLine` under the
+  stable family flock. Save, Delete, legacy promotion/removal, EventLog.Append,
+  and ToolCall share that one cross-process mutation identity; the family lock
+  covers the full sidecar-first/snapshot-last operation, while unrelated families
+  remain independent. `Read` scans ALL lines cumulatively (NOT latest-line-wins like the snapshot read),
   decodes each, and yields in append order, rejecting an unknown format tag as an infra
   error (a forward-incompatible log fails loud, not silently skips). `Delete` removes
   sidecars before each family snapshot, preserving the partial-failure-stays-visible
@@ -6591,8 +6804,14 @@ grew without bound. Split mechanism from policy:
   `port.ErrPruneUnsupported` = one INFO + sticky disable; Delete failures = one tallied
   WARN; one INFO summary only when something was deleted.
 - **Placement + defaults.** `startChildGC` runs after Service construction (it needs the
-  liveness predicate): startup sweep + ticker on one ctx-bound goroutine
-  (`--child-gc-interval`, default 1h, 0 = startup-only). `--child-retention` default
+  liveness predicate): startup sweep + ticker on one Build-owned goroutine
+  (`--child-gc-interval`, default 1h, 0 = startup-only). Its returned idempotent
+  cleanup cancels and joins startup, ticker, and blocked context-aware store/lease/delete
+  work; `Built.Close` invokes it before Service and store teardown, so a caller need not
+  cancel the Build context and no destructive pass can race closed dependencies. A
+  cancelled pass clears the health `ActiveJob` without claiming a successful sweep; a
+  transient failed pass clears it and records the bounded retention-failure status.
+  `--child-retention` default
   168h, `--child-retention-max-per-family` default 500; both zero = fully disabled (the
   zero-config/app.Config default, so embedded/test Builds are byte-identical unless
   opted in — mecatui's embeddedConfig passes the mecated defaults so a long-lived TUI's

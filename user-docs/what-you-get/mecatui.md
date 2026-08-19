@@ -157,6 +157,34 @@ New-chat creation waits for saved model defaults to be reconciled. Seed-prompt f
 
 `/sessions` opens a searchable inventory in four tabs: **Chats**, **Scheduled runs**, **Child runs**, and **Other**. Unknown legacy or custom rows appear under Other instead of being mislabeled as children. Rows show state, time, turns, title, model, and a short digest handle; the chat you are currently using is marked **`[current]`**. The search applies to the selected tab and matches the row's title, model, workspace, digest, and available relationship details.
 
+Large inventories are progressive: the first page is usable immediately while
+mecatui loads more in the background. New pages preserve your tab, search, exact
+selection, and scroll position, and duplicate rows are suppressed. Press **`c`**
+while loading to stop; **`r`** restarts a cancelled load or retries a failed later
+page. A later failure leaves the rows already on screen. If storage changed between
+pages, mecatui explicitly restarts from page one instead of mixing two inventory
+generations. Closing `/sessions`, or quitting a `mecatui sessions` startup browser,
+cancels outstanding requests without creating or switching chats.
+
+When the connected server advertises storage management, a fifth **Maintenance** tab keeps two
+operations visibly separate:
+
+- **`o` Optimize storage** is semantics-preserving. Its dry run shows v1/v2 and
+  invalid/skipped family counts, estimated reclaim, and temporary-space needs before starting a
+  resumable job. Closing and reopening `/sessions` refetches durable progress. Cancel stops
+  future families; it does not undo families already optimized.
+- **`x` Clean up sessions** is destructive. Its dry run separates eligible and protected
+  main/child/scheduled/unknown/live/awaiting rows. Unknown sessions are protected by default,
+  and bulk apply requires typing `CLEAN UP`; the ordinary single-row delete confirmation does
+  not authorize it. Partial results show apply-time skips, stale rows, failures, and a fresh
+  dry-run retry. Cancel stops future deletions; completed deletions remain committed.
+
+Both actions come from server capability discovery, so embedded and connected clients show only
+what their actual backend and management authority support. Unsupported storage is labelled
+unavailable rather than as zero impact. Progress and item failures use stable sanitized server
+projections—no transcript, tool content, backend path, or raw backend error is displayed. See the
+[full TUI reference](https://github.com/stacklok/mecatl/blob/main/docs/tui.md#overlays).
+
 The selected row shows only actions the server advertises: **`y`** copies its exact
 opaque ID, **`v`** opens its authoritative transcript without attaching, **`f`** forks
 an eligible main chat and adopts the peer, **`r`** edits its persisted title, and

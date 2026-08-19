@@ -1,4 +1,4 @@
-# ADR 0226 — Dream consolidation safety boundary
+# ADR 0227 — Dream consolidation safety boundary
 
 - Status: Accepted
 - Date: 2026-08-17

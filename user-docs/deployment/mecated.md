@@ -451,6 +451,21 @@ with no PVC requirement.
 
 :::
 
+The daemon owns automatic cleanup. Configure the strict operator-only
+`retention.version: 1` block in `~/.config/mecatl/settings.yaml` with separate
+`main`, `child`, and `scheduled` `max_age`/`max_count` limits plus
+`sweep_cadence`; every `0` disables that limit. Negative values, unknown keys,
+and unknown versions fail startup. Existing retention CLI flags remain compatible
+and explicitly supplied flags win over YAML. Project settings cannot set retention.
+
+Destructive main cleanup is off by default. Enabling its age or count limit also
+requires `acknowledge_main_deletion: true` or `--acknowledge-main-retention`; the
+server logs the effective planner summary first, and durable `unknown` sessions
+remain protected. The authenticated storage-health response reports the secret-free
+effective `retention/v1` policy. Embedded mecatui has local-only policy flags;
+`mecatui connect` rejects them and cannot configure a remote server without an
+advertised management capability. Follow [Operate local session storage](session-storage-operations.md)
+for tested systemd/launchd service definitions and the backup, migration, and restore runbook.
 The `--session-store-url` flag replaces the JSONL store with a remote gRPC driver
 (`mecatl.driver.v1.SessionStoreService`). This is the path for a managed Redis backend
 (`mecak8s` uses it internally) or a custom store behind the driver protocol. It is
@@ -534,12 +549,13 @@ Three lease backends are available:
 The ServiceAccount for the k8s backend needs `get,create,update,delete` on
 `leases.coordination.k8s.io` in the configured namespace — no `list` or `watch`.
 
-:::warning[Two replicas + shared store + no lease = no exclusion]
+:::warning[Remote shared stores still need an explicit lease]
 
-Without a lease backend AND without session affinity, two replicas over a shared
-JSONL directory or remote store have no mutual exclusion. Both may drive the same
-session concurrently. The lease backend is the fix; affinity routing is sufficient
-for the common case without it.
+A local `--store-dir` automatically uses a flock lease beneath the store root, so
+multiple current mecated processes on one host participate without another flag.
+Remote stores and multi-host filesystems still require an explicit Kubernetes or
+gRPC lease backend (and local flock is not reliable over NFS/EFS). Without one,
+use session affinity; destructive maintenance fails closed.
 
 :::
 

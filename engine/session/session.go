@@ -325,6 +325,22 @@ var (
 	ErrNoPendingAsk = errors.New("session: no pending ask to resume")
 )
 
+// AdoptionMetadata records the immutable source and request proof for an
+// explicitly adopted legacy session. Ordinary sessions have no adoption metadata.
+type AdoptionMetadata struct {
+	AdoptionSourceID      SessionID `json:"adoption_source_id,omitempty"`
+	AdoptionRequestDigest string    `json:"adoption_request_digest,omitempty"`
+}
+
+// Clone returns an independent copy, preserving nil.
+func (m *AdoptionMetadata) Clone() *AdoptionMetadata {
+	if m == nil {
+		return nil
+	}
+	clone := *m
+	return &clone
+}
+
 // Session is the aggregate root of the Agent Session context. All mutation of
 // the conversation, counters, and lifecycle flows through its intention-revealing
 // methods so the state machine and stop conditions always hold. Outside code
@@ -427,6 +443,9 @@ type Session struct {
 	// Relationship carries kind-specific durable lineage. It is empty for main
 	// and legacy unknown sessions.
 	Relationship SessionRelationship
+	// Adoption is non-nil only for the rare explicitly adopted main session, so
+	// ordinary sessions retain the aggregate's hot-path size class.
+	Adoption *AdoptionMetadata
 	// CreatedAt is the creation timestamp.
 	CreatedAt time.Time
 

@@ -58,6 +58,8 @@ func NewHTTPHandler(svc *Service) *HTTPHandler {
 	h.mux.HandleFunc("POST /v1/sessions/{id}/cancel", h.cancel)
 	h.mux.HandleFunc("POST /v1/sessions/{id}/cancel-child", h.cancelChild)
 	h.mux.HandleFunc("POST /v1/sessions/{id}/fork", h.forkSession)
+	h.mux.HandleFunc("POST /v1/sessions/{id}/adoption:preflight", h.preflightSessionAdoption)
+	h.mux.HandleFunc("POST /v1/sessions/{id}/adopt", h.adoptSession)
 	h.mux.HandleFunc("POST /v1/sessions/{id}/reflect", h.reflectSession)
 	h.mux.HandleFunc("POST /v1/dream/plans", h.generateDreamPlan)
 	h.mux.HandleFunc("POST /v1/dream/plans/{plan_id}/decision", h.decideDreamPlan)
@@ -87,6 +89,16 @@ func NewHTTPHandler(svc *Service) *HTTPHandler {
 	h.mux.HandleFunc("GET /v1/commands", h.listCommands)
 	h.mux.HandleFunc("GET /v1/worktrees", h.listWorktrees)
 	h.mux.HandleFunc("GET /v1/sessions", h.listSessions)
+	h.mux.HandleFunc("GET /v1/storage/health", h.getStorageHealth)
+	h.mux.HandleFunc("POST /v1/storage/migrations/plan", h.planSessionMigration)
+	h.mux.HandleFunc("POST /v1/storage/migrations/apply", h.applySessionMigration)
+	h.mux.HandleFunc("GET /v1/storage/migrations/{id}", h.getSessionMigrationJob)
+	h.mux.HandleFunc("POST /v1/storage/migrations/{id}/resume", h.resumeSessionMigration)
+	h.mux.HandleFunc("POST /v1/storage/migrations/{id}/cancel", h.cancelSessionMigration)
+	h.mux.HandleFunc("POST /v1/storage/cleanup:plan", h.planSessionCleanup)
+	h.mux.HandleFunc("POST /v1/storage/cleanup:apply", h.applySessionCleanup)
+	h.mux.HandleFunc("POST /v1/storage/cleanup/jobs/{id}/cancel", h.cancelSessionCleanup)
+	h.mux.HandleFunc("GET /v1/storage/cleanup/jobs/{id}", h.getSessionCleanupJob)
 	h.mux.HandleFunc("GET /v1/sessions/{id}/events", h.streamSessionEvents)
 	h.mux.HandleFunc("POST /v1/teams", h.createTeam)
 	h.mux.HandleFunc("POST /v1/teams/{id}/members", h.spawnTeammate)
@@ -211,6 +223,10 @@ type serverCapabilitiesJSON struct {
 	Reflection        bool                              `json:"reflection"`
 	LearningProposals bool                              `json:"learning_proposals"`
 	LearnedSkills     bool                              `json:"learned_skills"`
+	StorageHealth     bool                              `json:"storage_health"`
+	StorageMigration  bool                              `json:"storage_migration"`
+	StorageCleanup    bool                              `json:"storage_cleanup"`
+	LegacyAdoption    bool                              `json:"legacy_adoption"`
 	ManualDream       *mecatlv1.ManualDreamCapabilities `json:"manual_dream,omitempty"`
 	Posture           string                            `json:"posture,omitempty"`
 }
@@ -233,6 +249,10 @@ func capabilitiesJSON(c *mecatlv1.ServerCapabilities) *serverCapabilitiesJSON {
 		Reflection:        c.GetReflection(),
 		LearningProposals: c.GetLearningProposals(),
 		LearnedSkills:     c.GetLearnedSkills(),
+		StorageHealth:     c.GetStorageHealth(),
+		StorageMigration:  c.GetStorageMigration(),
+		StorageCleanup:    c.GetStorageCleanup(),
+		LegacyAdoption:    c.GetLegacyAdoption(),
 		ManualDream:       c.GetManualDream(),
 		Posture:           c.GetPosture(),
 	}
@@ -445,6 +465,79 @@ func (h *HTTPHandler) forkSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, struct {
 		SessionID string `json:"session_id"`
 	}{SessionID: string(newID)})
+}
+
+type adoptionBindingsJSON struct {
+	Workspace       string `json:"workspace"`
+	EnvironmentKind string `json:"environment_kind"`
+	EnvironmentID   string `json:"environment_id"`
+	ProviderID      string `json:"provider_id"`
+	ModelID         string `json:"model_id"`
+	Profile         string `json:"profile"`
+	IdempotencyKey  string `json:"idempotency_key,omitempty"`
+}
+
+func (b adoptionBindingsJSON) bindings() (AdoptionBindings, error) {
+	profile, err := ParseSessionProfile(b.Profile)
+	if err != nil {
+		return AdoptionBindings{}, err
+	}
+	return AdoptionBindings{Workspace: b.Workspace, EnvironmentRef: session.EnvironmentRef{Kind: session.EnvironmentKind(b.EnvironmentKind), ID: b.EnvironmentID}, ProviderID: b.ProviderID, ModelID: b.ModelID, Profile: profile}, nil
+}
+
+func adoptionBindingsJSONFrom(binding AdoptionBindings) adoptionBindingsJSON {
+	return adoptionBindingsJSON{Workspace: binding.Workspace, EnvironmentKind: string(binding.EnvironmentRef.Kind), EnvironmentID: binding.EnvironmentRef.ID, ProviderID: binding.ProviderID, ModelID: binding.ModelID, Profile: string(binding.Profile)}
+}
+
+const maxAdoptionBodyBytes = 1 << 20
+
+func (h *HTTPHandler) preflightSessionAdoption(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxAdoptionBodyBytes)
+	var body adoptionBindingsJSON
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	bindings, err := body.bindings()
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	result, err := h.svc.PreflightSessionAdoption(r.Context(), session.SessionID(r.PathValue("id")), bindings)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Eligible bool                 `json:"eligible"`
+		Reason   string               `json:"reason_code,omitempty"`
+		Bindings adoptionBindingsJSON `json:"bindings"`
+	}{result.Eligible, string(result.Reason), adoptionBindingsJSONFrom(result.Bindings)})
+}
+
+func (h *HTTPHandler) adoptSession(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxAdoptionBodyBytes)
+	var body adoptionBindingsJSON
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	bindings, err := body.bindings()
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	sess, err := h.svc.AdoptSession(r.Context(), session.SessionID(r.PathValue("id")), body.IdempotencyKey, bindings)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, struct {
+		SessionID       string                  `json:"session_id"`
+		SourceSessionID string                  `json:"source_session_id"`
+		Capabilities    *serverCapabilitiesJSON `json:"capabilities"`
+		ResolvedModel   *resolvedModelJSON      `json:"resolved_model"`
+	}{string(sess.ID), string(adoptionSourceID(sess)), capabilitiesJSON(h.svc.capabilities()), resolvedModelToJSON(h.svc.ResolvedModel(sess.ID))})
 }
 
 func (h *HTTPHandler) writeSession(w http.ResponseWriter, status int, sess *session.Session) {
@@ -1748,6 +1841,131 @@ func (h *HTTPHandler) listSessions(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *HTTPHandler) getStorageHealth(w http.ResponseWriter, r *http.Request) {
+	health, err := h.svc.StorageHealth(r.Context())
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toProtoStorageHealth(health))
+}
+
+func (h *HTTPHandler) planSessionMigration(w http.ResponseWriter, r *http.Request) {
+	plan, err := h.svc.PlanSessionMigration(r.Context())
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toProtoMigrationPlan(plan))
+}
+
+func (h *HTTPHandler) applySessionMigration(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		PlanID    string `json:"plan_id"`
+		BatchSize int    `json:"batch_size"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeServiceError(w, fmt.Errorf("%w: invalid migration request", ErrInvalidArgument))
+		return
+	}
+	job, err := h.svc.ApplySessionMigration(r.Context(), body.PlanID, body.BatchSize)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toProtoMigrationJob(job))
+}
+
+func (h *HTTPHandler) resumeSessionMigration(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		BatchSize int `json:"batch_size"`
+	}
+	if r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeServiceError(w, fmt.Errorf("%w: invalid migration request", ErrInvalidArgument))
+			return
+		}
+	}
+	job, err := h.svc.ResumeSessionMigration(r.Context(), r.PathValue("id"), body.BatchSize)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toProtoMigrationJob(job))
+}
+
+func (h *HTTPHandler) cancelSessionMigration(w http.ResponseWriter, r *http.Request) {
+	job, err := h.svc.CancelSessionMigration(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toProtoMigrationJob(job))
+}
+
+func (h *HTTPHandler) getSessionMigrationJob(w http.ResponseWriter, r *http.Request) {
+	job, err := h.svc.SessionMigrationJob(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toProtoMigrationJob(job))
+}
+
+func (h *HTTPHandler) planSessionCleanup(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Kinds []string `json:"kinds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeServiceError(w, fmt.Errorf("%w: invalid cleanup plan body", ErrInvalidArgument))
+		return
+	}
+	scope := CleanupScope{}
+	for _, kind := range body.Kinds {
+		scope.Kinds = append(scope.Kinds, session.SessionKind(kind))
+	}
+	plan, err := h.svc.PlanSessionCleanup(r.Context(), scope)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toProtoCleanupPlan(plan))
+}
+
+func (h *HTTPHandler) applySessionCleanup(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Token string `json:"confirmation_token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeServiceError(w, fmt.Errorf("%w: invalid cleanup apply body", ErrInvalidArgument))
+		return
+	}
+	job, err := h.svc.ApplySessionCleanup(r.Context(), body.Token)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toProtoCleanupJob(job))
+}
+
+func (h *HTTPHandler) cancelSessionCleanup(w http.ResponseWriter, r *http.Request) {
+	job, err := h.svc.CancelSessionCleanup(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toProtoCleanupJob(job))
+}
+
+func (h *HTTPHandler) getSessionCleanupJob(w http.ResponseWriter, r *http.Request) {
+	job, err := h.svc.SessionCleanupJob(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toProtoCleanupJob(job))
+}
+
 // streamSessionEvents handles GET /v1/sessions/{id}/events — replays a session's
 // durable event log as a Server-Sent Events stream (issue #245 Phase 1; cloud-
 // native Phase 3a read-back). This is the READ path: it never calls appendEvent
@@ -1835,6 +2053,22 @@ func writeError(w http.ResponseWriter, code int, msg string) {
 //nolint:gocyclo // a flat error→code classifier; a switch is the correct shape.
 func writeServiceError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, ErrManagementUnauthorized):
+		writeError(w, http.StatusForbidden, err.Error())
+	case errors.Is(err, ErrStorageHealthBackend):
+		writeError(w, http.StatusInternalServerError, err.Error())
+	case errors.Is(err, ErrMigrationUnsupported):
+		writeError(w, http.StatusNotImplemented, err.Error())
+	case errors.Is(err, ErrMigrationConflict):
+		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, ErrMigrationBackend):
+		writeError(w, http.StatusInternalServerError, err.Error())
+	case errors.Is(err, ErrCleanupPlanStale):
+		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, ErrCleanupUnsupported):
+		writeError(w, http.StatusNotImplemented, err.Error())
+	case errors.Is(err, ErrCleanupBackend):
+		writeError(w, http.StatusInternalServerError, err.Error())
 	case errors.Is(err, ErrInvalidArgument):
 		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, ErrNotFound):
@@ -1900,6 +2134,8 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotImplemented, err.Error())
 	case errors.Is(err, ErrSessionDeleteUnsupported):
 		writeError(w, http.StatusNotImplemented, err.Error())
+	case errors.Is(err, port.ErrSessionMetadataCursorRestart):
+		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, port.ErrSessionMetadataPagingUnsupported):
 		writeError(w, http.StatusNotImplemented, err.Error())
 	case errors.Is(err, ErrSchedulerNotRunning):

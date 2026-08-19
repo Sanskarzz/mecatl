@@ -188,8 +188,26 @@ type Resolver struct {
 	// first-non-nil; project mcp blocks are warning-only and never captured.
 	operatorMCP *MCPSection
 
+	// operatorRetention is the first complete operator-tier retention block.
+	operatorRetention    *RetentionSection
+	operatorRetentionErr error
+
+	// operatorStorageManagement is the first complete operator-tier authority
+	// block. Parse failures are retained so composition fails closed at startup.
+	operatorStorageManagement    *StorageManagementSection
+	operatorStorageManagementErr error
+
 	mu    sync.RWMutex
 	cache map[string]*cacheEntry // keyed by ws.Root()
+}
+
+// OperatorStorageManagement returns the immutable operator-tier management
+// authority block and any strict parse failure that would otherwise disable it.
+func (r *Resolver) OperatorStorageManagement() (*StorageManagementSection, error) {
+	if r == nil {
+		return nil, nil
+	}
+	return r.operatorStorageManagement, r.operatorStorageManagementErr
 }
 
 // OperatorGuardrails returns the operator-tier guardrails config (user-global + CLI
@@ -326,6 +344,14 @@ func (r *Resolver) OperatorMCP() *MCPSection {
 		return nil
 	}
 	return r.operatorMCP
+}
+
+// OperatorRetention returns the immutable operator-tier retention block.
+func (r *Resolver) OperatorRetention() (*RetentionSection, error) {
+	if r == nil {
+		return nil, nil
+	}
+	return r.operatorRetention, r.operatorRetentionErr
 }
 
 // OperatorModelPolicy returns the operator-tier models: subtree (user-global + CLI
@@ -584,6 +610,16 @@ func (r *Resolver) loadProjectRules(ws tool.WorkspaceReader) ([]governance.Rule,
 				"mcp: IGNORING a project-tier mcp: block (operator-tier only — a project repo cannot configure global MCP servers)",
 				"file", src.path, "root", ws.Root())
 		}
+		if cfg.Retention != nil {
+			r.diag.Log(context.Background(), port.LevelWarn,
+				"retention: IGNORING a project-tier retention block (operator-tier only; projects cannot weaken cleanup protection)",
+				"file", src.path, "root", ws.Root())
+		}
+		if cfg.StorageManagement != nil {
+			r.diag.Log(context.Background(), port.LevelWarn,
+				"storage_management: IGNORING a project-tier authority block (operator-tier only)",
+				"file", src.path, "root", ws.Root())
+		}
 		// models: is project-overridable WITHIN AN OPERATOR ALLOWLIST (ADR 0030 Phase 4),
 		// otherwise IGNORED. captureProjectModels applies the full gate (allowlist key
 		// stripped + WARN; opt-in by operator allowlist; trust gate) and merges the
@@ -738,6 +774,15 @@ func (r *Resolver) applyTrustGate(rules []governance.Rule, report *Report) []gov
 // root-independent user-global config (XDG/home) at ScopeUser, all fully trusted.
 // Read from the host filesystem via the injectable env (NOT a workspace — these
 // live outside any session root). Fail-soft per file.
+func (r *Resolver) captureOperatorParseError(data []byte, err error) {
+	if hasTopLevelKey(data, "retention") && r.operatorRetentionErr == nil {
+		r.operatorRetentionErr = err
+	}
+	if hasTopLevelKey(data, "storage_management") && r.operatorStorageManagementErr == nil {
+		r.operatorStorageManagementErr = err
+	}
+}
+
 func (r *Resolver) loadUserRules(report *Report) []governance.Rule {
 	var rules []governance.Rule
 
@@ -755,6 +800,7 @@ func (r *Resolver) loadUserRules(report *Report) []governance.Rule {
 		}
 		cfg, perr := parseYAML(data)
 		if perr != nil {
+			r.captureOperatorParseError(data, perr)
 			deny, ask, allow, counted := lostRuleCounts(data)
 			r.diag.Log(context.Background(), port.LevelWarn, "permission config: explicit file invalid; skipping (its rules are LOST, deny/ask included)",
 				"file", path, "err", perr,
@@ -779,6 +825,8 @@ func (r *Resolver) loadUserRules(report *Report) []governance.Rule {
 		r.captureOpenRouter(cfg.OpenRouter)
 		// Operator-tier MCP profiles: capture the complete first block; never field-merge.
 		r.captureMCP(cfg.MCP)
+		r.captureRetention(cfg.Retention)
+		r.captureStorageManagement(cfg.StorageManagement)
 	}
 
 	if !r.opts.Conventional {
@@ -790,6 +838,7 @@ func (r *Resolver) loadUserRules(report *Report) []governance.Rule {
 		path := filepath.Join(cfgDir, userSubdirMecatl)
 		if data, err := r.env.ReadFile(path); err == nil {
 			if cfg, perr := parseYAML(data); perr != nil {
+				r.captureOperatorParseError(data, perr)
 				deny, ask, allow, counted := lostRuleCounts(data)
 				r.diag.Log(context.Background(), port.LevelWarn, "permission config: user YAML invalid; skipping (its rules are LOST, deny/ask included)",
 					"file", path, "err", perr,
@@ -812,6 +861,8 @@ func (r *Resolver) loadUserRules(report *Report) []governance.Rule {
 				r.captureOpenRouter(cfg.OpenRouter)
 				// User-global MCP: captured only if no higher CLI file already did.
 				r.captureMCP(cfg.MCP)
+				r.captureRetention(cfg.Retention)
+				r.captureStorageManagement(cfg.StorageManagement)
 			}
 		}
 	}
@@ -929,6 +980,20 @@ func (r *Resolver) captureMCP(s *MCPSection) {
 		return
 	}
 	r.operatorMCP = s
+}
+
+func (r *Resolver) captureRetention(s *RetentionSection) {
+	if s == nil || r.operatorRetention != nil {
+		return
+	}
+	r.operatorRetention = s
+}
+
+func (r *Resolver) captureStorageManagement(s *StorageManagementSection) {
+	if s == nil || r.operatorStorageManagement != nil {
+		return
+	}
+	r.operatorStorageManagement = s
 }
 
 // specOf reconstructs a human-readable "Tool(pattern)" spec from a rule, for the

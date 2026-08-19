@@ -182,6 +182,29 @@ type Config struct {
 	Engine *agent.Engine
 	// Store persists and looks up sessions. Required.
 	Store port.SessionStore
+	// StorageManagementAuthorized gates process-wide storage health. A nil
+	// authorizer disables the management capability. It must be derived from the
+	// trusted request context, never request-supplied owner data.
+	StorageManagementAuthorized func(context.Context) bool
+	// LocalStorageMaintenanceSingleWriter is true only when composition has proved
+	// the store itself is private to this process (the in-process IsLive registry
+	// plus backend family locks are then sufficient). Management authorization is
+	// not such a proof. Any durable or otherwise shareable store must leave this
+	// false and wire a working SessionLease before destructive migration, cleanup,
+	// or automatic retention is advertised or run.
+	LocalStorageMaintenanceSingleWriter bool
+	// SessionLiveness carries process-local engine-owned child activity. Service's
+	// own runs map covers top-level runs; delegation children never enter that map,
+	// so destructive maintenance must consult both. Cross-process activity remains
+	// protected by SessionLease.
+	SessionLiveness port.SessionLiveness
+	// RetentionPolicy is the effective operator policy projected into health.
+	RetentionPolicy RetentionPolicy
+	// StorageMaintenanceStatus reports the shared retention/migration/cleanup lifecycle.
+	StorageMaintenanceStatus func() StorageMaintenanceStatus
+	// StorageMaintenanceUpdate receives sanitized lifecycle transitions. nil keeps
+	// maintenance APIs functional without process-wide health observability.
+	StorageMaintenanceUpdate func(StorageMaintenanceEvent)
 	// OwnershipEnforced is true only when the request edge has a verifier wired.
 	// Its zero value preserves the ownerless compatibility path. When enabled,
 	// create retries compare the verified issuer/subject pair before exposing an
@@ -886,6 +909,13 @@ type Service struct {
 	// durable EventLog, diagnostics, and the SHARED model-inventory pointer.
 	schedMgr *scheduleManager
 
+	// cleanupTokenKey signs opaque caller/scope/generation-bound confirmation
+	// handles; cleanupPlans and cleanupJobs retain bounded payloads/projections for
+	// apply and management inspection during this process lifetime. Guarded by s.mu.
+	cleanupTokenKey [32]byte
+	cleanupPlans    map[string]cleanupTokenPayload
+	cleanupJobs     map[string]cleanupJobRecord
+
 	// subscriptions is the per-session live event subscription registry (ADR 0075
 	// decision #5): a connected client (e.g. the embedded server's mecatui) holds
 	// open a per-session merged stream over the session's runs via Subscribe, and
@@ -1058,6 +1088,10 @@ func NewService(cfg Config) (*Service, error) {
 			cfg.LeaseRenewInterval = cfg.LeaseTTL // tiny-TTL guard: never a zero ticker.
 		}
 	}
+	var cleanupTokenKey [32]byte
+	if _, err := rand.Read(cleanupTokenKey[:]); err != nil {
+		return nil, fmt.Errorf("server: initialize cleanup token signer: %w", err)
+	}
 	_, shutdownCancel := context.WithCancel(context.Background())
 	svc := &Service{
 		cfg:                 cfg,
@@ -1069,6 +1103,9 @@ func NewService(cfg Config) (*Service, error) {
 		reservedIDs:         make(map[session.SessionID]struct{}),
 		replayedApprovals:   make(map[session.SessionID]struct{}),
 		heldLeases:          make(map[session.SessionID]*heldLease),
+		cleanupTokenKey:     cleanupTokenKey,
+		cleanupPlans:        make(map[string]cleanupTokenPayload),
+		cleanupJobs:         make(map[string]cleanupJobRecord),
 		subscriptions:       make(map[session.SessionID]map[int64]chan session.Event),
 	}
 	// Seed the model inventory from the static snapshot. ListModels and the
@@ -1736,6 +1773,10 @@ func (s *Service) capabilities() *mecatlv1.ServerCapabilities {
 		LearningProposals: s.cfg.Proposals != nil,
 		LearnedSkills:     s.cfg.LearnedSkills != nil,
 		Scheduling:        s.scheduleStore() != nil,
+		StorageHealth:     s.cfg.StorageManagementAuthorized != nil && implementsStorageHealth(s.cfg.Store),
+		StorageMigration:  s.cfg.StorageManagementAuthorized != nil && s.maintenanceMutationAvailable() && func() bool { _, ok := migrationStore(s.cfg.Store); return ok }(),
+		StorageCleanup:    s.cfg.StorageManagementAuthorized != nil && s.maintenanceMutationAvailable() && supportsCleanupDelete(s.cfg.Store),
+		LegacyAdoption:    s.cfg.OwnershipEnforced && s.cfg.SessionEngine != nil,
 		ManualDream:       toProtoDreamCapabilities(s.ManualDreamCapabilities()),
 	}
 }
@@ -2112,6 +2153,67 @@ func (s *Service) DeleteSession(ctx context.Context, id session.SessionID) error
 	}
 	s.CloseSession(id)
 	return nil
+}
+
+var (
+	errRetentionCandidateActive  = fmt.Errorf("%w: retention candidate is active", ErrFailedPrecondition)
+	errRetentionCandidateChanged = fmt.Errorf("%w: retention candidate changed", ErrFailedPrecondition)
+)
+
+// DeleteSessionForRetentionCandidate removes one exact planner candidate while
+// keeping the mandatory maintenance/run-entry lease exclusions held through the
+// backend's atomic final metadata comparison and family deletion. Automatic and
+// manual retention intentionally use the same exclusion posture.
+func (s *Service) DeleteSessionForRetentionCandidate(ctx context.Context, candidate port.SessionDiscoveryMeta) error {
+	unlock := s.runEntryMu.lock(candidate.ID)
+	defer unlock()
+	deleter, ok := s.cfg.Store.(port.ConditionalPrunableStore)
+	if !ok {
+		return ErrSessionDeleteUnsupported
+	}
+	if s.IsLive(candidate.ID) {
+		return errRetentionCandidateActive
+	}
+	release, err := s.acquireMaintenanceMutationLease(ctx, candidate.ID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	if s.IsLive(candidate.ID) {
+		return errRetentionCandidateActive
+	}
+	sess, err := s.cfg.Store.Load(ctx, candidate.ID)
+	if err != nil {
+		if errors.Is(err, port.ErrSessionNotFound) {
+			return errRetentionCandidateChanged
+		}
+		return fmt.Errorf("%w: load retention candidate: %v", ErrInternal, err)
+	}
+	if !retentionCandidateMatches(sess, candidate) {
+		return errRetentionCandidateChanged
+	}
+	deleted, err := deleter.DeleteSessionIfUnchanged(ctx, candidate)
+	if err != nil {
+		if errors.Is(err, port.ErrPruneUnsupported) {
+			return ErrSessionDeleteUnsupported
+		}
+		return fmt.Errorf("%w: delete retention candidate: %v", ErrInternal, err)
+	}
+	if !deleted {
+		return errRetentionCandidateChanged
+	}
+	s.CloseSession(candidate.ID)
+	return nil
+}
+
+func retentionCandidateMatches(sess *session.Session, candidate port.SessionDiscoveryMeta) bool {
+	if sess == nil {
+		return false
+	}
+	ownerMatches := candidate.Owner == nil && sess.Owner == nil || candidate.Owner != nil && candidate.Owner.SameIdentity(sess.Owner)
+	return sess.ID == candidate.ID && ownerMatches && sess.Kind == candidate.Kind && sess.State == candidate.State &&
+		sess.State != session.StateRunning && sess.State != session.StateAwaiting && sess.Kind != session.SessionKindUnknown &&
+		session.ValidateSessionMetadata(sess.Kind, sess.Relationship) == nil
 }
 
 // DeleteSessionForRetention removes one session selected by the composition-owned
@@ -3488,28 +3590,16 @@ func (s *Service) LookupRun(id session.SessionID) (*agent.Run, bool) {
 	return st.run, true
 }
 
-// IsLive reports whether a run is currently in flight for the session id — a
-// pure read over the same in-flight registry LookupRun consults. It is the
-// liveness predicate the composition layer's child-session GC injects so a
-// sweep never deletes the snapshot of a session that is mid-run in THIS
-// process.
-//
-// HONESTY: this knows TOP-LEVEL run ids only. Children spawned BY a live run
-// (subagent-*/parallel-*/team-* ids) are driven inside their parent's run and
-// never registered here, so IsLive answers false for them even mid-run
-// (pinned by TestServiceIsLiveDoesNotKnowEngineChildren). Engine children are
-// protected from the sweep by age horizon + snapshot freshness instead: they
-// persist at their terminal AND a resumed child re-persists at resume start,
-// so an in-flight child's snapshot is always fresh (see the invariant note in
-// internal/app/childgc.go). A client-driven id carrying a delegation-child
-// prefix (subagent-*/parallel-*/team-*) can no longer register here at all —
-// StartRunContent's isDelegationChildSessionID guard rejects it with
-// ErrInvalidArgument before it ever reaches this registry.
+// IsLive reports whether a top-level Service run or an engine-owned delegation
+// child is currently in flight in this process. The two registries share one
+// predicate so stale reconciliation and every destructive maintenance path see
+// the same process-local exclusion. Cross-process liveness is protected by the
+// separately configured SessionLease.
 func (s *Service) IsLive(id session.SessionID) bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, ok := s.runs[id]
-	return ok
+	_, topLevel := s.runs[id]
+	s.mu.Unlock()
+	return topLevel || s.cfg.SessionLiveness != nil && s.cfg.SessionLiveness.IsLive(id)
 }
 
 // Approve resolves the paused permission ask on the session's in-flight run with
@@ -5209,13 +5299,19 @@ type ListSessionsPage struct {
 type inventoryCursor struct {
 	ModifiedAtUnixNano int64  `json:"m"`
 	SessionID          string `json:"i"`
+	Generation         string `json:"g"`
+	Scope              string `json:"s"`
+	Continuation       string `json:"c"`
 }
 
 func encodeInventoryCursor(cursor *port.SessionMetadataCursor) (string, error) {
 	if cursor == nil {
 		return "", nil
 	}
-	data, err := json.Marshal(inventoryCursor{ModifiedAtUnixNano: cursor.ModifiedAt.UnixNano(), SessionID: string(cursor.ID)})
+	data, err := json.Marshal(inventoryCursor{
+		ModifiedAtUnixNano: cursor.ModifiedAt.UnixNano(), SessionID: string(cursor.ID),
+		Generation: cursor.Generation, Scope: cursor.Scope, Continuation: cursor.Continuation,
+	})
 	if err != nil {
 		return "", err
 	}
@@ -5231,10 +5327,13 @@ func decodeInventoryCursor(token string) (*port.SessionMetadataCursor, error) {
 		return nil, fmt.Errorf("%w: invalid session inventory cursor", ErrInvalidArgument)
 	}
 	var cursor inventoryCursor
-	if err := json.Unmarshal(data, &cursor); err != nil || cursor.SessionID == "" {
+	if err := json.Unmarshal(data, &cursor); err != nil || cursor.SessionID == "" || cursor.Generation == "" || cursor.Scope == "" || cursor.Continuation == "" {
 		return nil, fmt.Errorf("%w: invalid session inventory cursor", ErrInvalidArgument)
 	}
-	return &port.SessionMetadataCursor{ModifiedAt: time.Unix(0, cursor.ModifiedAtUnixNano), ID: session.SessionID(cursor.SessionID)}, nil
+	return &port.SessionMetadataCursor{
+		ModifiedAt: time.Unix(0, cursor.ModifiedAtUnixNano), ID: session.SessionID(cursor.SessionID),
+		Generation: cursor.Generation, Scope: cursor.Scope, Continuation: cursor.Continuation,
+	}, nil
 }
 
 func inventoryCapabilities(kind session.SessionKind, id session.SessionID, state session.State, live bool) (SessionInventoryCapabilities, SessionInventoryActionReasons) {
@@ -5291,6 +5390,11 @@ func metadataKeyAfter(row port.SessionDiscoveryMeta, cursor *port.SessionMetadat
 		(row.ModifiedAt.Equal(cursor.ModifiedAt) && row.ID > cursor.ID)
 }
 
+func validMetadataCursor(cursor *port.SessionMetadataCursor) bool {
+	return cursor != nil && cursor.ID != "" && utf8.ValidString(string(cursor.ID)) &&
+		cursor.Generation != "" && cursor.Scope != "" && cursor.Continuation != ""
+}
+
 func validateSessionMetadataPage(page port.SessionMetadataPage, request port.SessionMetadataPageRequest) error {
 	if len(page.Sessions) > request.Limit {
 		return fmt.Errorf("pager returned %d rows for limit %d", len(page.Sessions), request.Limit)
@@ -5316,7 +5420,7 @@ func validateSessionMetadataPage(page port.SessionMetadataPage, request port.Ses
 		}
 	}
 	if page.NextCursor != nil {
-		if len(page.Sessions) == 0 || page.NextCursor.ID == "" || !utf8.ValidString(string(page.NextCursor.ID)) {
+		if len(page.Sessions) == 0 || !validMetadataCursor(page.NextCursor) {
 			return fmt.Errorf("pager returned an invalid next cursor")
 		}
 		last := page.Sessions[len(page.Sessions)-1]
@@ -5356,7 +5460,7 @@ func (s *Service) ListSessionPage(ctx context.Context, request ListSessionsPageR
 	}
 	page, err := pager.PageSessionMetadata(ctx, pageRequest)
 	if err != nil {
-		if errors.Is(err, port.ErrSessionMetadataPagingUnsupported) {
+		if errors.Is(err, port.ErrSessionMetadataPagingUnsupported) || errors.Is(err, port.ErrSessionMetadataCursorRestart) {
 			return ListSessionsPage{}, err
 		}
 		return ListSessionsPage{}, fmt.Errorf("%w: list session page: %v", ErrInternal, err)

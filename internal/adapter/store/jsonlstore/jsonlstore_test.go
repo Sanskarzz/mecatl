@@ -66,7 +66,7 @@ func canonicalFamilyPath(dir string, id session.SessionID, suffix string) string
 }
 
 func canonicalSnapshotPath(dir string, id session.SessionID) string {
-	return canonicalFamilyPath(dir, id, ".session.jsonl")
+	return canonicalFamilyPath(dir, id, ".session.json")
 }
 
 func TestNewCreatesDirAt0700(t *testing.T) {
@@ -123,7 +123,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 }
 
-func TestAppendOnlyLatestWins(t *testing.T) {
+func TestCurrentSnapshotLatestWins(t *testing.T) {
 	ctx := context.Background()
 	st, dir := newStore(t)
 	s := driven(t)
@@ -136,10 +136,10 @@ func TestAppendOnlyLatestWins(t *testing.T) {
 		t.Fatalf("Save#2: %v", err)
 	}
 
-	// Two saves -> two lines.
+	// Repeated saves replace one current v2 snapshot.
 	path := canonicalSnapshotPath(dir, s.ID)
-	if n := countLines(t, path); n != 2 {
-		t.Fatalf("session file has %d lines, want 2 (append-only)", n)
+	if n := countLines(t, path); n != 1 {
+		t.Fatalf("session file has %d lines, want one current snapshot", n)
 	}
 
 	// Load returns the latest snapshot (awaiting, with pending ask).
@@ -610,10 +610,9 @@ func TestEventLogReadMalformedRecordPaths(t *testing.T) {
 	}
 }
 
-// TestEventLogConcurrentAppend pins that the shared mu serializes concurrent Appends
-// across goroutines (run under -race): N goroutines append M events each; a final
-// Read sees exactly N*M well-formed records (no interleaved/torn line). It shares the
-// store's one mutex with Save/ToolCall, so this also guards the cross-file lock.
+// TestEventLogConcurrentAppend pins that the family flock serializes concurrent
+// Appends across goroutines (run under -race): N goroutines append M events each;
+// a final Read sees exactly N*M well-formed records (no interleaved/torn line).
 func TestEventLogConcurrentAppend(t *testing.T) {
 	ctx := context.Background()
 	st, _ := newStore(t)

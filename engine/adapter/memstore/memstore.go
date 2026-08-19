@@ -9,7 +9,9 @@ package memstore
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -30,8 +32,21 @@ type Store struct {
 	// savedAt records each session's last Save time, read via now (injected
 	// for determinism; the real clock by default). It backs the optional
 	// port.PrunableStore List/Delete retention seam.
-	savedAt map[session.SessionID]time.Time
-	now     func() time.Time
+	savedAt        map[session.SessionID]time.Time
+	estimatedBytes map[session.SessionID]int64
+	deleteFailures map[session.SessionID]error
+	now            func() time.Time
+	// generation is a monotonic counter bumped on every Save/Delete, and
+	// handed to port.PaginateSessionMetadataBound as the cheap O(1)
+	// "has anything changed" signal a bound cursor is checked against. This
+	// is coarser than jsonlstore's real per-family bookkeeping (any mutation
+	// anywhere invalidates every outstanding cursor, not just ones scoped to
+	// the changed row) but matches how the real indexed adapters' own
+	// rebuild-generation counters work (e.g. redisstore's
+	// metadataRebuildGenerationKey) — a single global counter, not a
+	// per-owner one; owner-scope mismatches are caught separately by the
+	// Scope field, not Generation.
+	generation uint64
 }
 
 // compile-time assertions that Store satisfies the port plus the optional
@@ -59,12 +74,24 @@ func WithNow(now func() time.Time) Option {
 	}
 }
 
+// WithDeleteFailure scripts a deterministic Delete failure for the reference
+// adapter. It exists for offline conformance of retryable maintenance paths.
+func WithDeleteFailure(id session.SessionID, err error) Option {
+	return func(st *Store) {
+		if err != nil {
+			st.deleteFailures[id] = err
+		}
+	}
+}
+
 // New constructs an empty in-memory Store.
 func New(opts ...Option) *Store {
 	st := &Store{
-		sessions: make(map[session.SessionID]sessnap.Snapshot),
-		savedAt:  make(map[session.SessionID]time.Time),
-		now:      time.Now,
+		sessions:       make(map[session.SessionID]sessnap.Snapshot),
+		savedAt:        make(map[session.SessionID]time.Time),
+		estimatedBytes: make(map[session.SessionID]int64),
+		deleteFailures: make(map[session.SessionID]error),
+		now:            time.Now,
 	}
 	for _, opt := range opts {
 		opt(st)
@@ -81,9 +108,12 @@ func (st *Store) Save(_ context.Context, s *session.Session) error {
 	if err != nil {
 		return err
 	}
+	estimatedBytes := estimateSnapshotBytes(snap)
 	st.mu.Lock()
 	st.sessions[s.ID] = snap
 	st.savedAt[s.ID] = st.now()
+	st.estimatedBytes[s.ID] = estimatedBytes
+	st.generation++
 	st.mu.Unlock()
 	return nil
 }
@@ -127,18 +157,122 @@ func (st *Store) PageSessionMetadata(_ context.Context, request port.SessionMeta
 			Turns: snap.Counters.Turns, ModelID: snap.ModelID, CreatedAt: snap.CreatedAt,
 			Title: snap.Title, TitleProvenance: snap.TitleProvenance, Workspace: snap.Workspace,
 			Kind: kind, Relationship: snap.Relationship, Owner: snap.Owner,
+			EstimatedBytes: st.estimatedBytes[id],
 		})
 	}
+	generation := st.generation
 	st.mu.RUnlock()
-	return port.PaginateSessionMetadata(rows, request), nil
+	return port.PaginateSessionMetadataBound(rows, request, strconv.FormatUint(generation, 10))
+}
+
+// estimateSnapshotBytes is an allocation-free approximation of the persisted
+// JSON payload. Save pays the transcript walk once; metadata paging reads only
+// the cached scalar. Fixed overhead accounts for field names and scalar values,
+// while every variable-length persisted payload contributes its byte length.
+func estimateSnapshotBytes(snap sessnap.Snapshot) int64 {
+	size := int64(256 + len(snap.ID) + len(snap.State) + len(snap.Mode) + len(snap.Workspace) +
+		len(snap.StopReason) + len(snap.Kind) + len(snap.Profile) + len(snap.ProviderID) +
+		len(snap.ModelID) + len(snap.ReasoningEffort) + len(snap.Title) + len(snap.TitleProvenance) +
+		len(snap.LastError) + len(snap.Authority) + len(snap.EnvironmentRef.Kind) + len(snap.EnvironmentRef.ID))
+
+	rel := snap.Relationship
+	size += int64(len(rel.ScheduleName) + len(rel.OriginSessionID) + len(rel.ParentSessionID) +
+		len(rel.CallID) + len(rel.TeamID) + len(rel.MemberName))
+	if rel.BranchIndex != nil {
+		size += 16
+	}
+	if snap.Pending != nil {
+		size += int64(96 + len(snap.Pending.AskID) + len(snap.Pending.Tool) + len(snap.Pending.Args) +
+			len(snap.Pending.Reason) + len(snap.Pending.Call))
+	}
+	if snap.Owner != nil {
+		size += int64(64 + len(snap.Owner.Issuer) + len(snap.Owner.Subject) +
+			len(snap.Owner.GrantType) + len(snap.Owner.Name))
+	}
+	if snap.Usage != nil {
+		size += 96
+	}
+	if snap.AdoptionMetadata != nil {
+		size += int64(64 + len(snap.AdoptionSourceID) + len(snap.AdoptionRequestDigest))
+	}
+
+	for _, message := range snap.Messages {
+		size += int64(96 + len(message.Role) + len(message.Text) + len(message.Reasoning) +
+			len(message.ProviderPhase) + len(message.ReasoningItemID))
+		for _, call := range message.ToolCalls {
+			size += int64(64 + len(call.ID) + len(call.Name) + len(call.Args) + len(call.ItemID))
+		}
+		if message.ToolResult != nil {
+			result := message.ToolResult
+			size += int64(64 + len(result.CallID) + len(result.Content))
+			for _, part := range result.Parts {
+				size += estimateContentBytes(part)
+			}
+		}
+		for _, part := range message.Parts {
+			size += int64(48 + len(part.Kind) + len(part.MIMEType) + len(part.URL) + encodedBytesLen(len(part.Data)))
+		}
+	}
+	return size
+}
+
+func estimateContentBytes(part session.Content) int64 {
+	size := int64(128 + len(part.BlockKind) + len(part.Kind) + len(part.MIMEType) +
+		len(part.URL) + len(part.Text) + len(part.Name) + len(part.Title) + len(part.Description) +
+		len(part.LastModified) + encodedBytesLen(len(part.Data)))
+	for _, audience := range part.Audience {
+		size += int64(4 + len(audience))
+	}
+	return size
+}
+
+func encodedBytesLen(n int) int {
+	return base64.StdEncoding.EncodedLen(n)
+}
+
+// DeleteSessionIfUnchanged atomically revalidates metadata and deletes the
+// in-memory family while holding the store mutex.
+func (st *Store) DeleteSessionIfUnchanged(_ context.Context, expected port.SessionDiscoveryMeta) (bool, error) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	snap, ok := st.sessions[expected.ID]
+	if !ok {
+		return false, nil
+	}
+	kind := snap.Kind
+	if kind == "" {
+		kind = session.SessionKindUnknown
+	}
+	current := port.SessionDiscoveryMeta{
+		ID: expected.ID, ModifiedAt: st.savedAt[expected.ID], State: snap.State,
+		Kind: kind, Relationship: snap.Relationship, Owner: snap.Owner,
+	}
+	if !port.SessionDiscoveryMetaEqual(current, expected) {
+		return false, nil
+	}
+	if err := st.deleteFailures[expected.ID]; err != nil {
+		return false, err
+	}
+	delete(st.sessions, expected.ID)
+	delete(st.savedAt, expected.ID)
+	delete(st.estimatedBytes, expected.ID)
+	st.generation++
+	return true, nil
 }
 
 // Delete removes the session stored under id. It is idempotent: an unknown id
 // is success (port.PrunableStore contract).
 func (st *Store) Delete(_ context.Context, id session.SessionID) error {
 	st.mu.Lock()
+	defer st.mu.Unlock()
+	if err := st.deleteFailures[id]; err != nil {
+		return err
+	}
+	if _, ok := st.sessions[id]; ok {
+		st.generation++
+	}
 	delete(st.sessions, id)
 	delete(st.savedAt, id)
-	st.mu.Unlock()
+	delete(st.estimatedBytes, id)
 	return nil
 }

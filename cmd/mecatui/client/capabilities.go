@@ -51,6 +51,10 @@ type Capabilities struct {
 	Reflection        bool
 	LearningProposals bool
 	LearnedSkills     bool
+	StorageHealth     bool
+	StorageMigration  bool
+	StorageCleanup    bool
+	LegacyAdoption    bool
 	// ManualDream is nil when an older server does not expose the capability object.
 	// A non-nil value keeps /dream discoverable even when both targets are unavailable,
 	// so the overlay can explain the target-specific reasons.
@@ -82,6 +86,10 @@ func capabilitiesFrom(c *mecatlv1.ServerCapabilities) Capabilities {
 		Reflection:        c.GetReflection(),
 		LearningProposals: c.GetLearningProposals(),
 		LearnedSkills:     c.GetLearnedSkills(),
+		StorageHealth:     c.GetStorageHealth(),
+		StorageMigration:  c.GetStorageMigration(),
+		StorageCleanup:    c.GetStorageCleanup(),
+		LegacyAdoption:    c.GetLegacyAdoption(),
 		ManualDream:       manualDreamCapabilitiesFrom(c.GetManualDream()),
 	}
 }

@@ -112,6 +112,9 @@ type Snapshot struct {
 	// server.Config.EnvironmentResolver; local/mem/nofs resolve through the
 	// existing factories.
 	EnvironmentRef session.EnvironmentRef `json:"environment_ref,omitzero"`
+	// AdoptionMetadata is embedded so its rare pointer does not inflate every
+	// Snapshot, while its existing v2 fields remain flat on the JSON wire.
+	*session.AdoptionMetadata
 }
 
 // messageDTO mirrors session.Message with JSON tags. session.Message is
@@ -164,23 +167,24 @@ func Of(s *session.Session) (Snapshot, error) {
 		relationship.BranchIndex = &branchIndex
 	}
 	snap := Snapshot{
-		ID:              s.ID,
-		State:           s.State,
-		Mode:            s.Mode,
-		Limits:          s.Limits,
-		Counters:        s.Counters,
-		Workspace:       s.Workspace,
-		EnvironmentRef:  s.EnvironmentRef,
-		Profile:         s.Profile,
-		ProviderID:      s.ProviderID,
-		ModelID:         s.ModelID,
-		ReasoningEffort: s.ReasoningEffort,
-		Title:           s.Title,
-		TitleProvenance: s.TitleProvenance,
-		Authority:       s.Authority,
-		Kind:            s.Kind,
-		Relationship:    relationship,
-		CreatedAt:       s.CreatedAt,
+		ID:               s.ID,
+		State:            s.State,
+		Mode:             s.Mode,
+		Limits:           s.Limits,
+		Counters:         s.Counters,
+		Workspace:        s.Workspace,
+		EnvironmentRef:   s.EnvironmentRef,
+		Profile:          s.Profile,
+		ProviderID:       s.ProviderID,
+		ModelID:          s.ModelID,
+		ReasoningEffort:  s.ReasoningEffort,
+		Title:            s.Title,
+		TitleProvenance:  s.TitleProvenance,
+		Authority:        s.Authority,
+		Kind:             s.Kind,
+		Relationship:     relationship,
+		AdoptionMetadata: s.Adoption.Clone(),
+		CreatedAt:        s.CreatedAt,
 		// Owner is a pointer for true omitempty; Clone so the snapshot cannot
 		// alias (and later mutate) the aggregate's own principal.
 		Owner: s.Owner.Clone(),
@@ -232,6 +236,7 @@ func (snap Snapshot) Restore() (*session.Session, error) {
 	s.ModelID = snap.ModelID
 	s.ReasoningEffort = snap.ReasoningEffort
 	s.EnvironmentRef = snap.EnvironmentRef
+	s.Adoption = snap.Clone()
 	s.Title = snap.Title
 	s.TitleProvenance = snap.TitleProvenance
 	// The identity labels go through the WRITE-ONCE aggregate method rather than a

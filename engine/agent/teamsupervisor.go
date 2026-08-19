@@ -355,6 +355,11 @@ type Supervisor struct {
 	// running (members drain on independent errgroup goroutines), and the late verdict
 	// routes back via the parent router keyed on the member's child-namespaced askID.
 	caps parentCaps
+	// liveness is an optional maintenance-exclusion capability owned by the
+	// supervisor lifecycle. It is deliberately independent of caps: direct Service
+	// RunTeam supervisors keep zero permission/ask capabilities while still protecting
+	// member sessions locally and, when composition configures it, across replicas.
+	liveness port.SessionLiveness
 
 	members map[string]*memberRT
 	order   []string
@@ -389,9 +394,13 @@ type memberRT struct {
 	// ctx-Err check instead. Both fields are immutable after AddMember, so
 	// CancelMember may be called from any goroutine. nil on a memberRT constructed
 	// outside AddMember (internal tests) — every reader nil-guards.
-	ctx        context.Context
-	cancel     context.CancelFunc
-	ranInitial bool
+	// releaseLiveness ends the supervisor-owned maintenance exclusion. It is
+	// registered at Run entry before any member can be driven and released only by
+	// cleanupAll, including cancellation/error/pre-start exits.
+	releaseLiveness func()
+	ctx             context.Context
+	cancel          context.CancelFunc
+	ranInitial      bool
 	// ran reports that this member was DRIVEN at least once (set at the top of
 	// driveOneTurn — rounds AND the lead-synthesis drive). cleanupAll reads it for
 	// the A5 ghost-entry vocabulary: a never-driven, never-cancelled member (an
@@ -640,6 +649,16 @@ func withParentCaps(caps parentCaps) SupervisorOption {
 	return func(s *Supervisor) { s.caps = caps }
 }
 
+// WithMemberLiveness injects the maintenance exclusion used for team-member
+// sessions. Run acquires it for every member before scheduling begins and
+// cleanupAll releases each hold after the between-round and synthesis lifecycle
+// has ended. Acquisition failure safely skips that member. This capability is
+// independent of parent permission/ask capabilities, so a direct Service RunTeam
+// can remain zero-capability.
+func WithMemberLiveness(liveness port.SessionLiveness) SupervisorOption {
+	return func(s *Supervisor) { s.liveness = liveness }
+}
+
 // WithMemberStore injects the optional session store the supervisor uses to persist
 // each member session for out-of-band inspection. Nil disables persistence. The
 // supervisor consumes the port.SessionStore interface, never a concrete adapter, so
@@ -821,7 +840,14 @@ func (s *Supervisor) AddMember(ctx context.Context, spec MemberSpec) error {
 	// nothing and the member simply is not client-cancellable there (the whole-stream
 	// cancel covers it — D4). The member name is the registry's display goal.
 	memberCtx, memberCancel := context.WithCancel(context.Background())
-	s.caps.registerChildRun(sess.ID, childFamilyTeamMember, spec.Name, memberCancel, false)
+	if err := s.caps.registerChildRun(memberCtx, sess.ID, childFamilyTeamMember, spec.Name, memberCancel, false); err != nil {
+		memberCancel()
+		if cleanup != nil {
+			_ = cleanup()
+		}
+		s.team.RemoveMember(spec.Name)
+		return fmt.Errorf("agent: protect team member session %q: %w", sess.ID, err)
+	}
 	// A member is long-lived: its entry advances to RUNNING at enrolment and stays
 	// there across rounds (idle-between-rounds is still cancellable — design §1.2);
 	// done means de-scheduled (see childFamilyTeamMember's caution).
@@ -1122,6 +1148,29 @@ type turnInput struct {
 // run is bounded by ctx: cancelling it stops scheduling further rounds and lets the
 // in-flight round finish. Forked member workspaces are cleaned up on return.
 func (s *Supervisor) Run(ctx context.Context, sink func(TeamEvent)) TeamOutcome {
+	// Direct Service RunTeam has no parent child registry by design. Register its
+	// members through the independent lifecycle capability before planning can run;
+	// registrations remain held through idle rounds and lead synthesis.
+	if s.liveness != nil {
+		for _, name := range s.order {
+			m := s.members[name]
+			if m == nil || m.sess == nil || m.releaseLiveness != nil {
+				continue
+			}
+			release, err := s.liveness.Register(m.ctx, m.sess.ID, m.cancel)
+			if err != nil {
+				m.stopped = true
+				m.nonResumable = true
+				m.stopReason = StopReasonError
+				m.lastText = fmt.Sprintf("team member session could not be protected: %v", err)
+				if m.cancel != nil {
+					m.cancel()
+				}
+				continue
+			}
+			m.releaseLiveness = release
+		}
+	}
 	defer s.cleanupAll()
 	if sink == nil {
 		sink = func(TeamEvent) {}
@@ -1890,6 +1939,11 @@ func (s *Supervisor) cleanupAll() {
 			default:
 				s.caps.abortChildRun(m.sess.ID)
 			}
+			s.caps.releaseChildLiveness(m.sess.ID)
+		}
+		if m.releaseLiveness != nil {
+			m.releaseLiveness()
+			m.releaseLiveness = nil
 		}
 		if m.cleanup != nil {
 			_ = m.cleanup()

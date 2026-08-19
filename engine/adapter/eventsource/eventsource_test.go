@@ -34,6 +34,20 @@ func meta() eventsource.SessionMeta {
 	}
 }
 
+func TestFoldAdoptionAuditMetadata(t *testing.T) {
+	metadata := meta()
+	metadata.AdoptionSourceID = "legacy-source"
+	metadata.AdoptionRequestDigest = "request-digest"
+	folded, err := eventsource.Fold(metadata, seq(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adoption := folded.Adoption
+	if adoption == nil || adoption.AdoptionSourceID != metadata.AdoptionSourceID || adoption.AdoptionRequestDigest != metadata.AdoptionRequestDigest {
+		t.Fatalf("adoption metadata = %+v, want %q/%q", adoption, metadata.AdoptionSourceID, metadata.AdoptionRequestDigest)
+	}
+}
+
 // ev is a terse Event constructor.
 func toolCall(id, name, args string) session.ToolCall {
 	return session.NewToolCall(session.ToolCallID(id), name, json.RawMessage(args))

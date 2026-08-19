@@ -157,6 +157,13 @@ message ListSessionsResponse {
 message SessionMetadataCursor {
   google.protobuf.Timestamp modified_at = 1;
   string session_id = 2;
+  // generation binds continuation to one metadata catalog view.
+  string generation = 3;
+  // scope binds continuation to the ownership/filter set used for page one.
+  string scope = 4;
+  // continuation is opaque and interpreted only by the issuing backend.
+  reserved 5;
+  string continuation = 6;
 }
 
 message PageSessionMetadataRequest {
@@ -191,6 +198,7 @@ message SessionMetadataEntry {
   string workspace = 21;
   // title_provenance is "first-prompt", "operator", or empty for legacy/unknown.
   string title_provenance = 22;
+  int64 estimated_bytes = 23;
 }
 
 message PageSessionMetadataResponse {

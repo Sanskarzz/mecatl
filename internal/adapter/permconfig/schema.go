@@ -138,6 +138,148 @@ type Config struct {
 	// credential references, or egress policy. Values are metadata only; parsing
 	// never reads an environment variable, opens a credential store, or performs I/O.
 	MCP *MCPSection `yaml:"mcp"`
+	// Retention is the strict, versioned operator-only automatic session cleanup policy.
+	// Project-tier values are ignored; explicit CLI flags remain the highest precedence.
+	Retention *RetentionSection `yaml:"retention"`
+	// StorageManagement names the verified OIDC identities allowed to operate on
+	// process-wide storage. It is strict and operator-tier only.
+	StorageManagement *StorageManagementSection `yaml:"storage_management"`
+}
+
+// StorageManagementSection is the explicit operator authority for process-wide
+// storage health, migration, and cleanup.
+type StorageManagementSection struct {
+	// Version is the required schema version; the only supported value is 1.
+	Version int `yaml:"version"`
+	// Principals lists exact verified OIDC issuer/subject pairs. Empty grants nobody.
+	Principals []StorageManagementPrincipal `yaml:"principals"`
+}
+
+// StorageManagementPrincipal is one exact verified issuer/subject pair.
+type StorageManagementPrincipal struct {
+	// Issuer must equal the verified token issuer byte-for-byte.
+	Issuer string `yaml:"issuer"`
+	// Subject must equal the verified token subject byte-for-byte.
+	Subject string `yaml:"subject"`
+}
+
+// UnmarshalYAML strictly validates storage-management authority. An empty list
+// grants nobody; there is no wildcard or grant-type shortcut.
+func (s *StorageManagementSection) UnmarshalYAML(node *yaml.Node) error {
+	if err := decodeStrictMapping(node, "storage_management", map[string]any{
+		"version": &s.Version, "principals": &s.Principals,
+	}); err != nil {
+		return err
+	}
+	if s.Version != 1 {
+		return fmt.Errorf("storage_management.version: want 1, got %d", s.Version)
+	}
+	seen := make(map[string]bool, len(s.Principals))
+	for i := range s.Principals {
+		p := &s.Principals[i]
+		p.Issuer, p.Subject = strings.TrimSpace(p.Issuer), strings.TrimSpace(p.Subject)
+		if p.Issuer == "" || p.Subject == "" {
+			return fmt.Errorf("storage_management.principals[%d]: issuer and subject are required", i)
+		}
+		key := p.Issuer + "\x00" + p.Subject
+		if seen[key] {
+			return fmt.Errorf("storage_management.principals[%d]: duplicate issuer/subject", i)
+		}
+		seen[key] = true
+	}
+	return nil
+}
+
+// UnmarshalYAML keeps each principal mapping closed to prevent a misspelled
+// identity field from silently removing the management boundary.
+func (p *StorageManagementPrincipal) UnmarshalYAML(node *yaml.Node) error {
+	return decodeStrictMapping(node, "storage_management principal", map[string]any{
+		"issuer": &p.Issuer, "subject": &p.Subject,
+	})
+}
+
+// RetentionSection is the versioned operator automatic-cleanup policy.
+type RetentionSection struct {
+	// Version is the required schema version; the only supported value is 1.
+	Version int `yaml:"version"`
+	// Main controls top-level operator/service sessions.
+	Main RetentionLimitSection `yaml:"main"`
+	// Child controls subagent, parallel-branch, and team-member sessions.
+	Child RetentionLimitSection `yaml:"child"`
+	// Scheduled controls scheduled-fire sessions.
+	Scheduled RetentionLimitSection `yaml:"scheduled"`
+	// SweepCadence is the repeat interval; 0 disables repeats while retaining the compatibility startup sweep.
+	SweepCadence string `yaml:"sweep_cadence"`
+	// AcknowledgeMainDeletion explicitly consents to destructive main-session cleanup.
+	AcknowledgeMainDeletion bool `yaml:"acknowledge_main_deletion"`
+	SweepCadenceSet         bool `yaml:"-"`
+}
+
+// RetentionLimitSection controls one durable session-kind partition. Zero disables.
+type RetentionLimitSection struct {
+	// MaxAge deletes eligible rows older than this Go duration; 0 disables the age limit.
+	MaxAge string `yaml:"max_age"`
+	// MaxCount keeps the newest eligible rows up to this count; 0 disables the count limit.
+	MaxCount               int  `yaml:"max_count"`
+	MaxAgeSet, MaxCountSet bool `yaml:"-"`
+}
+
+// UnmarshalYAML strictly decodes and validates the versioned retention policy.
+func (s *RetentionSection) UnmarshalYAML(node *yaml.Node) error {
+	if err := decodeStrictMapping(node, "retention", map[string]any{
+		"version": &s.Version, "main": &s.Main, "child": &s.Child,
+		"scheduled": &s.Scheduled, "sweep_cadence": &s.SweepCadence,
+		"acknowledge_main_deletion": &s.AcknowledgeMainDeletion,
+	}); err != nil {
+		return err
+	}
+	if s.Version != 1 {
+		return fmt.Errorf("retention.version: want 1, got %d", s.Version)
+	}
+	s.SweepCadenceSet = mappingHasKey(node, "sweep_cadence")
+	for name, value := range map[string]RetentionLimitSection{"main": s.Main, "child": s.Child, "scheduled": s.Scheduled} {
+		if value.MaxCount < 0 {
+			return fmt.Errorf("retention.%s.max_count: must be non-negative", name)
+		}
+		if err := validateRetentionDuration(value.MaxAge); err != nil {
+			return fmt.Errorf("retention.%s.max_age: %w", name, err)
+		}
+	}
+	if err := validateRetentionDuration(s.SweepCadence); err != nil {
+		return fmt.Errorf("retention.sweep_cadence: %w", err)
+	}
+	return nil
+}
+
+// UnmarshalYAML strictly decodes one retention partition.
+func (s *RetentionLimitSection) UnmarshalYAML(node *yaml.Node) error {
+	if err := decodeStrictMapping(node, "retention limit", map[string]any{"max_age": &s.MaxAge, "max_count": &s.MaxCount}); err != nil {
+		return err
+	}
+	s.MaxAgeSet, s.MaxCountSet = mappingHasKey(node, "max_age"), mappingHasKey(node, "max_count")
+	return nil
+}
+
+func validateRetentionDuration(raw string) error {
+	_, err := ParseRetentionDuration(raw)
+	return err
+}
+
+// ParseRetentionDuration parses a retention/sweep-cadence duration string.
+// An empty or "0" value means disabled (0, nil); anything else must be a
+// valid, non-negative time.ParseDuration value.
+func ParseRetentionDuration(raw string) (time.Duration, error) {
+	if strings.TrimSpace(raw) == "" || strings.TrimSpace(raw) == "0" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(strings.TrimSpace(raw))
+	if err != nil {
+		return 0, fmt.Errorf("invalid duration %q", raw)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("must be non-negative")
+	}
+	return d, nil
 }
 
 // MCPSection is the strict operator-only mcp: subtree.

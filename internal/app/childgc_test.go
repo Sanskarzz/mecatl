@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -15,6 +18,7 @@ import (
 	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/session"
+	"github.com/stacklok/mecatl/internal/adapter/server"
 	"github.com/stacklok/mecatl/internal/adapter/store/jsonlstore"
 )
 
@@ -184,9 +188,8 @@ func TestChildGCMainSessionAgePass(t *testing.T) {
 }
 
 // TestChildGCMainSessionCountCap pins the GLOBAL main count cap (issue #79):
-// past mainMaxTotal, the OLDEST main snapshots go first, the cap is store-wide
-// (not per-prefix), and a live main keeps its slot (the next-oldest non-live is
-// deleted in its stead).
+// past mainMaxTotal, the OLDEST eligible main snapshots go first. Live mains
+// are protected and excluded from cap slots, so the cap applies only to b/c/d.
 func TestChildGCMainSessionCountCap(t *testing.T) {
 	f := newGCFixture(t, childGCPolicy{mainMaxTotal: 2})
 	live := map[session.SessionID]bool{"main-a": true}
@@ -196,21 +199,73 @@ func TestChildGCMainSessionCountCap(t *testing.T) {
 		f.now = f.now.Add(time.Duration(i+1) * time.Minute)
 	}
 
-	// 4 mains > cap 2, oldest-first with the live main-a skipped => main-b and
-	// main-c deleted (main-a kept though oldest; main-d newest).
+	// main-a is protected and excluded from slots. Of b/c/d, cap 2 removes b.
 	deleted, retained := f.gc.sweep(context.Background())
-	if deleted != 2 || retained != 2 {
-		t.Errorf("sweep = (deleted %d, retained %d), want (2, 2)", deleted, retained)
+	if deleted != 1 || retained != 3 {
+		t.Errorf("sweep = (deleted %d, retained %d), want (1, 3)", deleted, retained)
 	}
 	got := f.ids(t)
 	if !got["main-a"] {
 		t.Error("LIVE main was deleted — the liveness exclusion is broken for the main cap")
 	}
-	if got["main-b"] || got["main-c"] {
-		t.Errorf("cap pass kept the oldest non-live mains (b=%v c=%v), want them deleted", got["main-b"], got["main-c"])
+	if got["main-b"] {
+		t.Error("cap pass kept the oldest eligible main-b")
+	}
+	if !got["main-c"] {
+		t.Error("cap counted the protected live main as a slot and over-deleted main-c")
 	}
 	if !got["main-d"] {
 		t.Error("newest main was deleted under the cap pass")
+	}
+}
+
+// TestSessionStorageContinuity_Scenario5_AutomaticManualPlannerParity (AC5.5)
+// cross-checks the REAL automatic sweep (childGC.sweep — the only production
+// caller of sessionretention.Plan on the automatic path) against
+// server.PlanManualRetention (the manual cleanup planner) over the identical
+// store state, policy, and liveness set. It reads the store's rows BEFORE
+// sweeping (so the manual plan sees the same input the automatic sweep saw),
+// sweeps for real, then asserts the manual planner would have selected
+// exactly the sessions the real sweep actually deleted — a genuine
+// cross-check between the two real call sites, not two names for one
+// same-package shim.
+func TestSessionStorageContinuity_Scenario5_AutomaticManualPlannerParity(t *testing.T) {
+	f := newGCFixture(t, childGCPolicy{mainMaxTotal: 1})
+	live := map[session.SessionID]bool{"main-a": true}
+	f.gc.isLive = func(id session.SessionID) bool { return live[id] }
+	all := []session.SessionID{"main-a", "main-b", "main-c"}
+	for i, id := range all {
+		f.save(t, id)
+		f.now = f.now.Add(time.Duration(i+1) * time.Minute)
+	}
+
+	rows, err := f.gc.retentionMetadata(context.Background())
+	if err != nil {
+		t.Fatalf("retentionMetadata: %v", err)
+	}
+
+	deleted, _ := f.gc.sweep(context.Background())
+	if deleted == 0 {
+		t.Fatal("expected the real sweep to delete at least one session")
+	}
+	remaining := f.ids(t)
+	var actuallyDeleted []session.SessionID
+	for _, id := range all {
+		if !remaining[id] {
+			actuallyDeleted = append(actuallyDeleted, id)
+		}
+	}
+
+	manual := server.PlanManualRetention(rows, server.RetentionPolicy{MainMaxCount: 1}, nil, live, nil, f.now)
+	var manualEligible []session.SessionID
+	for _, item := range manual.Eligible {
+		manualEligible = append(manualEligible, item.ID)
+	}
+
+	slices.Sort(actuallyDeleted)
+	slices.Sort(manualEligible)
+	if !reflect.DeepEqual(actuallyDeleted, manualEligible) {
+		t.Fatalf("automatic sweep deleted %v, manual planner selected %v — automatic/manual retention diverged", actuallyDeleted, manualEligible)
 	}
 }
 
@@ -242,7 +297,7 @@ func TestChildGCMainPassDisabledByDefault(t *testing.T) {
 // TestChildGCMainAgePassSkipsLive pins the liveness exclusion on the MAIN AGE
 // pass specifically (issue #79): a LIVE main older than mainRetention keeps its
 // slot — the in-flight run protects it from the age pass, mirroring the
-// child-side TestChildGCSkipsLiveChildren age-pass leg. (Mutation-verified:
+// child-side TestChildGCSkipsLiveEngineChildren age-pass leg. (Mutation-verified:
 // removing the `!g.isLive(e.ID)` guard from sweepMain's age loop makes this
 // fail.)
 func TestChildGCMainAgePassSkipsLive(t *testing.T) {
@@ -411,13 +466,17 @@ func TestChildGCCapPassOldestFirst(t *testing.T) {
 	}
 }
 
-// TestChildGCSkipsLiveChildren pins the liveness exclusion: an id with an
-// in-flight run keeps its slot under the cap (the next-oldest non-live id is
-// deleted instead) and is never deleted by the age pass.
-func TestChildGCSkipsLiveChildren(t *testing.T) {
+// TestChildGCSkipsLiveEngineChildren pins the shared process-wide exclusion: an
+// engine-owned child registration survives both age and cap planning, is excluded
+// from cap slots, and becomes eligible immediately after its lifecycle releases.
+func TestChildGCSkipsLiveEngineChildren(t *testing.T) {
 	f := newGCFixture(t, childGCPolicy{retention: 24 * time.Hour, maxPerFamily: 2})
-	live := map[session.SessionID]bool{"subagent-live-old": true}
-	f.gc.isLive = func(id session.SessionID) bool { return live[id] }
+	live := newSessionLiveness(nil, "", 0, 0, nil)
+	release, err := live.Register(context.Background(), "subagent-live-old", func() {})
+	if err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	f.gc.isLive = live.IsLive
 
 	f.save(t, "subagent-live-old") // ancient but live: must survive BOTH passes
 	f.save(t, "subagent-dead-old") // ancient and dead: age pass takes it
@@ -427,11 +486,11 @@ func TestChildGCSkipsLiveChildren(t *testing.T) {
 		f.now = f.now.Add(time.Duration(i+1) * time.Minute)
 	}
 
-	// Age pass: dead-old deleted, live-old skipped. Survivors: live-old + y1..y3
-	// = 4 > cap 2, oldest-first with live-old skipped => y1 and y2 deleted.
+	// Age removes dead-old. live-old is protected and excluded from cap slots;
+	// y1..y3 exceed cap 2 by one, so only y1 is deleted.
 	deleted, retained := f.gc.sweep(context.Background())
-	if deleted != 3 || retained != 2 {
-		t.Errorf("sweep = (deleted %d, retained %d), want (3, 2)", deleted, retained)
+	if deleted != 2 || retained != 3 {
+		t.Errorf("sweep = (deleted %d, retained %d), want (2, 3)", deleted, retained)
 	}
 	got := f.ids(t)
 	if !got["subagent-live-old"] {
@@ -440,11 +499,22 @@ func TestChildGCSkipsLiveChildren(t *testing.T) {
 	if got["subagent-dead-old"] {
 		t.Error("dead aged-out child survived")
 	}
-	if got["subagent-y1"] || got["subagent-y2"] {
-		t.Errorf("cap pass kept the oldest non-live ids (y1=%v y2=%v), want them deleted in the live id's stead", got["subagent-y1"], got["subagent-y2"])
+	if got["subagent-y1"] {
+		t.Error("cap pass kept the oldest eligible child y1")
+	}
+	if !got["subagent-y2"] {
+		t.Error("cap counted the protected live child as a slot and over-deleted y2")
 	}
 	if !got["subagent-y3"] {
 		t.Error("newest child was deleted under the cap pass")
+	}
+
+	release()
+	if deleted, _ := f.gc.sweep(context.Background()); deleted != 1 {
+		t.Fatalf("post-terminal sweep deleted %d, want released aged child", deleted)
+	}
+	if f.ids(t)["subagent-live-old"] {
+		t.Fatal("released engine child leaked from the liveness registry")
 	}
 }
 
@@ -740,28 +810,102 @@ func TestChildGCPruneUnsupportedDisablesStickily(t *testing.T) {
 	}
 }
 
-// TestChildGCTickerStopsAfterPruneUnsupported pins the goroutine half of the
-// sticky disable: after the startup sweep hits ErrPruneUnsupported, no later
-// tick performs a List (the sweeper goroutine exits; goleak at TestMain is the
-// leak gate).
-func TestChildGCTickerStopsAfterPruneUnsupported(t *testing.T) {
-	cs := &countingPrunable{Store: memstore.New(), listed: make(chan struct{}, 16), listErr: pruneUnsupportedErr()}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	cfg := Config{
-		ChildRetention:  time.Hour,
-		ChildGCInterval: 2 * time.Millisecond,
-		Diagnostics:     port.NopDiagnostics{},
+// TestChildGCTickerStopsAfterUnsupportedRetention pins the goroutine and health
+// halves of sticky disable: either runtime unsupported sentinel ends the worker,
+// clears active/next-sweep state, and reports maintenance unavailability without
+// claiming a successful sweep.
+func TestChildGCTickerStopsAfterUnsupportedRetention(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{name: "prune", err: pruneUnsupportedErr()},
+		{name: "metadata paging", err: port.ErrSessionMetadataPagingUnsupported},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cs := &countingPrunable{Store: memstore.New(), listed: make(chan struct{}, 16), listErr: tc.err}
+			health := &storageMaintenanceState{}
+			cfg := Config{
+				ChildRetention: time.Hour, ChildGCInterval: 2 * time.Millisecond,
+				Diagnostics: port.NopDiagnostics{}, storageMaintenance: health,
+			}
+			closeGC := startChildGC(context.Background(), cfg, cs, func(session.SessionID) bool { return false })
+			defer closeGC()
+			select {
+			case <-cs.listed:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the startup sweep never consulted the store")
+			}
+			deadline := time.Now().Add(time.Second)
+			for health.snapshot().LastFailure == "" {
+				if time.Now().After(deadline) {
+					t.Fatal("unsupported sweep did not settle health")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			time.Sleep(20 * time.Millisecond) // many would-be ticks
+			if got := cs.lists.Load(); got != 1 {
+				t.Errorf("sweeper kept Listing after unsupported result (%d Lists, want 1)", got)
+			}
+			got := health.snapshot()
+			if got.ActiveJob != "" || got.LastSweepAvailable || got.NextSweepAvailable || got.LastFailure != "retention sweep unavailable" {
+				t.Fatalf("health after unsupported sweep = %+v", got)
+			}
+		})
 	}
-	startChildGC(ctx, cfg, cs, func(session.SessionID) bool { return false })
-	select {
-	case <-cs.listed:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the startup sweep never consulted the store")
+}
+
+func TestChildGCMaintenanceExclusionUnavailableNeverStartsOrSchedules(t *testing.T) {
+	store := &countingPrunable{Store: memstore.New(), listed: make(chan struct{}, 1)}
+	health := &storageMaintenanceState{}
+	closeGC := startChildGC(context.Background(), Config{
+		ChildRetention: time.Hour, ChildGCInterval: time.Millisecond,
+		Diagnostics: port.NopDiagnostics{}, storageMaintenance: health,
+		maintenanceMutationAvailable: func() bool { return false },
+	}, store, func(session.SessionID) bool { return false })
+	waitChildGCClose(t, closeGC)
+	time.Sleep(5 * time.Millisecond)
+	if got := store.lists.Load(); got != 0 {
+		t.Fatalf("unavailable GC consulted storage %d times, want zero", got)
 	}
-	time.Sleep(60 * time.Millisecond) // many would-be ticks
-	if got := cs.lists.Load(); got != 1 {
-		t.Errorf("sweeper kept Listing after ErrPruneUnsupported (%d Lists, want 1)", got)
+	if got := health.snapshot(); got.ActiveJob != "" || got.LastSweepAvailable || got.NextSweepAvailable || got.LastFailure != "retention sweep unavailable" {
+		t.Fatalf("unavailable GC health = %+v", got)
+	}
+}
+
+func TestChildGCRuntimeMaintenanceUnsupportedSettlesUnavailable(t *testing.T) {
+	now := time.Now()
+	store := &countingPrunable{Store: memstore.New(memstore.WithNow(func() time.Time { return now.Add(-2 * time.Hour) }))}
+	s := session.New("subagent-old", session.ModeDefault, "/ws", session.Limits{}, now.Add(-2*time.Hour))
+	if err := s.RestoreSessionMetadata(session.SessionKindSubagent, session.SessionRelationship{ParentSessionID: "parent", CallID: "call"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(context.Background(), s); err != nil {
+		t.Fatal(err)
+	}
+	health := &storageMaintenanceState{}
+	closeGC := startChildGC(context.Background(), Config{
+		ChildRetention: time.Hour, ChildGCInterval: time.Millisecond,
+		Diagnostics: port.NopDiagnostics{}, storageMaintenance: health,
+		maintenanceMutationAvailable: func() bool { return true },
+	}, store, func(session.SessionID) bool { return false }, func(context.Context, port.SessionDiscoveryMeta) error {
+		return server.ErrMaintenanceExclusionUnavailable
+	})
+	defer closeGC()
+	deadline := time.Now().Add(time.Second)
+	for health.snapshot().LastFailure != "retention sweep unavailable" {
+		if time.Now().After(deadline) {
+			t.Fatal("runtime unsupported exclusion did not settle health unavailable")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	calls := store.lists.Load()
+	time.Sleep(5 * time.Millisecond)
+	if store.lists.Load() != calls {
+		t.Fatal("runtime-unavailable GC remained scheduled")
+	}
+	if _, err := store.Load(context.Background(), s.ID); err != nil {
+		t.Fatalf("runtime-unavailable GC deleted candidate: %v", err)
 	}
 }
 
@@ -770,19 +914,188 @@ func TestChildGCTickerStopsAfterPruneUnsupported(t *testing.T) {
 // TestMain catches a lingering goroutine).
 func TestChildGCStartupOnlySweepsOnceAndExits(t *testing.T) {
 	cs := &countingPrunable{Store: memstore.New(), listed: make(chan struct{}, 4)}
+	health := &storageMaintenanceState{}
 	cfg := Config{
 		ChildRetention: time.Hour, // ChildGCInterval deliberately zero
-		Diagnostics:    port.NopDiagnostics{},
+		Diagnostics:    port.NopDiagnostics{}, storageMaintenance: health,
 	}
-	startChildGC(context.Background(), cfg, cs, func(session.SessionID) bool { return false })
-	select {
-	case <-cs.listed:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the startup sweep never consulted the store")
+	closeGC := startChildGC(context.Background(), cfg, cs, func(session.SessionID) bool { return false })
+	deadline := time.Now().Add(time.Second)
+	for !health.snapshot().LastSweepAvailable {
+		if time.Now().After(deadline) {
+			t.Fatal("startup-only sweep did not settle health")
+		}
+		time.Sleep(time.Millisecond)
 	}
-	time.Sleep(50 * time.Millisecond)
+	waitChildGCClose(t, closeGC)
 	if got := cs.lists.Load(); got != 1 {
 		t.Errorf("startup-only mode performed %d Lists, want exactly 1", got)
+	}
+	if got := health.snapshot(); got.ActiveJob != "" || !got.LastSweepAvailable || got.NextSweepAvailable || got.LastFailure != "" {
+		t.Fatalf("startup-only health = %+v", got)
+	}
+}
+
+type blockingRetentionStore struct {
+	*memstore.Store
+	calls       atomic.Int32
+	blockCall   int32
+	blocked     chan struct{}
+	workerDone  chan struct{}
+	blockedOnce sync.Once
+	closed      atomic.Bool
+}
+
+func newBlockingRetentionStore(blockCall int32) *blockingRetentionStore {
+	return &blockingRetentionStore{
+		Store: memstore.New(), blockCall: blockCall,
+		blocked: make(chan struct{}), workerDone: make(chan struct{}),
+	}
+}
+
+func (s *blockingRetentionStore) PageSessionMetadata(ctx context.Context, req port.SessionMetadataPageRequest) (port.SessionMetadataPage, error) {
+	call := s.calls.Add(1)
+	if call != s.blockCall {
+		return s.Store.PageSessionMetadata(ctx, req)
+	}
+	s.blockedOnce.Do(func() { close(s.blocked) })
+	defer close(s.workerDone)
+	<-ctx.Done()
+	return port.SessionMetadataPage{}, ctx.Err()
+}
+
+func (s *blockingRetentionStore) close(t *testing.T) {
+	t.Helper()
+	select {
+	case <-s.workerDone:
+	default:
+		t.Fatal("store closed before the retention worker joined")
+	}
+	if !s.closed.CompareAndSwap(false, true) {
+		t.Fatal("store closed more than once")
+	}
+}
+
+func waitChildGCClose(t *testing.T, closeGC func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		closeGC()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("retention cleanup did not cancel and join within one second")
+	}
+}
+
+func TestChildGCCleanupCancelsStartupSweepJoinsAndIsIdempotent(t *testing.T) {
+	store := newBlockingRetentionStore(1)
+	health := &storageMaintenanceState{}
+	cfg := Config{
+		ChildRetention: time.Hour, ChildGCInterval: time.Hour,
+		Diagnostics: port.NopDiagnostics{}, storageMaintenance: health,
+	}
+	closeGC := startChildGC(context.Background(), cfg, store, func(session.SessionID) bool { return false })
+	<-store.blocked
+	if got := health.snapshot().ActiveJob; got != "retention_sweep" {
+		t.Fatalf("active job while blocked = %q, want retention_sweep", got)
+	}
+	waitChildGCClose(t, closeGC)
+	waitChildGCClose(t, closeGC)
+	if got := health.snapshot(); got.ActiveJob != "" || got.LastSweepAvailable {
+		t.Fatalf("health after cancelled sweep = %+v, want inactive without a successful sweep", got)
+	}
+	store.close(t) // dependency teardown is safe only after the worker join.
+}
+
+func TestChildGCCleanupCancelsBlockedTickerSweep(t *testing.T) {
+	store := newBlockingRetentionStore(2)
+	health := &storageMaintenanceState{}
+	cfg := Config{
+		ChildRetention: time.Hour, ChildGCInterval: time.Millisecond,
+		Diagnostics: port.NopDiagnostics{}, storageMaintenance: health,
+	}
+	closeGC := startChildGC(context.Background(), cfg, store, func(session.SessionID) bool { return false })
+	select {
+	case <-store.blocked:
+	case <-time.After(time.Second):
+		t.Fatal("ticker sweep did not start")
+	}
+	if got := health.snapshot(); got.ActiveJob != "retention_sweep" || !got.LastSweepAvailable || !got.NextSweepAvailable {
+		t.Fatalf("health during ticker sweep = %+v", got)
+	}
+	waitChildGCClose(t, closeGC)
+	calls := store.calls.Load()
+	time.Sleep(10 * time.Millisecond)
+	if got := store.calls.Load(); got != calls {
+		t.Fatalf("post-close ticker touched store: calls %d -> %d", calls, got)
+	}
+	if got := health.snapshot(); got.ActiveJob != "" || !got.LastSweepAvailable || got.NextSweepAvailable || got.LastFailure != "" {
+		t.Fatalf("health after ticker shutdown = %+v", got)
+	}
+	store.close(t)
+}
+
+func TestChildGCFailedSweepSettlesHealth(t *testing.T) {
+	health := &storageMaintenanceState{}
+	listed := make(chan struct{}, 1)
+	store := &countingPrunable{Store: memstore.New(), listed: listed, listErr: context.DeadlineExceeded}
+	closeGC := startChildGC(context.Background(), Config{
+		ChildRetention: time.Hour, Diagnostics: port.NopDiagnostics{}, storageMaintenance: health,
+	}, store, func(session.SessionID) bool { return false })
+	select {
+	case <-listed:
+	case <-time.After(time.Second):
+		t.Fatal("failed sweep did not start")
+	}
+	deadline := time.Now().Add(time.Second)
+	for health.snapshot().LastFailure == "" {
+		if time.Now().After(deadline) {
+			t.Fatal("failed sweep did not settle health")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	waitChildGCClose(t, closeGC)
+	got := health.snapshot()
+	if got.ActiveJob != "" || got.LastFailure != "retention sweep failed" || got.LastSweepAvailable {
+		t.Fatalf("health after failed sweep = %+v", got)
+	}
+}
+
+func TestChildGCCleanupCancelsBlockedDelete(t *testing.T) {
+	now := time.Now()
+	store := &countingPrunable{Store: memstore.New(memstore.WithNow(func() time.Time { return now.Add(-2 * time.Hour) }))}
+	s := session.New("subagent-old", session.ModeDefault, "/ws", session.Limits{}, now.Add(-2*time.Hour))
+	if err := s.RestoreSessionMetadata(session.SessionKindSubagent, session.SessionRelationship{ParentSessionID: "parent", CallID: "call"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(context.Background(), s); err != nil {
+		t.Fatal(err)
+	}
+	blocked := make(chan struct{})
+	done := make(chan struct{})
+	var once sync.Once
+	deleter := func(ctx context.Context, _ port.SessionDiscoveryMeta) error {
+		once.Do(func() { close(blocked) })
+		defer close(done)
+		<-ctx.Done() // represents a blocked conditional delete or lease acquisition.
+		return ctx.Err()
+	}
+	closeGC := startChildGC(context.Background(), Config{
+		ChildRetention: time.Hour, Diagnostics: port.NopDiagnostics{},
+	}, store, func(session.SessionID) bool { return false }, deleter)
+	select {
+	case <-blocked:
+	case <-time.After(time.Second):
+		t.Fatal("delete did not start")
+	}
+	waitChildGCClose(t, closeGC)
+	select {
+	case <-done:
+	default:
+		t.Fatal("cleanup returned before blocked delete joined")
 	}
 }
 
@@ -794,7 +1107,7 @@ func jsonlSnapshotPath(t *testing.T, dir string, id session.SessionID) string {
 			t.Fatalf("ReadDir: %v", err)
 		}
 		for _, entry := range entries {
-			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".session.jsonl") {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".session.json") && !strings.HasSuffix(entry.Name(), ".session.jsonl") {
 				continue
 			}
 			path := filepath.Join(scanDir, entry.Name())
@@ -802,17 +1115,60 @@ func jsonlSnapshotPath(t *testing.T, dir string, id session.SessionID) string {
 			if err != nil {
 				continue
 			}
-			lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+			var payload []byte
+			if strings.HasSuffix(entry.Name(), ".session.json") {
+				var envelope struct {
+					Snapshot json.RawMessage `json:"snapshot"`
+				}
+				if json.Unmarshal(data, &envelope) != nil {
+					continue
+				}
+				payload = envelope.Snapshot
+			} else {
+				lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+				if len(lines) == 0 {
+					continue
+				}
+				payload = []byte(lines[len(lines)-1])
+			}
 			var head struct {
 				ID session.SessionID `json:"id"`
 			}
-			if len(lines) > 0 && json.Unmarshal([]byte(lines[len(lines)-1]), &head) == nil && head.ID == id {
+			if json.Unmarshal(payload, &head) == nil && head.ID == id {
 				return path
 			}
 		}
 	}
 	t.Fatalf("snapshot for %q not found", id)
 	return ""
+}
+
+func setJSONLSnapshotMtime(t *testing.T, path string, mtime time.Time) {
+	t.Helper()
+	if strings.HasSuffix(path, ".session.json") {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var envelope map[string]json.RawMessage
+		if err := json.Unmarshal(data, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		envelope["modified_at"], err = json.Marshal(mtime)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err = json.Marshal(envelope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chtimes(path, mtime, mtime); err != nil {
+		t.Fatalf("Chtimes(%s): %v", path, err)
+	}
 }
 
 // TestBuildChildGCSweepsStaleJSONLChild is the build-level E2E: a REAL jsonl
@@ -843,12 +1199,8 @@ func TestBuildChildGCSweepsStaleJSONLChild(t *testing.T) {
 	staleFile := jsonlSnapshotPath(t, storeDir, "subagent-stale")
 	mainFile := jsonlSnapshotPath(t, storeDir, "operator-main")
 	old := time.Now().Add(-48 * time.Hour)
-	if err := os.Chtimes(staleFile, old, old); err != nil {
-		t.Fatalf("Chtimes(stale child): %v", err)
-	}
-	if err := os.Chtimes(mainFile, old, old); err != nil { // main is ancient too — and must STILL survive
-		t.Fatalf("Chtimes(main): %v", err)
-	}
+	setJSONLSnapshotMtime(t, staleFile, old)
+	setJSONLSnapshotMtime(t, mainFile, old) // main is ancient too — and must STILL survive
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -881,6 +1233,59 @@ func TestBuildChildGCSweepsStaleJSONLChild(t *testing.T) {
 	}
 }
 
+// TestBuildAutomaticRetentionRespectsAnotherLocalInstance proves that every
+// local StoreDir composition joins the same flock lease domain. A second Build's
+// startup GC cannot delete a stale candidate whose session lease is held by the
+// first instance.
+func TestBuildAutomaticRetentionRespectsAnotherLocalInstance(t *testing.T) {
+	storeDir := t.TempDir()
+	seed, err := jsonlstore.New(storeDir)
+	if err != nil {
+		t.Fatalf("jsonlstore.New: %v", err)
+	}
+	child, err := session.NewSubagent("subagent-protected", session.ModeDefault, "/ws", session.Limits{}, time.Now().Add(-48*time.Hour), "parent", "call")
+	if err != nil {
+		t.Fatalf("NewSubagent: %v", err)
+	}
+	if err := seed.Save(context.Background(), child); err != nil {
+		t.Fatalf("seed Save: %v", err)
+	}
+	staleFile := jsonlSnapshotPath(t, storeDir, child.ID)
+	setJSONLSnapshotMtime(t, staleFile, time.Now().Add(-48*time.Hour))
+
+	_, _, blocker, blockerOwner, closeBlocker, err := buildStoreAndLease(Config{StoreDir: storeDir})
+	if err != nil {
+		t.Fatalf("build blocking local instance: %v", err)
+	}
+	defer closeBlocker()
+	held, err := blocker.Acquire(context.Background(), child.ID, blockerOwner)
+	if err != nil {
+		t.Fatalf("hold candidate lease: %v", err)
+	}
+	defer func() { _ = blocker.Release(context.Background(), held) }()
+
+	diag := newCapturingDiagnostics()
+	built, err := Build(context.Background(), Config{
+		Workspace: t.TempDir(), Model: "mock", UseMock: true,
+		StoreDir: storeDir, ChildRetention: 24 * time.Hour, Diagnostics: diag,
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer built.Close()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for diag.countContaining("session GC: some deletes failed") == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("automatic retention did not observe the other instance's lease")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := os.Stat(staleFile); err != nil {
+		t.Fatalf("automatic retention deleted another instance's leased session: %v", err)
+	}
+}
+
 // TestBuildZeroConfigChildGCIsNoOp is the build-level posture guard: a
 // zero-config Build (in-memory store, no retention fields set) narrates the
 // DISABLED fact and starts no sweeper goroutine (the package's goleak TestMain
@@ -909,13 +1314,12 @@ func TestBuildZeroConfigChildGCIsNoOp(t *testing.T) {
 }
 
 // TestBuildEnabledChildGCNarratesAndStops pins the enabled wiring end-to-end:
-// a Build with retention configured narrates ENABLED, and the ticker goroutine
-// exits on ctx cancel (goleak at TestMain is the assertion).
+// a Build with retention configured narrates ENABLED, and Built.Close owns the
+// ticker even while the Build context remains live (goleak at TestMain is the
+// assertion). A second Close is a no-op.
 func TestBuildEnabledChildGCNarratesAndStops(t *testing.T) {
 	diag := newCapturingDiagnostics()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	built, err := Build(ctx, Config{
+	built, err := Build(context.Background(), Config{
 		Workspace:                  t.TempDir(),
 		Model:                      "mock",
 		UseMock:                    true,
@@ -927,10 +1331,11 @@ func TestBuildEnabledChildGCNarratesAndStops(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	defer built.Close()
 	if got := diag.countContaining("session GC ENABLED"); got != 1 {
 		t.Errorf("Build narrated 'session GC ENABLED' %d times, want exactly 1", got)
 	}
+	built.Close()
+	built.Close()
 }
 
 // --- Schedule-fire retention (ADR 0059 decision #7 Phase-2) -----------------
@@ -993,8 +1398,7 @@ func TestScheduleFireGCSkipsLive(t *testing.T) {
 // TestScheduleFireGCCountCap pins the schedule-fire GLOBAL count cap (ADR 0059
 // Phase-2, the symmetric peer of the main cap): with more sched-- fire sessions than
 // scheduleFireMaxTotal, the OLDEST fire snapshots go first, the cap is store-wide,
-// and a LIVE fire keeps its slot (the next-oldest non-live is deleted in its
-// stead). Mirrors TestChildGCMainSessionCountCap.
+// and a LIVE fire is protected and excluded from the eligible cap slots.
 func TestScheduleFireGCCountCap(t *testing.T) {
 	f := newGCFixture(t, childGCPolicy{scheduleFireMaxTotal: 2})
 	live := map[session.SessionID]bool{"sched--a": true}
@@ -1004,18 +1408,20 @@ func TestScheduleFireGCCountCap(t *testing.T) {
 		f.now = f.now.Add(time.Duration(i+1) * time.Minute)
 	}
 
-	// 4 fires > cap 2, oldest-first with the live sched--a skipped => sched--b and
-	// sched--c deleted (sched--a kept though oldest; sched--d newest).
+	// sched--a is protected and excluded from slots. Of b/c/d, cap 2 removes b.
 	deleted, retained := f.gc.sweep(context.Background())
-	if deleted != 2 || retained != 2 {
-		t.Errorf("sweep = (deleted %d, retained %d), want (2, 2)", deleted, retained)
+	if deleted != 1 || retained != 3 {
+		t.Errorf("sweep = (deleted %d, retained %d), want (1, 3)", deleted, retained)
 	}
 	got := f.ids(t)
 	if !got["sched--a"] {
 		t.Error("LIVE fire was deleted — the liveness exclusion is broken for the schedule-fire cap")
 	}
-	if got["sched--b"] || got["sched--c"] {
-		t.Errorf("cap pass kept the oldest non-live fires (b=%v c=%v), want them deleted", got["sched--b"], got["sched--c"])
+	if got["sched--b"] {
+		t.Error("cap pass kept the oldest eligible fire b")
+	}
+	if !got["sched--c"] {
+		t.Error("cap counted the protected live fire as a slot and over-deleted c")
 	}
 	if !got["sched--d"] {
 		t.Error("newest fire was deleted under the schedule-fire cap pass")

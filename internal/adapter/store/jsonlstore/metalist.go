@@ -1,12 +1,17 @@
 package jsonlstore
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
+	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/stacklok/mecatl/engine/port"
@@ -83,8 +88,9 @@ var (
 // O(N × last-line-read) instead of O(N × filesize), because each file is
 // tail-read (seek near the end, find the last newline) rather than fully
 // scanned, and the unmarshal skips the conversation entirely. A file smaller
-// than the seek window is read whole (small file = fast). It reuses the same mu
-// as List/Save (one serialized reader per Store).
+// than the seek window is read whole (small file = fast). Catalog rebuilds use
+// a dedicated process mutex plus cross-process catalog flock; they never take a
+// store-wide session-operation lock.
 //
 // The last line is the LATEST snapshot (append-only, latest-line-wins), so the
 // metadata reflects the session's CURRENT state/turns/model/title, exactly as a
@@ -112,71 +118,315 @@ func (st *Store) MetaList(ctx context.Context) ([]port.SessionMeta, error) {
 	return out, nil
 }
 
-func (st *Store) discoveryMetaList(_ context.Context) ([]port.SessionDiscoveryMeta, error) {
-	st.mu.Lock()
-	defer st.mu.Unlock()
+func metaSnapshotFromSession(s *session.Session) metaSnapshot {
+	return metaSnapshot{
+		ID: s.ID, State: s.State, Counters: s.Counters, ModelID: s.ModelID,
+		Title: s.Title, TitleProvenance: s.TitleProvenance, Kind: s.Kind,
+		Relationship: s.Relationship, Workspace: s.Workspace, CreatedAt: s.CreatedAt,
+		Owner: s.Owner,
+	}
+}
+
+func (st *Store) discoveryMetaList(ctx context.Context) ([]port.SessionDiscoveryMeta, error) {
+	st.inventoryMu.Lock()
+	defer st.inventoryMu.Unlock()
+	var rows []port.SessionDiscoveryMeta
+	err := st.withInventoryCatalogLock(ctx, func() error {
+		var err error
+		rows, err = st.discoveryMetaListLocked(ctx)
+		return err
+	})
+	return rows, err
+}
+
+func (st *Store) discoveryMetaListLocked(ctx context.Context) ([]port.SessionDiscoveryMeta, error) {
+	// A durable catalog is derivative only. Every read first fingerprints the
+	// authoritative snapshot directory entries, so another Store's atomic save,
+	// create, remove, or promotion invalidates it without relying on process memory.
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		fingerprint, err := st.inventoryFingerprint()
+		if err != nil {
+			return nil, err
+		}
+		if rows, ok := st.readInventoryCatalog(fingerprint); ok {
+			return rows, nil
+		}
+		sources, err := st.inventoryV1Sources()
+		if err != nil {
+			return nil, err
+		}
+
+		st.observeInventoryWork(inventoryWorkRebuild)
+		rows, err := st.rebuildInventoryRows()
+		if err != nil {
+			return nil, err
+		}
+		after, err := st.inventoryFingerprint()
+		if err != nil {
+			return nil, err
+		}
+		afterSources, err := st.inventoryV1Sources()
+		if err != nil {
+			return nil, err
+		}
+		if after != fingerprint || !maps.Equal(afterSources, sources) {
+			continue // a shared-directory writer changed the source during rebuild
+		}
+		generation := inventoryGeneration(after, afterSources)
+		if err := st.writeInventoryCatalog(after, afterSources, rows); err != nil {
+			return nil, err
+		}
+		if err := st.reconcileInventoryArtifacts(generation); err != nil {
+			return nil, err
+		}
+		return rows, nil
+	}
+	return nil, fmt.Errorf("jsonlstore: inventory changed repeatedly during catalog rebuild")
+}
+
+func (st *Store) rebuildInventoryRows() ([]port.SessionDiscoveryMeta, error) {
 	files, err := st.resolver.snapshotFiles()
 	if err != nil {
 		return nil, err
 	}
 	out := make([]port.SessionDiscoveryMeta, 0, len(files))
 	for _, file := range files {
-		meta := port.SessionDiscoveryMeta{ID: file.id, ModifiedAt: file.modified}
+		st.observeInventoryWork(inventoryWorkSnapshotRead)
+		meta := port.SessionDiscoveryMeta{ID: file.id, ModifiedAt: file.modified, EstimatedBytes: file.estimatedBytes}
 		var m metaSnapshot
-		if err := json.Unmarshal(file.last, &m); err == nil && knownStates[m.State] {
+		if file.metadata != nil {
+			m = *file.metadata
+		} else if err := json.Unmarshal(file.last, &m); err != nil {
+			out = append(out, meta)
+			continue
+		}
+		if knownStates[m.State] {
 			kind := m.Kind
 			if kind == "" {
 				kind = session.SessionKindUnknown
 			}
-			if session.ValidateSessionMetadata(kind, m.Relationship) != nil {
-				out = append(out, meta)
-				continue
+			if session.ValidateSessionMetadata(kind, m.Relationship) == nil {
+				meta.State = m.State
+				meta.Turns = m.Counters.Turns
+				meta.ModelID = m.ModelID
+				meta.Title = m.Title
+				meta.TitleProvenance = m.TitleProvenance
+				meta.Workspace = m.Workspace
+				meta.Kind = kind
+				meta.Relationship = m.Relationship
+				meta.Owner = m.Owner
+				meta.CreatedAt = m.CreatedAt
 			}
-			meta.State = m.State
-			meta.Turns = m.Counters.Turns
-			meta.ModelID = m.ModelID
-			meta.Title = m.Title
-			meta.TitleProvenance = m.TitleProvenance
-			meta.Workspace = m.Workspace
-			meta.Kind = kind
-			meta.Relationship = m.Relationship
-			meta.Owner = m.Owner
-			meta.CreatedAt = m.CreatedAt
 		}
 		out = append(out, meta)
 	}
 	return out, nil
 }
 
-// PageSessionMetadata scans the latest-line metadata projection, then applies
-// the shared owner-filtered keyset contract. The response is bounded even
-// though this v1 adapter may scan all snapshot files.
+// PageSessionMetadata reads at most Limit+1 rows from the owner-specific,
+// pre-ordered derivative catalog. The cursor's byte position seeks directly to
+// page two; no prior catalog row or snapshot payload is traversed.
 func (st *Store) PageSessionMetadata(ctx context.Context, request port.SessionMetadataPageRequest) (port.SessionMetadataPage, error) {
-	rows, err := st.discoveryMetaList(ctx)
+	if request.Limit < 0 {
+		return port.SessionMetadataPage{}, fmt.Errorf("jsonlstore: metadata page limit must be non-negative")
+	}
+	st.inventoryMu.Lock()
+	defer st.inventoryMu.Unlock()
+	var page port.SessionMetadataPage
+	err := st.withInventoryCatalogLock(ctx, func() error {
+		var err error
+		page, err = st.pageSessionMetadataLocked(ctx, request)
+		return err
+	})
+	return page, err
+}
+
+func (st *Store) pageSessionMetadataLocked(ctx context.Context, request port.SessionMetadataPageRequest) (port.SessionMetadataPage, error) {
+	scopeKey := inventoryGlobalScope
+	if request.OwnershipEnforced {
+		scopeKey = inventoryOwnerScope(request.Owner)
+	}
+	catalog, err := st.readyInventoryCatalog(ctx, request.Cursor)
 	if err != nil {
 		return port.SessionMetadataPage{}, err
 	}
-	return port.PaginateSessionMetadata(rows, request), nil
+	if !inventoryCursorMatches(request.Cursor, catalog.Generation, scopeKey) {
+		return port.SessionMetadataPage{}, port.ErrSessionMetadataCursorRestart
+	}
+	scope, ok := catalog.Scopes[scopeKey]
+	if !ok {
+		if request.Cursor != nil {
+			return port.SessionMetadataPage{}, port.ErrSessionMetadataCursorRestart
+		}
+		return port.SessionMetadataPage{TotalCount: 0}, nil
+	}
+	rows, nextPosition, hasMore, err := st.readInventoryScopePage(ctx, request, scope)
+	if err != nil {
+		return port.SessionMetadataPage{}, err
+	}
+	page := port.SessionMetadataPage{Sessions: rows, TotalCount: scope.Count}
+	if hasMore && len(rows) > 0 {
+		last := rows[len(rows)-1]
+		page.NextCursor = &port.SessionMetadataCursor{
+			ModifiedAt: last.ModifiedAt, ID: last.ID, Generation: catalog.Generation,
+			Scope: scopeKey, Continuation: encodeInventoryContinuation(nextPosition),
+		}
+	}
+	return page, nil
 }
 
-// readLastLine returns the last non-blank record without reading older history.
+func (st *Store) readyInventoryCatalog(ctx context.Context, cursor *port.SessionMetadataCursor) (inventoryCatalog, error) {
+	fingerprint, err := st.inventoryFingerprint()
+	if err != nil {
+		return inventoryCatalog{}, err
+	}
+	if catalog, ready := st.readInventoryManifest(fingerprint); ready {
+		return catalog, nil
+	}
+	if cursor != nil {
+		return inventoryCatalog{}, port.ErrSessionMetadataCursorRestart
+	}
+	if _, err := st.discoveryMetaListLocked(ctx); err != nil {
+		return inventoryCatalog{}, err
+	}
+	fingerprint, err = st.inventoryFingerprint()
+	if err != nil {
+		return inventoryCatalog{}, err
+	}
+	catalog, ready := st.readInventoryManifest(fingerprint)
+	if !ready {
+		return inventoryCatalog{}, fmt.Errorf("jsonlstore: rebuilt inventory catalog is not ready")
+	}
+	return catalog, nil
+}
+
+const inventoryContinuationPrefix = "jsonl-v1."
+
+func encodeInventoryContinuation(position int64) string {
+	return inventoryContinuationPrefix + base64.RawURLEncoding.EncodeToString(strconv.AppendInt(nil, position, 10))
+}
+
+func decodeInventoryContinuation(token string) (int64, bool) {
+	if len(token) <= len(inventoryContinuationPrefix) || token[:len(inventoryContinuationPrefix)] != inventoryContinuationPrefix {
+		return 0, false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(token[len(inventoryContinuationPrefix):])
+	if err != nil {
+		return 0, false
+	}
+	position, err := strconv.ParseInt(string(raw), 10, 64)
+	if err != nil || position < 0 || encodeInventoryContinuation(position) != token {
+		return 0, false
+	}
+	return position, true
+}
+
+func inventoryCursorMatches(cursor *port.SessionMetadataCursor, generation, scope string) bool {
+	if cursor == nil {
+		return true
+	}
+	_, valid := decodeInventoryContinuation(cursor.Continuation)
+	return cursor.Generation == generation && cursor.Scope == scope && valid
+}
+
+func (st *Store) readInventoryScopePage(ctx context.Context, request port.SessionMetadataPageRequest, scope inventoryCatalogScope) ([]port.SessionDiscoveryMeta, int64, bool, error) {
+	position := int64(0)
+	if request.Cursor != nil {
+		var valid bool
+		position, valid = decodeInventoryContinuation(request.Cursor.Continuation)
+		if !valid {
+			return nil, 0, false, port.ErrSessionMetadataCursorRestart
+		}
+	}
+	f, err := os.Open(filepath.Join(st.inventoryCatalogDir(), scope.File)) //nolint:gosec // manifest-validated adapter-private path
+	if err != nil {
+		if request.Cursor != nil {
+			return nil, 0, false, port.ErrSessionMetadataCursorRestart
+		}
+		return nil, 0, false, fmt.Errorf("jsonlstore: open inventory scope: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	if _, err := f.Seek(position, io.SeekStart); err != nil {
+		return nil, 0, false, port.ErrSessionMetadataCursorRestart
+	}
+	reader := bufio.NewReaderSize(f, 64*1024)
+	capacity := request.Limit
+	if capacity > scope.Count {
+		capacity = scope.Count
+	}
+	rows := make([]port.SessionDiscoveryMeta, 0, capacity)
+	nextPosition := position
+	for len(rows) <= request.Limit {
+		line, readErr := readInventoryLine(ctx, reader)
+		if readErr != nil {
+			if readErr == io.EOF {
+				return rows, nextPosition, false, nil
+			}
+			return nil, 0, false, readErr
+		}
+		st.observeInventoryWork(inventoryWorkCatalogRow)
+		row, err := decodeInventoryPageRow(line, request, rows)
+		if err != nil {
+			return nil, 0, false, err
+		}
+		if len(rows) == request.Limit {
+			return rows, nextPosition, true, nil
+		}
+		rows = append(rows, row)
+		nextPosition += int64(len(line))
+	}
+	return rows, nextPosition, false, nil
+}
+
+func readInventoryLine(ctx context.Context, reader *bufio.Reader) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	line, err := reader.ReadBytes('\n')
+	if err != nil && err != io.EOF {
+		return nil, fmt.Errorf("jsonlstore: read inventory row: %w", err)
+	}
+	if len(line) == 0 && err == io.EOF {
+		return nil, io.EOF
+	}
+	return line, nil
+}
+
+func decodeInventoryPageRow(line []byte, request port.SessionMetadataPageRequest, rows []port.SessionDiscoveryMeta) (port.SessionDiscoveryMeta, error) {
+	var row port.SessionDiscoveryMeta
+	if err := json.Unmarshal(line, &row); err != nil || !validInventoryRows([]port.SessionDiscoveryMeta{row}) {
+		if request.Cursor != nil {
+			return port.SessionDiscoveryMeta{}, port.ErrSessionMetadataCursorRestart
+		}
+		return port.SessionDiscoveryMeta{}, fmt.Errorf("jsonlstore: invalid inventory row")
+	}
+	if request.OwnershipEnforced && (request.Owner == nil || !request.Owner.SameIdentity(row.Owner)) {
+		return port.SessionDiscoveryMeta{}, fmt.Errorf("jsonlstore: inventory scope contains a foreign owner")
+	}
+	if request.Cursor != nil && len(rows) == 0 && !metadataRowAfter(row, request.Cursor) {
+		return port.SessionDiscoveryMeta{}, port.ErrSessionMetadataCursorRestart
+	}
+	if len(rows) > 0 {
+		previous := rows[len(rows)-1]
+		if !metadataRowAfter(row, &port.SessionMetadataCursor{ModifiedAt: previous.ModifiedAt, ID: previous.ID}) {
+			return port.SessionDiscoveryMeta{}, fmt.Errorf("jsonlstore: inventory rows are out of order")
+		}
+	}
+	return row, nil
+}
+
+func metadataRowAfter(row port.SessionDiscoveryMeta, cursor *port.SessionMetadataCursor) bool {
+	cursorRow := port.SessionDiscoveryMeta{ModifiedAt: cursor.ModifiedAt, ID: cursor.ID}
+	return port.CompareSessionMetadataOrder(row, cursorRow) > 0
+}
+
+// readLastLineAt returns the last non-blank record without reading older history.
 // It grows an EOF window geometrically until it finds the delimiter immediately
 // before that record, so bytes read and allocated are bounded by a small constant
 // factor of the latest record rather than by the append-only file's total size.
-func readLastLine(path string) ([]byte, error) {
-	f, err := os.Open(path) //nolint:gosec // path is derived from the store dir listing
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-
-	st, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	return readLastLineAt(f, st.Size())
-}
-
 func readLastLineAt(r io.ReaderAt, size int64) ([]byte, error) {
 	if size == 0 {
 		return nil, nil

@@ -3,9 +3,9 @@ package server_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -79,25 +79,17 @@ func TestSessionContinuityUX_Scenario3_PaginationContract(t *testing.T) {
 	if len(first.Sessions) != 1 || first.TotalCount != 2 || first.NextCursor == "" {
 		t.Fatalf("first page = %+v, want one of two owned rows and an opaque cursor", first)
 	}
-	if strings.Contains(first.NextCursor, first.Sessions[0].SessionID) {
-		t.Fatalf("cursor %q exposes session id %q", first.NextCursor, first.Sessions[0].SessionID)
+	if first.NextCursor == first.Sessions[0].SessionID {
+		t.Fatalf("cursor %q must not be the raw session id", first.NextCursor)
 	}
 
-	// A concurrent save may move a row to an earlier page. The continuation is
-	// best-effort, but it must remain bounded and must not leak a foreign owner.
+	// A concurrent save changes the catalog generation. Continuing with the old
+	// token must request a page-one restart rather than mixing generations.
 	now = now.Add(time.Second)
 	saveInventorySession(t, st, "new", alice, session.SessionKindMain, session.SessionRelationship{})
-	second, err := svc.ListSessionPage(ctx, server.ListSessionsPageRequest{PageSize: 1, Cursor: first.NextCursor})
-	if err != nil {
-		t.Fatalf("ListSessionPage(second): %v", err)
-	}
-	if len(second.Sessions) > 1 {
-		t.Fatalf("second page has %d rows, page size is 1", len(second.Sessions))
-	}
-	for _, row := range append(first.Sessions, second.Sessions...) {
-		if row.SessionID == "foreign" {
-			t.Fatal("foreign-owned row crossed the inventory boundary")
-		}
+	_, err = svc.ListSessionPage(ctx, server.ListSessionsPageRequest{PageSize: 1, Cursor: first.NextCursor})
+	if !errors.Is(err, port.ErrSessionMetadataCursorRestart) {
+		t.Fatalf("ListSessionPage(second) error = %v, want cursor restart", err)
 	}
 
 	maxed, err := svc.ListSessionPage(ctx, server.ListSessionsPageRequest{PageSize: server.MaxSessionInventoryPageSize + 1})

@@ -1,9 +1,12 @@
 package port
 
 import (
+	"cmp"
 	"context"
+	"encoding/hex"
 	"errors"
-	"sort"
+	"fmt"
+	"slices"
 	"time"
 
 	"github.com/stacklok/mecatl/engine/session"
@@ -37,8 +40,8 @@ var ErrSessionNotFound = errors.New("port: session not found")
 //     recover advisory fires), cumulative Usage (the SUM of every per-run EvResult.Usage
 //     — the budget brake reads it), and the metadata the events do not carry (id, mode,
 //     limits, workspace, profile, provider/model selector, reasoning effort,
-//     authoritative title/provenance, session kind/relationship, createdAt — supplied
-//     out-of-band, e.g. eventsource.SessionMeta). A legacy empty title/provenance may be
+//     authoritative title/provenance, session kind/relationship, adoption source/request
+//     digest, createdAt — supplied out-of-band, e.g. eventsource.SessionMeta). A legacy empty title/provenance may be
 //     derived from the first genuine EvUserPrompt.
 //   - Run-scoped: Counters reflect only the LATEST run segment (they reset on Reopen);
 //     the run plumbing (diagnostics binding, askID serials) is rebuilt fresh.
@@ -134,6 +137,10 @@ type SessionDiscoveryMeta struct {
 	Workspace       string
 	Kind            session.SessionKind
 	Relationship    session.SessionRelationship
+	// EstimatedBytes is a content-free backend estimate of bytes reclaimed by
+	// deleting this session family. Zero means unavailable, never a measured
+	// assertion that the family occupies no storage.
+	EstimatedBytes int64
 }
 
 // MetaLister is the OPTIONAL cheap-listing seam a SessionStore adapter may
@@ -163,12 +170,23 @@ type MetaLister interface {
 // capability posture, distinct from a transient storage failure.
 var ErrSessionMetadataPagingUnsupported = errors.New("port: store does not support session metadata paging")
 
-// SessionMetadataCursor is the structured store-side keyset position. Public
-// transports encode it as an opaque token; adapters compare ModifiedAt
-// descending and ID ascending.
+// ErrSessionMetadataCursorRestart reports that a metadata cursor no longer
+// identifies the same generation and owner/filter scope. Callers must discard
+// the cursor and restart at page one; adapters never continue across the
+// mismatch.
+var ErrSessionMetadataCursorRestart = errors.New("port: session metadata cursor requires restart")
+
+// SessionMetadataCursor is an adapter-issued keyset position. Public transports
+// encode the whole value as an opaque token. Generation and Scope bind a page
+// sequence to one backend view and filter set; Continuation is an opaque value
+// owned and validated only by the issuing pager. ModifiedAt and ID retain the
+// neutral ordering boundary used for response validation.
 type SessionMetadataCursor struct {
-	ModifiedAt time.Time
-	ID         session.SessionID
+	ModifiedAt   time.Time
+	ID           session.SessionID
+	Generation   string
+	Scope        string
+	Continuation string
 }
 
 // SessionMetadataPageRequest asks an optional pager for one bounded metadata
@@ -197,28 +215,78 @@ type SessionMetadataPager interface {
 	PageSessionMetadata(ctx context.Context, request SessionMetadataPageRequest) (SessionMetadataPage, error)
 }
 
+// SessionStorageHealth is an aggregate, content-free measurement derived from
+// a backend's bounded metadata index. Availability bits distinguish an honest
+// zero measurement from a value the backend cannot provide.
+type SessionStorageHealth struct {
+	Available                 bool
+	UnavailableReason         string
+	CurrentBytes              int64
+	CurrentBytesAvailable     bool
+	ReclaimableBytes          int64
+	ReclaimableBytesAvailable bool
+	SessionCount              int64
+	FileCount                 int64
+	V1Count                   int64
+	V2Count                   int64
+	MainCount                 int64
+	ChildCount                int64
+	ScheduledCount            int64
+	UnknownCount              int64
+	CorruptCount              int64
+}
+
+// SessionStorageHealthProvider is the OPTIONAL bounded storage-health seam.
+// Implementations must use only an existing metadata index and cheap file/object
+// metadata. They must not load session snapshots or traverse transcripts.
+type SessionStorageHealthProvider interface {
+	SessionStorageHealth(ctx context.Context) (SessionStorageHealth, error)
+}
+
 // PaginateSessionMetadata applies the shared owner-filter, ordering, and keyset
-// rules to an adapter's metadata scan. It intentionally bounds only the returned
-// page; an adapter may scan its backend in v1.
+// rules to an adapter's metadata scan. It is retained for callers that form a
+// single page without a generation-bound continuation. Pager implementations
+// should use PaginateSessionMetadataBound.
 func PaginateSessionMetadata(rows []SessionDiscoveryMeta, request SessionMetadataPageRequest) SessionMetadataPage {
-	filtered := make([]SessionDiscoveryMeta, 0, len(rows))
-	for _, row := range rows {
-		if request.OwnershipEnforced && (request.Owner == nil || !request.Owner.SameIdentity(row.Owner)) {
-			continue
-		}
-		row.Owner = row.Owner.Clone()
-		if row.Relationship.BranchIndex != nil {
-			index := *row.Relationship.BranchIndex
-			row.Relationship.BranchIndex = &index
-		}
-		filtered = append(filtered, row)
+	page, _ := paginateSessionMetadata(rows, request, "", false)
+	return page
+}
+
+// PaginateSessionMetadataBound applies generation- and filter-bound pagination
+// for scan-based adapters. It returns ErrSessionMetadataCursorRestart rather
+// than mixing rows when the current inventory or owner scope differs from the
+// cursor. Indexed adapters may implement the same contract with adapter-private
+// opaque continuations instead of scanning.
+//
+// generation is the CALLER's own cheap, monotonic "has anything in this store
+// changed" signal (e.g. a counter bumped on every Save/Delete) — this helper
+// does not derive one from rows itself. An earlier version computed a
+// generation by JSON-marshalling and SHA-256-hashing the entire filtered row
+// set on every call; the real cost that removed is a full JSON encode +
+// SHA-256 of every row on every page (a large constant factor) — the row
+// copy/sort prepareSessionMetadataRows does is still O(rows) per call
+// regardless, so this is not an asymptotic change. A caller with no cheaper
+// signal available may still pass a content hash, but should prefer a real
+// counter. generation must be non-empty: an empty value cannot mean "unbound"
+// here (that's PaginateSessionMetadata) — silently downgrading would let a
+// stale cursor mix rows instead of restarting, exactly what
+// ErrSessionMetadataCursorRestart exists to prevent.
+func PaginateSessionMetadataBound(rows []SessionDiscoveryMeta, request SessionMetadataPageRequest, generation string) (SessionMetadataPage, error) {
+	if generation == "" {
+		return SessionMetadataPage{}, fmt.Errorf("port: PaginateSessionMetadataBound requires a non-empty generation")
 	}
-	sort.Slice(filtered, func(i, j int) bool {
-		if !filtered[i].ModifiedAt.Equal(filtered[j].ModifiedAt) {
-			return filtered[i].ModifiedAt.After(filtered[j].ModifiedAt)
-		}
-		return filtered[i].ID < filtered[j].ID
-	})
+	return paginateSessionMetadata(rows, request, generation, true)
+}
+
+const scanMetadataContinuation = "mecatl-scan-keyset-v1"
+
+func paginateSessionMetadata(rows []SessionDiscoveryMeta, request SessionMetadataPageRequest, generation string, bind bool) (SessionMetadataPage, error) {
+	filtered := prepareSessionMetadataRows(rows, request)
+	scope := metadataPageScope(request)
+	if bind && request.Cursor != nil && (request.Cursor.Generation != generation || request.Cursor.Scope != scope ||
+		request.Cursor.Continuation != scanMetadataContinuation) {
+		return SessionMetadataPage{}, ErrSessionMetadataCursorRestart
+	}
 
 	start := 0
 	if request.Cursor != nil {
@@ -242,9 +310,53 @@ func PaginateSessionMetadata(rows []SessionDiscoveryMeta, request SessionMetadat
 	page := SessionMetadataPage{Sessions: filtered[start:end], TotalCount: len(filtered)}
 	if end < len(filtered) && end > start {
 		last := filtered[end-1]
-		page.NextCursor = &SessionMetadataCursor{ModifiedAt: last.ModifiedAt, ID: last.ID}
+		page.NextCursor = &SessionMetadataCursor{
+			ModifiedAt: last.ModifiedAt, ID: last.ID, Generation: generation, Scope: scope,
+		}
+		if bind {
+			page.NextCursor.Continuation = scanMetadataContinuation
+		}
 	}
-	return page
+	return page, nil
+}
+
+func prepareSessionMetadataRows(rows []SessionDiscoveryMeta, request SessionMetadataPageRequest) []SessionDiscoveryMeta {
+	filtered := make([]SessionDiscoveryMeta, 0, len(rows))
+	for _, row := range rows {
+		if request.OwnershipEnforced && (request.Owner == nil || !request.Owner.SameIdentity(row.Owner)) {
+			continue
+		}
+		row.Owner = row.Owner.Clone()
+		if row.Relationship.BranchIndex != nil {
+			index := *row.Relationship.BranchIndex
+			row.Relationship.BranchIndex = &index
+		}
+		filtered = append(filtered, row)
+	}
+	slices.SortFunc(filtered, CompareSessionMetadataOrder)
+	return filtered
+}
+
+// CompareSessionMetadataOrder is the shared (ModifiedAt DESC, ID ASC) ordering
+// every SessionMetadataPager/MetaLister implementation sorts session inventory
+// rows by. It returns a negative number when a sorts before b, zero when the
+// two share the same order key, and a positive number when a sorts after b.
+func CompareSessionMetadataOrder(a, b SessionDiscoveryMeta) int {
+	if c := b.ModifiedAt.Compare(a.ModifiedAt); c != 0 {
+		return c
+	}
+	return cmp.Compare(a.ID, b.ID)
+}
+
+func metadataPageScope(request SessionMetadataPageRequest) string {
+	if !request.OwnershipEnforced {
+		return "all"
+	}
+	if request.Owner == nil {
+		return "owner:none"
+	}
+	sum := session.PrincipalScopeHash(request.Owner)
+	return "owner:" + hex.EncodeToString(sum[:])
 }
 
 // ErrPruneUnsupported is the port-level sentinel a PrunableStore's List or
@@ -278,6 +390,33 @@ type PrunableStore interface {
 	// Delete removes the session stored under id. An unknown id is success
 	// (idempotent); any returned error is an infrastructure failure.
 	Delete(ctx context.Context, id session.SessionID) error
+}
+
+// ConditionalPrunableStore is the OPTIONAL atomic cleanup seam. Implementations
+// acquire their session-family mutation exclusion, compare the complete expected
+// metadata row with the current durable row, and keep that exclusion held through
+// sidecar-first/snapshot-last deletion. A mismatch or missing row returns false
+// without mutation; backend failures return an error.
+type ConditionalPrunableStore interface {
+	DeleteSessionIfUnchanged(ctx context.Context, expected SessionDiscoveryMeta) (bool, error)
+}
+
+// SessionDiscoveryMetaEqual reports whether two inventory rows represent the
+// same durable cleanup precondition. Owner identity is compared semantically.
+func SessionDiscoveryMetaEqual(a, b SessionDiscoveryMeta) bool {
+	return a.ID == b.ID && a.ModifiedAt.Equal(b.ModifiedAt) && a.State == b.State &&
+		a.Kind == b.Kind && sessionRelationshipsEqual(a.Relationship, b.Relationship) &&
+		((a.Owner == nil && b.Owner == nil) || (a.Owner != nil && a.Owner.SameIdentity(b.Owner)))
+}
+
+func sessionRelationshipsEqual(a, b session.SessionRelationship) bool {
+	if a.ScheduleName != b.ScheduleName || a.OriginSessionID != b.OriginSessionID ||
+		a.ParentSessionID != b.ParentSessionID || a.CallID != b.CallID ||
+		a.TeamID != b.TeamID || a.MemberName != b.MemberName {
+		return false
+	}
+	return a.BranchIndex == nil && b.BranchIndex == nil ||
+		a.BranchIndex != nil && b.BranchIndex != nil && *a.BranchIndex == *b.BranchIndex
 }
 
 // SessionDeleteSupport is the optional authoritative capability signal for a

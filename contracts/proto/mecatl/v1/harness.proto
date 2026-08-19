@@ -66,6 +66,14 @@ service HarnessService {
   // running/awaiting source is rejected. No streaming.
   rpc ForkSession(ForkSessionRequest) returns (ForkSessionResponse);
 
+  // PreflightSessionAdoption evaluates one authenticated caller-owned legacy
+  // source against explicit workspace/environment/provider/model bindings.
+  rpc PreflightSessionAdoption(PreflightSessionAdoptionRequest) returns (PreflightSessionAdoptionResponse);
+
+  // AdoptSession atomically publishes a new explicit-main copy of one eligible
+  // legacy source. Retries are caller+source-bound by idempotency_key.
+  rpc AdoptSession(AdoptSessionRequest) returns (AdoptSessionResponse);
+
   // Converse drives one run. The first frame MUST be `prompt`; subsequent
   // frames are zero or more `resume_approval` / `cancel` control frames. The
   // server streams `Event` envelopes until the terminal `result` event, then
@@ -194,6 +202,25 @@ service HarnessService {
   // (modified_at descending). Read-only. There is intentionally NO
   // ServerCapabilities bit — see StreamSessionEvents for the rationale.
   rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+
+  // GetStorageHealth returns authenticated, content-free aggregate storage
+  // status. It never returns session ids, owners, paths, or transcript content.
+  rpc GetStorageHealth(GetStorageHealthRequest) returns (GetStorageHealthResponse);
+
+  // Session migration is authenticated, semantics-preserving physical
+  // maintenance. Plan is read-only; apply/resume process bounded batches.
+  rpc PlanSessionMigration(PlanSessionMigrationRequest) returns (SessionMigrationPlan);
+  rpc ApplySessionMigration(ApplySessionMigrationRequest) returns (SessionMigrationJob);
+  rpc ResumeSessionMigration(ResumeSessionMigrationRequest) returns (SessionMigrationJob);
+  rpc CancelSessionMigration(CancelSessionMigrationRequest) returns (SessionMigrationJob);
+  rpc GetSessionMigrationJob(GetSessionMigrationJobRequest) returns (SessionMigrationJob);
+
+  // Session cleanup is an authenticated plan/apply maintenance workflow. Plan is
+  // read-only; apply requires its caller-bound opaque confirmation token.
+  rpc PlanSessionCleanup(PlanSessionCleanupRequest) returns (PlanSessionCleanupResponse);
+  rpc ApplySessionCleanup(ApplySessionCleanupRequest) returns (CleanupJob);
+  rpc CancelSessionCleanup(CancelSessionCleanupRequest) returns (CleanupJob);
+  rpc GetSessionCleanupJob(GetSessionCleanupJobRequest) returns (CleanupJob);
 
   // ListSkills returns the resolved skills inventory snapshot: each discovered
   // skill's name + one-line description. Derived from the snapshot taken at
@@ -522,10 +549,24 @@ message ServerCapabilities {
   bool learning_proposals = 17;
   // learned_skills is true when the caller-partitioned lifecycle API is available.
   bool learned_skills = 18;
+  // legacy_adoption is true only when authenticated, caller-owned adoption with
+  // explicit engine bindings is available.
+  bool legacy_adoption = 20;
+  // storage_migration is true only when the backend implements durable bounded
+  // v1-to-v2 maintenance, a management authorizer is configured, and destructive
+  // mutation has cross-process lease exclusion (or explicitly proven private
+  // embedded single-writer composition).
+  bool storage_migration = 21;
+  // storage_cleanup advertises the authenticated plan/apply/job maintenance API
+  // only under the same destructive-mutation exclusion as storage_migration.
+  bool storage_cleanup = 22;
   // manual_dream is the composition-time availability snapshot for the two
   // deployment-owned manual consolidation targets. An older server leaves it
   // absent; unavailable reasons are bounded, content-free operator categories.
   ManualDreamCapabilities manual_dream = 19;
+  // storage_health is true only when the backend implements bounded indexed
+  // health and this deployment has a management authorizer.
+  bool storage_health = 23;
 }
 
 // CreateSessionResponse carries the newly-allocated session id.
@@ -789,6 +830,150 @@ message ListSessionsResponse {
   int32 total_count = 3;
 }
 
+message GetStorageHealthRequest {}
+
+message RetentionPolicy {
+  int64 main_max_age_seconds = 1;
+  int32 main_max_count = 2;
+  int64 child_max_age_seconds = 3;
+  int32 child_max_count = 4;
+  int64 scheduled_max_age_seconds = 5;
+  int32 scheduled_max_count = 6;
+  int64 sweep_cadence_seconds = 7;
+}
+
+message GetStorageHealthResponse {
+  bool available = 1;
+  string unavailable_reason = 2;
+  int64 current_bytes = 3;
+  bool current_bytes_available = 4;
+  int64 reclaimable_bytes = 5;
+  bool reclaimable_bytes_available = 6;
+  int64 session_count = 7;
+  int64 file_count = 8;
+  int64 v1_count = 9;
+  int64 v2_count = 10;
+  int64 main_count = 11;
+  int64 child_count = 12;
+  int64 scheduled_count = 13;
+  int64 unknown_count = 14;
+  int64 corrupt_count = 15;
+  RetentionPolicy policy = 16;
+  int64 last_sweep_unix = 17;
+  bool last_sweep_available = 18;
+  int64 next_sweep_unix = 19;
+  bool next_sweep_available = 20;
+  string active_job = 21;
+  string last_failure = 22;
+}
+
+message PlanSessionMigrationRequest {}
+
+message SessionMigrationPlan {
+  string plan_id = 1;
+  bool available = 2;
+  string unavailable_reason = 3;
+  int64 v1_families = 4;
+  int64 v2_families = 5;
+  int64 invalid_families = 6;
+  int64 skipped_families = 7;
+  int64 current_bytes = 8;
+  int64 reclaimable_bytes = 9;
+  int64 temporary_bytes = 10;
+}
+
+message ApplySessionMigrationRequest {
+  string plan_id = 1 [(buf.validate.field).string.min_len = 1];
+  int32 batch_size = 2;
+}
+
+message ResumeSessionMigrationRequest {
+  string job_id = 1 [(buf.validate.field).string.min_len = 1];
+  int32 batch_size = 2;
+}
+
+message CancelSessionMigrationRequest {
+  string job_id = 1 [(buf.validate.field).string.min_len = 1];
+}
+
+message GetSessionMigrationJobRequest {
+  string job_id = 1 [(buf.validate.field).string.min_len = 1];
+}
+
+message SessionMigrationItemError {
+  string item_handle = 1;
+  string reason_code = 2;
+  string message = 3;
+}
+
+message CleanupCounts {
+  int32 total = 1;
+  map<string, int32> by_kind = 2;
+  map<string, int32> by_state = 3;
+  map<string, int32> by_reason = 4;
+}
+
+message CleanupCandidate {
+  string session_id = 1;
+  string kind = 2;
+  string state = 3;
+  string reason = 4;
+  int64 modified_at_unix = 5;
+  int64 estimated_bytes = 6;
+}
+
+message PlanSessionCleanupRequest { repeated string kinds = 1; }
+
+message PlanSessionCleanupResponse {
+  string confirmation_token = 1;
+  bool available = 2;
+  string unavailable_reason = 3;
+  string generation = 4;
+  string policy_version = 5;
+  repeated CleanupCandidate eligible = 6;
+  CleanupCounts protected = 7;
+  int64 estimated_bytes = 8;
+  string planned_job_id = 9;
+  CleanupCounts eligible_counts = 10;
+}
+
+message ApplySessionCleanupRequest { string confirmation_token = 1 [(buf.validate.field).string.min_len = 1]; }
+message CancelSessionCleanupRequest { string job_id = 1 [(buf.validate.field).string.min_len = 1]; }
+message GetSessionCleanupJobRequest { string job_id = 1 [(buf.validate.field).string.min_len = 1]; }
+
+message CleanupItemError {
+  string item_handle = 1;
+  string reason_code = 2;
+  string message = 3;
+}
+
+message SessionMigrationJob {
+  string job_id = 1;
+  string state = 2;
+  int64 v1_families = 3;
+  int64 v2_families = 4;
+  int64 invalid_families = 5;
+  int64 skipped_families = 6;
+  int64 current_bytes = 7;
+  int64 reclaimable_bytes = 8;
+  int64 temporary_bytes = 9;
+  int64 processed = 10;
+  int64 migrated = 11;
+  int64 failed = 12;
+  repeated SessionMigrationItemError errors = 13;
+}
+
+message CleanupJob {
+  string job_id = 1;
+  string state = 2;
+  int32 processed = 3;
+  int32 deleted = 4;
+  int32 skipped = 5;
+  int32 stale = 6;
+  int32 failed = 7;
+  repeated CleanupItemError errors = 8;
+}
+
 // SetModeRequest changes a session's permission posture.
 message SetModeRequest {
   // session_id is the session to update.
@@ -850,6 +1035,41 @@ message ForkSessionResponse {
   string session_id = 1;
 }
 
+// AdoptionBindings are explicit; omitted fields never select a server default.
+message AdoptionBindings {
+  string workspace = 1;
+  string environment_kind = 2;
+  string environment_id = 3;
+  string provider_id = 4;
+  string model_id = 5;
+  string profile = 6;
+}
+
+message PreflightSessionAdoptionRequest {
+  string source_session_id = 1 [(buf.validate.field).string.min_len = 1];
+  AdoptionBindings bindings = 2;
+}
+
+message PreflightSessionAdoptionResponse {
+  bool eligible = 1;
+  string reason_code = 2;
+  AdoptionBindings bindings = 3;
+}
+
+message AdoptSessionRequest {
+  string source_session_id = 1 [(buf.validate.field).string.min_len = 1];
+  string idempotency_key = 2 [(buf.validate.field).string.min_len = 1];
+  AdoptionBindings bindings = 3;
+}
+
+message AdoptSessionResponse {
+  string session_id = 1;
+  string source_session_id = 2;
+  ServerCapabilities capabilities = 3;
+  SessionCapabilities session_capabilities = 4;
+  ResolvedModel resolved_model = 5;
+}
+
 // Session is a snapshot of server-side session state.
 message Session {
   // session_id is the session's id.
@@ -890,6 +1110,9 @@ message Session {
   // second CreateSession. An older server omits the field → client sees a zero value
   // and keeps its current caps untouched (fail-conservative).
   ServerCapabilities capabilities = 11;
+  // adoption_source_session_id is the immutable audit relationship on a main
+  // session created by explicit legacy adoption.
+  string adoption_source_session_id = 13;
 }
 
 // ConverseRequest is a client-to-server frame on the Converse stream. The
