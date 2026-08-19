@@ -121,6 +121,22 @@ func Wrap(inner port.LLMProvider, cfg Config) port.LLMProvider {
 	return &resilientProvider{inner: inner, cfg: cfg}
 }
 
+// ErrCredentials marks a failure to MINT OR LOAD the credential a request
+// needs, as distinct from a failure of the provider that would have served it. A
+// transport that resolves a token per request (the direct-mode bearer
+// RoundTripper) wraps its token-source failures with it.
+//
+// It exists because the two are otherwise indistinguishable here. net/http wraps
+// ANY error a RoundTripper returns in *url.Error, and *url.Error carries
+// Timeout()/Temporary() so it satisfies net.Error — meaning "I could not get a
+// token" arrives looking exactly like "the network flaked". Both classifiers
+// below would then call it retryable AND provider-unhealthy, so the one error
+// the user can act on gets retried MaxAttempts times, counted toward the shared
+// breaker, and finally replaced by the breaker's own error. Wrapping with this
+// sentinel routes the failure to the permanent, breaker-neutral path instead, so
+// the real cause reaches the caller on the first attempt.
+var ErrCredentials = errors.New("credential unavailable")
+
 // BreakerError is returned by Stream while the circuit breaker is open. It
 // carries the time at which the breaker is next eligible to half-open so callers
 // can surface a meaningful terminal error.
@@ -364,7 +380,7 @@ func (p *resilientProvider) allow(now time.Time) error {
 	if elapsed < p.cfg.BreakerCooldown {
 		return &BreakerError{RetryAfter: p.cfg.BreakerCooldown - elapsed}
 	}
-	// Cooldown elapsed: admit a single half-open trial.
+	// Cooldown elapsed: admit a half-open trial.
 	p.breaker.halfOpen = true
 	p.diag().Log(context.Background(), port.LevelInfo, "llm circuit breaker half-open; admitting a trial")
 	return nil
@@ -397,15 +413,15 @@ func (p *resilientProvider) recordFailure(now time.Time) {
 		return
 	}
 	p.breaker.mu.Lock()
-	// A half-open trial leaves open=true (allow() sets halfOpen without clearing
-	// open), so a failed trial is NOT a closed→open crossing by the open bit
-	// alone. Treat a failed half-open trial as its own crossing: it is an
-	// operator-meaningful "breaker re-opened" event. `crossing` is therefore the
-	// UNION of (closed→open) and (half-open trial failed and re-opened).
-	wasOpen := p.breaker.open
+	// A failure from an attempt already in flight when another request opened the
+	// breaker must not restart its cooldown or overwrite its opening state.
+	if p.breaker.open && !p.breaker.halfOpen {
+		p.breaker.mu.Unlock()
+		return
+	}
 	wasHalfOpen := p.breaker.halfOpen
 	p.breaker.consecutiveFailures++
-	if p.breaker.halfOpen {
+	if wasHalfOpen {
 		// A failed trial re-opens the breaker and restarts the cooldown.
 		p.breaker.halfOpen = false
 		p.breaker.open = true
@@ -414,8 +430,8 @@ func (p *resilientProvider) recordFailure(now time.Time) {
 		p.breaker.open = true
 		p.breaker.openedAt = now
 	}
-	// Emit on a fresh closed→open crossing OR on a half-open→open re-open.
-	opened := p.breaker.open && (!wasOpen || wasHalfOpen)
+	// Emit on a fresh closed→open crossing or on a failed half-open trial.
+	opened := p.breaker.open && (wasHalfOpen || p.breaker.consecutiveFailures == p.cfg.BreakerThreshold)
 	failures := p.breaker.consecutiveFailures
 	p.breaker.mu.Unlock()
 	// Log the open transition exactly once per crossing: the initial
@@ -1021,6 +1037,15 @@ func DefaultClassifier(err error) bool {
 		return false
 	}
 
+	// A credential we could not mint or load is never fixed by replaying the
+	// request: the token source already tried, and the remediation is a human
+	// re-authenticating. Checked BEFORE the transport arms below because
+	// net/http's *url.Error wrapper satisfies net.Error, so leaving it to them
+	// would classify every credential failure as a retryable network blip.
+	if errors.Is(err, ErrCredentials) {
+		return false
+	}
+
 	// Provider adapters may spend a bounded, protocol-private recovery attempt
 	// inside one Stream call. Honour that explicit outcome before unwrapping to a
 	// retryable HTTP status, or the generic wrapper would replay the entire pair.
@@ -1118,6 +1143,15 @@ func isTransientForBreaker(err error) bool {
 	}
 	// Caller-style context cancellation is breaker-neutral.
 	if errors.Is(err, context.Canceled) {
+		return false
+	}
+
+	// A credential failure is breaker-neutral: it happens before the provider is
+	// ever dialed, so it is no evidence about the provider's health, and letting
+	// it open a SHARED breaker takes down every session on this provider over a
+	// problem local to one caller's token. Checked BEFORE the transport arms for
+	// the same reason as in DefaultClassifier — *url.Error satisfies net.Error.
+	if errors.Is(err, ErrCredentials) {
 		return false
 	}
 
