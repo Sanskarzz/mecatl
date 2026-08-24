@@ -23,7 +23,7 @@ These tools are always present in a default session (no extra configuration requ
 | Catalog name | Purpose | Read-only? |
 |---|---|---|
 | `Read` | Read a file from the workspace by path. The primary way the model loads source code, config, and data files. | Yes |
-| `Write` | Write a file to the workspace (create or overwrite). Creating a new file requires no prior read; overwriting an existing file requires a prior Read and that the file is unchanged since — so a concurrent change is never silently clobbered. A concurrent creation of a new path surfaces as a create-conflict refusal (read the now-existing file first, then overwrite). | No |
+| `Write` | Create a missing file or conditionally replace an existing file in the workspace. A replacement requires a prior Read and an unchanged version; concurrent changes and creations surface as model-visible conflicts rather than being silently clobbered. | No |
 | `Edit` | Apply an exact-string replacement to a file. Enforces read-before-edit, exact match, and uniqueness (or `replace_all`). The file must be unchanged since it was read; a concurrent change or deletion since the read surfaces as a model-visible refusal to re-read and retry. Safer than Write for targeted changes. | No |
 | `Bash` | Execute a shell command. The model's general-purpose escape hatch for tasks no other tool covers. Subject to permission rules. Supports `background: true` for long-running commands (see below). | No |
 | `BashStatus` | Check on the background commands `Bash` started in this run: poll a job's output tail, collect a finished job's result, or cancel a job. Registered wherever `Bash` is. | Yes |
@@ -89,7 +89,14 @@ Three delegation tools are always registered in a default session. They let the 
 | `Parallel` | Fan out a set of tasks to isolated branches, then join all results or select a winner. Branches run concurrently; a single-branch winner is merged back into the parent by default, multi-branch runs never auto-merge. |
 | `Team` | Coordinate a named crew of specialist members under a lead. The lead synthesizes a consolidated report from member findings. |
 
-`Subagent` and `Parallel` are read-parallel — each isolates its child's writes in its own workspace, so the dispatcher can run them alongside your other read-only tool calls. `Team` is fully serialized (it never runs concurrently with anything else). None are available in plan mode. For depth on how delegation works — child permissions, session persistence, token budgets, structured output — see [Subagents, teams, and parallel](subagents-teams-parallel.md).
+`Subagent` and `Parallel` are read-parallel by default — each isolates its child's
+writes in its own workspace, so the dispatcher can run them alongside other
+read-only tool calls. `Team` is mutating and serialized. Plan mode still permits
+`Subagent` and `Parallel` where their calls are read-only; `Team` is unavailable
+because it mutates team state. Child policies and any call-level mutation rules
+still apply. For depth on how delegation works — child permissions, session
+persistence, token budgets, and structured output — see [Subagents, teams, and
+parallel](subagents-teams-parallel.md).
 
 ---
 

@@ -98,7 +98,7 @@ Key points from the implementation:
 
 ---
 
-## The three backends
+## The four reference implementations
 
 Deploy them in this order as you scale up:
 
@@ -107,12 +107,16 @@ Deploy them in this order as you scale up:
 | `memlease` | `engine/adapter/memlease` | (none — explicit construction) | Tests, offline, single-replica |
 | `flocklease` | `internal/adapter/flocklease` | `--session-lease-dir <dir>` | Single host, multiple processes |
 | `k8slease` | `internal/adapter/k8slease` | `--session-lease-k8s-namespace <ns>` | Kubernetes multi-replica (mecak8s) |
+| `grpcdriver` | `internal/adapter/grpcdriver` | `--session-lease-url <host:port>` | Remote or multi-host lease service |
 
 ### `engine/adapter/memlease` — in-process reference
 
 `memlease.New(clock port.Clock, ttl time.Duration) *memlease.Lease` constructs the in-process reference implementation. It keeps per-session records in a mutex-guarded map and derives expiry from an injected `port.Clock`, so tests advance a fake clock past the TTL to exercise expiry and takeover without real sleeps.
 
-This is the backend the conformance suite validates against. It is also the implementation the `engine/adapter/memstore` package exposes as `memstore.NewLease` — the same contract, slightly different constructor, wired by composition when a memstore deployment opts into leasing by flag.
+This is the backend the conformance suite validates against. The
+`memstore.NewLease` constructor exists for explicit in-process/test construction
+when exercising the lease seam; it is not a standard deployment backend selected
+by a flag.
 
 `memlease` is useful for tests and for single-replica deployments where you want the full lease lifecycle exercised. It is **not** a cross-process lock — two distinct OS processes each construct their own map and are invisible to each other.
 
@@ -183,7 +187,11 @@ The suite never sleeps — `advance` is how it crosses the TTL boundary. A real-
 
 ## When to implement your own
 
-The three reference backends cover file-based (single host) and Kubernetes (multi-host) locking. Implement your own `port.SessionLease` if you have an existing distributed lock service that neither covers — for example, etcd, DynamoDB conditional writes, or a Redis-backed lock primitive that isn't using the k8s API.
+The four reference backends cover in-process testing, single-host file locking,
+Kubernetes coordination, and a remote gRPC lease service. Implement your own
+`port.SessionLease` if you have an existing distributed lock service that none
+covers — for example, etcd, DynamoDB conditional writes, or a Redis-backed lock
+primitive that isn't using the k8s API.
 
 The interface is small (three methods, one value type), the conformance suite validates the contract mechanically, and the composition layer wires it with zero loop changes. A custom backend is a sibling of `flocklease` and `k8slease` under `internal/adapter/`.
 

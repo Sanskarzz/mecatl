@@ -5,7 +5,13 @@ title: Pick your deployment shape
 
 # Pick your deployment shape
 
-mecatl has four deployment shapes. They are not interchangeable — each one fits a different operational model. This doc walks you through the decision and gives you the trade-offs for each.
+Mecatl has one agent/server core and several delivery shapes. `mecated` and
+`mecak8s` expose the same core agent experience; they differ in how the service
+is operated and where durable state lives. `mecatui` is a terminal skin over an
+embedded or remote server, not a separate agent implementation. `mecatequi` and
+an engine embedding are purpose-built exceptions.
+
+Use this page to choose the operational boundary that fits your environment.
 
 ## Decision tree
 
@@ -20,20 +26,20 @@ flowchart TD
     D -- no --> MECATED[mecated]
 ```
 
-If you landed on **mecated** but want multi-replica support without affinity routing, add a session lease backend and Redis — or just switch to **mecak8s**, which wires both for you.
+If you landed on **mecated** but want multi-replica support without affinity routing, add a session lease backend and an externalized store such as the gRPC driver — or switch to **mecak8s**, which wires Redis and Kubernetes Leases for you.
 
 ## Shape summary
 
 | Shape | When to choose | State model | Key dependency |
 |-------|---------------|-------------|----------------|
-| **Embed the engine** | You own the binary and want the loop in-process | You own it — implement the ports | `golang.org/x/sync` + `doublestar` + `robfig/cron/v3` at runtime |
-| **mecated** | Single server, interactive clients (TUI, IDE), or a controlled service deployment | In-memory or JSONL on disk; optional Redis or gRPC driver | A running process; PV for durable sessions |
+| **Embed the engine** | You own the binary and want the loop in-process | You own it — implement the ports | `doublestar` + `robfig/cron/v3` + `go.yaml.in/yaml/v3` + `x/net` + `x/sync` at runtime; `goleak` is test-only |
+| **mecated** | Single server, interactive clients (TUI, IDE), or a controlled service deployment | In-memory, JSONL on disk, or gRPC driver | A running process; durable local sessions need a PV or shared storage |
 | **mecak8s** | Kubernetes, no persistent volumes, multi-replica | Redis + Kubernetes `coordination.k8s.io` lease | Redis StatefulSet + k8s RBAC for `leases` |
 | **mecatequi** | GitHub Actions (or any CI): label/comment → patch → PR | None — stateless per run | LLM provider key; GitHub Actions runner |
 
 ## Embed the engine
 
-Import `github.com/stacklok/mecatl/engine` and wire the ports yourself. The engine module's dep closure is four packages — `golang.org/x/sync`, `doublestar`, `robfig/cron/v3` (itself dependency-free; used only by `engine/adapter/cronparse`), and (test-only) `goleak`. Nothing from mecatl's heavy require cone (OpenAI/Anthropic SDKs, gRPC, the TUI, client-go) enters your build graph.
+Import `github.com/stacklok/mecatl/engine` and wire the ports yourself. The engine module's runtime dependency closure is `doublestar`, `robfig/cron/v3`, `go.yaml.in/yaml/v3`, `golang.org/x/net`, and `golang.org/x/sync`; `goleak` is test-only. Nothing from mecatl's heavy require cone (OpenAI/Anthropic SDKs, gRPC, the TUI, client-go) enters your build graph.
 
 You implement `port.LLMProvider`, `port.SessionStore`, and the rest using the reference adapters under `engine/adapter/` as a starting point, or bring your own. You get the agent loop, the full tool catalog, the permission model, hooks, subagent delegation, and compaction with no binary dependency.
 
@@ -51,11 +57,14 @@ The cost: you run a process and keep it alive. Durable sessions mean a PV or sha
 
 ## mecak8s
 
-`mecak8s` is a thin peer of `mecated` with Kubernetes-native defaults baked in. It runs two replicas with no PVC: session state lives in Redis, and single-writer enforcement uses `coordination.k8s.io` Leases. The pod is disposable — on SIGTERM it cancels in-flight runs, releases its leases so a survivor takes over immediately (not after the TTL), and exits. Interrupted sessions are recoverable from the Redis snapshot on the successor pod.
+`mecak8s` is a thin peer of `mecated` with Kubernetes-native defaults baked in. It runs two replicas with no PVC: session state lives in Redis, and single-writer enforcement uses `coordination.k8s.io` Leases. The pod is disposable for durable state: on graceful SIGTERM it drains and releases its leases so a survivor can take over immediately; after a crash, a survivor waits for the lease TTL. Interrupted sessions are recoverable from the last persisted Redis snapshot on a later run.
 
-`mecak8s` inverts `mecated`'s interactive defaults: `--headless` is on and `--posture` defaults to `auto`. It is designed for unattended daemon operation, not interactive clients.
+`mecak8s` inverts `mecated`'s interactive defaults: `--headless` is on and
+`--posture` defaults to `auto`. It is optimized for unattended daemon operation,
+but it can serve interactive remote clients when configured with
+`--headless=false`.
 
-The `deploy/helm/mecak8s/` Helm chart provides the production deployment contract: namespace-scoped RBAC for `leases`, a storage-free agent Deployment (two replicas, no PVC), Service, and PodDisruptionBudget. It creates no Redis and ships no NetworkPolicy — network isolation is left to the cluster's own policy layer.
+The `deploy/helm/mecak8s/` Helm chart provides the production deployment contract: namespace-scoped RBAC for `leases`, a storage-free agent Deployment (two replicas, no PVC), Service, and PodDisruptionBudget. The production profile does not create Redis and does not ship a general workload NetworkPolicy; the Kind/local profile can create a disposable Redis fixture, and enabling OIDC can render a narrow raw-driver NetworkPolicy. General network isolation remains the cluster policy layer.
 
 The cost: Redis is a required dependency — you need a managed Redis or a Redis StatefulSet in-cluster. The ServiceAccount needs `get,create,update,delete` on `leases` in `coordination.k8s.io`. The Prometheus/OTel admin surface and the `perf-mcp` subcommand are dropped (not exposed by `mecak8s`). If you need those or want to keep the operator surface identical to `mecated`, run `mecated` with `--redis-url` is not an option — `mecated` does not expose that flag; the Redis store is wired only by `cmd/mecak8s`.
 
