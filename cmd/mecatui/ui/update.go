@@ -397,7 +397,7 @@ func (m Model) applySessionReady(msg client.SessionReadyMsg) (tea.Model, tea.Cmd
 	// The EFFECTIVE provider+model the server resolved this session to (echoed
 	// verbatim). The header shows it from turn zero. The model is FIXED per session,
 	// so this is set once here. An older server yields the zero value → no segment.
-	(&m).setEffectiveModel(msg.ResolvedModel)
+	(&m).setResolvedSessionModel(msg.ResolvedModel)
 	if msg.Mode != "" {
 		m.activeMode = client.ModeString(client.ModeFromString(msg.Mode))
 	}
@@ -445,9 +445,9 @@ func (m Model) applySessionReady(msg client.SessionReadyMsg) (tea.Model, tea.Cmd
 	// clear the pending field, and submit via the identical typed-prompt path so
 	// the behavior is byte-identical to the operator pressing enter. The pending
 	// field is cleared BEFORE submitPrompt runs (defense-in-depth against re-fire
-	// on a /models restart or the connect-fallback rebind, the two paths that
-	// funnel back through here — /clear is NOT one: runClear resets the same
-	// session via resetSession and never reaches this seam).
+	// on a /models restart or the connect-fallback rebind. /clear also reaches
+	// this seam only after its replacement session was created; its pending initial
+	// prompt has already been consumed, so it never re-fires).
 	// A "/"-prefixed seed (e.g. -p /clear) is intercepted by submitPrompt's
 	// built-in intercept — documented behavior.
 	if p := strings.TrimSpace(m.pendingInitialPrompt); p != "" {
@@ -511,6 +511,27 @@ func (m Model) updateLifecycle(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		return mm, cmd, true
 	case client.SessionReadyMsg:
 		return m.applySessionReady(msg)
+	case clearSessionReadyMsg:
+		// The replacement exists, so it is now safe to discard the old transcript
+		// and bind through the ordinary SessionReady machinery. Do this before
+		// scheduling the best-effort close: a close failure cannot disturb the
+		// already-active replacement.
+		m = m.resetSession()
+		mm, bindCmd, handled := m.applySessionReady(msg.ready)
+		m = mm.(Model)
+		// The replacement was created with desiredMode, so its ready echo confirms
+		// that any deferred old-session mode switch is now settled. Leaving it set
+		// would make onIdleSubmit keep deferring every future prompt.
+		m.pendingMode = ""
+		m.statusMsg = m.deps.Theme.Style("success").Render("cleared")
+		m.refreshView()
+		return m, tea.Batch(bindCmd, m.closeSessionCmd(msg.oldID)), handled
+	case clearSessionFailedMsg:
+		// The old session and all of its derived UI state remain intact; only the
+		// temporary input-blocking phase and status are rolled back.
+		m.phase = phaseIdle
+		m.statusMsg = m.deps.Theme.Style("errorText").Render("could not clear: " + sanitizeTerminal(msg.err.Error()))
+		return m, nil, true
 	case connectFallbackMsg:
 		// The connect-time create REJECTED the saved selection; the zero-selection
 		// retry succeeded (createSessionCmd's fallback leg, issue #41). The session is
@@ -521,15 +542,15 @@ func (m Model) updateLifecycle(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		// rewritten (the pick may become valid again next launch).
 		mm, cmd, handled := m.applySessionReady(msg.ready)
 		m = mm.(Model)
-		m.activeModel = client.ModelSelection{}
+		m.createModelSelection = client.ModelSelection{}
 		m.modelCatalog.active = client.ModelSelection{}
 		notice := "saved model " + sanitizeTerminal(modelSelLabel(msg.rejected)) +
 			" was rejected by the server (" + sanitizeTerminal(msg.err.Error()) +
 			") — using the server default"
 		// Name the model the session actually fell back to, when known — mirroring
 		// the key-removed reconcile notice. The fallback create's response already
-		// carries it (applySessionReady set m.effectiveModel from msg.ready).
-		if id := m.effectiveModel.ModelID; id != "" {
+		// carries it (applySessionReady set m.resolvedSessionModel from msg.ready).
+		if id := m.resolvedSessionModel.ModelID; id != "" {
 			notice += " — now running " + sanitizeTerminal(id)
 		}
 		m.statusMsg = m.deps.Theme.Style("warning").Render(notice)
@@ -543,7 +564,7 @@ func (m Model) updateLifecycle(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		// fork) failed. Unlike ConnectErrMsg this is NOT terminal: we deliberately
 		// destroyed a working session (or attempted a fork), so leave the app
 		// RECOVERABLE (idle, no session) with a loud status naming the failed model and
-		// enter-to-retry armed (the selection still lives in m.activeModel). On the
+		// enter-to-retry armed (the selection still lives in m.createModelSelection). On the
 		// /models + /worktrees paths the transcript is gone, but the app stays usable;
 		// on the /effort path the source session (and transcript) SURVIVES — see
 		// restartFailedForkID.
@@ -677,7 +698,7 @@ func (m Model) onResolvedModelMsg(msg client.ResolvedModelMsg) (Model, tea.Cmd, 
 	m.sessionState = msg.State
 	m.sessionCreatedAt = msg.CreatedAt
 	m.activeWorkspace = msg.Workspace
-	if (&m).setEffectiveModel(msg.Resolved) {
+	if (&m).setResolvedSessionModel(msg.Resolved) {
 		m.refreshView()
 	}
 	return m, nil, true
@@ -757,7 +778,7 @@ func (m Model) updateStreamEvent(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		mm, cmd := m.afterEvent()
 		// Footer context-meter self-heal (issue #66): if the meter's denominator is
-		// still UNKNOWN (m.effectiveModel.ContextWindow == 0), refetch the session's
+		// still UNKNOWN (m.resolvedSessionModel.ContextWindow == 0), refetch the session's
 		// resolved model. For a session on a LIVE-ONLY model the create-time echo carries
 		// a DELIBERATE PROVISIONAL 0 — the server's echo resolver (echoWindowResolver)
 		// reports 0 (not an accidental 128k floor) while the one-shot live model-list
@@ -771,7 +792,7 @@ func (m Model) updateStreamEvent(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// The client never overrides this value. Embedded mode can configure the
 		// server-side resolver with --context-window-override; the gate remains purely
 		// "session live AND window still unknown".
-		if m.sessionID != "" && m.effectiveModel.ContextWindow == 0 {
+		if m.sessionID != "" && m.resolvedSessionModel.ContextWindow == 0 {
 			refresh := client.RefreshResolvedModelCmd(m.deps.Ctx, m.deps.Session, m.sessionID)
 			return mm, tea.Batch(cmd, refresh)
 		}
@@ -1665,7 +1686,7 @@ func (m Model) applySessionsSurfaceIntent(intent surfaceIntent) (model tea.Model
 		return m, nil, true, false
 	case sessionsTranscriptAdoptionIntent:
 		m.caps = intent.capabilities
-		(&m).setEffectiveModel(intent.model)
+		(&m).setResolvedSessionModel(intent.model)
 		m.activeMode = intent.mode
 		mm, cmd, stopSurfaceDispatch := m.adoptAuthoritativeTranscript(intent.row, intent.transcript)
 		return mm, cmd, true, stopSurfaceDispatch
@@ -2396,7 +2417,7 @@ func (m Model) onIdleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 //   - RETRY a failed restart-now re-create: in the recoverable state (restartFailed +
 //     no session) enter on an EMPTY line re-fires the RECOVERABLE create path
 //     (restartOnModelCmd with an empty oldID — no CloseSession) carrying the pending
-//     selection (m.activeModel). Routing through restartOnModelCmd (NOT the generic
+//     selection (m.createModelSelection). Routing through restartOnModelCmd (NOT the generic
 //     createSessionCmd) is what keeps a re-FAILED retry recoverable: a re-failure
 //     emits restartFailedMsg again (looping back to this same recoverable state),
 //     never client.ConnectErrMsg → phaseFatal. restartFailed is NOT cleared eagerly —
@@ -2407,7 +2428,7 @@ func (m Model) onIdleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 //     the surviving source session (switchEffortCmd), NOT restartOnModelCmd — the
 //     source session is still open, and re-forking PRESERVES the transcript where a
 //     create-fresh retry would wipe it (the exact thing the fork-resume switch exists
-//     to prevent). The effort rides m.activeModel (the switch applied it
+//     to prevent). The effort rides m.createModelSelection (the switch applied it
 //     synchronously before the fork failed).
 //   - RESUME a paused queue: enter on an EMPTY line fires the next staged prompt.
 //   - otherwise a normal submitPrompt (a no-op on an empty sessionID).
@@ -2420,9 +2441,9 @@ func (m Model) onIdleSubmit() (tea.Model, tea.Cmd) {
 		// m.sp.Tick re-arms the spinner for the idle→connecting transition (the
 		// phase-gated TickMsg handler dropped the chain at idle).
 		if m.restartFailedForkID != "" {
-			return m, tea.Batch(m.switchEffortCmd(m.restartFailedForkID, m.activeModel), m.sp.Tick)
+			return m, tea.Batch(m.switchEffortCmd(m.restartFailedForkID, m.createModelSelection), m.sp.Tick)
 		}
-		return m, tea.Batch(m.restartOnModelCmd("", m.activeModel), m.sp.Tick)
+		return m, tea.Batch(m.restartOnModelCmd("", m.createModelSelection), m.sp.Tick)
 	}
 	if m.queuePaused != "" && len(m.queued) > 0 && empty {
 		return m.resumeQueue()
@@ -2754,7 +2775,7 @@ func (m Model) submitPrompt() (tea.Model, tea.Cmd) {
 // was flipped server-side at the approval terminal; the TUI header mode+model
 // echo is refreshed by a concurrent RefreshResolvedModelCmd (also fired from
 // applyResult on the same gate) whose ResolvedModelMsg result updates
-// m.activeMode and m.effectiveModel from the server's session snapshot.
+// m.activeMode and m.resolvedSessionModel from the server's session snapshot.
 func (m Model) submitProceedPrompt() (Model, tea.Cmd) {
 	if m.sessionID == "" {
 		return m, nil
@@ -3972,7 +3993,7 @@ func sumUsage(a, b client.Usage) client.Usage {
 // goes straight to ConnectErrMsg.
 func (m Model) createSessionCmd() tea.Cmd {
 	deps := m.deps
-	sel := m.activeModel // the reconciled apply-on-next-create selection (zero ⇒ server default)
+	sel := m.createModelSelection // the reconciled apply-on-next-create selection (zero ⇒ server default)
 	return func() tea.Msg {
 		id, caps, resolved, err := deps.Session.CreateSession(deps.Ctx, sel, m.desiredMode())
 		if err == nil {
