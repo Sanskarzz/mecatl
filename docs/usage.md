@@ -85,7 +85,9 @@ session handoff. Seed-prompt and resume flags conflict with this explicit browse
 To continue directly at process startup, pass `--resume SESSION_ID` or
 `--resume-latest` in either embedded or `connect` mode. mecatui adopts the complete
 authoritative transcript without creating a throwaway session; latest excludes active,
-awaiting, scheduled, child, unknown, and transcript-unavailable rows. The first new
+awaiting, scheduled, child, unknown, and transcript-unavailable rows. When no eligible
+chat exists, `--resume-latest` starts a fresh chat instead of failing (a genuine
+inventory-list failure still surfaces). The first new
 prompt still enters the normal atomic run funnel. If attachment fails, the transcript
 stays visible and the preserved prompt can be retried with `r` or returned to with
 `esc`; no fallback chat is created. A `--prompt`/`--prompt-file` seed is submitted only

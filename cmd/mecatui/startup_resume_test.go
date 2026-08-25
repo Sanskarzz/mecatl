@@ -140,3 +140,54 @@ func TestADR_0108_StartupStaticValidation(t *testing.T) {
 		t.Fatalf("transcript error = %#v", err)
 	}
 }
+
+// TestResumeLatest_FallsBackToNewOnMiss proves --resume-latest degrades a
+// "no eligible chat" miss into a fresh session (nil selection + the configured
+// workspace) instead of failing startup.
+func TestResumeLatest_FallsBackToNewOnMiss(t *testing.T) {
+	empty := func() *fakeStartupResumeSource { return &fakeStartupResumeSource{} }
+
+	// --resume-latest: miss → new session, no error.
+	sel, ws, err := startupResumeConfig(context.Background(), empty(), config{resumeLatest: true, workspace: "/ws"})
+	if err != nil {
+		t.Fatalf("resume-latest miss returned error: %v", err)
+	}
+	if sel != nil {
+		t.Fatalf("resume-latest miss must yield no selection, got %+v", sel)
+	}
+	if ws != "/ws" {
+		t.Fatalf("resume-latest miss workspace = %q, want /ws", ws)
+	}
+}
+
+// TestResumeLatest_AdoptsWhenEligible proves the happy path: when an eligible chat
+// exists it is adopted (selection + its stored workspace).
+func TestResumeLatest_AdoptsWhenEligible(t *testing.T) {
+	source := &fakeStartupResumeSource{
+		rows: []client.SessionListItem{
+			{ID: "newest", ModifiedAt: 60, Kind: client.SessionKindMain, State: "completed", Capabilities: client.SessionInventoryCapabilities{PublicChat: true}},
+		},
+		transcripts: map[string]client.SessionTranscript{"newest": {SessionID: "newest", Complete: true}},
+		snapshots:   map[string]client.SessionSnapshot{"newest": {State: "completed", Workspace: "/adopted"}},
+	}
+	sel, ws, err := startupResumeConfig(context.Background(), source, config{resumeLatest: true, workspace: "/ws"})
+	if err != nil {
+		t.Fatalf("resume-latest adopt returned error: %v", err)
+	}
+	if sel == nil || sel.Row.ID != "newest" {
+		t.Fatalf("resume-latest adopt selection = %+v", sel)
+	}
+	if ws != "/adopted" {
+		t.Fatalf("resume-latest adopt workspace = %q, want /adopted", ws)
+	}
+}
+
+// TestResumeLatest_ListFailureStillErrors proves the fallback is scoped to the
+// not-found miss ONLY: a genuine inventory-list failure still surfaces (retryable
+// infrastructure error), never silently degraded to a new session.
+func TestResumeLatest_ListFailureStillErrors(t *testing.T) {
+	source := &fakeStartupResumeSource{listErr: errors.New("inventory unavailable")}
+	if _, _, err := startupResumeConfig(context.Background(), source, config{resumeLatest: true, workspace: "/ws"}); err == nil {
+		t.Fatal("resume-latest must surface a list failure, not fall back to a new session")
+	}
+}

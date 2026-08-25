@@ -182,7 +182,9 @@ func TestSessionsLaunchRejectsSeedAndResumeFlags(t *testing.T) {
 		args []string
 		want string
 	}{
-		{args: []string{"--prompt-file", "task.md"}, want: "--prompt-file"},
+		{
+			args: []string{"--prompt-file", "task.md"}, want: "--prompt-file",
+		},
 		{args: []string{"--resume", "session-id"}, want: "--resume"},
 		{args: []string{"--resume-latest"}, want: "--resume-latest"},
 		{args: []string{"-p", "hello"}, want: "-p/--prompt"},
