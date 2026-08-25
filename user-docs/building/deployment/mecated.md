@@ -204,7 +204,7 @@ secrets or raw file content. See [ADR 0088](https://github.com/stacklok/mecatl/b
 | `--scheduler-tick-interval` | `30s` | How often the tick loop polls for due schedules |
 | `--scheduler-min-interval` | `1m` | Frequency floor enforced at schedule-create time (fail-closed, by both the in-chat `Schedule` tool and the REST/gRPC create). Defaults to `1m`; `0` disables the floor |
 | `--scheduler-max-concurrent-fires` | `4` | Max schedules fired in parallel per tick |
-| `--schedule-store-url` | `""` | gRPC driver endpoint (`ScheduleStoreService` + `ScheduleOneShotReArmerService`) for the durable schedule registry, **independent of the session store** — when set, replaces the `ScheduleStore()` discovery from the configured store. Empty keeps the default (the configured store's own `ScheduleStore()`, or no scheduling). The driver runs the atomic advance server-side |
+| `--schedule-store-url` | `""` | gRPC driver endpoint (`ScheduleStoreService` + `ScheduleOneShotReArmerService`) for the durable schedule registry, **independent of the session store** — when set, replaces the `ScheduleStore()` discovery from the configured store. Empty keeps the default (the configured store's own `ScheduleStore()`, or no scheduling). The driver runs atomic fire advancement server-side, but current remote drivers do not expose atomic create-only publication; this option is therefore rejected when OIDC caller ownership is enabled |
 
 See [Scheduled tasks](/building/what-you-get/scheduled-tasks.md) for the in-chat `Schedule` tool and the gRPC/REST management surface.
 
@@ -468,8 +468,11 @@ advertised management capability. Follow [Operate local session storage](session
 for tested systemd/launchd service definitions and the backup, migration, and restore runbook.
 The `--session-store-url` flag replaces the JSONL store with a remote gRPC driver
 (`mecatl.driver.v1.SessionStoreService`). This is the path for a managed Redis backend
-(`mecak8s` uses it internally) or a custom store behind the driver protocol. It is
-mutually exclusive with `--store-dir`.
+or a custom store behind the driver protocol, and is mutually exclusive with
+`--store-dir`. The current driver protocol has no atomic create-only session RPC, so
+an OIDC/ownership-enforced server rejects `--session-store-url`; use the local JSONL
+backend (or mecak8s's directly wired Redis store) for multi-user deployments until
+the driver adds `port.SessionCreator` parity.
 
 ### Import from Codex or Claude Code
 

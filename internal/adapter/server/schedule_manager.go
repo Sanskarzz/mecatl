@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -318,27 +317,29 @@ func (m *scheduleManager) physicalScheduleName(ctx context.Context, name string)
 	return m.ownerScheduleNamespace(ctx) + name
 }
 
-// LiteralScheduleName removes the ownership namespace from a store-facing
-// schedule key. It is the sole physical-to-presentation translation: scheduler
-// callbacks retain physical keys for ScheduleStore operations but use this value
-// in model/client-facing IDs, lifecycle events, and metrics. Unnamespaced keys
-// preserve the ownership-disabled compatibility path unchanged.
-func LiteralScheduleName(name string) string {
-	if strings.HasPrefix(name, scheduleOwnerlessNamespace) {
-		return strings.TrimPrefix(name, scheduleOwnerlessNamespace)
-	}
-	const ownerPrefix = "schedule/"
-	if !strings.HasPrefix(name, ownerPrefix) {
+const invalidSchedulePresentation = "invalid-schedule"
+
+// PresentScheduleName projects the caller-visible name from an authoritative
+// stored schedule. Ownerless records carry literal names byte-for-byte. Owned
+// records carry an owner-qualified physical key, which is stripped only when it
+// matches the exact namespace derived from the stored owner. Arbitrary strings
+// never acquire physical-key provenance from their grammar alone.
+func PresentScheduleName(sched port.Schedule) string {
+	name := sched.Spec.Name
+	owner := sched.Spec.Owner
+	if owner == nil {
 		return name
 	}
-	rest := strings.TrimPrefix(name, ownerPrefix)
-	if len(rest) < sha256.Size*2+1 || rest[sha256.Size*2] != '\x00' {
-		return name
+	if owner.Issuer == "" || owner.Subject == "" || strings.ContainsRune(owner.Issuer, '\x00') || strings.ContainsRune(owner.Subject, '\x00') {
+		return invalidSchedulePresentation
 	}
-	if _, err := hex.DecodeString(rest[:sha256.Size*2]); err != nil {
-		return name
+	digest := sha256.Sum256([]byte(owner.Issuer + "\x00" + owner.Subject))
+	prefix := fmt.Sprintf("schedule/%x\x00", digest[:])
+	literal, ok := strings.CutPrefix(name, prefix)
+	if !ok {
+		return invalidSchedulePresentation
 	}
-	return rest[sha256.Size*2+1:]
+	return literal
 }
 
 // scheduleNotFoundErr normalizes a ScheduleStore not-found error to name the
@@ -430,10 +431,9 @@ func (m *scheduleManager) CreateSchedule(ctx context.Context, spec port.Schedule
 	// ScheduleCreator seam (review finding 5, issue #368), the check-and-write
 	// is ONE atomic backend operation: two concurrent creates of the same name
 	// yield exactly one success and one ErrScheduleAlreadyExists, never a
-	// silent overwrite. A store that does not implement the seam falls back to
-	// the pre-fix check-then-Save (a tiny TOCTOU window across two separate
-	// calls — Create is a low-frequency human action, so the residual race is
-	// accepted on that path only).
+	// silent overwrite. Ownership enforcement REQUIRES that capability; only
+	// the ownerless compatibility path retains the historical check-then-Save
+	// fallback.
 	if creator, ok := m.schedStore.(port.ScheduleCreator); ok {
 		if err := creator.Create(ctx, sched); err != nil {
 			if errors.Is(err, port.ErrScheduleAlreadyExists) {
@@ -442,6 +442,12 @@ func (m *scheduleManager) CreateSchedule(ctx context.Context, spec port.Schedule
 			return port.Schedule{}, err
 		}
 	} else {
+		// ScheduleCreator is optional for ownerless compatibility, but ownership
+		// enforcement may never fall back to check-then-upsert: a concurrent
+		// creator could otherwise overwrite another caller's schedule.
+		if m.ownershipEnforced {
+			return port.Schedule{}, fmt.Errorf("%w: ownership enforcement requires a schedule store with atomic create capability", ErrFailedPrecondition)
+		}
 		if _, lerr := m.schedStore.Load(ctx, physicalName); lerr == nil {
 			return port.Schedule{}, fmt.Errorf("%w: a schedule named %q already exists", ErrInvalidArgument, literalName)
 		} else if !errors.Is(lerr, port.ErrScheduleNotFound) {

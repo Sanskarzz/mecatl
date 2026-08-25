@@ -1041,6 +1041,13 @@ type Config struct {
 	// production core set is untouched). Unexported: an internal composition
 	// detail, not an operator knob.
 	extraCoreTools []tool.Tool
+	// extraCoreToolClassifications is test-only metadata for deliberately
+	// registered extra tools. An absent entry remains unclassified and makes the
+	// production-derived catalog guard fail.
+	extraCoreToolClassifications map[string]server.ClassificationEntry
+	// catalogClassificationObserver is a test-only view of the classifications
+	// derived from one completed full-session assembly.
+	catalogClassificationObserver func(map[string]server.ClassificationEntry)
 
 	// toolhiveConfigPath is the composition-only test seam for the ToolHive
 	// config-file path (mirroring envDetector/liveModelHTTPClient): ""
@@ -1632,6 +1639,11 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	// (the byte-identical default).
 	store, eventLog, sessionLease, leaseOwner, storeClose, err := buildStoreAndLease(cfg)
 	if err != nil {
+		commandConnClose()
+		return nil, err
+	}
+	if err := requireAtomicSessionCreate(cfg, store); err != nil {
+		storeClose()
 		commandConnClose()
 		return nil, err
 	}
@@ -2653,6 +2665,26 @@ func buildProvider(ctx context.Context, cfg Config) (*providerRegistry, port.LLM
 	return reg, entry.provider, nil
 }
 
+func requireAtomicSessionCreate(cfg Config, store port.SessionStore) error {
+	if !cfg.OwnershipEnforced {
+		return nil
+	}
+	if _, ok := store.(port.SessionCreator); !ok {
+		return errors.New("ownership enforcement requires a session store with atomic create capability")
+	}
+	return nil
+}
+
+func requireAtomicScheduleCreate(cfg Config, store port.ScheduleStore) error {
+	if !cfg.OwnershipEnforced || store == nil {
+		return nil
+	}
+	if _, ok := store.(port.ScheduleCreator); !ok {
+		return errors.New("ownership enforcement requires a schedule store with atomic create capability")
+	}
+	return nil
+}
+
 // buildStore constructs the SessionStore plus its durable EventLog (cloud-native
 // Phase 3a): a gRPC driver client when SessionStoreURL is set
 // (validateDriverConfig has already rejected the URL+dir combination), a JSONL
@@ -2940,13 +2972,10 @@ func startScheduler(ctx context.Context, cfg Config, store port.SessionStore, se
 	// is the package var (test-overridable); a future operator-tier Config knob
 	// would thread through here instead.
 	sched.SetFire(makeFireFunc(svc, fireStore, defaultFireTimeout, deliverFireStarted(svc, deliveryQueue)))
-	// Store keys are owner-namespaced only when caller ownership is enforced;
-	// server.LiteralScheduleName is a total, self-guarding reverse mapping
-	// (identity on any non-namespaced/flat key), so it is wired unconditionally
-	// rather than gated on cfg.OwnershipEnforced. Scheduler callbacks keep the
-	// physical keys for storage, while lifecycle events and metrics receive the
-	// literal name through this adapter-owned reverse mapping.
-	sched.SetPresentScheduleName(server.LiteralScheduleName)
+	// Scheduler callbacks keep physical keys for storage. Presentation receives
+	// the authoritative stored schedule so ownerless names remain literal and
+	// owned keys are stripped only against their stored owner provenance.
+	sched.SetPresentScheduleName(server.PresentScheduleName)
 	// Stale-fire reconciler (issue #386 Phase 4b, acceptance criterion #7): wire
 	// the composition-injected ReconcileStaleFire callback the scheduler invokes
 	// from the tick loop's reconcile scan when it DETECTS a stale in-flight fire
@@ -3219,6 +3248,10 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 	toolSchedStore, toolSchedClose, err := resolveScheduleStore(cfg, store)
 	if err != nil {
 		return nil, nil, nil, nil, nil, nil, nil, catalogAssets{}, nil, func() {}, fmt.Errorf("resolve schedule store for tool: %w", err)
+	}
+	if err := requireAtomicScheduleCreate(cfg, toolSchedStore); err != nil {
+		toolSchedClose()
+		return nil, nil, nil, nil, nil, nil, nil, catalogAssets{}, nil, func() {}, err
 	}
 	scheduleMgr := server.NewScheduleManager(server.ScheduleManagerConfig{
 		Store:             store,
@@ -4542,12 +4575,6 @@ func registerCoreTools(cfg Config, cat *tool.Catalog, log, noFS bool, searchProv
 		cat.MustRegister(t)
 	}
 	cat.MustRegister(tools.NewWebSearchTool(searchProvider))
-	// Test seam: register any ADDITIONAL core tools a test injected (nil in
-	// production — the production core set above is untouched). Appended AFTER the
-	// production set so an injected tool can shadow nothing and adds only itself.
-	for _, t := range cfg.extraCoreTools {
-		cat.MustRegister(t)
-	}
 	if runner := buildCommandRunner(cfg); runner != nil {
 		// The AGENT-loop Bash tool (not the fstools one): foreground byte-identical,
 		// plus the `background: true` detach over the run's child registry. Its
@@ -5319,13 +5346,16 @@ func buildLearningObserver(cfg Config, reg *providerRegistry, providerID string,
 // engine (the Stop-triggered background reviewer of the finished session), not a
 // delegation child, so the cheap child-default does not apply to it.
 func buildUserModelReviewEngine(cfg Config, reg *providerRegistry, providerID string, provider port.LLMProvider, store tool.MemoryStore) *agent.Engine {
-	cat := tool.NewCatalog()
+	classified := newClassifiedCatalog()
+	entry := classification(server.KindCallerOwned,
+		"RememberUser writes through the verified caller's user-model memory partition")
 	for _, t := range memory.NewUserModelTools(store) {
 		if t.Spec().Name == memory.RememberUserToolName {
-			cat.MustRegister(t)
+			classified.mustRegister(t, entry)
 		}
 	}
-	return newChildEngine(cfg, "usermodel-review", provider, cat, cfg.Model,
+	mustValidateClassifiedCatalog(classified, "user-model review tool catalog")
+	return newChildEngine(cfg, "usermodel-review", provider, classified.catalog, cfg.Model,
 		reg.windowResolver(cfg, providerID, cfg.Model), promptConfig(cfg, cfg.gitStatus))
 }
 
@@ -5893,10 +5923,13 @@ func childExplorerDeps(cfg Config, provReg *providerRegistry, provider port.LLMP
 // built from here: its Bash gating differs (spec.Mutating || roIsolationAvailable, with
 // the isolateReadOnly side-effect), so it keeps its own tiering.
 func readOnlyExplorerCatalog(runner tool.CommandRunner) *tool.Catalog {
-	cat := tool.NewCatalog()
-	cat.MustRegister(tools.ReadTool{})
-	cat.MustRegister(tools.GrepTool{})
-	cat.MustRegister(tools.GlobTool{})
+	classified := newClassifiedCatalog()
+	cat := classified.catalog
+	workspace := classification(server.KindExempt,
+		"bound to the authorized child workspace and constrained by its isolation and tool permissions")
+	classified.mustRegister(tools.ReadTool{}, workspace)
+	classified.mustRegister(tools.GrepTool{}, workspace)
+	classified.mustRegister(tools.GlobTool{}, workspace)
 	if runner != nil {
 		// agent.NewBashTool, NOT the fstools one: the child's Bash reaches its
 		// OWN run's child registry through the dispatch seam, so `background:
@@ -5904,9 +5937,26 @@ func readOnlyExplorerCatalog(runner tool.CommandRunner) *tool.Catalog {
 		// at the child's run end). The child deliberately gets NO BashStatus —
 		// the collection channel stays main-catalog-only, mirroring the
 		// SubagentStatus rule (never in child catalogs).
-		cat.MustRegister(agent.NewBashTool())
+		classified.mustRegister(agent.NewBashTool(), workspace)
 	}
+	mustValidateClassifiedCatalog(classified, "read-only explorer tool catalog")
 	return cat
+}
+
+func writableExplorerCatalog(runner tool.CommandRunner, surface string) *tool.Catalog {
+	classified := newClassifiedCatalog()
+	workspace := classification(server.KindExempt,
+		"bound to the authorized child workspace and constrained by its isolation and tool permissions")
+	for _, t := range []tool.Tool{tools.ReadTool{}, tools.GrepTool{}, tools.GlobTool{}} {
+		classified.mustRegister(t, workspace)
+	}
+	if runner != nil {
+		classified.mustRegister(agent.NewBashTool(), workspace)
+	}
+	classified.mustRegister(tools.EditTool{}, workspace)
+	classified.mustRegister(tools.WriteTool{}, workspace)
+	mustValidateClassifiedCatalog(classified, surface)
+	return classified.catalog
 }
 
 // explorerPromptConfig is promptConfig for the DEFAULT Subagent explorer child: it appends
@@ -5976,9 +6026,7 @@ func parallelChildDeps(cfg Config, provReg *providerRegistry, provider port.LLMP
 	// the branch's fork workspace at construction — no per-call workdir passed), so a
 	// branch's Bash runs in its OWN fork. (Subagent/Parallel/ToolSearch stay
 	// excluded — readOnlyExplorerCatalog never adds them — so a branch can't recurse.)
-	childCat := readOnlyExplorerCatalog(runner)
-	childCat.MustRegister(tools.EditTool{})
-	childCat.MustRegister(tools.WriteTool{})
+	childCat := writableExplorerCatalog(runner, "parallel child tool catalog")
 
 	return childEngineDepsForProvider(cfg, "parallel", provider, model, windowFn,
 		childCat, promptConfig(modelCfgFor(cfg, model), cfg.gitStatus), nil)
@@ -6019,9 +6067,7 @@ func buildWritableSubagentChildEngine(cfg Config, provReg *providerRegistry, pro
 // resolution (resolveDefaultChildModel for the default engine; the override id VERBATIM
 // with childWindowFor for the factory — the buildParallelEngineFactory discipline).
 func writableExplorerDeps(cfg Config, provider port.LLMProvider, model, role string, windowFn func() int, runner tool.CommandRunner) agent.Deps {
-	childCat := readOnlyExplorerCatalog(runner)
-	childCat.MustRegister(tools.EditTool{})
-	childCat.MustRegister(tools.WriteTool{})
+	childCat := writableExplorerCatalog(runner, "writable subagent tool catalog")
 	return childEngineDepsForProvider(cfg, role, provider, model, windowFn,
 		childCat, promptConfig(modelCfgFor(cfg, model), cfg.gitStatus), nil)
 }
@@ -6087,9 +6133,7 @@ func buildParallelEngineFactory(cfg Config, provReg *providerRegistry, provider 
 		// model composition's buildModelRouterTask produced; the same discipline
 		// buildSubagentEngineFactory uses for a per-call model override. The branch catalog
 		// mirrors parallelChildDeps exactly (Read/Grep/Glob/Edit/Write + Bash when wired).
-		childCat := readOnlyExplorerCatalog(runner)
-		childCat.MustRegister(tools.EditTool{})
-		childCat.MustRegister(tools.WriteTool{})
+		childCat := writableExplorerCatalog(runner, "routed parallel child tool catalog")
 		windowFn := childWindowFor(cfg, provReg, parentProviderID, model)
 		deps := childEngineDepsForProvider(cfg, "parallel:model="+model, provider, model, windowFn,
 			childCat, promptConfig(modelCfgFor(cfg, model), cfg.gitStatus), nil)
@@ -6995,19 +7039,24 @@ func buildMemberEngine(cfg Config, provReg *providerRegistry, provider port.LLMP
 				model = rm
 				windowFn = childWindowFor(cfg, provReg, parentProviderID, rm)
 			}
-			cat := noFSChildCatalog(context.Background(), cfg, a)
+			classified := newNoFSClassifiedChildCatalog(context.Background(), cfg, a)
+			cat := classified.catalog
 			// Exempt the catalog's non-workspace mutators (memory writers, MCP
 			// tools) BEFORE the coordination tools are added (those are exempted
 			// by name in the supervisor already).
 			exempt := nonReadOnlyToolNames(cat)
+			coordination := classification(server.KindDerived,
+				"team coordination tools operate only on the current authorized team's task and message state")
 			for _, mt := range agent.MemberTools(t, spec.Name, teamHooks) {
-				cat.MustRegister(mt)
+				classified.mustRegister(mt, coordination)
 			}
+			mustValidateClassifiedCatalog(classified, "no-FS team member tool catalog")
 			pc := applyNoFSPosture(promptConfig(modelCfgFor(cfg, model), ""), noFSMemberNote)
 			eng := newChildEngineForProvider(cfg, "member:"+spec.Name, provider, model, windowFn, cat, pc, nil)
 			return agent.MemberBuild{Engine: eng, MCPToolNames: exempt}
 		}
-		cat := tool.NewCatalog()
+		classified := newClassifiedCatalog()
+		cat := classified.catalog
 		// Default (undefined) member model (issue #35): the SAME def-less chain as
 		// the default Subagent explorer and Parallel branches — `SubagentModel
 		// (alias-resolved) > parentModel` — with the window re-derived when the
@@ -7086,19 +7135,8 @@ func buildMemberEngine(cfg Config, provReg *providerRegistry, provider port.LLMP
 				// baseSubagentTools one used purely to compute the name set — so a
 				// member's shell over the shared `.git` cannot be hijacked via git config
 				// (core.pager/hooksPath/fsmonitor/external-diff). Every other tool registers
-				// as-is. Note: there is NO unhardened member-Bash fall-through — a
-				// read-only member gets the trust-gated `runner` (the only path that
-				// kept Bash for it, via allowShell ⇒ runner != nil), a Mutating member
-				// the ungated-but-hardened `mutatingRunner` (its force-copy fork
-				// COPIED the base `.git` verbatim — possibly an untrusted repo's — so
-				// the env scrub is load-bearing there too, not moot).
-				if name == tools.BashToolName {
-					if memberBash := memberBashRunner(spec.Mutating, runner, mutatingRunner); memberBash != nil {
-						cat.MustRegister(agent.NewBashTool())
-					}
-					continue
-				}
-				cat.MustRegister(base[name])
+				// as-is. Note: there is NO unhardened member-Bash fall-through.
+				registerScopedMemberTool(classified, name, base, spec, runner, mutatingRunner)
 			}
 			// A read-only def-member that ended up with Bash is worktree-isolated.
 			if allowShell {
@@ -7115,8 +7153,10 @@ func buildMemberEngine(cfg Config, provReg *providerRegistry, provider port.LLMP
 			// to the supervisor so the read-only-member backstop exempts them (they report
 			// ReadOnly()==false but never touch the workspace).
 			mcpTools, names2, _, cl := defMCPTools(context.Background(), cfg.diag(), def, mainMgr)
+			mcpEntry := classification(server.KindDerived,
+				"member agent-definition MCP tools are scoped to this already authorized team member")
 			for _, mt := range mcpTools {
-				if err := cat.Register(mt); err != nil {
+				if err := classified.register(mt, mcpEntry); err != nil {
 					cfg.diag().Log(context.Background(), port.LevelWarn, "team member agent def MCP tool registration failed; skipped",
 						"member", spec.Name, "agent", def.Name, "tool", mt.Spec().Name, "err", err)
 				}
@@ -7159,7 +7199,7 @@ func buildMemberEngine(cfg Config, provReg *providerRegistry, provider port.LLMP
 			// member's Bash runs in its OWN fork/worktree,
 			// not the shared parent base. (Bash can still escape its cwd via absolute
 			// paths / `cd`, the inherent Bash trust model; isolation is the boundary.)
-			isolateReadOnly = registerDefaultMemberTools(cat, spec, runner, mutatingRunner, roIsolationAvailable)
+			isolateReadOnly = registerDefaultMemberTools(classified, spec, runner, mutatingRunner, roIsolationAvailable)
 			// OPT-IN model router (ADR 0034): the supervisor classified this UNDEFINED
 			// member, so run it on the ALREADY-RESOLVED routed model in place of the
 			// def-less default (a DEFINED member never reaches here — its def pinned the
@@ -7171,9 +7211,12 @@ func buildMemberEngine(cfg Config, provReg *providerRegistry, provider port.LLMP
 
 		// Team coordination tools ALWAYS, in both branches: they bypass the def
 		// allowlist and are exempt from the read-only-member mutating-tool backstop.
+		coordination := classification(server.KindDerived,
+			"team coordination tools operate only on the current authorized team's task and message state")
 		for _, mt := range agent.MemberTools(t, spec.Name, teamHooks) {
-			cat.MustRegister(mt)
+			classified.mustRegister(mt, coordination)
 		}
+		mustValidateClassifiedCatalog(classified, "team member tool catalog", mcpClose)
 
 		pc = applyUntrustedMemberShellNote(cfg, spec, pc)
 
@@ -7186,6 +7229,22 @@ func buildMemberEngine(cfg Config, provReg *providerRegistry, provider port.LLMP
 	}
 }
 
+func registerScopedMemberTool(classified *classifiedCatalog, name string, base map[string]tool.Tool, spec agent.MemberSpec, runner, mutatingRunner tool.CommandRunner) {
+	registered := base[name]
+	if name == tools.BashToolName {
+		if memberBashRunner(spec.Mutating, runner, mutatingRunner) == nil {
+			return
+		}
+		registered = agent.NewBashTool()
+	}
+	entry, ok := coreToolClassification(registered)
+	if !ok {
+		classified.mustRegister(registered, nil)
+		return
+	}
+	classified.mustRegister(registered, &entry)
+}
+
 // registerDefaultMemberTools registers the DEFAULT (no-def) member catalog tiers:
 // Read/Grep/Glob always; Edit/Write for a Mutating member; and Bash per the
 // issue-#40 runner split — a Mutating member's Bash rides the ungated
@@ -7196,16 +7255,18 @@ func buildMemberEngine(cfg Config, provReg *providerRegistry, provider port.LLMP
 // pinned asymmetry).
 // It reports whether the member ended up read-only-ISOLATED (Bash granted to a
 // non-mutating member ⇒ the supervisor must worktree-isolate it).
-func registerDefaultMemberTools(cat *tool.Catalog, spec agent.MemberSpec, runner, mutatingRunner tool.CommandRunner, roIsolationAvailable bool) (isolateReadOnly bool) {
-	cat.MustRegister(tools.ReadTool{})
-	cat.MustRegister(tools.GrepTool{})
-	cat.MustRegister(tools.GlobTool{})
+func registerDefaultMemberTools(classified *classifiedCatalog, spec agent.MemberSpec, runner, mutatingRunner tool.CommandRunner, roIsolationAvailable bool) (isolateReadOnly bool) {
+	workspace := classification(server.KindExempt,
+		"bound to the authorized member workspace and constrained by member isolation and tool permissions")
+	classified.mustRegister(tools.ReadTool{}, workspace)
+	classified.mustRegister(tools.GrepTool{}, workspace)
+	classified.mustRegister(tools.GlobTool{}, workspace)
 	if spec.Mutating {
-		cat.MustRegister(tools.EditTool{})
-		cat.MustRegister(tools.WriteTool{})
+		classified.mustRegister(tools.EditTool{}, workspace)
+		classified.mustRegister(tools.WriteTool{}, workspace)
 	}
 	if memberBash := memberBashRunner(spec.Mutating, runner, mutatingRunner); memberBash != nil && (spec.Mutating || roIsolationAvailable) {
-		cat.MustRegister(agent.NewBashTool())
+		classified.mustRegister(agent.NewBashTool(), workspace)
 		isolateReadOnly = !spec.Mutating && roIsolationAvailable
 	}
 	return isolateReadOnly

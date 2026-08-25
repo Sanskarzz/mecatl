@@ -15,6 +15,7 @@ import (
 
 	driverv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/driver/v1"
 	"github.com/stacklok/mecatl/engine/adapter/memmemory"
+	"github.com/stacklok/mecatl/engine/adapter/memschedulestore"
 	"github.com/stacklok/mecatl/engine/adapter/memstore"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/port"
@@ -425,6 +426,35 @@ func TestBuildCatalogBaseOnlyMemoryDriverOmitsLifecycleTools(t *testing.T) {
 	}
 	if _, ok := assets.memStore.(tool.MemoryLifecycleStore); ok {
 		t.Fatalf("base-only assets advertise lifecycle: %T", assets.memStore)
+	}
+}
+
+func TestOwnershipRequiresAtomicSessionCreateCapability(t *testing.T) {
+	legacy := plainSessionStore{inner: memstore.New()}
+	if err := requireAtomicSessionCreate(Config{OwnershipEnforced: true}, legacy); err == nil || !strings.Contains(err.Error(), "atomic create") {
+		t.Fatalf("ownership guard error = %v, want atomic-create requirement", err)
+	}
+	if err := requireAtomicSessionCreate(Config{}, legacy); err != nil {
+		t.Fatalf("ownerless legacy store rejected: %v", err)
+	}
+	if err := requireAtomicSessionCreate(Config{OwnershipEnforced: true}, memstore.New()); err != nil {
+		t.Fatalf("atomic store rejected: %v", err)
+	}
+}
+
+func TestOwnershipRequiresAtomicScheduleCreateCapability(t *testing.T) {
+	legacy := grpcdriver.NewScheduleStore(nil)
+	if err := requireAtomicScheduleCreate(Config{OwnershipEnforced: true}, legacy); err == nil || !strings.Contains(err.Error(), "atomic create") {
+		t.Fatalf("ownership guard error = %v, want atomic-create requirement", err)
+	}
+	if err := requireAtomicScheduleCreate(Config{}, legacy); err != nil {
+		t.Fatalf("ownerless legacy store rejected: %v", err)
+	}
+	if err := requireAtomicScheduleCreate(Config{OwnershipEnforced: true}, memschedulestore.New()); err != nil {
+		t.Fatalf("atomic schedule store rejected: %v", err)
+	}
+	if err := requireAtomicScheduleCreate(Config{OwnershipEnforced: true}, nil); err != nil {
+		t.Fatalf("absent schedule store rejected: %v", err)
 	}
 }
 

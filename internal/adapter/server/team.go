@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/stacklok/mecatl/engine/agent"
+	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/team"
 	"github.com/stacklok/mecatl/engine/tool"
@@ -165,6 +166,12 @@ func (s *Service) CreateTeam(ctx context.Context, workspace, name, goal string, 
 	if s.cfg.RootAuthority != nil {
 		opts = append(opts, agent.WithRootAuthority(s.cfg.RootAuthority(session.SessionKindTeamMember)))
 	}
+	// Attribute members to the creating caller. CreateTeam runs with zero parent
+	// caps by design, so without this AddMember publishes durable member sessions
+	// with Owner == nil — unreadable by the team's own owner, and skipped by every
+	// retention path, so they can never be reaped. Appended unconditionally:
+	// WithTeamOwner no-ops on a nil principal, which is the ownerless path.
+	opts = append(opts, agent.WithTeamOwner(session.PrincipalFromContext(ctx)))
 	// The goal is the team's TRUSTED top-level instruction by default (the deployment
 	// owns the gRPC front door, so the goal's provenance is the operator/principal,
 	// not a peer). A multi-tenant / relay deployment that may interpolate untrusted
@@ -203,26 +210,112 @@ func (s *Service) CreateTeam(ctx context.Context, workspace, name, goal string, 
 	// configured, the automated reviewer).
 	sup := agent.NewSupervisor(t, base, factory, opts...)
 
-	// Enrol the initial roster BEFORE registering the team. A failure here abandons
-	// the whole team: we return without inserting it into s.teams, so it neither leaks
-	// nor counts against the cap, and the un-registered supervisor is GC'd.
-	for _, spec := range members {
-		if err := sup.AddMember(ctx, spec); err != nil {
-			return "", nil, classifyAddMemberErr(err)
-		}
-	}
-
+	// Claim a registry slot BEFORE enrolling. Enrolment acquires each member's
+	// cross-process lease and publishes a durable member snapshot, so checking the
+	// cap afterwards would refuse the request having already stranded both: leases
+	// no other replica can take until expiry, and member records no owner can reach
+	// and no retention path will reap. The reservation is released on every failure
+	// path below and converted to a registration on success.
 	s.mu.Lock()
-	// Count only un-cleaned teams (the live registry) against the cap; CleanupTeam
-	// frees a slot. The check and the insert share the lock so concurrent CreateTeams
-	// cannot both slip past a full registry.
-	if len(s.teams) >= s.cfg.MaxTeams {
+	if len(s.teams)+s.teamsReserving >= s.cfg.MaxTeams {
 		s.mu.Unlock()
 		return "", nil, fmt.Errorf("%w: %d", ErrTooManyTeams, s.cfg.MaxTeams)
 	}
+	s.teamsReserving++
+	s.mu.Unlock()
+	registered := false
+	defer func() {
+		if !registered {
+			s.mu.Lock()
+			s.teamsReserving--
+			s.mu.Unlock()
+		}
+	}()
+
+	// Enrol the initial roster BEFORE registering the team. A failure here abandons
+	// the whole team: the reservation is dropped, every acquired lease is released,
+	// every published member snapshot is deleted, and the un-registered supervisor
+	// is GC'd — so a refused create leaves nothing behind.
+	//
+	// The member's cross-process lease is acquired BEFORE AddMember, not after and
+	// not in RunTeam: AddMember publishes a durable SessionKindTeamMember snapshot,
+	// which is retention-eligible, so a lease taken afterwards leaves a window in
+	// which a peer replica can delete a live team's member — unbounded, and infinite
+	// for a team that is never run. Leasing first also means a refused lease writes
+	// nothing, so the abandon path leaves no orphaned member snapshot behind.
+	// Member ids are derivable here because the team id was computed above, before
+	// the supervisor. RunTeam's own acquire loop stays as a no-op backstop
+	// (acquireLease is idempotent for an id this service already holds).
+	if err := s.enrolInitialRoster(ctx, id, sup, members); err != nil {
+		return "", nil, err
+	}
+
+	s.mu.Lock()
+	// The slot was claimed above, so no capacity refusal can occur here — the cap
+	// is enforced before any lease or durable write.
 	s.teams[id] = &teamState{team: t, sup: sup, base: workspace, owner: session.PrincipalFromContext(ctx).Clone()}
+	s.teamsReserving--
+	registered = true
 	s.mu.Unlock()
 	return id, t.Members(), nil
+}
+
+// enrolInitialRoster adds every initial member, leaving NOTHING behind on
+// failure: each member's cross-process lease is acquired before AddMember
+// publishes its durable snapshot, and any failure releases the leases and
+// deletes the snapshots taken so far. Extracted from CreateTeam to keep it under
+// the gocyclo threshold, the same reason createPerSessionEngine was split out of
+// createSession. The returned error is already classified for the wire.
+func (s *Service) enrolInitialRoster(ctx context.Context, teamID string, sup *agent.Supervisor, members []agent.MemberSpec) error {
+	leased := make([]session.SessionID, 0, len(members))
+	published := make([]session.SessionID, 0, len(members))
+	unwind := func() {
+		// Published snapshots first, then leases: the lease is what stops a peer
+		// replica touching the record, so it is released last.
+		s.deleteAbandonedMembers(ctx, published)
+		for _, id := range leased {
+			s.releaseLease(id)
+		}
+	}
+	for _, spec := range members {
+		memberID := agent.MemberSessionID(teamID, spec.Name)
+		if err := s.acquireLease(ctx, memberID); err != nil {
+			unwind()
+			return err
+		}
+		leased = append(leased, memberID)
+		if err := sup.AddMember(ctx, spec); err != nil {
+			unwind()
+			return classifyAddMemberErr(err)
+		}
+		published = append(published, memberID)
+	}
+	return nil
+}
+
+// deleteAbandonedMembers removes the durable member snapshots an abandoned
+// CreateTeam already published. Best-effort and deliberately quiet: the caller
+// is already returning the failure that matters, and a store that cannot prune
+// (no port.PrunableStore) simply leaves the records for retention — which can
+// reach them, because they carry the creating caller's owner.
+//
+// It runs while this service still holds each member's lease, so no peer replica
+// can be mid-flight on the same id.
+func (s *Service) deleteAbandonedMembers(ctx context.Context, ids []session.SessionID) {
+	if len(ids) == 0 {
+		return
+	}
+	prunable, ok := s.cfg.Store.(port.PrunableStore)
+	if !ok {
+		return
+	}
+	for _, id := range ids {
+		if err := prunable.Delete(ctx, id); err != nil && !errors.Is(err, port.ErrSessionNotFound) {
+			s.cfg.Diagnostics.Log(ctx, port.LevelWarn,
+				"abandoned team member snapshot could not be deleted; left for retention",
+				"session", string(id), "err", err.Error())
+		}
+	}
 }
 
 // lookupTeam returns the registered team state for id, or ErrNotFound.
@@ -261,7 +354,14 @@ func (s *Service) SpawnTeammate(ctx context.Context, teamID string, spec agent.M
 	if started {
 		return team.Member{}, fmt.Errorf("%w: cannot spawn into a team that has started", ErrTeamRunning)
 	}
+	// Lease before AddMember publishes the durable member snapshot — same ordering
+	// and same reason as CreateTeam's enrolment loop above.
+	memberID := agent.MemberSessionID(teamID, spec.Name)
+	if err := s.acquireLease(ctx, memberID); err != nil {
+		return team.Member{}, err
+	}
 	if err := ts.sup.AddMember(ctx, spec); err != nil {
+		s.releaseLease(memberID)
 		return team.Member{}, classifyAddMemberErr(err)
 	}
 	for _, m := range ts.team.Members() {
@@ -403,6 +503,23 @@ func (s *Service) RunTeam(ctx context.Context, teamID string, sink func(agent.Te
 	s.mu.Unlock()
 	ts.run.Unlock()
 
+	// Team members are durable sessions driven outside StartRunContent, so their
+	// cross-process ownership must be established here before Supervisor.Run
+	// starts their engines. acquireLease is idempotent for a session already held
+	// by this service and keeps the hold until CloseSession or service shutdown.
+	for _, member := range ts.team.Members() {
+		memberID := member.Session
+		if memberID == "" {
+			memberID = agent.MemberSessionID(teamID, member.Name)
+		}
+		if err := s.acquireLease(ctx, memberID); err != nil {
+			s.mu.Lock()
+			ts.phase = teamCreated
+			s.mu.Unlock()
+			return agent.TeamOutcome{}, err
+		}
+	}
+
 	defer func() {
 		s.mu.Lock()
 		ts.phase = teamDone
@@ -429,14 +546,34 @@ func (s *Service) ListTeam(ctx context.Context, teamID string) ([]team.Member, [
 // (FailedPrecondition) instead. It returns ErrNotFound for an unknown team.
 func (s *Service) CleanupTeam(ctx context.Context, teamID string) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	ts, ok := s.teams[teamID]
 	if !ok || !s.ownsResource(ctx, ts.owner) {
+		s.mu.Unlock()
 		return fmt.Errorf("%w: %q", ErrTeamNotFound, teamID)
 	}
 	if ts.phase == teamRunning {
+		s.mu.Unlock()
 		return fmt.Errorf("%w: %q", ErrTeamRunning, teamID)
 	}
 	delete(s.teams, teamID)
+	s.mu.Unlock()
+
+	// Release every member lease this team acquired. Without this the lease and its
+	// renewer goroutine outlive the team and are only reclaimed at process exit, so a
+	// long-lived server that churns teams accumulates both, and the member ids stay
+	// claimed against peer replicas that could legitimately take them over. The phase
+	// check above guarantees the team is not running, so no member drive can still
+	// need its lease, and releaseLease is a no-op for an id not held.
+	//
+	// This runs OUTSIDE s.mu deliberately: releaseLease re-takes it, and a
+	// sync.Mutex is not reentrant. Team.Members takes the team's own lock, not
+	// s.mu, so reading the roster here is safe.
+	for _, member := range ts.team.Members() {
+		memberID := member.Session
+		if memberID == "" {
+			memberID = agent.MemberSessionID(teamID, member.Name)
+		}
+		s.releaseLease(memberID)
+	}
 	return nil
 }

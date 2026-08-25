@@ -208,7 +208,8 @@ type Config struct {
 	// OwnershipEnforced is true only when the request edge has a verifier wired.
 	// Its zero value preserves the ownerless compatibility path. When enabled,
 	// create retries compare the verified issuer/subject pair before exposing an
-	// existing caller-selected ID.
+	// existing caller-selected ID, and the store must implement port.SessionCreator
+	// so no generated, forked, or scheduled session can overwrite an existing snapshot.
 	OwnershipEnforced bool
 	// Workspaces builds a Workspace for a session root. Required.
 	Workspaces WorkspaceFactory
@@ -779,6 +780,11 @@ type Service struct {
 	mu    sync.Mutex
 	runs  map[session.SessionID]*runState
 	teams map[string]*teamState
+	// teamsReserving counts CreateTeam calls that have passed the MaxTeams check
+	// but have not yet registered. Enrolment acquires member leases and publishes
+	// durable member snapshots, so the cap must be claimed BEFORE that work: a
+	// capacity refusal afterwards would strand both. Guarded by mu, like teams.
+	teamsReserving int
 	// sessionEngines holds the per-session engines — built for a session that needs
 	// a non-default provider/model selector (gRPC/HTTP CreateSession) OR
 	// client-provided MCP servers (ACP session/new). The ACP surface drains them on
@@ -1457,23 +1463,47 @@ func seedCarryover(sess *session.Session, snap []session.Message) error {
 // must match. It deliberately excludes the owner: that comes only from the
 // verified context and is checked separately.
 type createRequest struct {
-	workspace string
-	mode      session.PermissionMode
-	limits    session.Limits
-	selector  ProviderSelector
-	profile   SessionProfile
-	sourceID  session.SessionID
+	workspace    string
+	mode         session.PermissionMode
+	limits       session.Limits
+	selector     ProviderSelector
+	profile      SessionProfile
+	sourceID     session.SessionID
+	kind         session.SessionKind
+	relationship session.SessionRelationship
+}
+
+func newCreateRequest(workspace string, mode session.PermissionMode, limits session.Limits, selector ProviderSelector, profile SessionProfile, sourceID session.SessionID, scheduled *session.SessionRelationship) createRequest {
+	request := createRequest{workspace: workspace, mode: mode, limits: limits, selector: selector, profile: profile, sourceID: sourceID, kind: session.SessionKindMain}
+	if scheduled != nil {
+		request.kind = session.SessionKindScheduled
+		request.relationship = *scheduled
+	}
+	return request
 }
 
 func (r createRequest) matches(sess *session.Session) bool {
 	return r.sourceID == "" && sess.Workspace == r.workspace && sess.Mode == r.mode &&
 		sess.Limits == r.limits && sess.ProviderID == r.selector.ProviderID &&
 		sess.ModelID == r.selector.ModelID && sess.ReasoningEffort == r.selector.ReasoningEffort &&
-		sess.Profile == string(r.profile)
+		sess.Profile == string(r.profile) && sess.Kind == r.kind && sess.Relationship == r.relationship
 }
 
 func sameCreateOwner(a, b *session.Principal) bool {
 	return (a == nil && b == nil) || a.SameIdentity(b)
+}
+
+func (s *Service) classifyCreateWinner(existing *session.Session, owner *session.Principal, request createRequest) (*session.Session, error) {
+	if !s.cfg.OwnershipEnforced {
+		return nil, fmt.Errorf("%w: session id %q already exists", ErrInvalidArgument, existing.ID)
+	}
+	if !sameCreateOwner(existing.Owner, owner) {
+		return nil, fmt.Errorf("%w: %q", ErrNotFound, existing.ID)
+	}
+	if !request.matches(existing) {
+		return nil, fmt.Errorf("%w: session id %q was retried with a different request", ErrInvalidArgument, existing.ID)
+	}
+	return existing, nil
 }
 
 // reserveSessionID validates a caller-chosen session id (WithSessionID, ADR 0059
@@ -1515,21 +1545,45 @@ func (s *Service) reserveSessionID(ctx context.Context, id session.SessionID, ow
 	// silently pass, so it is propagated.
 	if existing, lerr := s.cfg.Store.Load(ctx, id); lerr == nil && existing != nil {
 		release()
-		if !s.cfg.OwnershipEnforced {
-			return nil, nil, fmt.Errorf("%w: session id %q already exists", ErrInvalidArgument, id)
-		}
-		if sameCreateOwner(existing.Owner, owner) {
-			if request.matches(existing) {
-				return existing, nil, nil
-			}
-			return nil, nil, fmt.Errorf("%w: session id %q was retried with a different request", ErrInvalidArgument, id)
-		}
-		return nil, nil, fmt.Errorf("%w: %q", ErrNotFound, id)
+		winner, classifyErr := s.classifyCreateWinner(existing, owner, request)
+		return winner, nil, classifyErr
 	} else if lerr != nil && !errors.Is(lerr, port.ErrSessionNotFound) {
 		release()
 		return nil, nil, fmt.Errorf("server: probe session id %q: %w", id, lerr)
 	}
 	return nil, release, nil
+}
+
+func (s *Service) persistNewSession(ctx context.Context, sess *session.Session) error {
+	if creator, ok := s.cfg.Store.(port.SessionCreator); ok {
+		return creator.Create(ctx, sess)
+	}
+	if s.cfg.OwnershipEnforced {
+		return fmt.Errorf("%w: ownership enforcement requires a session store with atomic create capability", ErrConfig)
+	}
+	return s.cfg.Store.Save(ctx, sess)
+}
+
+func (s *Service) persistCreatedSession(ctx context.Context, sess *session.Session, owner *session.Principal, request *createRequest) (*session.Session, error) {
+	if err := s.persistNewSession(ctx, sess); err != nil {
+		if existing, ok, collisionErr := s.resolveCreateCollision(ctx, sess.ID, owner, request, err); ok || collisionErr != nil {
+			return existing, collisionErr
+		}
+		return nil, fmt.Errorf("server: persist session: %w", err)
+	}
+	return sess, nil
+}
+
+func (s *Service) resolveCreateCollision(ctx context.Context, id session.SessionID, owner *session.Principal, request *createRequest, createErr error) (*session.Session, bool, error) {
+	if !errors.Is(createErr, port.ErrSessionAlreadyExists) || request == nil {
+		return nil, false, nil
+	}
+	existing, err := s.cfg.Store.Load(ctx, id)
+	if err != nil {
+		return nil, false, fmt.Errorf("server: load session create winner: %w", err)
+	}
+	winner, err := s.classifyCreateWinner(existing, owner, *request)
+	return winner, err == nil, err
 }
 
 func (s *Service) createSession(ctx context.Context, workspace string, mode session.PermissionMode, limits session.Limits, sel ProviderSelector, specs []mcp.ServerConfig, profile SessionProfile, opts createSessionOpts) (*session.Session, error) {
@@ -1568,12 +1622,14 @@ func (s *Service) createSession(ctx context.Context, workspace string, mode sess
 	// idSet. A caller-chosen id is validated + reserved by reserveSessionID (see
 	// its doc for the three collision sources); the reservation is released on
 	// EVERY exit path.
+	var retryRequest *createRequest
 	mintID := s.cfg.NewID
 	if opts.idSet {
 		if opts.id == "" {
 			return nil, fmt.Errorf("%w: session id must not be empty", ErrInvalidArgument)
 		}
-		request := createRequest{workspace: workspace, mode: mode, limits: limits, selector: sel, profile: profile, sourceID: opts.sourceSessionID}
+		request := newCreateRequest(workspace, mode, limits, sel, profile, opts.sourceSessionID, opts.scheduled)
+		retryRequest = &request
 		existing, release, err := s.reserveSessionID(ctx, opts.id, owner, request)
 		if err != nil {
 			return nil, err
@@ -1632,13 +1688,10 @@ func (s *Service) createSession(ctx context.Context, workspace string, mode sess
 		if err := seedCarryover(sess, carrySnap); err != nil {
 			return nil, err
 		}
-		if err := s.cfg.Store.Save(ctx, sess); err != nil {
-			return nil, fmt.Errorf("server: persist session: %w", err)
-		}
-		return sess, nil
+		return s.persistCreatedSession(ctx, sess, owner, retryRequest)
 	}
 
-	return s.createPerSessionEngine(ctx, mintID, mode, workspace, limits, sel, specs, profile, carrySnap, owner, opts.scheduled, carriedAuthority, carriedAuthorityBound)
+	return s.createPerSessionEngine(ctx, mintID, mode, workspace, limits, sel, specs, profile, carrySnap, owner, opts.scheduled, carriedAuthority, carriedAuthorityBound, retryRequest)
 }
 
 // createPerSessionEngine is the per-session-engine create branch, factored out
@@ -1649,7 +1702,7 @@ func (s *Service) createSession(ctx context.Context, workspace string, mode sess
 // evicts the reservation and tears the freshly-built engine down so a failed
 // create leaks neither a slot nor a connection. See createSession for the
 // profile-aware workspace rule and the carryover snapshot semantics.
-func (s *Service) createPerSessionEngine(ctx context.Context, mintID func() session.SessionID, mode session.PermissionMode, workspace string, limits session.Limits, sel ProviderSelector, specs []mcp.ServerConfig, profile SessionProfile, carrySnap []session.Message, owner *session.Principal, scheduled *session.SessionRelationship, carriedAuthority session.Authority, carriedAuthorityBound bool) (*session.Session, error) {
+func (s *Service) createPerSessionEngine(ctx context.Context, mintID func() session.SessionID, mode session.PermissionMode, workspace string, limits session.Limits, sel ProviderSelector, specs []mcp.ServerConfig, profile SessionProfile, carrySnap []session.Message, owner *session.Principal, scheduled *session.SessionRelationship, carriedAuthority session.Authority, carriedAuthorityBound bool, retryRequest *createRequest) (*session.Session, error) {
 	if s.cfg.SessionEngine == nil {
 		return nil, fmt.Errorf("%w: per-session engine not supported (no session-engine factory configured)", ErrInvalidArgument)
 	}
@@ -1733,11 +1786,11 @@ func (s *Service) createPerSessionEngine(ctx context.Context, mintID func() sess
 	}
 	s.mu.Unlock()
 
-	if serr := s.cfg.Store.Save(ctx, sess); serr != nil {
-		// The engine was built and the slot reserved but the session could not be
-		// persisted: evict the reservation (engine slot AND any environment
-		// override) and tear the per-session MCP manager down so a failed create
-		// leaks neither a slot nor a connection.
+	persisted, perr := s.persistCreatedSession(ctx, sess, owner, retryRequest)
+	if perr != nil || persisted != sess {
+		// The engine was built and the slot reserved but this newly-built session
+		// was not published: evict the slot and environment. On an idempotent
+		// cross-service retry, persisted is the already-published winner.
 		s.mu.Lock()
 		delete(s.sessionEngines, sess.ID)
 		delete(s.sessionEnvironments, sess.ID)
@@ -1745,7 +1798,7 @@ func (s *Service) createPerSessionEngine(ctx context.Context, mintID func() sess
 		if closeFn != nil {
 			_ = closeFn()
 		}
-		return nil, fmt.Errorf("server: persist session: %w", serr)
+		return persisted, perr
 	}
 	return sess, nil
 }
@@ -1803,7 +1856,7 @@ func (s *Service) capabilities() *mecatlv1.ServerCapabilities {
 		LearningProposals: s.cfg.Proposals != nil,
 		LearnedSkills:     s.cfg.LearnedSkills != nil,
 		Scheduling:        s.scheduleStore() != nil,
-		StorageHealth:     s.cfg.StorageManagementAuthorized != nil && implementsStorageHealth(s.cfg.Store),
+		StorageHealth:     s.cfg.StorageManagementAuthorized != nil && (implementsStorageHealth(s.cfg.Store) || s.scheduleStore() != nil),
 		StorageMigration:  s.cfg.StorageManagementAuthorized != nil && s.maintenanceMutationAvailable() && func() bool { _, ok := migrationStore(s.cfg.Store); return ok }(),
 		StorageCleanup:    s.cfg.StorageManagementAuthorized != nil && s.maintenanceMutationAvailable() && supportsCleanupDelete(s.cfg.Store),
 		LegacyAdoption:    s.cfg.OwnershipEnforced && s.cfg.SessionEngine != nil,
@@ -2079,6 +2132,14 @@ func (s *Service) Diagnostics() port.Diagnostics {
 	return s.cfg.Diagnostics
 }
 
+// OwnershipEnforced reports whether caller ownership is active. Composition
+// uses it only where ownerless persisted metadata must fail closed before
+// reconstructing a caller context; resource decisions still flow through
+// ownsResource/authorizeSession.
+func (s *Service) OwnershipEnforced() bool {
+	return s.cfg.OwnershipEnforced
+}
+
 // IsDraining reports whether the drain gate is armed. It is the read-side
 // companion to Drain: a cmd binary's dynamic ReadyFunc (mecak8s /readyz)
 // closes over it so readiness flips to not-ready the moment Drain is armed,
@@ -2124,8 +2185,27 @@ func (s *Service) StorageReady(ctx context.Context) bool {
 }
 
 // GetSession returns the persisted session under id, or ErrNotFound.
+//
+// Absence, foreign ownership, and a broken store are deliberately ONE
+// caller-visible answer, so a caller cannot probe for another owner's ids. That
+// concealment is owed to the CALLER only: an infrastructure failure is logged
+// for the operator, because otherwise a storage outage is indistinguishable from
+// mass deletion from both sides at once. A genuine not-found is the normal case
+// and stays silent.
 func (s *Service) GetSession(ctx context.Context, id session.SessionID) (*session.Session, error) {
 	sess, err := s.cfg.Store.Load(ctx, id)
+	if err != nil && !errors.Is(err, port.ErrSessionNotFound) {
+		// Under enforcement the line carries NO target: neither the id nor the
+		// store's error, which routinely embeds the record path. An operator only
+		// needs the RATE of this line to see an outage, and withholding the target
+		// keeps a probing caller from correlating anything through the log.
+		if s.cfg.OwnershipEnforced {
+			s.cfg.Diagnostics.Log(ctx, port.LevelWarn, "session load failed; reported to callers as absent (target withheld under ownership enforcement)")
+		} else {
+			s.cfg.Diagnostics.Log(ctx, port.LevelWarn, "session load failed; reported to the caller as absent",
+				"session", string(id), "err", err.Error())
+		}
+	}
 	if err != nil || s.authorizeSession(ctx, sess) != nil {
 		return nil, fmt.Errorf("%w: %q", ErrNotFound, id)
 	}
@@ -2137,13 +2217,41 @@ func (s *Service) GetSession(ctx context.Context, id session.SessionID) (*sessio
 	return sess, nil
 }
 
+// WithAuthorizedSession serializes a caller-owned side effect with session run
+// entry. It performs an ownership-only preflight before taking caller-selected
+// coordination, then reloads and reauthorizes under runEntryMu immediately
+// before effect. The callback must not call another operation that locks the
+// same session id.
+func (s *Service) WithAuthorizedSession(ctx context.Context, id session.SessionID, effect func(*session.Session) error) (*session.Session, error) {
+	if _, err := s.GetSession(ctx, id); err != nil {
+		return nil, err
+	}
+	unlock := s.runEntryMu.lock(id)
+	defer unlock()
+	sess, err := s.GetSession(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := effect(sess); err != nil {
+		return nil, err
+	}
+	return sess, nil
+}
+
 // RenameSession applies an explicit operator title change to an owned main
 // session. Authorization, kind/state/liveness checks, and lease acquisition are
 // serialized under the same per-session mutex used by prompt starts.
 func (s *Service) RenameSession(ctx context.Context, id session.SessionID, title string) (*session.Session, error) {
+	absent, err := s.managementOwnershipPreflight(ctx, id, false)
+	if err != nil {
+		return nil, err
+	}
+	if absent {
+		return nil, fmt.Errorf("%w: %q", ErrNotFound, id)
+	}
 	unlock := s.runEntryMu.lock(id)
 	defer unlock()
-	sess, absent, err := s.managementTarget(ctx, id, false)
+	_, absent, err = s.managementTarget(ctx, id, false)
 	if err != nil {
 		return nil, err
 	}
@@ -2155,6 +2263,13 @@ func (s *Service) RenameSession(ctx context.Context, id session.SessionID, title
 		return nil, err
 	}
 	defer release()
+	sess, absent, err := s.managementTarget(ctx, id, false)
+	if err != nil {
+		return nil, err
+	}
+	if absent {
+		return nil, fmt.Errorf("%w: %q", ErrNotFound, id)
+	}
 	if err := sess.RenameTitle(title); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidArgument, err)
 	}
@@ -2168,9 +2283,13 @@ func (s *Service) RenameSession(ctx context.Context, id session.SessionID, title
 // sidecars. Absence and foreign ownership are both idempotent success, preventing
 // deletion from becoming an ownership oracle. Infrastructure failures remain loud.
 func (s *Service) DeleteSession(ctx context.Context, id session.SessionID) error {
+	absent, err := s.managementOwnershipPreflight(ctx, id, true)
+	if err != nil || absent {
+		return err
+	}
 	unlock := s.runEntryMu.lock(id)
 	defer unlock()
-	sess, absent, err := s.managementTarget(ctx, id, true)
+	_, absent, err = s.managementTarget(ctx, id, true)
 	if err != nil || absent {
 		return err
 	}
@@ -2183,6 +2302,10 @@ func (s *Service) DeleteSession(ctx context.Context, id session.SessionID) error
 		return err
 	}
 	defer release()
+	sess, absent, err := s.managementTarget(ctx, id, true)
+	if err != nil || absent {
+		return err
+	}
 	if err := prunable.Delete(ctx, sess.ID); err != nil {
 		if errors.Is(err, port.ErrSessionNotFound) {
 			return nil
@@ -2303,6 +2426,34 @@ func (s *Service) DeleteSessionForRetention(ctx context.Context, id session.Sess
 	}
 	s.CloseSession(id)
 	return nil
+}
+
+// managementOwnershipPreflight keeps foreign callers out of caller-selected
+// per-session coordination. It deliberately checks ownership only and returns no
+// aggregate: managementTarget must reload and reauthorize under runEntryMu before
+// any mutation. The ownership-disabled compatibility path retains its historical
+// single authoritative load.
+func (s *Service) managementOwnershipPreflight(ctx context.Context, id session.SessionID, concealAbsence bool) (bool, error) {
+	if !s.cfg.OwnershipEnforced {
+		return false, nil
+	}
+	sess, err := s.cfg.Store.Load(ctx, id)
+	if err != nil {
+		if errors.Is(err, port.ErrSessionNotFound) {
+			if concealAbsence {
+				return true, nil
+			}
+			return false, fmt.Errorf("%w: %q", ErrNotFound, id)
+		}
+		return false, fmt.Errorf("%w: load session: %v", ErrInternal, err)
+	}
+	if sess == nil || sess.ID != id || s.authorizeSession(ctx, sess) != nil {
+		if concealAbsence {
+			return true, nil
+		}
+		return false, fmt.Errorf("%w: %q", ErrNotFound, id)
+	}
+	return false, nil
 }
 
 // managementTarget performs the common management authorization and eligibility
@@ -2432,9 +2583,16 @@ func (s *Service) LoadSession(ctx context.Context, id session.SessionID) (*sessi
 // shared engine (zero overhead, no registry entry). The MaxSessionEngines cap is
 // enforced by the rehydrate path. Returns the new id.
 func (s *Service) ForkSession(ctx context.Context, srcID session.SessionID, title, effortOverride string) (session.SessionID, error) {
+	absent, err := s.managementOwnershipPreflight(ctx, srcID, false)
+	if err != nil {
+		return "", err
+	}
+	if absent {
+		return "", fmt.Errorf("%w: %q", ErrNotFound, srcID)
+	}
 	unlock := s.runEntryMu.lock(srcID)
 	defer unlock()
-	src, absent, err := s.managementTarget(ctx, srcID, false)
+	_, absent, err = s.managementTarget(ctx, srcID, false)
 	if err != nil {
 		return "", err
 	}
@@ -2446,6 +2604,13 @@ func (s *Service) ForkSession(ctx context.Context, srcID session.SessionID, titl
 		return "", err
 	}
 	defer release()
+	src, absent, err := s.managementTarget(ctx, srcID, false)
+	if err != nil {
+		return "", err
+	}
+	if absent {
+		return "", fmt.Errorf("%w: %q", ErrNotFound, srcID)
+	}
 	src, err = s.reopenLoadedSession(ctx, src)
 	if err != nil {
 		return "", err
@@ -2487,7 +2652,7 @@ func (s *Service) ForkSession(ctx context.Context, srcID session.SessionID, titl
 	// leaves a valid persisted session that self-heals at the next StartRunContent
 	// (needsRehydration re-runs rehydrateSession). Do NOT Store.Delete on failure —
 	// it would race a concurrent rehydrating StartRunContent on the same id.
-	if err := s.cfg.Store.Save(ctx, forked); err != nil {
+	if err := s.persistNewSession(ctx, forked); err != nil {
 		return "", fmt.Errorf("server: persist forked session: %w", err)
 	}
 	if s.sessionNeedsPerFactory(sel, nil, profile, forked.Workspace) {
@@ -2896,9 +3061,20 @@ func (s *Service) startRunContent(ctx context.Context, id session.SessionID, tex
 	if text == "" && len(parts) == 0 {
 		return nil, fmt.Errorf("%w: prompt text or parts is required", ErrInvalidArgument)
 	}
-	// Serialize the complete run-entry transaction, including the authoritative
-	// load, purpose authorization, and terminal-state recovery. Loading before this
-	// lock lets two same-id starts recover the same snapshot independently.
+	// With ownership enabled, prove ownership before entering caller-selected
+	// per-session coordination. This is only a preflight: the session may change
+	// before the lock is acquired, so the aggregate is deliberately discarded and
+	// loaded again under the lock. The compatibility path retains its historical
+	// single authoritative load.
+	if s.cfg.OwnershipEnforced {
+		if _, err := s.GetSession(ctx, id); err != nil {
+			return nil, err
+		}
+	}
+	// Serialize the authoritative run-entry transaction, including a fresh load,
+	// purpose authorization, and terminal-state recovery. When enabled, the
+	// preflight above keeps foreign callers out of this owner-correlated lock; this
+	// reload prevents the preflight from becoming a durable grant.
 	unlock := s.runEntryMu.lock(id)
 	defer unlock()
 	// Authorize the exact id before revealing whether its metadata or legacy prefix
@@ -4959,11 +5135,17 @@ func (s *Service) LeaseSweepDisabled() bool {
 // no-op result for a session that already moved on, e.g. a race with a
 // genuinely live re-entry or a peer's own settle).
 func (s *Service) SettleIfStale(ctx context.Context, id session.SessionID) (bool, error) {
+	if !staleReconcileAuthorized(ctx) {
+		return false, ErrManagementUnauthorized
+	}
 	sess, err := s.cfg.Store.Load(ctx, id)
 	if err != nil {
 		return false, fmt.Errorf("server: load session for stale settle: %w", err)
 	}
-	if sess.State != session.StateRunning {
+	if s.cfg.OwnershipEnforced && sess.Owner == nil {
+		return false, nil
+	}
+	if !staleMaintenanceSessionCandidate(sess) {
 		return false, nil
 	}
 	// ponytail: narrows, doesn't close, the TOCTOU window between the sweep's

@@ -299,6 +299,11 @@ type Supervisor struct {
 	// Parent-driven teams are child-derivation work and deliberately do not use it.
 	rootAuthority session.Authority
 	rootBound     bool
+	// directOwner attributes members of a DIRECTLY server-created team (the gRPC
+	// CreateTeam path), which runs with zero parent caps by design and therefore
+	// has no caps.owner to inherit. A team created from a parent run ignores it:
+	// caps.owner is authoritative there. Same split as rootAuthority.
+	directOwner *session.Principal
 
 	limits      session.Limits
 	mode        session.PermissionMode
@@ -522,6 +527,21 @@ func WithRootAuthority(authority session.Authority) SupervisorOption {
 		if authority.Provenance != "" {
 			s.rootAuthority = authority.Clone()
 			s.rootBound = true
+		}
+	}
+}
+
+// WithTeamOwner attributes members of a directly server-created team to the
+// verified caller that created it. It is ignored for a team created from a
+// parent run, where caps.owner carries the authoritative inheritance.
+//
+// It supplies the OWNER ONLY. The gRPC path deliberately runs with zero parent
+// caps — no ask surfacing and no child-ask adjudicator — and that posture is
+// preserved: this option must never become a general caps channel.
+func WithTeamOwner(owner *session.Principal) SupervisorOption {
+	return func(s *Supervisor) {
+		if owner != nil {
+			s.directOwner = owner.Clone()
 		}
 	}
 }
@@ -851,6 +871,8 @@ func (s *Supervisor) AddMember(ctx context.Context, spec MemberSpec) error {
 		s.team.RemoveMember(spec.Name)
 		return fmt.Errorf("agent: stamp team-member relationship: %w", err)
 	}
+	// The member is attributed to the PARENT session's owner (ADR 0204 decision 4),
+	// or carries delegated authority when the parent run is authority-bound.
 	if s.caps.parentSessionID != "" && s.caps.authorityBound {
 		if authorityErr := stampDelegatedLabels(sess, s.caps.owner, delegatedAuthority); authorityErr != nil {
 			if cleanup != nil {
@@ -860,9 +882,12 @@ func (s *Supervisor) AddMember(ctx context.Context, spec MemberSpec) error {
 			return fmt.Errorf("agent: stamp team-member authority: %w", authorityErr)
 		}
 	} else {
-		s.caps.inheritOwner(sess)
+		s.stampMemberOwner(sess)
 	}
 	if err := s.stampDirectTeamRoot(sess, cleanup, spec.Name); err != nil {
+		return err
+	}
+	if err := s.publishMemberSession(ctx, spec.Name, sess, cleanup); err != nil {
 		return err
 	}
 	_ = s.team.SetMemberSession(spec.Name, sess.ID)
@@ -1649,6 +1674,34 @@ func (s *Supervisor) driveOneTurn(ctx context.Context, m *memberRT, prompt strin
 		}
 	}
 	return text, stop, usage
+}
+
+// stampMemberOwner attributes a freshly-minted member session. A parent run's
+// caps.owner wins; a directly server-created team falls back to the owner
+// CreateTeam supplied. An ownerless deployment stamps nothing, exactly as before.
+func (s *Supervisor) stampMemberOwner(sess *session.Session) {
+	if s.caps.owner != nil {
+		s.caps.inheritOwner(sess)
+		return
+	}
+	if s.directOwner == nil {
+		return
+	}
+	// Write-once via the aggregate, and a fresh member has no owner yet, so the
+	// only error RestoreLabels can return here is unreachable — mirroring
+	// inheritOwner's own reasoning.
+	_ = sess.RestoreLabels(s.directOwner, session.Authority{})
+}
+
+func (s *Supervisor) publishMemberSession(ctx context.Context, name string, sess *session.Session, cleanup func() error) error {
+	if err := createSessionIfSupported(ctx, s.store, sess); err != nil {
+		if cleanup != nil {
+			_ = cleanup()
+		}
+		s.team.RemoveMember(name)
+		return fmt.Errorf("agent: create durable team-member session %q: %w", sess.ID, err)
+	}
+	return nil
 }
 
 // persistMember best-effort saves a member's session to the injected store so an
