@@ -138,6 +138,12 @@ type scheduleManager struct {
 	// ownershipEnforced mirrors ScheduleManagerConfig.OwnershipEnforced — see
 	// its doc. Gates physicalScheduleName's owner-prefixing.
 	ownershipEnforced bool
+	// workspaceForCreate applies the owning Service's workspace authority to
+	// schedule create/update requests, returning the effective root AND profile so
+	// a file-less deployment persists the profile it actually applied (a stored
+	// empty profile would later fail the fire-time authority check).
+	// Nil preserves standalone manager behavior.
+	workspaceForCreate func(string, SessionProfile) (string, SessionProfile, error)
 }
 
 // scheduleStoreProvider is the accessor the jsonlstore + redisstore expose:
@@ -246,6 +252,13 @@ func NewScheduleManager(cfg ScheduleManagerConfig) *scheduleManager {
 // before Start); the pointer is read lock-free on every selector validation.
 func (m *scheduleManager) setModelsPointer(p *atomic.Pointer[[]*mecatlv1.ModelInfo]) {
 	m.models = p
+}
+
+// setWorkspaceForCreate attaches the Service-owned workspace authority to the
+// manager after Service construction. A standalone manager remains
+// client-selectable by leaving this nil.
+func (m *scheduleManager) setWorkspaceForCreate(fn func(string, SessionProfile) (string, SessionProfile, error)) {
+	m.workspaceForCreate = fn
 }
 
 // scheduleStore returns the manager's ScheduleStore (the explicit override
@@ -374,6 +387,19 @@ func fireNotFoundErr(fireID string) error {
 func (m *scheduleManager) CreateSchedule(ctx context.Context, spec port.ScheduleSpec) (port.Schedule, error) {
 	if !m.requireCaller(ctx) {
 		return port.Schedule{}, fmt.Errorf("%w: unable to create schedule", ErrInvalidArgument)
+	}
+	if m.workspaceForCreate != nil {
+		// Validate the request and resolve the effective profile, but do NOT persist
+		// a resolved root. A server-assigned schedule stores the empty WIRE
+		// workspace; the fire assigns the deployment root when it mints its session
+		// (ADR 0237), exactly as a live create does. Persisting the resolved root
+		// would store a value the create gate rejects at fire time (a non-empty
+		// filesystem request), so the schedule could never fire.
+		_, profile, err := m.workspaceForCreate(spec.Workspace, SessionProfile(spec.Profile))
+		if err != nil {
+			return port.Schedule{}, err
+		}
+		spec.Profile = string(profile)
 	}
 	now := m.now()
 	cronNextFire, originOwner, err := m.validateScheduleSpec(ctx, spec, now)
@@ -522,6 +548,35 @@ func scheduleSingletonExplicit(_ port.ScheduleSpec) bool { return false }
 // ListModels advertises) and the cadence floor against the composition-
 // injected scheduler MinInterval — two deployment-level inputs the spec alone
 // cannot carry.
+// validateScheduleWorkspaceProfile enforces the profile-aware workspace rule,
+// mirroring the session create-seam (service.go createSession): a default-profile
+// schedule REQUIRES a workspace (a fire mints a filesystem session), a no-fs
+// schedule must NOT carry one. Enforcing it at create is fail-closed — otherwise
+// an empty-workspace default schedule is accepted at create but fails at FIRE time
+// ("workspace is required"), i.e. a schedule that can never fire.
+//
+// EXCEPTION under server-assigned authority (ADR 0237): the authority hook
+// (m.workspaceForCreate, installed only for a server-assigned deployment) already
+// rejected a non-empty client workspace, and the deployment assigns the root at
+// fire time. There an empty default-profile workspace is the correct WIRE value,
+// not a can-never-fire mistake, so the required-workspace rule is
+// client-selected-only.
+func (m *scheduleManager) validateScheduleWorkspaceProfile(spec port.ScheduleSpec) error {
+	switch SessionProfile(spec.Profile) {
+	case ProfileDefault:
+		if spec.Workspace == "" && m.workspaceForCreate == nil {
+			return fmt.Errorf("%w: a default-profile schedule requires a workspace (the fire mints a filesystem session)", ErrInvalidArgument)
+		}
+	case ProfileNoFS:
+		if spec.Workspace != "" {
+			return fmt.Errorf("%w: a %q schedule must not carry a workspace (a no-FS fire has no filesystem to root); got %q", ErrInvalidArgument, ProfileNoFS, spec.Workspace)
+		}
+	default:
+		return fmt.Errorf("%w: unknown schedule profile %q (supported: \"\" (default) and %q)", ErrInvalidArgument, spec.Profile, ProfileNoFS)
+	}
+	return nil
+}
+
 func (m *scheduleManager) validateScheduleSpec(ctx context.Context, spec port.ScheduleSpec, now time.Time) (time.Time, *session.Principal, error) {
 	if spec.Name == "" {
 		return time.Time{}, nil, fmt.Errorf("%w: schedule name is required", ErrInvalidArgument)
@@ -568,23 +623,8 @@ func (m *scheduleManager) validateScheduleSpec(ctx context.Context, spec port.Sc
 	if !spec.Mutating && mode != session.ModePlan {
 		return time.Time{}, nil, fmt.Errorf("%w: a non-mutating schedule must use plan mode (got %q)", ErrInvalidArgument, mode)
 	}
-	// Validate the workspace PROFILE-AWARE, mirroring the session create-seam
-	// (service.go createSession): a default-profile schedule REQUIRES a workspace
-	// (a fire mints a filesystem session), a no-fs schedule must NOT carry one.
-	// Enforcing it HERE is fail-closed — otherwise an empty-workspace default
-	// schedule is accepted at create but fails at FIRE time ("workspace is
-	// required"), i.e. a schedule that can never fire.
-	switch SessionProfile(spec.Profile) {
-	case ProfileDefault:
-		if spec.Workspace == "" {
-			return time.Time{}, nil, fmt.Errorf("%w: a default-profile schedule requires a workspace (the fire mints a filesystem session)", ErrInvalidArgument)
-		}
-	case ProfileNoFS:
-		if spec.Workspace != "" {
-			return time.Time{}, nil, fmt.Errorf("%w: a %q schedule must not carry a workspace (a no-FS fire has no filesystem to root); got %q", ErrInvalidArgument, ProfileNoFS, spec.Workspace)
-		}
-	default:
-		return time.Time{}, nil, fmt.Errorf("%w: unknown schedule profile %q (supported: \"\" (default) and %q)", ErrInvalidArgument, spec.Profile, ProfileNoFS)
+	if err := m.validateScheduleWorkspaceProfile(spec); err != nil {
+		return time.Time{}, nil, err
 	}
 	// Selector validation (ADR 0073, AC1.2c): a non-empty selector must name a
 	// provider+model pair the deployment actually serves — resolved against the
@@ -812,6 +852,19 @@ func (m *scheduleManager) ListSchedules(ctx context.Context) ([]port.Schedule, e
 func (m *scheduleManager) UpdateSchedule(ctx context.Context, spec port.ScheduleSpec) (port.Schedule, error) {
 	if !m.requireCaller(ctx) {
 		return port.Schedule{}, scheduleNotFoundErr(port.ErrScheduleNotFound, spec.Name)
+	}
+	if m.workspaceForCreate != nil {
+		// Validate the request and resolve the effective profile, but do NOT persist
+		// a resolved root. A server-assigned schedule stores the empty WIRE
+		// workspace; the fire assigns the deployment root when it mints its session
+		// (ADR 0237), exactly as a live create does. Persisting the resolved root
+		// would store a value the create gate rejects at fire time (a non-empty
+		// filesystem request), so the schedule could never fire.
+		_, profile, err := m.workspaceForCreate(spec.Workspace, SessionProfile(spec.Profile))
+		if err != nil {
+			return port.Schedule{}, err
+		}
+		spec.Profile = string(profile)
 	}
 	now := m.now()
 	// The computed cron next-fire is not needed here (Update preserves the

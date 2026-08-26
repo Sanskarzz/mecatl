@@ -70,6 +70,30 @@ trusted source, the same way you would point `mecated serve --skills-dir` at a
 trusted directory. Start `mecated serve` with the same `--store-dir`, and
 explicitly enable the imported skills directory.
 
+### Workspace authority
+
+`--workspace-authority` controls who may select the workspace for a filesystem
+session. The topology-derived default is `client-selected` only when both API
+listeners are loopback; any non-loopback, wildcard, or mixed listener defaults
+to `server-assigned`. Set `--workspace-authority=server-assigned` explicitly
+when a reverse proxy makes a loopback listener remotely reachable.
+
+In a server-assigned filesystem deployment, configure the one authoritative root
+with `--workspace` and have every client send an **empty** `workspace` field in
+its `CreateSession` request. The empty value means “use the server's configured
+root”; it never means “use my local cwd.” A non-empty client path is rejected as
+`InvalidArgument` before the service cleans it, touches the filesystem, evaluates
+trust, or creates an environment. The server also fails before opening listeners
+if server-assigned filesystem authority has no `--workspace`. This policy remains
+in force when a session is rehydrated or resumed, when a schedule fires, and for
+legacy adoption; stale or non-canonical stored roots fail closed.
+
+Loopback-only and embedded deployments retain local developer behavior: clients
+may select an absolute checkout or sibling worktree. This is not an
+authorization scheme for a remote multi-workspace service. Use one deployment
+root, or wait for a future opaque scoped-grant design. See [ADR
+0237](../adr/0237-listener-scoped-workspace-authority.md).
+
 ### Flags
 
 | Flag | Default | Meaning |
@@ -77,6 +101,7 @@ explicitly enable the imported skills directory.
 | `--grpc-addr` | `127.0.0.1:8080` | gRPC listen address (loopback; **unauthenticated unless** the security & transport flags below are set) |
 | `--http-addr` | `127.0.0.1:8081` | HTTP/SSE listen address (loopback; **unauthenticated unless** the security & transport flags below are set) |
 | `--workspace` | current working dir | default session workspace root |
+| `--workspace-authority` | topology-derived | `client-selected` or `server-assigned`. Loopback-only gRPC + HTTP/SSE keeps local client workspace/worktree selection; any public, wildcard, or mixed listener assigns `--workspace` server-side and requires filesystem requests to leave `workspace` empty. Set `server-assigned` explicitly behind a reverse proxy. A network filesystem deployment without `--workspace` fails before listeners start. |
 | `--model` | `""` | model identifier sent to the provider. Empty → the server-configured default (`--default-model`, when set), else the selected provider's built-in default: `gpt-5` (OpenAI), `openai/gpt-5` (OpenRouter), `claude-sonnet-4-6` (Anthropic). |
 | `--default-provider` | `""` | server-configured **deployment-wide default provider** id shared by every client (also on `mecatui`'s embedded server); overrides the built-in provider preference for zero-selector sessions, while a client-side selector still wins. **Fail-fast:** an unknown or unavailable provider refuses startup. |
 | `--default-model` | `""` | server-configured **deployment-wide default model** for the default provider (also on `mecatui`'s embedded server); sits below client-side defaults and above the per-provider built-in. **Fail-fast:** a model not catalogued for the default provider refuses startup (stricter than per-session selectors, which allow passthrough). |

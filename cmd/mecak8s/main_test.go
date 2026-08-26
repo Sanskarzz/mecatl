@@ -13,7 +13,10 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
+	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/internal/adapter/server"
@@ -59,6 +62,9 @@ func TestParseFlagsK8sDefaults(t *testing.T) {
 	}
 	if def.grpcAddr != defaultGRPCAddr {
 		t.Errorf("grpcAddr default = %q, want %q (a pod binds 0.0.0.0)", def.grpcAddr, defaultGRPCAddr)
+	}
+	if def.workspace != "" {
+		t.Errorf("workspace default = %q, want empty (file-less by default; a container cwd must never become the agent workspace)", def.workspace)
 	}
 	if def.httpAddr != defaultHTTPAddr {
 		t.Errorf("httpAddr default = %q, want %q", def.httpAddr, defaultHTTPAddr)
@@ -149,6 +155,172 @@ func TestAppConfigHeadlessDefault(t *testing.T) {
 	ac := appConfig(cfg, port.NopDiagnostics{}, observability{})
 	if ac.Interactive {
 		t.Error("default mecak8s must be Interactive=false (headless=true default) so the auto-deny/reviewer path engages")
+	}
+}
+
+func TestListenerScopedWorkspaceAuthority_Scenario4_Mecak8sDefaultsToNoFS(t *testing.T) {
+	cfg, err := parseFlags([]string{"--mock", "--posture", "strict", "--no-soul", "--no-user-model", "--permissions-conventional=false", "--agents-conventional=false"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	// No --workspace: the default is a file-less deployment. The flag no longer
+	// defaults to the process cwd, so a container root can never become the agent
+	// workspace by omission (the reason this used to force cfg.workspace = "/").
+	if cfg.workspace != "" {
+		t.Fatalf("default workspace = %q, want empty (file-less by default)", cfg.workspace)
+	}
+	// Disable the k8s session lease: this offline test has no kubeconfig/in-cluster
+	// config, and app.Build builds a lease client when the namespace is set.
+	cfg.sessionLeaseK8sNamespace = ""
+	built, err := app.Build(context.Background(), appConfig(cfg, port.NopDiagnostics{}, observability{}))
+	if err != nil {
+		t.Fatalf("app.Build: %v", err)
+	}
+	defer built.Close()
+
+	harness := server.NewHarnessServer(built.Service)
+	resp, err := harness.CreateSession(context.Background(), &mecatlv1.CreateSessionRequest{})
+	if err != nil {
+		t.Fatalf("CreateSession(empty wire profile and workspace): %v", err)
+	}
+	sess, err := built.Service.GetSession(context.Background(), session.SessionID(resp.GetSessionId()))
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if sess.Profile != string(server.ProfileNoFS) {
+		t.Errorf("session profile = %q, want %q", sess.Profile, server.ProfileNoFS)
+	}
+	if sess.Workspace != "" {
+		t.Errorf("session workspace = %q, want empty for no-FS", sess.Workspace)
+	}
+}
+
+func TestListenerScopedWorkspaceAuthority_Scenario4_Mecak8sRejectsFilesystemProfileAndWorkspace(t *testing.T) {
+	cfg, err := parseFlags([]string{"--mock", "--posture", "strict", "--no-soul", "--no-user-model", "--permissions-conventional=false", "--agents-conventional=false"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	// Disable the k8s session lease (no kubeconfig in this offline test).
+	cfg.sessionLeaseK8sNamespace = ""
+	built, err := app.Build(context.Background(), appConfig(cfg, port.NopDiagnostics{}, observability{}))
+	if err != nil {
+		t.Fatalf("app.Build: %v", err)
+	}
+	defer built.Close()
+
+	harness := server.NewHarnessServer(built.Service)
+	if _, err := harness.CreateSession(context.Background(), &mecatlv1.CreateSessionRequest{Profile: string(server.ProfileNoFS)}); err != nil {
+		t.Fatalf("CreateSession(no-fs, empty workspace): %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		req  *mecatlv1.CreateSessionRequest
+	}{
+		{name: "empty wire profile with workspace", req: &mecatlv1.CreateSessionRequest{Workspace: "/caller/workspace"}},
+		{name: "no-fs with workspace", req: &mecatlv1.CreateSessionRequest{Profile: string(server.ProfileNoFS), Workspace: "/caller/workspace"}},
+		{name: "unsupported filesystem profile", req: &mecatlv1.CreateSessionRequest{Profile: "filesystem"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := harness.CreateSession(context.Background(), tc.req)
+			if got := status.Code(err); got != codes.InvalidArgument {
+				t.Fatalf("CreateSession(%+v) status = %s, want %s (error: %v)", tc.req, got, codes.InvalidArgument, err)
+			}
+		})
+	}
+}
+
+func TestListenerScopedWorkspaceAuthority_Scenario4_Mecak8sMountedWorkspaceIsServerAssigned(t *testing.T) {
+	// A configured --workspace (a mounted PVC path) is an operator-enabled
+	// filesystem deployment: server-assigned authority rooted at the mount, so a
+	// default-profile session mints on that root and a client cannot select
+	// another. A real temp dir stands in for the mount.
+	mount := t.TempDir()
+	cfg, err := parseFlags([]string{"--workspace", mount, "--mock", "--posture", "strict", "--no-soul", "--no-user-model", "--permissions-conventional=false", "--agents-conventional=false"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	// Disable the k8s session lease (no kubeconfig in this offline test).
+	cfg.sessionLeaseK8sNamespace = ""
+	ac := appConfig(cfg, port.NopDiagnostics{}, observability{})
+	if ac.WorkspaceAuthority != server.WorkspaceAuthorityServerAssigned {
+		t.Fatalf("WorkspaceAuthority = %v, want ServerAssigned for a configured mount", ac.WorkspaceAuthority)
+	}
+	if ac.AuthoritativeWorkspace != mount || ac.Workspace != mount {
+		t.Fatalf("authoritative/workspace = %q/%q, want the mount %q", ac.AuthoritativeWorkspace, ac.Workspace, mount)
+	}
+
+	built, err := app.Build(context.Background(), ac)
+	if err != nil {
+		t.Fatalf("app.Build: %v", err)
+	}
+	defer built.Close()
+	harness := server.NewHarnessServer(built.Service)
+
+	// An omitted (empty) workspace requests the operator root; the session mints
+	// on the mount as a default-profile (filesystem) session, not no-FS.
+	resp, err := harness.CreateSession(context.Background(), &mecatlv1.CreateSessionRequest{})
+	if err != nil {
+		t.Fatalf("CreateSession(empty): %v", err)
+	}
+	sess, err := built.Service.GetSession(context.Background(), session.SessionID(resp.GetSessionId()))
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if sess.Profile != "" {
+		t.Errorf("session profile = %q, want default (filesystem) on a mounted deployment", sess.Profile)
+	}
+	if sess.Workspace != mount {
+		t.Errorf("session workspace = %q, want the deployment mount %q", sess.Workspace, mount)
+	}
+
+	// A client cannot select a different root: server-assigned rejects a non-empty
+	// client workspace before any filesystem access.
+	if _, err := harness.CreateSession(context.Background(), &mecatlv1.CreateSessionRequest{Workspace: "/client/root"}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("CreateSession(client workspace) status = %s, want InvalidArgument", status.Code(err))
+	}
+}
+
+func TestParseFlagsMecak8sRejectsRelativeWorkspace(t *testing.T) {
+	if _, err := parseFlags([]string{"--workspace", "relative/mount"}); err == nil {
+		t.Fatal("parseFlags(--workspace relative/mount) = nil, want an absolute-path error")
+	}
+}
+
+func TestListenerScopedWorkspaceAuthority_Scenario4_Mecak8sFixtureRunsNoFS(t *testing.T) {
+	cfg, err := parseFlags([]string{"--mock", "--posture", "strict", "--no-soul", "--no-user-model", "--permissions-conventional=false", "--agents-conventional=false"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	// No --workspace: file-less by default (the flag no longer defaults to cwd, so
+	// the container root cannot become the agent workspace by omission).
+	cfg.sessionLeaseK8sNamespace = ""
+	appCfg := appConfig(cfg, port.NopDiagnostics{}, observability{})
+	if appCfg.Workspace != "" {
+		t.Fatalf("mecak8s app workspace = %q, want empty: the container root must not be an agent workspace", appCfg.Workspace)
+	}
+	built, err := app.Build(context.Background(), appCfg)
+	if err != nil {
+		t.Fatalf("app.Build: %v", err)
+	}
+	defer built.Close()
+
+	sess, err := built.Service.CreateSession(context.Background(), "", session.ModeDefault, session.Limits{})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	run, err := built.Service.StartRun(context.Background(), sess.ID, "hello from mecak8s")
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	var stop session.StopReason
+	for ev := range run.Events() {
+		if ev.Type == session.EvResult && ev.Result != nil {
+			stop = ev.Result.Stop
+		}
+	}
+	built.Service.FinishRun(sess.ID, run)
+	if stop != session.StopEndTurn {
+		t.Errorf("run stop = %q, want %q", stop, session.StopEndTurn)
 	}
 }
 

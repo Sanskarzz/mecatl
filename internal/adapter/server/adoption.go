@@ -132,6 +132,28 @@ func validateAdoptionBindingShape(bindings AdoptionBindings) error {
 	return nil
 }
 
+// adoptionBindingsForAuthority replaces caller-provided execution bindings with
+// the deployment's environment in server-assigned mode. A non-empty filesystem
+// workspace is rejected by workspaceForCreate before any resolver or factory is
+// consulted; local/embedded adoption remains unchanged.
+func (s *Service) adoptionBindingsForAuthority(bindings AdoptionBindings) (AdoptionBindings, error) {
+	if s.cfg.WorkspaceAuthority.clientSelectsRoot() {
+		return bindings, nil
+	}
+	workspace, profile, err := s.workspaceForCreate(bindings.Workspace, bindings.Profile)
+	if err != nil {
+		return AdoptionBindings{}, err
+	}
+	bindings.Workspace = workspace
+	bindings.Profile = profile
+	if bindings.Profile == ProfileNoFS {
+		bindings.EnvironmentRef = session.EnvironmentRef{Kind: session.EnvKindNoFS}
+	} else {
+		bindings.EnvironmentRef = session.EnvironmentRef{Kind: session.EnvKindLocal, ID: workspace}
+	}
+	return bindings, nil
+}
+
 func (s *Service) resolveAdoptionEnvironment(ctx context.Context, bindings AdoptionBindings) error {
 	ref := bindings.EnvironmentRef
 	switch ref.Kind {
@@ -159,6 +181,10 @@ func (s *Service) resolveAdoptionBindings(ctx context.Context, bindings Adoption
 	if s.cfg.SessionEngine == nil {
 		return SessionEngineResult{}, fmt.Errorf("%w: adoption requires a session-engine factory", ErrInvalidArgument)
 	}
+	bindings, err := s.adoptionBindingsForAuthority(bindings)
+	if err != nil {
+		return SessionEngineResult{}, err
+	}
 	if err := validateAdoptionBindingShape(bindings); err != nil {
 		return SessionEngineResult{}, err
 	}
@@ -180,6 +206,17 @@ func (s *Service) resolveAdoptionBindings(ctx context.Context, bindings Adoption
 // the short trial lease is released before return and every condition is checked
 // again by AdoptSession under the mutation lease.
 func (s *Service) PreflightSessionAdoption(ctx context.Context, id session.SessionID, bindings AdoptionBindings) (AdoptionPreflight, error) {
+	// Reject an authority-invalid binding up front rather than swallowing the error.
+	// resolveAdoptionBindings below re-normalizes and would still return
+	// binding_unresolved, so the OUTCOME was already correct — but swallowing meant
+	// the ownership, source, and mutation-lease steps all ran for a binding doomed
+	// to fail authority. Rejecting here skips that (notably the lease acquire/release)
+	// and matches AdoptSession, which normalizes before any of it.
+	normalized, err := s.adoptionBindingsForAuthority(bindings)
+	if err != nil {
+		return AdoptionPreflight{Reason: AdoptionReasonBindingUnresolved, Bindings: bindings}, nil
+	}
+	bindings = normalized
 	result := AdoptionPreflight{Bindings: bindings}
 	reason, err := s.adoptionOwnershipPreflight(ctx, id)
 	if err != nil {
@@ -334,6 +371,10 @@ func (s *Service) AdoptSession(ctx context.Context, sourceID session.SessionID, 
 	}
 	if reason != "" {
 		return nil, fmt.Errorf("%w: adoption ineligible: %s", ErrFailedPrecondition, reason)
+	}
+	bindings, err = s.adoptionBindingsForAuthority(bindings)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrFailedPrecondition, AdoptionReasonBindingUnresolved)
 	}
 	unlockSource := s.runEntryMu.lock(sourceID)
 	defer unlockSource()
