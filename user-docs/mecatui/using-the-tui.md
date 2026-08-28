@@ -23,7 +23,7 @@ When a tool needs permission, a modal shows what it wants to do. Read the reques
 
 ## Change the conversation settings
 
-- `/models` starts a new session on the selected model while carrying the conversation forward. A cross-provider change drops provider-private reasoning state, not the conversation text.
+- `/models` starts a new session on the selected model and keeps the conversation. **Switching models is expensive as it clears caches.**
 - `/effort` forks the conversation onto the chosen reasoning-effort tier. Unsupported tiers are reported rather than silently applied.
 - `/clear` starts over; `/session` shows the active session details.
 

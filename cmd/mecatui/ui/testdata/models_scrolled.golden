@@ -6,6 +6,8 @@
 ┃  current: gpt-5 (server default)                                                                    ┃
 ┃  > filter models…                                                                                   ┃
 ┃                                                                                                     ┃
+┃  Switching models is expensive as it clears caches.                                                 ┃
+┃                                                                                                     ┃
 ┃       prov · model-027                                                                              ┃
 ┃       prov · model-028                                                                              ┃
 ┃  ╭─────────────────────────╮                                                                        ┃
