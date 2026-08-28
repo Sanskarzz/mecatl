@@ -28,7 +28,26 @@ The covered surface is the eight core packages (`session`, `governance`, `learni
   `RetryDisposition` and `StreamProgress` fields. Struct field additions are
   breaking under `COMPATIBILITY.md` (pre-v1 a minor bump).
 
+### Removed
+
+- **Agent untrusted-content fencing APIs** (issue #380,
+  [ADR 0241](../docs/adr/0241-governance-fence-ownership.md)) — removed
+  `agent.UntrustedFence`, `agent.WriteUntrustedBlock`, `agent.FenceUntrusted`, and
+  `agent.NeutraliseFraming` as part of their clean relocation to governance. This
+  is a breaking API change (pre-v1 a minor bump); callers must use the governance
+  equivalents listed below. `agent.StripLoneCodeFence` remains in agent.
+
 ### Added
+
+- **Canonical governance untrusted-content fencing** (issue #380,
+  [ADR 0241](../docs/adr/0241-governance-fence-ownership.md)) —
+  `governance.UntrustedFence`, `governance.WriteUntrustedBlock`,
+  `governance.FenceUntrusted`, `governance.NeutraliseFraming`, and
+  `governance.NeutraliseDelegationResult` are the five canonical public APIs for
+  byte-identical framing and neutralisation of untrusted model-visible content.
+  `NeutraliseDelegationResult` is exported so delegation result renderers can use
+  the canonical neutralisation policy without duplicating the marker logic. This
+  addition is paired with the breaking removal of the former agent APIs above.
 
 - **Run-owned attempt correlation context** (issue #409) —
   `port.WithRunAttemptContext` installs one independent session/run/turn carrier
