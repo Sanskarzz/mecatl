@@ -378,7 +378,8 @@ func (c *fakeConv) CreateSessionInWorkspace(_ context.Context, workspace string,
 	if c.mode == "" {
 		c.mode = client.ModeDefaultString
 	}
-	return id, c.caps, resolved, nil
+	caps := c.caps
+	return id, caps, resolved, nil
 }
 
 // CreateSessionWithCarryover implements the ui SessionCreator's carryover seam
