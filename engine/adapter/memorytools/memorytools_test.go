@@ -3,6 +3,7 @@ package memorytools_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -13,6 +14,15 @@ import (
 )
 
 type legacyStore struct{ entries map[string]tool.MemoryEntry }
+
+type failingRecallStore struct {
+	*legacyStore
+	err error
+}
+
+func (s failingRecallStore) Recall(context.Context, string) (tool.MemoryEntry, bool, error) {
+	return tool.MemoryEntry{}, false, s.err
+}
 
 type inspectCountingStore struct {
 	*memmemory.Store
@@ -276,5 +286,116 @@ func TestUserScopeNamesAndPrefix(t *testing.T) {
 	}
 	if _, found, _ := store.Recall(context.Background(), "user/editor"); !found {
 		t.Fatal("user prefix not applied")
+	}
+}
+
+func TestMutationScopeDescriptionsAndExpectedVersionSchemas(t *testing.T) {
+	store := memmemory.New()
+	projectTools := memorytools.ProjectTools(store)
+	userTools := memorytools.UserTools(store)
+	for _, family := range [][]tool.Tool{projectTools, userTools} {
+		for _, candidate := range family {
+			if !json.Valid(candidate.Spec().Schema) {
+				t.Errorf("%s schema is invalid JSON: %s", candidate.Spec().Name, candidate.Spec().Schema)
+			}
+		}
+	}
+
+	for _, test := range []struct {
+		name, projectPrefix, userPrefix string
+	}{
+		{"Forget", "Forget a project-scoped memory", "Forget a user-scoped memory"},
+		{"Undo", "Undo the latest project-scoped memory", "Undo the latest user-scoped memory"},
+	} {
+		project := named(t, projectTools, test.name+"Memory")
+		user := named(t, userTools, test.name+"UserMemory")
+		if !strings.HasPrefix(project.Spec().Description, test.projectPrefix) {
+			t.Errorf("%s project description = %q, want prefix %q", test.name, project.Spec().Description, test.projectPrefix)
+		}
+		if !strings.HasPrefix(user.Spec().Description, test.userPrefix) {
+			t.Errorf("%s user description = %q, want prefix %q", test.name, user.Spec().Description, test.userPrefix)
+		}
+		for _, candidate := range []tool.Tool{project, user} {
+			if !strings.Contains(candidate.Spec().Description, "exact Recall result, Inspect result, or mutation receipt") {
+				t.Errorf("%s description lacks current-token guidance: %q", candidate.Spec().Name, candidate.Spec().Description)
+			}
+		}
+	}
+
+	for _, test := range []struct {
+		candidate tool.Tool
+		inspect   string
+	}{
+		{named(t, projectTools, "ForgetMemory"), "InspectMemory"},
+		{named(t, userTools, "ForgetUserMemory"), "InspectUserMemory"},
+		{named(t, projectTools, "UndoMemory"), "InspectMemory"},
+		{named(t, userTools, "UndoUserMemory"), "InspectUserMemory"},
+	} {
+		if !strings.Contains(string(test.candidate.Spec().Schema), test.inspect) {
+			t.Errorf("%s schema lacks matching inspector %q: %s", test.candidate.Spec().Name, test.inspect, test.candidate.Spec().Schema)
+		}
+	}
+}
+
+func TestStoreFailurePreservesUnderlyingError(t *testing.T) {
+	store := failingRecallStore{legacyStore: &legacyStore{}, err: errors.New("remote memory RPC unavailable")}
+	result := execute(t, named(t, memorytools.ProjectTools(store), "Recall"), map[string]any{"key": "profile/editor"})
+	if !result.IsError || !strings.Contains(result.Content, "remote memory RPC unavailable") {
+		t.Fatalf("store failure = %#v", result)
+	}
+}
+
+func TestStaleVersionConflictMessages(t *testing.T) {
+	store := memmemory.New()
+	tools := memorytools.ProjectTools(store)
+	remember := named(t, tools, "Remember")
+	forget := named(t, tools, "ForgetMemory")
+	// Remember a record
+	execute(t, remember, map[string]any{"key": "test/conflict", "value": "v1"})
+	// Stale version conflict (Actual != "")
+	stale := execute(t, forget, map[string]any{"key": "test/conflict", "expected_version": "wrong-opaque"})
+	if !stale.IsError {
+		t.Fatal("expected error for stale version")
+	}
+	content := stale.Content
+	assertContains := []string{"stale version", "project", "expected_version=", "actual=", "InspectMemory", "never guess"}
+	for _, want := range assertContains {
+		if !strings.Contains(content, want) {
+			t.Errorf("stale conflict message missing %q: %s", want, content)
+		}
+	}
+
+	// Missing-record conflict (Actual == "") using a non-existent key with some expected_version
+	missing := execute(t, forget, map[string]any{"key": "test/nonexistent", "expected_version": "some-token"})
+	if !missing.IsError {
+		t.Fatal("expected error for missing record")
+	}
+	missingContent := missing.Content
+	if !strings.Contains(missingContent, "no current record exists") || !strings.Contains(missingContent, "re-inspect") || !strings.Contains(missingContent, "InspectMemory") {
+		t.Errorf("missing-record conflict message incorrect: %s", missingContent)
+	}
+
+	// User/user-model scope stale version conflict.
+	userStore := memmemory.New()
+	userRemember := named(t, memorytools.UserTools(userStore), "RememberUser")
+	userForget := named(t, memorytools.UserTools(userStore), "ForgetUserMemory")
+	execute(t, userRemember, map[string]any{"key": "editor", "value": "v1"})
+	userStale := execute(t, userForget, map[string]any{"key": "user/editor", "expected_version": "bad"})
+	if !userStale.IsError {
+		t.Fatal("expected user stale error")
+	}
+	userStaleMsg := userStale.Content
+	if !strings.Contains(userStaleMsg, "user/user-model") || !strings.Contains(userStaleMsg, "InspectUserMemory") {
+		t.Errorf("user stale message missing scope/tool refs: %s", userStaleMsg)
+	}
+
+	// User/user-model missing-record conflict.
+	userMissing := execute(t, userForget, map[string]any{"key": "user/nonexistent", "expected_version": "token"})
+	if !userMissing.IsError {
+		t.Fatal("expected user missing error")
+	}
+	userMissingMsg := userMissing.Content
+	if !strings.Contains(userMissingMsg, "no current record exists") || !strings.Contains(userMissingMsg, "user/user-model") {
+		t.Errorf("user missing message incorrect: %s", userMissingMsg)
 	}
 }
