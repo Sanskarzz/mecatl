@@ -1,0 +1,219 @@
+version: '3'
+
+# Disposable, operator-run mecak8s Kind baseline. It intentionally owns only
+# Kind, the local chart/image, and in-chart local Redis.
+vars:
+  CLUSTER: mecatl-dev
+  CONTEXT: kind-mecatl-dev
+  NAMESPACE: mecatl
+  RELEASE: mecak8s
+  STATE: .scratch/kind/mecatl-dev
+  KUBECONFIG: deploy/mecak8s-kind/kconfig.yaml
+  SETUP_LOCK: .scratch/kind/mecatl-dev.setup-lock
+  IMAGE: ko.local/mecak8s:dev
+  PROVIDER_SECRET: mecak8s-openrouter
+
+tasks:
+  kind-setup:
+    desc: Recreate the local mecak8s Kind baseline with local Redis
+    cmds:
+      - task: reset-state
+      - task: cluster-create
+      - task: namespace-apply
+      - task: image-build-load
+      - task: chart-apply
+
+  kind-keycloak-apply:
+    desc: Idempotently apply the optional Keycloak, certificate, and OIDC/TLS layer
+    cmds:
+      - task: cert-manager-install
+      - task: certificate-apply
+      - task: keycloak-apply
+      - task: chart-keycloak-apply
+
+  kind-keycloak-setup:
+    desc: Recreate the Kind baseline then apply its optional Keycloak identity layer
+    cmds:
+      - task: kind-setup
+      - task: kind-keycloak-apply
+
+  kind-status:
+    desc: Show the local mecak8s Kind baseline
+    cmds:
+      - task: cluster-ready
+      - kubectl --kubeconfig={{.KUBECONFIG}} --context={{.CONTEXT}} get pods,services,statefulsets -n {{.NAMESPACE}}
+      - helm status {{.RELEASE}} --namespace={{.NAMESPACE}} --kubeconfig={{.KUBECONFIG}} --kube-context={{.CONTEXT}}
+
+  kind-port-forward:
+    desc: Forward mecak8s gRPC and HTTP to loopback only (Ctrl-C to stop)
+    cmds:
+      - task: cluster-ready
+      - kubectl --kubeconfig={{.KUBECONFIG}} --context={{.CONTEXT}} --namespace={{.NAMESPACE}} port-forward --address=127.0.0.1 svc/{{.RELEASE}}-mecak8s 18080:8080 18081:8081
+
+  kind-keycloak-port-forward:
+    desc: Forward Keycloak HTTPS to loopback only (Ctrl-C to stop)
+    cmds:
+      - task: cluster-ready
+      - kubectl --kubeconfig={{.KUBECONFIG}} --context={{.CONTEXT}} --namespace={{.NAMESPACE}} port-forward --address=127.0.0.1 svc/keycloak 8443:8443
+
+  kind-hosts-show:
+    desc: Show the temporary loopback alias required for the Keycloak issuer
+    cmds:
+      - cmd: printf '%s\n' '127.0.0.1 keycloak.mecatl.svc.cluster.local'
+
+  kind-hosts-add:
+    desc: Add the temporary Keycloak issuer alias to /etc/hosts (loopback only)
+    cmds:
+      - cmd: |
+          set -eu
+          entry='127.0.0.1 keycloak.mecatl.svc.cluster.local'
+          sudo sh -c 'grep -Fqx "$1" /etc/hosts || printf "%s\\n" "$1" >> /etc/hosts' sh "$entry"
+          echo 'Added (or already present):'
+          task mecak8s:kind-hosts-show
+
+  kind-hosts-remove:
+    desc: Remove only the temporary Keycloak issuer alias from /etc/hosts
+    cmds:
+      - cmd: |
+          set -eu
+          sudo sed -i.bak -e '\|^127\.0\.0\.1 keycloak\.mecatl\.svc\.cluster\.local$|d' /etc/hosts
+          echo 'Removed exact temporary entry (backup: /etc/hosts.bak).'
+
+  kind-destroy:
+    desc: Delete the named Kind baseline and its local state
+    cmds:
+      - kind delete cluster --name={{.CLUSTER}}
+      - rm -rf {{.STATE}}
+      - rm -f {{.KUBECONFIG}} {{.SETUP_LOCK}}
+
+  reset-state:
+    internal: true
+    preconditions:
+      - sh: command -v kind >/dev/null 2>&1
+        msg: kind is required
+    cmds:
+      - cmd: |
+          set -eu
+          kind delete cluster --name={{.CLUSTER}} 2>/dev/null || true
+          rm -rf {{.STATE}}
+          rm -f {{.KUBECONFIG}} {{.SETUP_LOCK}}
+          mkdir -p .scratch/kind deploy/mecak8s-kind
+          : > {{.SETUP_LOCK}}
+
+  cluster-ready:
+    internal: true
+    preconditions:
+      - sh: command -v kind >/dev/null 2>&1
+        msg: kind is required
+      - sh: command -v kubectl >/dev/null 2>&1
+        msg: kubectl is required
+    cmds:
+      - cmd: |
+          set -eu
+          kind get clusters 2>/dev/null | grep -Fxq '{{.CLUSTER}}' || { echo "cluster {{.CLUSTER}} not found"; exit 1; }
+          [ -f {{.KUBECONFIG}} ] || { echo "kubeconfig {{.KUBECONFIG}} not found"; exit 1; }
+          [ "$(kubectl --kubeconfig={{.KUBECONFIG}} config current-context)" = '{{.CONTEXT}}' ] || { echo "kubeconfig context mismatch"; exit 1; }
+
+  cluster-create:
+    internal: true
+    preconditions:
+      - sh: command -v kubectl >/dev/null 2>&1
+        msg: kubectl is required
+    cmds:
+      - cmd: |
+          set -eu
+          trap 'status=$?; deploy/mecak8s-kind/cleanup-on-failure.sh "$status"' EXIT
+          mkdir -p {{.STATE}}
+          kind create cluster --name={{.CLUSTER}} --config=deploy/mecak8s-kind/kind-config.yaml
+          kind get kubeconfig --name={{.CLUSTER}} > {{.KUBECONFIG}}
+
+  namespace-apply:
+    internal: true
+    preconditions:
+      - sh: command -v kubectl >/dev/null 2>&1
+        msg: kubectl is required
+    cmds:
+      - task: cluster-ready
+      - kubectl --kubeconfig={{.KUBECONFIG}} --context={{.CONTEXT}} create namespace {{.NAMESPACE}} --dry-run=client -o yaml | kubectl --kubeconfig={{.KUBECONFIG}} --context={{.CONTEXT}} apply -f -
+      - kubectl --kubeconfig={{.KUBECONFIG}} --context={{.CONTEXT}} label namespace {{.NAMESPACE}} pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted --overwrite
+
+  image-build-load:
+    internal: true
+    preconditions:
+      - sh: command -v ko >/dev/null 2>&1
+        msg: ko is required
+    cmds:
+      - task: cluster-ready
+      - cmd: |
+          set -eu
+          trap 'status=$?; deploy/mecak8s-kind/cleanup-on-failure.sh "$status"' EXIT
+          runtime=docker
+          [ "${KIND_EXPERIMENTAL_PROVIDER:-}" != podman ] || runtime=podman
+          command -v "$runtime" >/dev/null 2>&1 || { echo "$runtime is required"; exit 1; }
+          KO_DOCKER_REPO=ko.local/mecak8s ko build --local --bare --tags=dev ./cmd/mecak8s >/dev/null
+          archive={{.STATE}}/mecak8s.tar
+          "$runtime" save {{.IMAGE}} -o "$archive"
+          kind load image-archive "$archive" --name={{.CLUSTER}}
+          rm -f "$archive"
+
+  cert-manager-install:
+    internal: true
+    preconditions:
+      - sh: command -v helm >/dev/null 2>&1
+        msg: helm is required
+    cmds:
+      - task: cluster-ready
+      - helm upgrade --install cert-manager oci://quay.io/jetstack/charts/cert-manager --version=v1.17.2 --namespace=cert-manager --create-namespace --set crds.enabled=true --kubeconfig={{.KUBECONFIG}} --kube-context={{.CONTEXT}} --wait --timeout=4m
+
+  certificate-apply:
+    internal: true
+    preconditions:
+      - sh: command -v kubectl >/dev/null 2>&1
+        msg: kubectl is required
+    cmds:
+      - task: cluster-ready
+      - kubectl --kubeconfig={{.KUBECONFIG}} --context={{.CONTEXT}} --namespace={{.NAMESPACE}} apply -f deploy/mecak8s-kind/fixture-tls.yaml
+      - kubectl --kubeconfig={{.KUBECONFIG}} --context={{.CONTEXT}} --namespace={{.NAMESPACE}} wait --for=condition=Ready certificate/fixture-ca --timeout=120s
+      - kubectl --kubeconfig={{.KUBECONFIG}} --context={{.CONTEXT}} --namespace={{.NAMESPACE}} wait --for=condition=Ready certificate/mecak8s-tls --timeout=120s
+      - kubectl --kubeconfig={{.KUBECONFIG}} --context={{.CONTEXT}} --namespace={{.NAMESPACE}} wait --for=condition=Ready certificate/keycloak-tls --timeout=120s
+
+  keycloak-apply:
+    internal: true
+    preconditions:
+      - sh: command -v kubectl >/dev/null 2>&1
+        msg: kubectl is required
+    cmds:
+      - task: cluster-ready
+      - kubectl --kubeconfig={{.KUBECONFIG}} --context={{.CONTEXT}} --namespace={{.NAMESPACE}} apply -f deploy/mecak8s-kind/keycloak.yaml
+      - kubectl --kubeconfig={{.KUBECONFIG}} --context={{.CONTEXT}} rollout status deployment/keycloak -n {{.NAMESPACE}} --timeout=240s
+
+  chart-keycloak-apply:
+    internal: true
+    preconditions:
+      - sh: command -v helm >/dev/null 2>&1
+        msg: helm is required
+    cmds:
+      - task: cluster-ready
+      - helm upgrade --install {{.RELEASE}} deploy/helm/mecak8s --namespace={{.NAMESPACE}} --kubeconfig={{.KUBECONFIG}} --kube-context={{.CONTEXT}} --values=deploy/helm/mecak8s/values-kind.yaml --values=deploy/helm/mecak8s/values-kind-keycloak.yaml --wait --timeout=4m
+      - kubectl --kubeconfig={{.KUBECONFIG}} --context={{.CONTEXT}} rollout status deployment/{{.RELEASE}}-mecak8s -n {{.NAMESPACE}} --timeout=240s
+
+  chart-apply:
+    internal: true
+    preconditions:
+      - sh: command -v helm >/dev/null 2>&1
+        msg: helm is required
+    cmds:
+      - task: cluster-ready
+      - cmd: |
+          set -eu
+          trap 'status=$?; deploy/mecak8s-kind/cleanup-on-failure.sh "$status"' EXIT
+          if [ -n "${OPENROUTER_API_KEY:-}" ]; then
+            printf '%s' "$OPENROUTER_API_KEY" | kubectl --kubeconfig={{.KUBECONFIG}} --context={{.CONTEXT}} --namespace={{.NAMESPACE}} create secret generic {{.PROVIDER_SECRET}} --from-file=OPENROUTER_API_KEY=/dev/stdin --dry-run=client -o yaml | kubectl --kubeconfig={{.KUBECONFIG}} --context={{.CONTEXT}} apply -f -
+            provider_values=deploy/mecak8s-kind/kind-provider-real.yaml
+          else
+            kubectl --kubeconfig={{.KUBECONFIG}} --context={{.CONTEXT}} delete secret {{.PROVIDER_SECRET}} --namespace={{.NAMESPACE}} --ignore-not-found
+            provider_values=deploy/mecak8s-kind/kind-provider-mock.yaml
+          fi
+          helm upgrade --install {{.RELEASE}} deploy/helm/mecak8s --namespace={{.NAMESPACE}} --kubeconfig={{.KUBECONFIG}} --kube-context={{.CONTEXT}} --values=deploy/helm/mecak8s/values-kind.yaml --values="$provider_values" --wait --timeout=4m
+          kubectl --kubeconfig={{.KUBECONFIG}} --context={{.CONTEXT}} rollout status statefulset/redis -n {{.NAMESPACE}} --timeout=240s
+          kubectl --kubeconfig={{.KUBECONFIG}} --context={{.CONTEXT}} rollout status deployment/{{.RELEASE}}-mecak8s -n {{.NAMESPACE}} --timeout=240s

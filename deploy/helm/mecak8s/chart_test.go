@@ -63,7 +63,7 @@ func secureProductionArgs() []string {
 // OIDC/TLS overlay layered on top — the shape deploy/mecak8s-vmcp/Taskfile.yml
 // actually installs. Never pass values-kind-vmcp.yaml alone or without
 // values-kind.yaml first: e2e/k8s's suite installs values-kind.yaml ALONE and
-// must stay free of secrets that overlay assumes exist (dex-fixture-ca,
+// must stay free of secrets that overlay assumes exist (fixture-ca,
 // mecak8s-tls) — see values-kind.yaml's own comment.
 func kindVMCPArgs() []string {
 	return []string{"template", "kind", ".", "-f", "values-kind.yaml", "-f", "values-kind-vmcp.yaml"}
@@ -73,18 +73,52 @@ func kindVMCPArgs() []string {
 // shape e2e/k8s's Ginkgo suite installs: `helm ... --values values-kind.yaml
 // --wait`, with no other overrides and no Secrets/ConfigMaps created beyond
 // the namespace. values-kind.yaml alone must render with OIDC/TLS off and no
-// NodePort — any of those pull in a Secret (mecak8s-tls, dex-fixture-ca) that
+// NodePort — any of those pull in a Secret (mecak8s-tls, fixture-ca) that
 // only the mecak8s-vmcp fixture's own setup creates, and the e2e pod would
 // hang mounting a missing volume until the install times out (the regression
 // this test exists to catch).
 func TestMecak8sHelmChart_KindProfileAloneHasNoSecretDependency(t *testing.T) {
+	values, err := os.ReadFile("values-kind.yaml")
+	if err != nil {
+		t.Fatalf("read Kind values: %v", err)
+	}
+	for _, want := range []string{
+		"mockProvider: true", "endpoint: redis:6379", "credentialsSecret: \"\"",
+		"enabled: true", "workspace: /tmp",
+	} {
+		if !strings.Contains(string(values), want) {
+			t.Fatalf("Kind values missing %q", want)
+		}
+	}
+
+	e2eFiles, err := filepath.Glob(filepath.Join("..", "..", "..", "e2e", "k8s", "*.go"))
+	if err != nil {
+		t.Fatalf("list e2e files: %v", err)
+	}
+	e2eText := ""
+	for _, path := range e2eFiles {
+		body, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatalf("read e2e file %s: %v", path, readErr)
+		}
+		e2eText += string(body)
+	}
+	if !strings.Contains(e2eText, "values-kind.yaml") || strings.Contains(e2eText, "values-kind-vmcp.yaml") {
+		t.Fatal("e2e/k8s must install values-kind.yaml directly, without an operator-fixture overlay")
+	}
+
 	rendered, err := helm(t, "template", "kind", ".", "-f", "values-kind.yaml")
 	if err != nil {
 		t.Fatalf("render Kind profile: %v", err)
 	}
-	for _, forbidden := range []string{"--oidc-issuer", "--tls-cert", "--tls-key", "mecak8s-tls", "dex-fixture-ca", "type: NodePort", "nodePort:"} {
+	for _, forbidden := range []string{"--oidc-issuer", "--tls-cert", "--tls-key", "mecak8s-tls", "fixture-ca", "secretName:", "type: NodePort", "nodePort:"} {
 		if strings.Contains(rendered, forbidden) {
-			t.Fatalf("bare Kind render (no vmcp overlay) unexpectedly contains %q — e2e/k8s's suite creates no matching Secret and would hang", forbidden)
+			t.Fatalf("bare Kind render (no fixture overlay) unexpectedly contains %q — e2e/k8s's suite creates no matching Secret and would hang", forbidden)
+		}
+	}
+	for _, want := range []string{"replicas: 2", "- --mock", "--redis-url=redis:6379", "--workspace=/tmp", "type: ClusterIP"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("bare Kind render missing %q", want)
 		}
 	}
 }
@@ -334,6 +368,26 @@ func TestMecak8sHelmChart_RealProviderSecurityGate(t *testing.T) {
 				t.Fatal("unsafe real-provider render is not visibly annotated")
 			}
 		})
+	}
+}
+
+// TestMecak8sHelmChart_KindFixtureRealProviderDisablesMock pins the
+// fixture-only real-provider overlay: one Secret-backed env projection and no
+// mock flag. The key itself is created by the fixture, not chart values.
+func TestMecak8sHelmChart_KindFixtureRealProviderDisablesMock(t *testing.T) {
+	rendered, err := helm(t, "template", "kind", ".", "-f", "values-kind.yaml", "-f", "../../mecak8s-kind/kind-provider-real.yaml")
+	if err != nil {
+		t.Fatalf("render real-provider fixture: %v", err)
+	}
+	if strings.Contains(rendered, "- --mock") {
+		t.Fatal("real-provider fixture still enables mock mode")
+	}
+	const projection = "name: OPENROUTER_API_KEY\n              valueFrom:\n                secretKeyRef:\n                  key: OPENROUTER_API_KEY\n                  name: mecak8s-openrouter"
+	if count := strings.Count(rendered, projection); count != 1 {
+		t.Fatalf("expected exactly one OpenRouter Secret projection, got %d", count)
+	}
+	if strings.Contains(rendered, "OPENROUTER_API_KEY=") {
+		t.Fatal("rendered manifest contains an OpenRouter credential value")
 	}
 }
 
@@ -637,7 +691,7 @@ func taskFileClosure(t *testing.T, text string, roots ...string) string {
 }
 
 func TestMecak8sHelmChart_Scenario1_KindLifecycleUsesNamedCluster(t *testing.T) {
-	path := filepath.Join("..", "..", "mecak8s-vmcp", "Taskfile.yml")
+	path := filepath.Join("..", "..", "mecak8s-kind", "Taskfile.yml")
 	body, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -830,7 +884,7 @@ func TestMecak8sVMCPPOC_Scenario3_ChartTLSContract(t *testing.T) {
 		`- {key: "tls.key", path: "tls.key"}`,
 		"name: oidc-ca",
 		"mountPath: /var/run/secrets/oidc-ca",
-		"secretName: dex-fixture-ca",
+		"secretName: fixture-ca",
 		`- {key: "tls.crt", path: "tls.crt"}`,
 		"--oidc-ca-cert-file=/var/run/secrets/oidc-ca/tls.crt",
 		"--oidc-allow-private-https-issuer",
