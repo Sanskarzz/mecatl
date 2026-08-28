@@ -24,8 +24,16 @@ resume an in-flight goroutine or guarantee that work after the last save exists.
 Graceful shutdown cancels active runs after its bounded drain window, while a
 crash may leave a Kubernetes lease held until its TTL expires. Recovery occurs
 when a later prompt or approval re-enters the session. Local JSONL persistence is
-restart-safe, but it has no fsync or atomic-rename guarantee against host or
-process crashes; use an external durable backend when that guarantee matters.
+restart-safe where its guarantees are met. Strict EventLog append requires file and
+directory sync; Delete, retention, and migration fail closed without directory sync,
+which can make maintenance unavailable. An existing canonical snapshot can retain a
+weaker Save capability, while the first Save of a root-level legacy family fails before
+mutation when migration cannot sync directories. ToolCall audit is best-effort and may
+leave an unsynced or partially synced record. `SnapshotDurability` probes syscall support,
+not media persistence; the storage stack must honor successful sync and atomic rename.
+A process crash can still lose buffered message/reasoning deltas from only the incomplete
+turn or leave an unterminated final sidecar record. Completed-turn deltas are coalesced
+into at most two durable appends while clients remain chunk-streamed.
 
 The harness was unusually close to this by construction: the LLM adapters keep no server-side state (`store:false`; full replay on every turn), and the session aggregate round-trips through a stable snapshot saved at every turn boundary. The remaining gaps were the snapshot missing three fields (session profile, provider/model selector, cumulative token usage), a process death while parked awaiting approval stranding the session, and the event stream being emitted and discarded rather than persisted.
 

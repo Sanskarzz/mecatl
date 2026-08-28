@@ -6038,10 +6038,24 @@ yet (a replay consumer is Phase 3b). See `CLOUD-NATIVE.md` (Phase 3, ledger row 
   modification time; first lazy promotion preserves the v1 mtime, aggregate bytes
   after restore, and sidecars, while later saves replace only the v2 current file.
   `Store.SnapshotDurability` exposes the three verified replacement primitives;
-  unsupported sync primitives are an explicit weaker capability rather than a
-  host-crash-safety claim. A write, file-sync, or rename failure leaves the prior
-  snapshot authoritative and fails loudly; a directory-sync failure after rename
-  reports an error with the new snapshot already authoritative.
+  unsupported sync primitives are an explicit weaker snapshot capability rather than
+  a host-crash-safety claim. The capability probes prove syscall support, not media
+  persistence; the guarantee still depends on storage honoring successful sync and
+  atomic rename. The configured store path and every ancestor must be physical,
+  non-symlink directories; on macOS use `/private/...` rather than a `/var/...` path
+  traversing the `/var` symlink. An existing canonical snapshot Save may retain weaker
+  behavior, but the first Save of a root-level legacy family fails before migration when
+  directory sync is unavailable. EventLog strict append requires file and directory sync.
+  Delete, retention, and other destructive operations fail closed without directory sync,
+  reducing availability. ToolCall appends to an existing readable sidecar (or the sidecar
+  matching the authoritative snapshot family) without forcing migration when directory sync
+  is unavailable, attempts every available sync, and may leave an unsynced or partially synced
+  best-effort record. Sidecars opened for append and regular legacy family files selected for
+  migration are tightened to `0600` through their validated, no-follow descriptor before data
+  handling or rename. A write, file-sync, or rename failure leaves the
+  prior snapshot authoritative and fails loudly; a directory-sync failure after rename
+  reports an error with the new snapshot already authoritative. Partial destructive
+  progress is synced before an error returns so retry converges.
   The owner-only version directory makes canonical names physically disjoint
   from root-level legacy and schedule names.
   `internal/adapter/store/jsonlstore/resolve.go` (`sessionResolver`) is the single
@@ -6237,14 +6251,29 @@ yet (a replay consumer is Phase 3b). See `CLOUD-NATIVE.md` (Phase 3, ledger row 
 
   `Append` writes a per-record format-tagged line
   `{"v":"eventlog-json/1","ev":<session.Event JSON>}` via `appendLine` under the
-  stable family flock. Save, Delete, legacy promotion/removal, EventLog.Append,
-  and ToolCall share that one cross-process mutation identity; the family lock
-  covers the full sidecar-first/snapshot-last operation, while unrelated families
-  remain independent. `Read` scans ALL lines cumulatively (NOT latest-line-wins like the snapshot read),
-  decodes each, and yields in append order, rejecting an unknown format tag as an infra
-  error (a forward-incompatible log fails loud, not silently skips). `Delete` removes
-  sidecars before each family snapshot, preserving the partial-failure-stays-visible
-  invariant. The composition
+  stable family flock. Newline is the commit marker. Strict EventLog append requires
+  file and directory sync, repairs only an unterminated EOF tail, then writes and syncs
+  one complete record. ToolCall uses the same append transaction but, because its port cannot
+  return an error, avoids legacy-family migration on a filesystem without directory sync:
+  it appends to the existing readable sidecar or the side matching the authoritative snapshot,
+  attempts every available sync, and may leave an unsynced or partially synced best-effort
+  append. A later capable operation migrates that complete history without reordering it.
+  Save, Delete, legacy promotion/removal, EventLog.Append,
+  and ToolCall share that one cross-process mutation identity; the family lock covers
+  the full sidecar-first/snapshot-last operation, while unrelated families remain
+  independent. `Read` captures a bounded complete-record prefix under the flock, then
+  releases the lock while retaining its descriptor/section view until iteration ends;
+  only an unterminated final fragment is ignored and complete corruption fails loudly.
+  `Delete` removes sidecars before each family snapshot, preserving the
+  partial-failure-stays-visible invariant. Clients remain chunk-streamed, while one
+  run-scoped `RunEventRecorder` coalesces message and reasoning into UTF-8-safe chunks of
+  at most 1 MiB. That ceiling keeps worst-case JSON escaping below the JSONL reader's 16 MiB
+  cap; normal turns produce one record per present kind and oversized turns the minimum
+  bounded count. Non-delta boundaries flush pending chunks first. Every chunk and boundary
+  is attempted exactly once and cleared even on error because an EventLog error can be
+  post-write; retrying would duplicate folded text. Failures warn once but later events keep
+  appending. Process death or a failed append can lose a chunk; the SessionStore snapshot
+  remains authoritative. The composition
   layer (`internal/app/build.go` (`buildStore`)) wires the jsonlstore `Store` as both
   `SessionStore` and `EventLog`; the memstore default supplies an in-memory
   `engine/adapter/memstore/eventlog.go` (`EventLog`) sibling so the seam is never nil

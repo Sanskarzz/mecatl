@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"syscall"
@@ -159,6 +160,46 @@ func TestSessionStorageContinuity_Scenario1_AtomicCrashRecovery(t *testing.T) {
 				t.Fatalf("reopened title = %q, want committed %q (never torn, absent, or stale v1)", got.Title, wantTitle)
 			}
 		})
+	}
+}
+
+func TestStoreInitializationDurablyPublishesCreatedDirectories(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "parent", "store")
+	ops := defaultSnapshotOps()
+	syncDir := ops.syncDir
+	var synced []string
+	ops.syncDir = func(dir *os.File) error {
+		synced = append(synced, filepath.Clean(dir.Name()))
+		return syncDir(dir)
+	}
+	if _, err := newStoreWithSnapshotOps(root, ops); err != nil {
+		t.Fatalf("newStoreWithSnapshotOps: %v", err)
+	}
+	canonical := filepath.Join(root, canonicalDirName)
+	catalog := filepath.Join(canonical, inventoryCatalogDirName)
+	migrationRegistry := filepath.Join(canonical, migrationJobsDir)
+	wantPrefix := []string{
+		filepath.Join(base, "parent"), base,
+		root, filepath.Join(base, "parent"),
+		canonical, root,
+		catalog, canonical,
+		migrationRegistry, canonical,
+	}
+	if len(synced) < len(wantPrefix) || !reflect.DeepEqual(synced[:len(wantPrefix)], wantPrefix) {
+		t.Fatalf("initial directory syncs = %v, want prefix %v", synced, wantPrefix)
+	}
+	if info, err := os.Lstat(migrationRegistry); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("migration registry = (%v, %v), want a real directory", info, err)
+	}
+}
+
+func TestStoreInitializationDirectorySyncFailureIsLoud(t *testing.T) {
+	ops := defaultSnapshotOps()
+	ops.syncDir = func(*os.File) error { return syscall.EIO }
+	root := filepath.Join(t.TempDir(), "new-store")
+	if st, err := newStoreWithSnapshotOps(root, ops); st != nil || !errors.Is(err, syscall.EIO) {
+		t.Fatalf("newStoreWithSnapshotOps = (%v, %v), want nil Store and EIO", st, err)
 	}
 }
 

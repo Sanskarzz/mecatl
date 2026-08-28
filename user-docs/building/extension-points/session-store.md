@@ -157,7 +157,7 @@ type EventLog interface {
 }
 ```
 
-**`Append`** durably records `ev` under the session id. The durability obligation is strict: `Append` must return nil only after the record is on stable storage or committed to the backing service. An implementation that buffers without guaranteeing durability violates the contract. The relay calls `Append` for every observed event, on a cancel-detached context, so a dead client's cancelled context cannot abort the durable write; a failure warns and never aborts the live run.
+**`Append`** durably records `ev` under the session id. The durability obligation is strict: `Append` must return nil only after the record is on stable storage or committed to the backing service. For local jsonlstore that means both the file and its directory have synced; without either capability append fails. An implementation that buffers without guaranteeing durability violates the contract. Callers must attempt each event at most once because an error may arrive after the write committed. The relay uses a cancel-detached context so a dead client's cancellation cannot abort it. Clients still receive every original chunk, while the run-scoped recorder coalesces message and reasoning into UTF-8-safe chunks capped at 1 MiB—small enough for the JSONL reader under worst-case escaping. Normal turns use one record per present kind; oversized turns use the minimum bounded count. Every chunk is cleared after its single attempt, append failure warns once per recorder, and later boundary/result events continue. A crash or failed append can leave a log gap; the completed session snapshot remains authoritative.
 
 **`Read`** returns the session's events in append order as a lazy `iter.Seq2[session.Event, error]`, following the same streaming idiom as `port.LLMProvider.Stream`. Streaming matters: a long session log can exceed a gRPC message limit if read as a single unary response; `Read` maps 1:1 to a server-streaming RPC and avoids the size cap. Key contract points:
 
@@ -189,7 +189,7 @@ The loop never imports `port.EventLog` or calls `Append`. Persistence is a relay
 | Backend | Package | Notes |
 |---|---|---|
 | In-memory | `engine/adapter/memstore` | Default; test/single-process; implements `SessionStore` + `PrunableStore` + `EventLog` as siblings |
-| JSONL on disk | `internal/adapter/store/jsonlstore` | Default for `mecated`; triples as `SessionStore` + `EventLog` + `ToolCallRecorder` |
+| JSONL on disk | `internal/adapter/store/jsonlstore` | Default for `mecated`; triples as `SessionStore` + `EventLog` + `ToolCallRecorder`. The configured path and every ancestor must be physical non-symlink directories (use macOS `/private/...`, not a `/var/...` symlink path). Existing canonical snapshot Save may retain weaker capability; first legacy-family Save, EventLog append, Delete, retention, and migration fail closed when their required sync is unavailable. ToolCall audit is best-effort and may be unsynced or partially synced. Capability probes establish syscall support, not media persistence. |
 | Redis | `internal/adapter/redisstore` | Used by `mecak8s`; validated by conformance suites over miniredis |
 
 ### engine/adapter/memstore — in-memory
@@ -211,34 +211,36 @@ log   := memstore.NewEventLog()
 
 The default backend for `mecated`. The same package triples as `port.SessionStore`, `port.EventLog`, and `port.ToolCallRecorder`.
 
-Each session owns **three** files under a `sid-v1` subdirectory of the store directory, sharing one stem:
+Each session owns an authoritative v2 snapshot and two append-only sidecars under a
+`sid-v1` subdirectory, sharing one stem:
 
 ```
-<store-dir>/sid-v1/sid-v1-<token>.session.jsonl   one snapshot per Save (latest line wins)
-<store-dir>/sid-v1/sid-v1-<token>.tools.jsonl     one record per tool call
-<store-dir>/sid-v1/sid-v1-<token>.events.jsonl    one record per relayed event (eventlog-json/1)
+<store-dir>/sid-v1/sid-v1-<token>.session.json      authoritative v2 current snapshot
+<store-dir>/sid-v1/sid-v1-<token>.tools.jsonl       one record per tool call
+<store-dir>/sid-v1/sid-v1-<token>.events.jsonl      one record per relayed event (eventlog-json/1)
 ```
 
-**The filename is not the session id.** `<token>` is a sanitized, truncated
-excerpt of the id plus a hash — bounded so a session id of any length names a
-valid file, and deliberately not reversible. To find a session on disk, read the
-id out of the file rather than inferring it from the name:
+Historical v1 `.session.jsonl` files remain readable and are lazily promoted on a
+later write. Do not infer the session id from a filename or edit these files; the
+store is plaintext and its files, including sidecars, are owner-only (`0600`).
 
-```sh
-for f in "$STORE_DIR"/sid-v1/*.session.jsonl; do
-  printf '%s\t%s\n' "$(tail -n1 "$f" | jq -r .id)" "$f"
-done
-```
-
-`Delete` removes the sidecars **before** the snapshot, and is not atomic across
-the three. That order is deliberate: listing enumerates only `*.session.jsonl`,
-so a partial delete leaves the session still visible and the next retention sweep
-retries it. The reverse order could orphan a sidecar no sweep could find.
+Snapshot replacement uses a same-directory temporary file, full write, file sync
+where supported, atomic replacement, and directory sync where supported.
+`SnapshotDurability` reports the available primitives: only all three, on an underlying
+filesystem/storage stack that honors successful sync and atomic rename, make a successful
+save host-crash safe. The probe verifies syscall support; it does not make volatile
+storage such as tmpfs survive power loss. Event records are newline-committed and append
+fails closed when required directory sync is unavailable. Tool-call audit is best-effort
+and may drop. An interrupted final fragment is ignored or replaced on the next append,
+while a blank, whitespace-only, or otherwise malformed complete record fails loudly. A
+stable family flock coordinates
+cooperating jsonlstore processes, not arbitrary external writers. Quiesce every
+writer before copying the complete store directory for backup or restore.
 
 Select it with `--store-dir <path>`. The directory is created if it does not
-exist, owner-only (`0700`) — it holds plaintext transcripts. A store written by an
-older version keeps its files directly under `<store-dir>`; those are read as-is
-and moved into `sid-v1/` the next time that session is written.
+exist, owner-only (`0700`). A store written by an older version keeps its files
+directly under `<store-dir>`; those are read as-is and moved into `sid-v1/` the
+next time that session is written.
 
 ### internal/adapter/redisstore — Redis-backed
 

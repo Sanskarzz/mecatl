@@ -165,8 +165,9 @@ func migrationOwnerKey(owner *session.Principal) string {
 }
 
 // MigrateSessionFamily holds the stable family flock across revalidation,
-// promotion, v2 verification, and v1 removal. Item failures are returned as a
-// closed reason code; raw backend errors never cross the maintenance boundary.
+// promotion, v2 verification, and v1 removal. Expected item outcomes return a
+// closed reason code; operational failures are wrapped for the server boundary to
+// sanitize as backend_failure.
 //
 //nolint:gocyclo // the linear crash-safety transaction keeps every fail-closed checkpoint explicit.
 func (st *Store) MigrateSessionFamily(ctx context.Context, expected port.SessionMigrationFamily) (string, error) {
@@ -181,16 +182,23 @@ func (st *Store) MigrateSessionFamily(ctx context.Context, expected port.Session
 	path := st.resolver.currentSnapshotPath(expected.ID)
 	var reason string
 	err = st.withSnapshotFamilyLock(ctx, path, func() error {
-		_, info, line, found, err := st.migrationSource(expected.ID)
+		dirs, err := st.openDurableDirectories(st.resolver.dir, st.resolver.canonicalDir())
+		if err != nil {
+			return err
+		}
+		defer dirs.close()
+		v1Path, info, line, found, err := st.migrationSource(expected.ID)
 		if err != nil {
 			reason = "invalid_snapshot"
 			return nil
 		}
 		if !found {
 			// A previous attempt may have committed and removed v1 before its job
-			// checkpoint. A readable matching v2 is idempotent success.
+			// checkpoint. A readable matching v2 is idempotent success after the
+			// canonical directory is synced again, which converges a retry after a
+			// failed final removal sync.
 			if st.verifiedCurrent(expected.ID, nil) {
-				return nil
+				return dirs.sync()
 			}
 			reason = "changed"
 			return nil
@@ -215,13 +223,22 @@ func (st *Store) MigrateSessionFamily(ctx context.Context, expected port.Session
 		} else if !os.IsNotExist(statErr) {
 			return statErr
 		}
+		// A v2 file left by a prior rename whose directory sync failed is not
+		// durable authority yet. Establish it before removing the verified v1.
+		if currentExists {
+			if err := dirs.sync(); err != nil {
+				return err
+			}
+		}
 		if err := st.advanceInventoryGeneration(); err != nil {
 			return err
 		}
-		if err := st.resolver.prepareWrite(expected.ID); err != nil {
+		if err := st.prepareWrite(expected.ID); err != nil {
 			return err
 		}
-		v1Path := st.resolver.canonicalPath(expected.ID, kindSnapshot)
+		if !currentExists && v1Path == st.resolver.legacyPath(expected.ID, kindSnapshot) {
+			v1Path = st.resolver.canonicalPath(expected.ID, kindSnapshot)
+		}
 		if !currentExists {
 			data, err := json.Marshal(currentSnapshot{
 				Format: currentSnapshotFormat, ModifiedAt: info.ModTime(), Metadata: metaSnapshotFromSession(sess), Snapshot: line,
@@ -243,13 +260,17 @@ func (st *Store) MigrateSessionFamily(ctx context.Context, expected port.Session
 			reason = "verification_failed"
 			return nil
 		}
-		if err := os.Remove(v1Path); err != nil && !os.IsNotExist(err) {
+		removed, err := removeSessionFile(st.snapshot.remove, v1Path)
+		if err != nil {
 			return err
 		}
-		return st.syncCanonicalDir()
+		if removed {
+			return dirs.sync()
+		}
+		return nil
 	})
 	if err != nil {
-		return "backend_failure", nil
+		return "", fmt.Errorf("jsonlstore: migrate session family: %w", err)
 	}
 	return reason, nil
 }
@@ -301,16 +322,8 @@ func (st *Store) verifiedCurrent(id session.SessionID, want []byte) bool {
 	return want == nil || string(current.Snapshot) == string(want)
 }
 
-func (st *Store) syncCanonicalDir() error {
-	if !st.durability.DirectorySync {
-		return nil
-	}
-	dir, err := st.snapshot.openDir(st.resolver.canonicalDir())
-	if err != nil {
-		return err
-	}
-	defer func() { _ = dir.Close() }()
-	return st.snapshot.syncDir(dir)
+func (st *Store) migrationJobDir() string {
+	return filepath.Join(st.resolver.canonicalDir(), migrationJobsDir)
 }
 
 func (st *Store) migrationJobPath(id string) (string, error) {
@@ -320,8 +333,7 @@ func (st *Store) migrationJobPath(id string) (string, error) {
 	if _, err := hex.DecodeString(id); err != nil {
 		return "", errors.New("invalid migration job handle")
 	}
-	dir := filepath.Join(st.resolver.canonicalDir(), migrationJobsDir)
-	return filepath.Join(dir, id+".json"), nil
+	return filepath.Join(st.migrationJobDir(), id+".json"), nil
 }
 
 type migrationAcquisitionContextKey struct{}
@@ -354,8 +366,8 @@ func (st *Store) AcquireSessionMigrationJob(ctx context.Context, id string) (con
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, nil, fmt.Errorf("jsonlstore: create migration registry: %w", err)
+	if err := validateAdapterDirectory(st.migrationJobDir()); err != nil {
+		return nil, nil, fmt.Errorf("jsonlstore: validate migration registry: %w", err)
 	}
 	fl := flock.New(path+".lock", flock.SetPermissions(0o600))
 	locked, err := fl.TryLockContext(ctx, 10*time.Millisecond)
@@ -400,12 +412,12 @@ func (st *Store) SaveSessionMigrationJob(ctx context.Context, job port.SessionMi
 		return err
 	}
 	defer releaseOwnership()
+	if !st.durability.HostCrashSafe() {
+		return errors.New("jsonlstore: migration checkpoint requires atomic replacement, file sync, and directory sync")
+	}
 	path, err := st.migrationJobPath(job.ID)
 	if err != nil {
 		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("jsonlstore: create migration registry: %w", err)
 	}
 	data, err := json.Marshal(job)
 	if err != nil {
