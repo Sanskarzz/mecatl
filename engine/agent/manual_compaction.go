@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"fmt"
-	"reflect"
 
 	"github.com/stacklok/mecatl/engine/session"
 )
@@ -24,10 +23,13 @@ type budgetedCompactor interface {
 	compactToBudget(context.Context, *session.Conversation, int) ([]session.Message, string, error)
 }
 
-// compactionCandidate runs a compactor against a deep copy and applies the one
-// candidate-admission contract shared by automatic and manual compaction.
-func (e *Engine) compactionCandidate(ctx context.Context, original []session.Message, budget int) (ManualCompactionResult, []session.Message, error) {
-	input := &session.Conversation{Messages: cloneCompactionMessages(original)}
+// compactionCandidate runs a compactor and applies the one candidate-admission
+// contract shared by automatic and manual compaction. Callers choose input
+// ownership: the hot automatic path passes the live immutable conversation,
+// while CompactSession passes a deep copy to isolate the aggregate from an
+// out-of-band compactor.
+func (e *Engine) compactionCandidate(ctx context.Context, input *session.Conversation, budget int) (ManualCompactionResult, []session.Message, error) {
+	original := input.Messages
 	var candidate []session.Message
 	var summary string
 	var err error
@@ -39,7 +41,7 @@ func (e *Engine) compactionCandidate(ctx context.Context, original []session.Mes
 	if err != nil {
 		return ManualCompactionResult{}, nil, err
 	}
-	if len(candidate) == 0 || reflect.DeepEqual(candidate, original) {
+	if len(candidate) == 0 {
 		return ManualCompactionResult{}, nil, nil
 	}
 	if err := session.ValidateToolPairing(candidate); err != nil {
@@ -48,8 +50,7 @@ func (e *Engine) compactionCandidate(ctx context.Context, original []session.Mes
 	if e.deps.TokenCounter.CountMessages(candidate) >= e.deps.TokenCounter.CountMessages(original) {
 		return ManualCompactionResult{}, nil, nil
 	}
-	archive := cloneCompactionMessages(original)
-	return ManualCompactionResult{Changed: true, Archive: archive, Summary: summary}, cloneCompactionMessages(candidate), nil
+	return ManualCompactionResult{Changed: true, Summary: summary}, candidate, nil
 }
 
 func cloneCompactionMessages(messages []session.Message) []session.Message {
@@ -92,12 +93,16 @@ func (e *Engine) CompactSession(ctx context.Context, sess *session.Session) (Man
 	}
 
 	original := sess.Conversation.Messages
-	result, candidate, err := e.compactionCandidate(ctx, original, 0)
+	input := &session.Conversation{Messages: cloneCompactionMessages(original)}
+	result, candidate, err := e.compactionCandidate(ctx, input, 0)
 	if err != nil || !result.Changed {
 		return result, err
 	}
 	if err := sess.ReplaceHistoryAtBoundary(candidate); err != nil {
 		return ManualCompactionResult{}, err
 	}
+	// Message elements are immutable, so the replaced backing slice remains a
+	// safe archive after the aggregate takes ownership of the candidate.
+	result.Archive = original
 	return result, nil
 }

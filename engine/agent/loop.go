@@ -2185,12 +2185,12 @@ func (e *Engine) refreshOperatorProfile(ctx context.Context, r *Run, cfg *prompt
 }
 
 func estimateRequestTokens(counter TokenCounter, req port.LLMRequest) int {
-	total := counter.Count(req.System.Render()) + counter.CountMessages(req.Messages)
+	total := countLayered(counter, req.System) + counter.CountMessages(req.Messages)
 	for _, spec := range req.Tools {
 		total += perToolSpecOverhead
 		total += counter.Count(spec.Name)
 		total += counter.Count(spec.Description)
-		total += counter.Count(string(spec.Schema))
+		total += countBytes(counter, spec.Schema)
 	}
 	return total
 }
@@ -2211,16 +2211,17 @@ func (e *Engine) maybeCompact(ctx context.Context, r *Run, sess *session.Session
 		return false
 	}
 	threshold := int(float64(window) * e.deps.CompactionRatio)
-	if estimateRequestTokens(e.deps.TokenCounter, *req) < threshold {
+	requestTokens := estimateRequestTokens(e.deps.TokenCounter, *req)
+	if requestTokens < threshold {
 		return false
 	}
-	// Derive the cascade target from the same live window and the complete request
-	// measured above. System text, ephemeral fragments, and tool schemas are
-	// irreducible here, so only the remaining budget is available to persisted
-	// history. A floor of one keeps the budget meaningful when overhead alone is
-	// already above the target; candidate admission below still requires reduction.
+	// Derive the cascade target from the same complete-request measurement. System
+	// text, ephemeral fragments, and tool schemas are irreducible here, so only the
+	// remaining budget is available to persisted history. A floor of one keeps the
+	// budget meaningful when overhead alone is already above the target; candidate
+	// admission below still requires reduction.
 	persistedTokens := e.deps.TokenCounter.CountMessages(sess.Conversation.Messages)
-	irreducible := estimateRequestTokens(e.deps.TokenCounter, *req) - persistedTokens
+	irreducible := requestTokens - persistedTokens
 	if irreducible < 0 {
 		irreducible = 0
 	}
@@ -2228,7 +2229,7 @@ func (e *Engine) maybeCompact(ctx context.Context, r *Run, sess *session.Session
 	if budget < 1 {
 		budget = 1
 	}
-	result, compacted, err := e.compactionCandidate(ctx, sess.Conversation.Messages, budget)
+	result, compacted, err := e.compactionCandidate(ctx, sess.Conversation, budget)
 	if err != nil {
 		// Compaction is best-effort: a failure must not abort the run. Keep the
 		// existing history and continue — but no longer SILENTLY: surface the

@@ -3,6 +3,7 @@ package agent
 import (
 	"strconv"
 
+	"github.com/stacklok/mecatl/engine/prompt"
 	"github.com/stacklok/mecatl/engine/session"
 )
 
@@ -24,6 +25,30 @@ type TokenCounter interface {
 	// summing each message's text/reasoning/tool bodies plus the per-message and
 	// per-role framing overhead the provider adds on the wire.
 	CountMessages(msgs []session.Message) int
+}
+
+// byteTokenCounter and layeredTokenCounter let in-package counters avoid temporary
+// strings while keeping TokenCounter's public compatibility surface unchanged.
+type byteTokenCounter interface {
+	countBytes([]byte) int
+}
+
+type layeredTokenCounter interface {
+	countLayered(prompt.Layered) int
+}
+
+func countBytes(counter TokenCounter, text []byte) int {
+	if c, ok := counter.(byteTokenCounter); ok {
+		return c.countBytes(text)
+	}
+	return counter.Count(string(text))
+}
+
+func countLayered(counter TokenCounter, system prompt.Layered) int {
+	if c, ok := counter.(layeredTokenCounter); ok {
+		return c.countLayered(system)
+	}
+	return counter.Count(system.Render())
 }
 
 // estimateZeroUsageInput implements the issue-#82 DISPLAY-ONLY zero-usage input
@@ -77,21 +102,33 @@ type HeuristicTokenCounter struct {
 
 // Count implements TokenCounter for a single string.
 func (h HeuristicTokenCounter) Count(text string) int {
-	cpt := charsPerToken
-	if h.CharsPerToken > 0 {
-		cpt = h.CharsPerToken
+	return len(text) / h.charsPerToken()
+}
+
+func (h HeuristicTokenCounter) countBytes(text []byte) int {
+	return len(text) / h.charsPerToken()
+}
+
+func (h HeuristicTokenCounter) countLayered(system prompt.Layered) int {
+	length := len(system.StablePrefix) + len(system.VolatileSuffix)
+	if system.StablePrefix != "" && system.VolatileSuffix != "" {
+		length += len("\n\n")
 	}
-	return len(text) / cpt
+	return length / h.charsPerToken()
+}
+
+func (h HeuristicTokenCounter) charsPerToken() int {
+	if h.CharsPerToken > 0 {
+		return h.CharsPerToken
+	}
+	return charsPerToken
 }
 
 // CountMessages implements TokenCounter for a conversation slice, summing the
 // text/reasoning/tool bodies (divided by the chars-per-token ratio) plus the
 // fixed per-message and per-tool-call framing overhead.
 func (h HeuristicTokenCounter) CountMessages(msgs []session.Message) int {
-	cpt := charsPerToken
-	if h.CharsPerToken > 0 {
-		cpt = h.CharsPerToken
-	}
+	cpt := h.charsPerToken()
 	total := 0
 	for _, m := range msgs {
 		total += perMessageOverhead
