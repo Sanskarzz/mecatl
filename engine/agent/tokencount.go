@@ -1,6 +1,10 @@
 package agent
 
-import "github.com/stacklok/mecatl/engine/session"
+import (
+	"strconv"
+
+	"github.com/stacklok/mecatl/engine/session"
+)
 
 // TokenCounter estimates how many model tokens a piece of text or a slice of
 // conversation messages occupies. It is a seam (ARCHITECTURE.md §8, gauntlet
@@ -50,8 +54,15 @@ const charsPerToken = 4
 const perMessageOverhead = 4
 
 // perToolCallOverhead is the fixed token cost the heuristic attributes to each
-// tool call for its id and JSON envelope, on top of the name and argument bytes.
+// tool-call envelope. IDs, names, arguments, and provider item IDs are counted
+// separately as transmitted payload.
 const perToolCallOverhead = 4
+
+// perToolSpecOverhead covers the advertised tool-definition envelope.
+const perToolSpecOverhead = 4
+
+// perContentPartOverhead covers the provider's typed-block envelope and discriminator.
+const perContentPartOverhead = 4
 
 // HeuristicTokenCounter is the default, dependency-free TokenCounter. It divides
 // byte length by charsPerToken and adds a small fixed overhead per message and
@@ -84,21 +95,45 @@ func (h HeuristicTokenCounter) CountMessages(msgs []session.Message) int {
 	total := 0
 	for _, m := range msgs {
 		total += perMessageOverhead
-		total += (len(m.Text) + len(m.Reasoning)) / cpt
+		total += (len(m.Text) + len(m.Reasoning) + len(m.ProviderPhase) + len(m.ReasoningItemID)) / cpt
 		for _, c := range m.ToolCalls {
 			total += perToolCallOverhead
-			total += (len(c.Name) + len(c.Args)) / cpt
+			total += (len(c.ID) + len(c.Name) + len(c.Args) + len(c.ItemID)) / cpt
 		}
 		if m.ToolResult != nil {
-			total += len(m.ToolResult.Content) / cpt
+			total += len(m.ToolResult.CallID) / cpt
+			contentTokens := len(m.ToolResult.Content) / cpt
+			partsTokens := heuristicContentParts(m.ToolResult.Parts, cpt)
+			total += max(contentTokens, partsTokens)
 		}
-		// Media parts are not free: a multimodal message carries image/audio bytes
-		// that the provider bills. Count each part's inline byte length (URL-sourced
-		// parts contribute only their reference length) so a multimodal message is
-		// not undercounted and the compaction budget is not silently blown.
-		for _, p := range m.Parts {
-			total += (len(p.Data) + len(p.URL) + len(p.MIMEType)) / cpt
+		total += heuristicContentParts(m.Parts, cpt)
+	}
+	return total
+}
+
+func heuristicContentParts(parts []session.Content, cpt int) int {
+	total := 0
+	for _, p := range parts {
+		dataBytes := len(p.Data)
+		if dataBytes > 0 && (p.Kind == session.MediaImage || p.Kind == session.MediaAudio) {
+			dataBytes = ((dataBytes + 2) / 3) * 4
 		}
+		// Resource metadata is conservatively counted because shared provider routing
+		// may project it into a model-visible textual block. Inline media bytes use
+		// their base64 wire length; fixed overhead covers framing only.
+		bytes := len(p.BlockKind) + len(p.Kind) + len(p.MIMEType) + dataBytes +
+			len(p.URL) + len(p.Text) + len(p.Name) + len(p.Title) + len(p.Description) +
+			len(p.LastModified)
+		if p.Size != 0 {
+			bytes += len(strconv.FormatInt(p.Size, 10))
+		}
+		if p.Priority != 0 {
+			bytes += len(strconv.FormatFloat(p.Priority, 'g', -1, 64))
+		}
+		for _, audience := range p.Audience {
+			bytes += len(audience)
+		}
+		total += perContentPartOverhead + bytes/cpt
 	}
 	return total
 }
