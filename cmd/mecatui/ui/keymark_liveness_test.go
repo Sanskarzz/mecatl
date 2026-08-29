@@ -21,6 +21,8 @@ func overrideAll() map[string][]string {
 		"Submit":           {"ctrl+f1"},
 		"Newline":          {"ctrl+f2"},
 		"Paste":            {"ctrl+f3"},
+		"SelectAll":        {"ctrl+f31"},
+		"CopySelection":    {"ctrl+f32"},
 		"Cancel":           {"ctrl+f4"},
 		"Effort":           {"ctrl+f5"},
 		"MCPPanel":         {"ctrl+f6"},
@@ -209,6 +211,15 @@ func TestFooterReflectsKeyOverride(t *testing.T) {
 		m.phase = phaseIdle
 		got := stripANSIstr(m.renderFooter())
 		// help line: "<help> help · / commands · <quit> quit"
+		if !strings.Contains(got, "ctrl+f31 select all") {
+			t.Errorf("footer help line should carry the overridden SelectAll chord ctrl+f31: %q", got)
+		}
+		if !strings.Contains(got, "ctrl+f32 copy") {
+			t.Errorf("footer help line should carry the overridden CopySelection chord ctrl+f32: %q", got)
+		}
+		if strings.Contains(got, "ctrl+g select all") || strings.Contains(got, "ctrl+shift+c copy") {
+			t.Errorf("footer help line still shows a default selection chord: %q", got)
+		}
 		if !strings.Contains(got, "ctrl+f12 help") {
 			t.Errorf("footer help line should carry the overridden help chord ctrl+f12: %q", got)
 		}
@@ -518,12 +529,10 @@ func TestApprovalMnemonic(t *testing.T) {
 	}
 }
 
-// TestDefaultFooterBytesUnchanged is the byte-identical guard for the default
-// keymap: with NO overrides the footer help line, the plan-approval mnemonics,
-// and the agents advertisement must render EXACTLY the historical literals
-// ("? help · / commands · ctrl+c quit", "A approve & run · W auto-accept · D
-// iterate", "ctrl+a") so the goldens and the pre-#457 output stay byte-for-byte.
-func TestDefaultFooterBytesUnchanged(t *testing.T) {
+// TestDefaultFooterHelp pins the default footer help affordances. The selection
+// shortcuts follow help and slash commands, then quit; live-key tests separately
+// prove these markings update when operators rebind them.
+func TestDefaultFooterHelp(t *testing.T) {
 	m, _, _ := newTestModel(t, theme.New("aztec", theme.AztecPalette()))
 	m = applyAll(m,
 		tea.WindowSizeMsg{Width: 120, Height: 30},
@@ -531,8 +540,8 @@ func TestDefaultFooterBytesUnchanged(t *testing.T) {
 	)
 	m.phase = phaseIdle
 	got := stripANSIstr(m.renderFooter())
-	if !strings.Contains(got, "? help · / commands · ctrl+c quit") {
-		t.Errorf("default footer help line should be the historical literal, got %q", got)
+	if !strings.Contains(got, "? help · / commands · ctrl+g select all · ctrl+shift+c copy · ctrl+c quit") {
+		t.Errorf("default footer help line = %q", got)
 	}
 
 	m.phase = phaseAwaitingApproval
@@ -926,7 +935,7 @@ func TestAncillaryHintsReflectKeyOverride(t *testing.T) {
 	m := newTestModelFromDeps(Deps{Theme: th, KeyOverrides: overrideAll(), NoAltScreen: true})
 
 	t.Run("textarea placeholder", func(t *testing.T) {
-		got := m.ta.Placeholder
+		got := m.prompt.Placeholder()
 		for _, want := range []string{"ctrl+f1 to send", "ctrl+f2 for newline", "ctrl+f12 for help"} {
 			if !strings.Contains(got, want) {
 				t.Errorf("placeholder missing live hint %q: %q", want, got)

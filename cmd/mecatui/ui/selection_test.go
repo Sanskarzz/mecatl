@@ -841,35 +841,43 @@ func TestSelectedTextUnchangedByEmptyLineFix(t *testing.T) {
 	}
 }
 
-// TestPressDragReleaseCopies: a press anchors, motion extends, release copies. The
-// returned command carries the OSC52 payload AND the shell-write fallback fires;
-// the status reads "copied". FAILS if the copy path breaks.
-func TestPressDragReleaseCopies(t *testing.T) {
+// TestPressDragReleaseCopiesSelection confirms a non-empty conversation drag
+// copies on release while retaining its selection.
+func TestPressDragReleaseCopiesSelection(t *testing.T) {
 	m, cb := selModel(t)
 	m.vp.SetContent("hello world\nsecond line\nthird row")
 	m.vp.SetYOffset(0)
 	top := convTopRow(m)
 
-	m, _ = pressMouse(m, tea.MouseLeft, 0, top) // anchor at line0 col0
-	if !m.sel.active {
-		t.Fatal("press should activate a selection")
-	}
-	m, _ = motionMouse(m, 11, top) // extend to end of "hello world"
+	m, _ = pressMouse(m, tea.MouseLeft, 0, top)
+	m, _ = motionMouse(m, 11, top)
 	m, cmd := releaseMouse(m, 11, top)
 
 	leaves := collectLeaves(cmd)
-	payload, ok := osc52Payload(leaves)
-	if !ok {
-		t.Fatal("release should return an OSC52 SetClipboard command")
+	osc52, shellWrites := 0, 0
+	for _, msg := range leaves {
+		if _, ok := msg.(shellWriteResultMsg); ok {
+			shellWrites++
+		} else {
+			osc52++
+		}
 	}
-	if payload != "hello world" {
-		t.Errorf("OSC52 payload = %q, want %q", payload, "hello world")
+	if osc52 != 1 || shellWrites != 1 {
+		t.Fatalf("copy transports = OSC52:%d shell:%d, want one each", osc52, shellWrites)
+	}
+	payload, ok := osc52Payload(leaves)
+	if !ok || payload != "hello world" {
+		t.Fatalf("release OSC52 payload = %q, ok=%v", payload, ok)
+	}
+	for _, msg := range leaves {
+		mm, _ := m.Update(msg)
+		m = mm.(Model)
+	}
+	if !m.sel.active || selectedText(m.vp.GetContent(), m.sel) != "hello world" {
+		t.Fatalf("selection = %q, want retained hello world", selectedText(m.vp.GetContent(), m.sel))
 	}
 	if len(cb.wrote) != 1 || string(cb.wrote[0]) != "hello world" {
-		t.Errorf("shell-write fallback not invoked with the payload: %v", cb.wrote)
-	}
-	if !strings.Contains(stripANSIstr(m.statusMsg), "copied") {
-		t.Errorf("status = %q, want a 'copied N chars' confirmation", stripANSIstr(m.statusMsg))
+		t.Fatalf("release shell clipboard writes = %q", cb.wrote)
 	}
 }
 
@@ -2099,8 +2107,8 @@ func TestCtrlVPasteWithActiveSelection(t *testing.T) {
 
 	m = pressCtrlV(t, m)
 
-	if !strings.Contains(m.ta.Value(), "pasted text") {
-		t.Errorf("ctrl+v should insert the pasted text regardless of an active selection, got %q", m.ta.Value())
+	if !strings.Contains(m.prompt.Value(), "pasted text") {
+		t.Errorf("ctrl+v should insert the pasted text regardless of an active selection, got %q", m.prompt.Value())
 	}
 }
 
