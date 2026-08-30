@@ -533,6 +533,23 @@ func (m Model) updateLifecycle(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		return m, tea.Batch(focusCmd, (&m).armLiveFeed()), true
 	case client.SessionReadyMsg:
 		return m.applySessionReady(msg)
+	case client.SessionCompactedMsg:
+		if msg.RequestToken != m.compactRequestToken || msg.SessionID != m.sessionID || !m.compactPending {
+			return m, nil, true
+		}
+		m.compactPending = false
+		if msg.Err != nil {
+			m.statusMsg = m.deps.Theme.Style("warning").Render("could not compact model history: " + sanitizeTerminal(msg.Err.Error()))
+			return m, nil, true
+		}
+		if msg.Compacted {
+			m.conv.addNotice("Model history compacted.")
+		} else {
+			m.conv.addNotice("Model history is already compact.")
+		}
+		m.statusMsg = m.deps.Theme.Style("muted").Render("ready")
+		m.refreshView()
+		return m, nil, true
 	case clearSessionReadyMsg:
 		// The replacement exists, so it is now safe to discard the old transcript
 		// and bind through the ordinary SessionReady machinery. Do this before
@@ -2637,9 +2654,6 @@ func (m Model) failStartupRunEntry() Model {
 // mandatory prompt frame, starts the reader goroutine, and arms WaitForMsg.
 func (m Model) submitPrompt() (tea.Model, tea.Cmd) {
 	text := strings.TrimSpace(m.prompt.Value())
-	if m.sessionID == "" {
-		return m, nil
-	}
 	// A BARE built-in command line ("/clear", "/help", …) is dispatched here —
 	// before addUser / stream-open — and dispatched to its Model action, so the
 	// built-in text never reaches the model. A non-built-in "/…" falls through to
@@ -2648,6 +2662,13 @@ func (m Model) submitPrompt() (tea.Model, tea.Cmd) {
 	// (workspace commands expand server-side from the full line).
 	if mm, cmd, handled := m.dispatchBareBuiltin(m.prompt.Value()); handled {
 		return mm, cmd
+	}
+	if m.sessionID == "" {
+		return m, nil
+	}
+	if m.compactPending {
+		m.statusMsg = m.deps.Theme.Style("warning").Render("wait for session compaction to finish before sending a prompt")
+		return m, nil
 	}
 	// Expand staged large-paste placeholders IN PLACE first, so the mention
 	// expansion and the media reconcile below run on the FINAL text (a pasted
