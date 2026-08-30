@@ -7367,17 +7367,10 @@ execution requires an explicit workspace-file workflow.
 
 ## TUI — `cmd/mecatui/` (see `docs/tui.md`)
 
-**Upstream textarea word-backward hang workaround** (`cmd/mecatui/ui/textarea_guard.go` + the two
-`default:` guards in `update.go`'s `onRunningKey`/`onIdleKey`): bubbles v2.1.0's
-`textarea.wordLeft()` has an unbounded loop — alt+left/alt+b with only whitespace strictly before
-the cursor (the subtle case: `" foo"` at the origin) spins forever, wedging the update goroutine
-at 100% CPU; this froze a live session. The guard predicts the hang (`wordLeftWouldHang`) and
-swallows the keypress (a semantic no-op: upstream's intended "no word to the left" is don't-move).
-Upstream refs: charmbracelet/bubbletea#1652; bubbles PRs #948 (incomplete) / #959 / #987
-(unmerged). Removal condition: once on a bubbles release whose `wordLeft` has an in-loop boundary
-guard, delete `textarea_guard.go`, the two call sites, and this paragraph. The textinput overlays
-need nothing (textinput is upstream-guarded), but any FUTURE textarea-bearing overlay needs the
-same one-line guard in front of its `textarea.Update`.
+**Bubbles textarea selection support**: mecatui uses bubbles v2.2.1, which fixes the
+v2.1.0 `textarea.wordLeft()` whitespace hang. The local word-backward guard has therefore
+been removed; textarea navigation and its upstream keyboard-selection behavior now reach
+the widget directly.
 
 **Large-paste placeholder staging + input render memoization** (issue #45, `cmd/mecatui/ui`):
 a bracketed paste ≥ 2000 runes or ≥ 30 lines is staged in `Model.stagedPastes` behind a
@@ -7388,8 +7381,9 @@ returns) or at `enqueuePrompt` (the queue holds FINAL text; the store is textare
 Root cause: bubbles textarea's `View()` re-wraps + SHA-256-keys every logical line per call
 even on its memo hits, and `renderInput` runs ≥ 2× per reduced message — a buffered huge paste
 made every keystroke O(paste). The companion fix memoizes `renderInput` on a single-entry
-STATE-KEYED cache (`renderer.inputKey`: value, cursor row/rowOffset/colOffset, focus,
-width/height — NOT a dirty flag: the textarea has ~30 mutation sites and a missed dirty-set
+STATE-KEYED cache (`renderer.inputKey`: value, cursor row/rowOffset/colOffset,
+selection active state + normalized logical endpoints, focus, width/height — NOT a dirty flag:
+the textarea has ~30 mutation sites and a missed dirty-set
 would freeze the input). Single-entry correctness: the textarea's un-keyed hidden state
 (internal scroll offset, cursor blink phase — the virtual cursor is STATIC, `cursor.BlinkMsg`
 is never routed to the textarea) changes only alongside a keyed fact in the same reducer step,
@@ -7397,7 +7391,7 @@ and the relayout chokepoint re-keys every step. Sits beside the streamed-delta c
 per-block render cache (`docs/tui.md` "Performance" notes). Tests: `paste_large_test.go`
 (staging thresholds/boundary, submit/enqueue expansion, deleted-marker drop, image-marker
 coexistence, overlay gate, /clear, golden `paste_placeholder.golden`, cache hit + edit/cursor/
-focus invalidation) — all three mutation drills verified (threshold branch, submit expansion,
+selection/focus invalidation) — all four mutation drills verified (threshold branch, submit expansion,
 key comparison).
 
 **First-encounter workspace-trust prompt** (WORKSPACE-TRUST Phase 2c, `cmd/mecatui/trust.go`) is

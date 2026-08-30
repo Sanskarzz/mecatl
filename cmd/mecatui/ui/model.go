@@ -11,7 +11,6 @@ import (
 	"errors"
 
 	"charm.land/bubbles/v2/spinner"
-	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
@@ -19,6 +18,7 @@ import (
 	"github.com/stacklok/mecatl/cmd/mecatui/client"
 	"github.com/stacklok/mecatl/cmd/mecatui/theme"
 	"github.com/stacklok/mecatl/cmd/mecatui/ui/platform"
+	"github.com/stacklok/mecatl/cmd/mecatui/ui/prompttextarea"
 	"github.com/stacklok/mecatl/cmd/mecatui/ui/welcome"
 )
 
@@ -472,8 +472,8 @@ type Model struct {
 	// wrap shapes (one long line, a compound pipeline, a heredoc).
 	debugAskCycle int
 
-	ta textarea.Model
-	sp spinner.Model
+	prompt prompttextarea.Editor
+	sp     spinner.Model
 	// stuck is true while the viewport auto-follows the bottom (tails streaming
 	// output). It is no longer hardcoded: syncStuck re-derives it from
 	// m.vp.AtBottom() after every scroll/wheel/nav so a scroll-up unsticks (and
@@ -834,7 +834,6 @@ type Model struct {
 	// refreshView). Active only on the alt screen; an overlay/modal/help blocks a new
 	// selection and clears an active one.
 	sel selection
-
 	// mouseDebug is the last formatted mouse-diagnostic line (see mouseDebugLine),
 	// rendered in the footer only when Deps.DebugMouse is set. Set at the top of
 	// onMousePress/onMouseMotion when the diagnostic is enabled; empty otherwise.
@@ -884,17 +883,10 @@ func New(deps Deps) Model {
 	keys := applyKeyOverrides(defaultKeys(), deps.KeyOverrides)
 	hk := keyMarkingsWithScroll(keys, deps.scrollKeysMarking())
 
-	ta := textarea.New()
-	// The mode-coloured rail border (renderInputRail) is the SINGLE vertical accent cue,
-	// so suppress the textarea's own inner prompt bar (U+2503) and line-number gutter to
-	// avoid a redundant second bar (issue #161). Both MUST be set before any SetWidth —
-	// bubbles' textarea computes its inner gutter width in SetWidth from Prompt +
-	// ShowLineNumbers — which covers both New()'s internal SetWidth and the later onResize.
-	ta.Prompt = ""
-	ta.ShowLineNumbers = false
-	ta.Placeholder = "Ask mecatl to do something…  (" + hk.submit + " to send · " + hk.newlineFirst + " for newline · " + hk.help + " for help)"
-	ta.SetHeight(3)
-	ta.Focus()
+	prompt := prompttextarea.New(prompttextarea.Config{
+		Placeholder: "Ask mecatl to do something…  (" + hk.submit + " to send · " + hk.newlineFirst + " for newline · " + hk.help + " for help)",
+		SelectAll:   keys.SelectAll,
+	})
 
 	sp := spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(th.Style("spinner")))
 
@@ -917,7 +909,7 @@ func New(deps Deps) Model {
 		hits:    &hitRegions{},
 		metrics: &renderedSurfaceMetrics{},
 		phase:   phaseConnecting,
-		ta:      ta,
+		prompt:  prompt,
 		sp:      sp,
 		vp:      vp,
 		stuck:   true,
@@ -950,7 +942,7 @@ func New(deps Deps) Model {
 		m.modelsReconciled = deps.Models == nil
 		state := m.newSessionsSurface(true)
 		_ = state.beginPage("")
-		m.ta.Blur()
+		m.prompt.Blur()
 		if deps.Sessions == nil {
 			state.loading = false
 			state.loadState = sessionsInitialPageError

@@ -187,7 +187,7 @@ func TestRunMCPOpensPanelOnModal(t *testing.T) {
 	if !st.loading {
 		t.Error("panel should be loading until the RPC result lands")
 	}
-	if m.ta.Focused() {
+	if m.prompt.Focused() {
 		t.Error("opening the panel should blur the textarea")
 	}
 	if cmd == nil {
@@ -262,8 +262,8 @@ func TestMCPPromptGotClosesAndInserts(t *testing.T) {
 	if m.modal != nil {
 		t.Fatalf("PromptGot should close the surface: modal=%v", m.modal)
 	}
-	if !strings.Contains(m.ta.Value(), "Please review path X.") {
-		t.Fatalf("Model remnant did not load the prompt: %q", m.ta.Value())
+	if !strings.Contains(m.prompt.Value(), "Please review path X.") {
+		t.Fatalf("Model remnant did not load the prompt: %q", m.prompt.Value())
 	}
 }
 
@@ -507,8 +507,8 @@ func TestMCPResourceInsertIntoInput(t *testing.T) {
 	if m.modal != nil {
 		t.Fatalf("surface still open after insert: %v", m.modal)
 	}
-	if !strings.Contains(m.ta.Value(), "the resource body") {
-		t.Fatalf("resource text not in input: %q", m.ta.Value())
+	if !strings.Contains(m.prompt.Value(), "the resource body") {
+		t.Fatalf("resource text not in input: %q", m.prompt.Value())
 	}
 }
 
@@ -607,8 +607,8 @@ func TestMCPPromptSendIntoInput(t *testing.T) {
 	if m.modal != nil {
 		t.Fatalf("surface still open: %v", m.modal)
 	}
-	if !strings.Contains(m.ta.Value(), "Please review path X.") {
-		t.Fatalf("prompt text not in input: %q", m.ta.Value())
+	if !strings.Contains(m.prompt.Value(), "Please review path X.") {
+		t.Fatalf("prompt text not in input: %q", m.prompt.Value())
 	}
 }
 
@@ -618,8 +618,8 @@ func TestFeedMCPInsertionRunsBusinessMessageWithoutBlink(t *testing.T) {
 	m = feedMCPInsertion(t, m, func() tea.Msg {
 		return client.MCPPromptGotMsg{Name: "review", Messages: samplePromptMCP().promptMsg}
 	})
-	if m.modal != nil || !strings.Contains(m.ta.Value(), "Please review") {
-		t.Fatalf("business message was not reduced: modal=%v input=%q", m.modal, m.ta.Value())
+	if m.modal != nil || !strings.Contains(m.prompt.Value(), "Please review") {
+		t.Fatalf("business message was not reduced: modal=%v input=%q", m.modal, m.prompt.Value())
 	}
 	// feedMCPInsertion never invokes the returned focus command. Cursor lifecycle
 	// rendering remains owned by TestRenderInputInvalidatedByCursorMove.
@@ -645,8 +645,8 @@ func TestMCPArgsSubmitCollectsValues(t *testing.T) {
 	mm, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = mm.(Model)
 	m = feedMCPInsertion(t, m, cmd)
-	if m.modal != nil || !strings.Contains(m.ta.Value(), "Please review") {
-		t.Fatalf("prompt not sent into input: modal=%v ta=%q", m.modal, m.ta.Value())
+	if m.modal != nil || !strings.Contains(m.prompt.Value(), "Please review") {
+		t.Fatalf("prompt not sent into input: modal=%v prompt=%q", m.modal, m.prompt.Value())
 	}
 }
 

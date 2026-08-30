@@ -40,7 +40,7 @@ func TestCompactTypedAndPaletteDispatchAgree(t *testing.T) {
 	}
 
 	palette, paletteStub, _ := compactModel(t, true)
-	palette.ta.SetValue("/compact")
+	palette.prompt.Rewrite("/compact")
 	palette.palette.open = true
 	palette.palette.filtered = []client.Command{{Name: "compact", Builtin: true}}
 	palette.palette.cursor = 0
@@ -74,7 +74,7 @@ func TestCompactLocalRejectionsNeverReachModel(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m, stub, send := compactModel(t, true)
 			tc.setup(&m)
-			m.ta.SetValue(tc.input)
+			m.prompt.Rewrite(tc.input)
 			var cmd tea.Cmd
 			if m.phase == phaseRunning {
 				mm, c, _ := m.dispatchBareBuiltin(tc.input)
@@ -94,15 +94,15 @@ func TestCompactCompletionPreservesStateAndNextPromptSession(t *testing.T) {
 	m, stub, send := compactModel(t, true)
 	m.queued = []string{"queued follow-up"}
 	m.resolvedSessionModel = client.ResolvedModel{ProviderID: "provider", ModelID: "model"}
-	m.ta.SetValue("/compact")
+	m.prompt.Rewrite("/compact")
 	mm, cmd := m.submitPrompt()
 	m = mm.(Model)
 	beforeBlocks := len(m.conv.blocks)
-	m.ta.SetValue("do not overtake")
+	m.prompt.Rewrite("do not overtake")
 	blocked, blockedCmd := m.submitPrompt()
 	m = blocked.(Model)
-	if blockedCmd != nil || m.ta.Value() != "do not overtake" || !strings.Contains(stripANSIstr(m.statusMsg), "wait for session compaction") {
-		t.Fatalf("pending prompt overtook compact: cmd=%v input=%q status=%q", blockedCmd, m.ta.Value(), stripANSIstr(m.statusMsg))
+	if blockedCmd != nil || m.prompt.Value() != "do not overtake" || !strings.Contains(stripANSIstr(m.statusMsg), "wait for session compaction") {
+		t.Fatalf("pending prompt overtook compact: cmd=%v input=%q status=%q", blockedCmd, m.prompt.Value(), stripANSIstr(m.statusMsg))
 	}
 	msg := cmd().(client.SessionCompactedMsg)
 	mm, _ = m.Update(msg)
@@ -110,15 +110,15 @@ func TestCompactCompletionPreservesStateAndNextPromptSession(t *testing.T) {
 	if m.compactPending || len(m.conv.blocks) != beforeBlocks+1 || !strings.Contains(m.conv.blocks[len(m.conv.blocks)-1].raw, "Model history compacted.") {
 		t.Fatalf("pending=%v blocks=%#v", m.compactPending, m.conv.blocks)
 	}
-	if m.ta.Value() != "do not overtake" || len(m.queued) != 1 || m.resolvedSessionModel.ModelID != "model" {
-		t.Fatalf("compact changed compose/model state: input=%q queue=%v model=%+v", m.ta.Value(), m.queued, m.resolvedSessionModel)
+	if m.prompt.Value() != "do not overtake" || len(m.queued) != 1 || m.resolvedSessionModel.ModelID != "model" {
+		t.Fatalf("compact changed compose/model state: input=%q queue=%v model=%+v", m.prompt.Value(), m.queued, m.resolvedSessionModel)
 	}
 	if len(stub.calls) != 1 || len(send.frames()) != 0 {
 		t.Fatalf("compact calls=%v converse frames=%d", stub.calls, len(send.frames()))
 	}
 
 	id := m.sessionID
-	m.ta.SetValue("next prompt")
+	m.prompt.Rewrite("next prompt")
 	mm, promptCmd := m.submitPrompt()
 	m = mm.(Model)
 	runBatchLeaves(promptCmd)
@@ -159,7 +159,7 @@ func TestCompactNoOpErrorAndStaleCompletion(t *testing.T) {
 	if len(m.conv.blocks) != blocks || m.statusMsg != status {
 		t.Fatal("stale compact completion mutated replacement session")
 	}
-	m.ta.SetValue("replacement prompt")
+	m.prompt.Rewrite("replacement prompt")
 	mm, promptCmd := m.submitPrompt()
 	m = mm.(Model)
 	if promptCmd == nil {
