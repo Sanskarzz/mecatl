@@ -269,12 +269,12 @@ func compactionDriveBuryTurns(ctx ginkgo.SpecContext) (*harness.Local, []*harnes
 	ginkgo.GinkgoHelper()
 	window := envOrDefault("MECATL_E2E_COMPACTION_WINDOW", compactionWindowDefault)
 	// --max-run-tokens is a SAFETY RAIL (not the test's cost control — the small
-	// window + fixed turn count bound that); 150000 sits comfortably above the
-	// scenario's natural multi-turn usage. --context-window-override forces the
-	// small compaction window.
+	// window + fixed turn count bound that); 300000 covers both this scenario and
+	// the model-slot companion that shares the override. --context-window-override
+	// forces the small compaction window.
 	spawn, err := harness.NewLocalWith(
 		"--context-window-override", window,
-		"--max-run-tokens", envOrDefault("MECATL_E2E_COMPACTION_MAX_RUN_TOKENS", "150000"),
+		"--max-run-tokens", envOrDefault("MECATL_E2E_COMPACTION_MAX_RUN_TOKENS", "300000"),
 	)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "spawn local mecated with --context-window-override")
 	logTail := func() string { return "\n--- mecated log tail ---\n" + spawn.LogTail(4096) }

@@ -35,7 +35,7 @@ Environment knobs (all optional):
 | `MECATL_E2E_MAX_RUN_TOKENS` | `50000` | `--max-run-tokens` for the spawned server (a single full-catalog turn is ~5-6k input tokens; a runaway brake, not a cost control — raised 20k→50k for multi-turn + cross-restart headroom against live-model verbosity drift) |
 | `MECATL_E2E_MAX_TEAM_TOKENS` | `60000` | `--max-team-tokens` for the spawned server |
 | `MECATL_E2E_COMPACTION_WINDOW` | `2000` | compaction spec only: the `--context-window-override` for its own spawn (trigger = 0.8 × the estimated complete request) |
-| `MECATL_E2E_COMPACTION_MAX_RUN_TOKENS` | `150000` | compaction + model-slots specs: `--max-run-tokens` for their OWN small-window spawns (the reused multi-turn session needs headroom; a safety rail above the ~110k natural usage, NOT a cost control) |
+| `MECATL_E2E_COMPACTION_MAX_RUN_TOKENS` | `300000` | compaction + model-slots specs: `--max-run-tokens` for their own small-window spawns. The model-slots case deliberately grows enough deterministic history to force a reducing cascade summary; this is a runaway safety rail, not a cost control. |
 | `MECATL_E2E_WORKSPACE` | — | remote target only: absolute workspace root on the server host (required) |
 | `MECATL_E2E_METRICS_URL` | — | remote target only: the `/metrics` URL (metrics spec Skips without it) |
 | `MECATL_E2E_AUTH_TOKEN` | — | remote target only: bearer token |
