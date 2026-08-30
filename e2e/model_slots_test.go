@@ -70,9 +70,10 @@ func modelSlotSpecs() {
 				gomega.Expect(startLog).To(gomega.ContainSubstring(cheap),
 					"the slot fact must name the resolved cheap model "+cheap+logTail())
 
-				// (B) Drive a session that triggers a real compaction (the same Read-bury
-				// arithmetic as the compaction spec), then assert a compaction fired and
-				// the runs ended cleanly — the tier-4 summary (slot model) ran live.
+				// (B) Drive enough sized Read turns to grow compactible history past the
+				// complete-request threshold and yield a reducing tier-4 summary, then
+				// assert a compaction fired and the runs ended cleanly — the tier-4
+				// summary (slot model) ran live.
 				var runs []*harness.RunResult
 				runTurn := func(scenario, prompt string) *harness.RunResult {
 					ginkgo.GinkgoHelper()
@@ -93,7 +94,8 @@ func modelSlotSpecs() {
 				readPrompt := `Read the file compaction-input.txt in the workspace and reply with the single word ok.`
 				runTurn("slot-1-read", readPrompt)
 				runTurn("slot-2-read", readPrompt)
-				last := runTurn("slot-3-read", readPrompt)
+				runTurn("slot-3-read", readPrompt)
+				last := runTurn("slot-4-read", readPrompt)
 
 				totalCompactions := 0
 				for _, r := range runs {
