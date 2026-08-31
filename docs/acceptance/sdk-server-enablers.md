@@ -207,14 +207,20 @@ The transport over the cursor seam. Depends on Scenarios 4 and 6.
   - verify: `TestSDKServerEnablers_Scenario7_WatchOwnershipEnforced`
 - AC7.5: A slow watcher is terminated with a **resumable** error and never backpressures the run; the run completes normally.
   - verify: `TestADR_0250_SlowWatcherTerminatesWithoutBackpressure`
-- AC7.6: A durable append failure terminates watchers **in that process** with `ActivityGapError` without advancing their cursor, and the owned run continues.
-  - verify: `TestADR_0250_AppendFailureTerminatesLocalWatchers`
+- AC7.6: A durable append failure terminates watchers **in that process** with `ActivityGapError` without advancing their cursor, and the owned run continues. It terminates EVERY watcher attached to the session, not only the first, and a known gap OUTRANKS any other terminal the watch had already recorded — a lagging termination tells the client it lost nothing, which is exactly the wrong thing to say when records are missing. The client-facing terminal carries no backend prose; the cause survives on the durable gap marker and the operator WARN. (The fan-out, the precedence and the redaction were added after review of [#878](https://github.com/stacklok/mecatl/pull/878); the precedence claim survived mutation before it was pinned.)
+  - verify: `TestADR_0250_AppendFailureTerminatesLocalWatchers`, `TestADR_0250_FaultTerminatesEveryAttachedWatcher`, `TestADR_0250_GapOutranksEveryOtherTerminal`
 - AC7.7: The best-effort durable gap marker, when it lands, is observed by watchers in a **second** process.
   - verify: `TestADR_0250_GapMarkerObservedCrossProcess`
 - AC7.8: Exactly one append occurs per event; cursor assignment happens at the persistence chokepoint, not at the emit site.
   - verify: `TestADR_0250_OneAppendPerEvent`
 - AC7.9: The existing `StreamSessionEvents` and `StreamSessionLive` endpoints behave identically to today.
   - verify: `TestSDKServerEnablers_Scenario7_LegacyStreamEndpointsUnchanged`
+- AC7.10: A watch narrowed by `run_id` delivers exactly that run's events, delivers every gap **regardless** of the filter, and advances its internal position over the records it dropped so the follow does not re-read them. A cursor is consequently scoped to the `run_id` it was issued under, and both transports' contracts say so. (Added after review of [#878](https://github.com/stacklok/mecatl/pull/878): run filtering shipped with no coverage at all, and all three behaviours survived mutation.)
+  - verify: `TestSDKServerEnablers_Scenario7_RunFilterDeliversOneRunAndEveryGap`
+- AC7.11: A stream-terminal error is DELIVERABLE to a conforming SSE client — framed as `event: error` with the payload on a `data:` line — on the watch route and on the older replay route alike. A frame written without the prefix is discarded by the EventSource grammar, so producing the right error and framing it unreadably is the same failure as producing none. (Added after review of [#878](https://github.com/stacklok/mecatl/pull/878), where it was a live defect inherited from the replay route.)
+  - verify: `TestSDKServerEnablers_Scenario7_TerminalErrorIsValidSSE`
+- AC7.12: The watch lifecycle holds at its edges: an EMPTY log still announces the boundary (a bootstrapping client must not hang waiting for a record that would carry the live marker), `Service.Close` ends attached watches CLEANLY rather than as a gap, a watch attached after close is born cancelled, and a backend fault during the FOLLOW phase reaches the client instead of parking it on a stream nobody is reading. (Added after review of [#878](https://github.com/stacklok/mecatl/pull/878).)
+  - verify: `TestADR_0250_EmptyLogAnnouncesTheBoundaryImmediately`, `TestADR_0250_ShutdownEndsAttachedWatchesCleanly`, `TestADR_0250_WatchAfterCloseIsBornCancelled`, `TestADR_0250_BackendFaultDuringFollowTerminates`
 
 ---
 

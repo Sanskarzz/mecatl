@@ -2094,9 +2094,7 @@ func (h *HTTPHandler) streamSessionEvents(w http.ResponseWriter, r *http.Request
 			// Mid-stream fault: emit an SSE error frame and stop. The iter.Seq2
 			// releases its file handle on early break per port.EventLog.Read's
 			// contract.
-			_ = enc.Encode(map[string]string{"error": iterErr.Error()})
-			_, _ = w.Write([]byte("\n"))
-			flusher.Flush()
+			writeSSEError(w, flusher, map[string]string{"error": iterErr.Error()})
 			return
 		}
 		if _, err := w.Write([]byte("data: ")); err != nil {
@@ -2159,9 +2157,7 @@ func (h *HTTPHandler) watchSessionEvents(w http.ResponseWriter, r *http.Request)
 			// the stable machine code so a client can tell a resumable lag from a
 			// delivery gap without parsing prose. Breaking out releases the watch.
 			entry := classifyError(iterErr)
-			_ = enc.Encode(map[string]string{"code": entry.Code, "error": iterErr.Error()})
-			_, _ = w.Write([]byte("\n"))
-			flusher.Flush()
+			writeSSEError(w, flusher, map[string]string{"code": entry.Code, "error": iterErr.Error()})
 			return
 		}
 		if _, err := w.Write([]byte("data: ")); err != nil {
@@ -2178,6 +2174,37 @@ func (h *HTTPHandler) watchSessionEvents(w http.ResponseWriter, r *http.Request)
 }
 
 // --- helpers ----------------------------------------------------------------
+
+// writeSSEError writes a TERMINAL error frame as valid Server-Sent Events.
+//
+// The payload has to ride a `data: ` line. Per the EventSource grammar a line is
+// split into `field: value` at the first colon, so a bare `{"code":"..."}` parses
+// as the unrecognised field `{"code"` and is DISCARDED — a conforming client sees
+// the stream go quiet and cannot tell a resumable fault from a delivery gap from
+// a clean end. That silence is precisely the failure the durable watch exists to
+// abolish (see ErrWatchLagging), so the framing here is load-bearing rather than
+// cosmetic.
+//
+// The frame is tagged `event: error` so a client can ROUTE it — an SSE consumer
+// otherwise has to shape-sniff the JSON against the success payload it is not,
+// and on the watch route the success payload is a WatchSessionEventsResponse
+// whose fields are all optional, so sniffing is unreliable by construction.
+//
+// Callers own the payload shape: the watch route carries the stable machine
+// `code`, the older replay route carries `error` alone. Both now ARRIVE, which is
+// the fix; unifying their bodies would change a shape clients may already read.
+func writeSSEError(w http.ResponseWriter, flusher http.Flusher, payload any) {
+	if _, err := w.Write([]byte("event: error\ndata: ")); err != nil {
+		return
+	}
+	if err := json.NewEncoder(w).Encode(payload); err != nil { // Encode appends a newline
+		return
+	}
+	if _, err := w.Write([]byte("\n")); err != nil {
+		return
+	}
+	flusher.Flush()
+}
 
 // modeFromString maps a JSON mode string to a session.PermissionMode. Unknown
 // or empty values fall through to the empty mode (Service applies its default).

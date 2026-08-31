@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"iter"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -682,17 +683,38 @@ func TestADR_0250_AppendFailureTerminatesLocalWatchers(t *testing.T) {
 	if !errors.Is(termErr, server.ErrActivityGap) {
 		t.Fatalf("ActivityGapError does not classify as ErrActivityGap: %v", termErr)
 	}
-	if !strings.Contains(gap.Reason, errAppendRejected.Error()) {
-		t.Fatalf("gap reason = %q, want the backend cause", gap.Reason)
-	}
 	if code := server.ClassifyErrorCodeForTest(termErr); code != "activity_gap" {
 		t.Fatalf("error code = %q, want activity_gap", code)
 	}
+	// The terminal reaches the CLIENT — as a gRPC status message and an SSE error
+	// field — so it must not carry the backend's prose. A raw store error embeds
+	// infrastructure detail (a Redis dial address, a jsonlstore path); GetSession
+	// already withholds it for that reason, and the same applies at least as
+	// strongly to a field the client reads. The operator keeps every byte: the
+	// cause goes to the durable gap marker and to the recorder's append-failure
+	// WARN.
+	if strings.Contains(termErr.Error(), errAppendRejected.Error()) {
+		t.Fatalf("client-facing terminal %q leaks the raw backend cause", termErr)
+	}
 
-	// TIER 1 was attempted: one best-effort durable gap marker.
+	// TIER 1 was attempted: one best-effort durable gap marker. It is also where
+	// the cause SURVIVES — the client-facing terminal above is bare, so if the
+	// marker did not carry the backend error the operator would have lost it.
 	_, gaps, _ := log.counts()
 	if gaps == 0 {
 		t.Fatal("no gap marker was attempted; the best-effort cross-process tier never ran")
+	}
+	markerReason := ""
+	for rec, readErr := range inner.ReadAfter(context.Background(), id, "", port.ReadOptions{}) {
+		if readErr != nil {
+			t.Fatalf("read back the log: %v", readErr)
+		}
+		if rec.Kind == port.LogRecordGap {
+			markerReason = rec.GapReason
+		}
+	}
+	if !strings.Contains(markerReason, errAppendRejected.Error()) {
+		t.Fatalf("durable gap marker reason = %q, want the backend cause — redacting the client-facing error must not lose it for the operator", markerReason)
 	}
 
 	// The owned run continued. A broken log must not break a live run — that is
@@ -1061,4 +1083,280 @@ func TestADR_0250_WatchEnvelopeSurvivesAnInvalidUTF8Cursor(t *testing.T) {
 	if frames < 2 {
 		t.Fatalf("only %d frames; the fixture proves nothing", frames)
 	}
+}
+
+// --- AC7.10 -----------------------------------------------------------------
+
+// TestSDKServerEnablers_Scenario7_RunFilterDeliversOneRunAndEveryGap is AC7.10:
+// a watch narrowed by run_id delivers exactly that run's events, delivers every
+// gap regardless of the filter, and advances its internal position over the
+// records it dropped.
+//
+// The third clause is the one with no other witness. resumeFrom is set BEFORE the
+// filter runs, so the follow resumes past records the filter excluded rather than
+// re-reading them; moving that assignment inside the delivery branch is the
+// natural-looking tidy-up, and nothing else in the suite would notice. The
+// fixture therefore ends the replay on a FILTERED-OUT record, so the boundary
+// cursor can only be right if the position advanced over it.
+func TestSDKServerEnablers_Scenario7_RunFilterDeliversOneRunAndEveryGap(t *testing.T) {
+	log := memstore.NewEventLog()
+	svc, client, id := watchedRun(t, log)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	// Run A is already durable. Its id has to be discovered from the log: the
+	// server mints run ids, so a test cannot choose one in advance.
+	runA := ""
+	for _, ev := range readEventLog(t, log, id) {
+		if ev.RunID != "" {
+			runA = ev.RunID
+			break
+		}
+	}
+	if runA == "" {
+		t.Fatal("no run id on any recorded event; the filter has nothing to select")
+	}
+
+	// A durable gap inside the replay window. Appended directly rather than by
+	// faulting an append, because faulting would also TERMINATE this watcher
+	// (tier 2) and the frame is what is under test.
+	if _, err := log.AppendGap(ctx, id, "injected replay gap"); err != nil {
+		t.Fatalf("AppendGap: %v", err)
+	}
+	// Run B lands AFTER the gap, so the last record in the log is one the filter
+	// excludes.
+	driveRunSync(t, client, id, "second")
+
+	lastCursor := port.Cursor("")
+	for rec, err := range log.ReadAfter(ctx, id, "", port.ReadOptions{}) {
+		if err != nil {
+			t.Fatalf("read back the log: %v", err)
+		}
+		lastCursor = rec.Cursor
+	}
+
+	envelopes, err := svc.WatchSessionEvents(ctx, id, "", runA)
+	if err != nil {
+		t.Fatalf("WatchSessionEvents: %v", err)
+	}
+	next, stop := iter.Pull2(envelopes)
+	defer stop()
+
+	gaps, events, boundary := 0, 0, port.Cursor("")
+	for {
+		env, iterErr, ok := next()
+		if !ok {
+			t.Fatal("watch ended before the boundary frame")
+		}
+		if iterErr != nil {
+			t.Fatalf("watch failed during replay: %v", iterErr)
+		}
+		if env.Event == nil && env.Phase == server.WatchPhaseLive {
+			boundary = env.Cursor
+			break
+		}
+		if env.Phase == server.WatchPhaseGap {
+			gaps++
+			continue
+		}
+		events++
+		if env.Event.RunID != runA {
+			t.Fatalf("filtered watch delivered an event from run %q, want only %q", env.Event.RunID, runA)
+		}
+	}
+	if events == 0 {
+		t.Fatal("the filter delivered no events at all; it selects nothing rather than one run")
+	}
+	if gaps != 1 {
+		t.Fatalf("delivered %d gap frames, want 1 — a gap is delivered WHATEVER the filter says, because a failed append left no record to attribute to a run", gaps)
+	}
+	if boundary != lastCursor {
+		t.Fatalf("boundary cursor = %q, want the last record in the log %q — the watch position must advance over filtered-out records, or the follow re-reads them", boundary, lastCursor)
+	}
+
+	// The live half. Run C is excluded too, so the only thing that may arrive is
+	// the gap appended after it — which simultaneously proves the follow is awake,
+	// that it read and dropped run C, and that gaps bypass the filter live as well
+	// as in replay.
+	driveRunSync(t, client, id, "third")
+	if _, err := log.AppendGap(ctx, id, "injected live gap"); err != nil {
+		t.Fatalf("AppendGap: %v", err)
+	}
+	env, iterErr, ok := next()
+	if !ok || iterErr != nil {
+		t.Fatalf("live follow ended (ok=%v) with %v, want the gap frame", ok, iterErr)
+	}
+	if env.Phase != server.WatchPhaseGap || env.Event != nil {
+		t.Fatalf("live frame = %s/%v, want an event-less gap — run C's events must be filtered out and the gap must not be", env.Phase, env.Event)
+	}
+}
+
+// --- AC7.11 -----------------------------------------------------------------
+
+// TestSDKServerEnablers_Scenario7_TerminalErrorIsValidSSE is AC7.11: a
+// stream-terminal error is DELIVERABLE to a conforming SSE client, on both the
+// watch route and the older replay route.
+//
+// A terminal frame written without a `data: ` prefix is not SSE at all: the
+// EventSource grammar splits a line into `field: value` at the first colon, so a
+// bare `{"code":...}` parses as the unrecognised field `{"code"` and is
+// DISCARDED. The client sees the stream fall silent and cannot tell a delivery
+// gap from a clean end — which is precisely the failure ADR 0250 exists to
+// abolish, reintroduced one layer down at the transport. Producing the right
+// error and framing it unreadably is the same bug as not producing it.
+//
+// The assertion parses like a CONFORMING CLIENT — it reads the `event:` tag and
+// the `data:` payload — rather than scanning the raw body for a substring, which
+// would pass on the malformed framing too.
+//
+// The terminal chosen is activity_gap rather than watch_lagging because it is the
+// one reachable over SSE deterministically: lagging needs the delivery buffer to
+// fill, and an SSE handler drains into a socket buffer that absorbs a test-sized
+// run, so a stalled reader never applies backpressure. Both terminals go through
+// the same writeSSEError helper and take their code from the same classifyError,
+// so the framing is covered; watch_lagging's own production is pinned at the
+// service level by AC7.5.
+func TestSDKServerEnablers_Scenario7_TerminalErrorIsValidSSE(t *testing.T) {
+	t.Run("watch route surfaces activity_gap", func(t *testing.T) {
+		log := newCountingCursorLog(memstore.NewEventLog())
+		svc, client, id := watchedRun(t, log)
+		srv := httptest.NewServer(server.NewHTTPHandler(svc))
+		defer srv.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		resp := openSSE(ctx, t, srv.URL+"/v1/sessions/"+string(id)+"/watch")
+		defer func() { _ = resp.Body.Close() }()
+
+		frames := make(chan sseFrame, 64)
+		go scanSSE(resp.Body, frames)
+
+		// Drain to the boundary, then break the log and drive a run: the first
+		// relayed append fails and faults this attached watcher.
+		for f := range frames {
+			if f.tag == "error" {
+				t.Fatalf("unexpected early error frame %q", f.data)
+			}
+			var env mecatlv1.WatchSessionEventsResponse
+			if err := json.Unmarshal([]byte(f.data), &env); err != nil {
+				t.Fatalf("decode %q: %v", f.data, err)
+			}
+			if env.GetEvent() == nil && env.GetPhase() == server.WatchPhaseLive {
+				break
+			}
+		}
+		log.failAppends(true)
+		done := driveRunBackground(t, client, id, "second")
+
+		frame := awaitErrorFrame(t, frames)
+		if frame.Code != "activity_gap" {
+			t.Fatalf("sse terminal code = %q, want activity_gap", frame.Code)
+		}
+		if frame.Error == "" {
+			t.Fatal("sse terminal frame carries no error text")
+		}
+		if strings.Contains(frame.Error, errAppendRejected.Error()) {
+			t.Fatalf("sse terminal frame %q leaks the raw backend cause to the client", frame.Error)
+		}
+		waitRun(t, done)
+		log.failAppends(false)
+	})
+
+	// The same defect was INHERITED from the older replay route, which had the
+	// identical unprefixed write and the identical absence of coverage. One shared
+	// helper fixes both, so both are pinned; a client of /events could not see a
+	// mid-replay storage fault either.
+	t.Run("replay route surfaces a mid-stream fault", func(t *testing.T) {
+		svc := watchService(t, failingReadLog{inner: memstore.NewEventLog()}, false)
+		srv := httptest.NewServer(server.NewHTTPHandler(svc))
+		defer srv.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		sess, err := svc.CreateSession(ctx, "/ws", session.ModeDefault, session.Limits{})
+		if err != nil {
+			t.Fatalf("CreateSession: %v", err)
+		}
+		resp := openSSE(ctx, t, srv.URL+"/v1/sessions/"+string(sess.ID)+"/events")
+		defer func() { _ = resp.Body.Close() }()
+
+		frames := make(chan sseFrame, 64)
+		go scanSSE(resp.Body, frames)
+		frame := awaitErrorFrame(t, frames)
+		if frame.Error == "" {
+			t.Fatalf("replay-route error frame carries no error text: %+v", frame)
+		}
+	})
+}
+
+// --- SSE reading helpers ------------------------------------------------------
+
+// sseFrame is one parsed Server-Sent Event: its optional `event:` tag and its
+// `data:` payload. Parsing the tag is the point — a client routes on it, and a
+// test that only greps for `data:` cannot tell a well-formed error frame from a
+// success frame that happens to contain the same bytes.
+type sseFrame struct {
+	tag  string
+	data string
+}
+
+// scanSSE parses an SSE body into frames and closes out at end of stream.
+func scanSSE(body io.Reader, out chan<- sseFrame) {
+	defer close(out)
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	tag := ""
+	for scanner.Scan() {
+		line := scanner.Text()
+		switch {
+		case strings.HasPrefix(line, "event: "):
+			tag = strings.TrimPrefix(line, "event: ")
+		case strings.HasPrefix(line, "data: "):
+			out <- sseFrame{tag: tag, data: strings.TrimPrefix(line, "data: ")}
+			tag = ""
+		}
+	}
+}
+
+// awaitErrorFrame consumes frames until the `event: error` terminal arrives,
+// failing if the stream ends without one.
+func awaitErrorFrame(t *testing.T, frames <-chan sseFrame) (frame struct {
+	Code  string `json:"code"`
+	Error string `json:"error"`
+}) {
+	t.Helper()
+	for {
+		select {
+		case f, ok := <-frames:
+			if !ok {
+				t.Fatal("SSE stream ended with no `event: error` frame carrying a `data:` payload — a terminal the client cannot parse is a terminal the client never receives")
+			}
+			if f.tag != "error" {
+				continue
+			}
+			if err := json.Unmarshal([]byte(f.data), &frame); err != nil {
+				t.Fatalf("decode sse error payload %q: %v", f.data, err)
+			}
+			return frame
+		case <-time.After(20 * time.Second):
+			t.Fatal("timed out waiting for the SSE terminal frame")
+		}
+	}
+}
+
+// openSSE issues the GET and asserts the stream opened.
+func openSSE(ctx context.Context, t *testing.T, url string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("sse GET %s: %v", url, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("sse GET %s status = %d, want 200", url, resp.StatusCode)
+	}
+	return resp
 }

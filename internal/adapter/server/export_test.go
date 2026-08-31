@@ -126,3 +126,12 @@ func ShrinkWatchDeliveryForTest(buffer int, grace time.Duration) (restore func()
 func ClassifyErrorCodeForTest(err error) string {
 	return classifyError(err).Code
 }
+
+// WatchTerminalForTest exposes the watch's terminal-precedence decision so the
+// gap-outranks-everything rule can be asserted exhaustively. The discriminating
+// state (a faulted watcher that had ALREADY recorded a lagging termination) is
+// reachable in production only through a race, so an end-to-end test cannot
+// produce it deterministically.
+func WatchTerminalForTest(gapped bool, recorded error) error {
+	return watchTerminal(gapped, recorded)
+}

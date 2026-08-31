@@ -77,6 +77,12 @@ type WatchEnvelope struct {
 	Event *session.Event
 
 	// Cursor is the opaque resume token positioned AFTER this envelope.
+	//
+	// It is SCOPED TO THE run_id IT WAS ISSUED UNDER. A filtered watch advances
+	// its internal position over records the filter dropped, so a cursor handed
+	// back on a DIFFERENT filter — or on none — resumes past events that filter
+	// would have delivered, silently. Resume with the same run_id, or start over
+	// from the beginning.
 	Cursor port.Cursor
 
 	// Phase is one of the WatchPhase* values, as an open string.
@@ -127,18 +133,20 @@ var ErrActivityGap = errors.New("server: a durable event-log append failed; this
 // best-effort durable gap marker (AppendGap) covers the likely case of one
 // rejected record, and a total backend outage plus process loss leaves a gap that
 // is undetectable by construction. Do not restate this as an absolute.
-type ActivityGapError struct {
-	// Reason is the operator-facing description of the failed append. It may be
-	// empty.
-	Reason string
-}
+//
+// It carries NO description of the underlying failure, deliberately. The cause is
+// a raw backend error — `dial tcp 10.0.0.5:6379: connect: connection refused`, a
+// jsonlstore path — and this value reaches the client as a gRPC status message
+// and an SSE `error` field. That is the same exposure GetSession already refuses
+// under ownership enforcement, on the same reasoning: the store's error routinely
+// embeds infrastructure detail a caller has no business reading. The cause is not
+// lost — it goes to the durable gap marker (tier 1) and to the append-failure
+// WARN the recorder already emits — so the operator keeps every byte of it and
+// the client gets the stable `activity_gap` code, which is the whole of what it
+// can act on.
+type ActivityGapError struct{}
 
-func (e *ActivityGapError) Error() string {
-	if e.Reason == "" {
-		return ErrActivityGap.Error()
-	}
-	return fmt.Sprintf("%s: %s", ErrActivityGap.Error(), e.Reason)
-}
+func (*ActivityGapError) Error() string { return ErrActivityGap.Error() }
 
 // Unwrap lets errors.Is(err, ErrActivityGap) classify this through the shared
 // error registry, so both transports report it identically.
@@ -157,9 +165,8 @@ type watchRegistration struct {
 	// instead of a clean end.
 	cancel context.CancelFunc
 
-	mu        sync.Mutex
-	gapped    bool
-	gapReason string
+	mu     sync.Mutex
+	gapped bool
 }
 
 // fault records that a durable append failed and stops the watch.
@@ -167,21 +174,21 @@ type watchRegistration struct {
 // It is called from the appending relay thread, so it must not block: a map walk
 // plus a context cancel is the entire cost, and a broken log must never
 // backpressure the live run it belongs to.
-func (r *watchRegistration) fault(reason string) {
+//
+// It takes no reason: the cause belongs to the durable marker and the operator
+// WARN, not to the client-facing terminal (see ActivityGapError).
+func (r *watchRegistration) fault() {
 	r.mu.Lock()
-	if !r.gapped {
-		r.gapped = true
-		r.gapReason = reason
-	}
+	r.gapped = true
 	r.mu.Unlock()
 	r.cancel()
 }
 
-// gap reports whether this watch was faulted, and why.
-func (r *watchRegistration) gap() (reason string, gapped bool) {
+// gap reports whether this watch was faulted.
+func (r *watchRegistration) gap() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.gapReason, r.gapped
+	return r.gapped
 }
 
 // registerWatch attaches a watcher for id and returns its registration.
@@ -228,15 +235,19 @@ func (s *Service) unregisterWatch(id session.SessionID, reg *watchRegistration) 
 //
 // This is ADR 0250 decision 6's guaranteed, process-local tier. It runs on the
 // appending thread and is therefore deliberately cheap.
-func (s *Service) faultWatchers(id session.SessionID, reason string) {
+func (s *Service) faultWatchers(id session.SessionID) {
 	s.watchMu.Lock()
 	regs := make([]*watchRegistration, 0, len(s.watches[id]))
 	for reg := range s.watches[id] {
 		regs = append(regs, reg)
 	}
 	s.watchMu.Unlock()
+	// Faulting is a fan-out: EVERY watcher on the session terminates, not just the
+	// one that happened to be first. The snapshot above is taken under the lock and
+	// walked outside it, so a watcher unregistering mid-walk is faulted harmlessly
+	// rather than deadlocking against watchMu.
 	for _, reg := range regs {
-		reg.fault(reason)
+		reg.fault()
 	}
 }
 
@@ -325,6 +336,16 @@ func (s *Service) watchLog(ctx context.Context, id session.SessionID) (port.Curs
 	if s.cfg.EventLog == nil {
 		return nil, ErrNoEventLog
 	}
+	// A delegation child's transcript is not a caller-addressable stream. This is
+	// safe TODAY by absence of data — every NewRunEventRecorder site passes a
+	// top-level relay id, so a child has no durable log and a watch on one would
+	// replay nothing — but "safe because the data happens not to exist" stops being
+	// true the moment a per-child-observability feature records under child ids,
+	// and then this becomes a direct child-transcript read with nothing in the way
+	// (gauntlet #7). The guard makes the invariant enforced rather than emergent.
+	if isDelegationChildSessionID(id) {
+		return nil, fmt.Errorf("%w: %s is a delegation child session", ErrInvalidArgument, id)
+	}
 	log := s.cursorLog
 	if log == nil {
 		return nil, ErrWatchUnsupported
@@ -369,15 +390,9 @@ func pumpWatch(
 	resumeFrom := after
 
 	defer func() {
-		// A gap OUTRANKS every other outcome, including a clean end and a lagging
-		// termination: the one thing a client must never do is carry on believing
-		// its stream is complete.
-		if reason, gapped := reg.gap(); gapped {
-			terminal = &ActivityGapError{Reason: reason}
-		}
-		if terminal != nil {
+		if err := watchTerminal(reg.gap(), terminal); err != nil {
 			select {
-			case term <- terminal:
+			case term <- err:
 			default:
 			}
 		}
@@ -446,6 +461,29 @@ func pumpWatch(
 	}
 }
 
+// watchTerminal decides a watch's terminal error from the two facts that can end
+// it: whether a durable append failed underneath it, and whatever the pump itself
+// recorded.
+//
+// A GAP OUTRANKS EVERY OTHER OUTCOME — a clean end and a lagging termination
+// alike. The two are not interchangeable and the ordering is not a tie-break:
+// after a lagging termination a client reconnects from its cursor and carries on
+// believing its transcript is whole, which is exactly the false belief a KNOWN
+// gap has to destroy. Lagging is recoverable and says so; a gap is not, and must
+// not be masked merely because the delivery grace happened to expire first.
+//
+// It is a function rather than an inline defer because the interesting state —
+// gapped AND already lagging — is reachable only through a race between the
+// delivery grace expiring and the fault landing, so no end-to-end test can
+// produce it reliably. Extracted, the precedence is exhaustively testable, which
+// is the difference between a documented claim and an enforced one.
+func watchTerminal(gapped bool, recorded error) error {
+	if gapped {
+		return &ActivityGapError{}
+	}
+	return recorded
+}
+
 // watchEnvelopeFor projects one durable log record into a delivery envelope,
 // reporting whether the run filter admits it.
 func watchEnvelopeFor(rec port.LogRecord, phase, runID string) (WatchEnvelope, bool) {
@@ -477,10 +515,11 @@ func watchEnvelopeFor(rec port.LogRecord, phase, runID string) (WatchEnvelope, b
 // a marker that could not land either — is documented in ADR 0250 rather than
 // logged twice per incident.
 func (s *Service) noteAppendGap(ctx context.Context, id session.SessionID, log port.CursorEventLog, cause error) {
-	// The reason is a backend error string bound for a durable record and, via
-	// ActivityGapError, a gRPC status message — itself a protobuf string field. Run
-	// it through the same UTF-8 repair every producer-influenced string crossing
-	// into proto gets.
+	// The reason is a backend error string bound for a DURABLE RECORD, and it stops
+	// there: ActivityGapError deliberately carries no prose, so this text never
+	// reaches a client. Run it through the same UTF-8 repair every
+	// producer-influenced string crossing into proto gets, because a gap marker
+	// read back through ReadAfter is still bound for a protobuf string field.
 	reason := valid(cause.Error())
 
 	// TIER 1 — best-effort, CROSS-process. One gap marker, one attempt. If it
@@ -490,5 +529,5 @@ func (s *Service) noteAppendGap(ctx context.Context, id session.SessionID, log p
 	_, _ = log.AppendGap(ctx, id, reason)
 
 	// TIER 2 — guaranteed, PROCESS-local.
-	s.faultWatchers(id, reason)
+	s.faultWatchers(id)
 }

@@ -62,7 +62,11 @@ semantic-version protocol.
 bytes to hand back — never parse, build, or edit one. Persist it once per frame you
 have PROCESSED, and on any reconnect (including after a `watch_lagging`
 termination) pass that value back: the watch continues from exactly the next
-record. Do NOT resume from a cursor you saw but did not process. A `gap` frame, or
+record. Do NOT resume from a cursor you saw but did not process. A cursor is
+SCOPED TO THE `run_id` IT WAS ISSUED UNDER — a filtered watch advances its
+position over the records the filter dropped, so handing that cursor back under a
+different `run_id`, or none, skips them silently. Resume with the same filter, or
+start from the beginning. A `gap` frame, or
 an `activity_gap` termination, means events that should have been recorded were
 not — a retry does not recover them. That guarantee is deliberately bounded: it
 covers durably-appended events, and a total backend outage combined with loss of

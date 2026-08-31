@@ -6545,6 +6545,45 @@ allocates are `0027-cloud-native.md` List 1 rows 65–66.
   envelope-for-envelope. The legacy `GET /v1/sessions/{id}/events` frame stays a BARE
   Event (a separate route, not a query-parameter widening — overloading one path
   would change an existing endpoint's termination behaviour).
+- **A stream-terminal error is framed as SSE, not as bare JSON.** Both SSE routes emit
+  it through the ONE `writeSSEError` helper as `event: error` plus a `data:` line. The
+  prefix is load-bearing rather than cosmetic: the EventSource grammar splits a line
+  into `field: value` at the first colon, so a bare `{"code":…}` parses as the
+  unrecognised field `{"code"` and is DISCARDED — the client sees the stream fall
+  silent and cannot tell a resumable lag from a delivery gap from a clean end, which is
+  the exact failure ADR 0250 exists to abolish, reintroduced at the transport. The
+  `event: error` tag lets a client ROUTE the frame instead of shape-sniffing it against
+  a `WatchSessionEventsResponse` whose fields are all optional. Payloads stay per-route
+  (the watch carries the stable `code`, the replay route carries `error` alone).
+- **A cursor is SCOPED to the `run_id` it was issued under.** Under a run filter the
+  watch's internal position (`resumeFrom`) advances over the records the filter DROPPED
+  — deliberately, so the follow does not re-read them — which means the client's cursor
+  sits past events another filter would have delivered. Resuming with a different
+  `run_id`, or none, therefore skips them with no signal. This is a CONTRACT statement
+  on both transports, not a code fix: tracking a last-DELIVERED cursor instead would
+  narrow the window without closing it, and would cost the follow its
+  no-re-read property.
+- **A gap frame is delivered WHATEVER the filter says.** A failed append left no record,
+  so there is nothing to attribute to a run; filtering it would hide a real gap from
+  exactly the client that asked to be told about its run.
+- **The client-facing gap terminal carries no backend prose.** `ActivityGapError` is a
+  bare sentinel: the cause is a raw store error (a Redis dial address, a jsonlstore
+  path) and this value reaches the client as a gRPC status message and an SSE `error`
+  field — the same exposure `GetSession` already refuses under ownership enforcement.
+  The cause is not lost: it goes to the durable gap marker (tier 1) and to the
+  recorder's append-failure WARN, so the operator keeps every byte and the client gets
+  the stable `activity_gap` code, which is the whole of what it can act on.
+- **`watchLog` refuses a delegation-child session id.** Safe TODAY by absence of data
+  (every `NewRunEventRecorder` site passes a top-level relay id, so a child has no
+  durable log), but the guard makes the invariant ENFORCED rather than emergent: a
+  future per-child-observability feature recording under child ids would otherwise turn
+  a watch into a direct child-transcript read (gauntlet #7).
+- **Cursor faults are not HTTP statuses on the watch route.** `watchLog` validates the
+  feature, the seam and ownership eagerly, but the cursor is decoded inside
+  `log.ReadAfter` — after the `200` is committed — so over SSE a malformed or expired
+  cursor arrives as the stream-terminal frame. gRPC is unaffected (`toStatus` fires
+  before any `Send`). The `400`/`409` rows stay registered because they are the right
+  mapping wherever a cursor fault is raised before the first byte.
 - **Feature identifier**: `watch_session_events` in
   `internal/adapter/server/features.go`. It answers "does this BUILD implement the
   watch?", NOT "will a watch succeed here" — the latter also needs the wired log to

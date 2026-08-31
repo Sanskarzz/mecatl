@@ -125,6 +125,16 @@ var errorRegistry = []errorCodeEntry{
 	// from the beginning (the log's positional basis moved); malformed indicates a
 	// bug or tampering and must not be silently retried, which is why they are
 	// distinct codes rather than one "bad cursor".
+	//
+	// TRANSPORT NOTE for the watch route: these two HTTP statuses are NOT
+	// observable on GET /v1/sessions/{id}/watch. watchLog validates the feature,
+	// the cursor seam and ownership eagerly, but the cursor itself is decoded
+	// inside log.ReadAfter — which runs after the 200 has been committed — so over
+	// SSE a bad cursor is always a 200 plus a stream-terminal `event: error` frame
+	// carrying the code below. gRPC is unaffected: toStatus fires before any Send.
+	// The statuses stay registered because they ARE the right mapping wherever a
+	// cursor fault can be raised before the first byte, and because a code's
+	// transport pairing is a property of the sentinel, not of one route.
 	{Sentinel: port.ErrCursorExpired, Code: "cursor_expired", GRPC: codes.FailedPrecondition, HTTPStatus: http.StatusConflict, Title: "Event-log cursor is from a superseded log generation"},
 	{Sentinel: port.ErrCursorMalformed, Code: "cursor_malformed", GRPC: codes.InvalidArgument, HTTPStatus: http.StatusBadRequest, Title: "Event-log cursor is malformed"},
 	{Sentinel: ErrSessionDeleteUnsupported, Code: "session_delete_unsupported", GRPC: codes.Unimplemented, HTTPStatus: http.StatusNotImplemented, Title: "Session deletion is not supported by the configured store"},

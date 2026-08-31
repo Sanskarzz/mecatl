@@ -2125,6 +2125,11 @@ type WatchSessionEventsRequest struct {
 	Cursor string `protobuf:"bytes,2,opt,name=cursor,proto3" json:"cursor,omitempty"`
 	// run_id, when set, narrows delivery to the events one run emitted (ADR 0249).
 	// Empty delivers every run's events. Gap frames are delivered either way.
+	//
+	// A cursor is SCOPED to the run_id it was issued under: resume with the same
+	// value you watched with. Changing it — or dropping it — replays from a
+	// position that already advanced past the other runs' records, which skips
+	// them silently.
 	RunId         string `protobuf:"bytes,3,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2192,6 +2197,12 @@ type WatchSessionEventsResponse struct {
 	// that persists it once per processed envelope gets at-least-once delivery
 	// across a reconnect: hand the last one back and the watch continues from
 	// exactly the next record.
+	//
+	// That guarantee is scoped to the run_id the cursor was issued under. Under a
+	// run filter the watch's position advances over the records it dropped, so the
+	// cursor sits past events another filter would have delivered; resuming with a
+	// different run_id, or none, skips them with no signal. Resume with the same
+	// filter, or start from the beginning.
 	Cursor string `protobuf:"bytes,2,opt,name=cursor,proto3" json:"cursor,omitempty"`
 	// phase is an OPEN STRING: `replay` (already durable when the watch attached),
 	// `live` (appended while the watch was following), or `gap` (a position whose

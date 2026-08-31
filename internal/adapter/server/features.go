@@ -41,9 +41,18 @@ const (
 	// replay-then-subscribe dance. It deliberately does NOT answer "will a watch
 	// succeed here": that additionally depends on the wired event log implementing
 	// the cursor seam, which is a DEPLOYMENT fact and is reported by the
-	// watch_unsupported error instead. Conflating the two is exactly the
-	// capabilities/features confusion ADR 0248 exists to prevent — a build that
-	// implements the RPC over a cursor-less store must not look like version skew.
+	// watch_unsupported error instead.
+	//
+	// The DISAMBIGUATOR is the stable `code` string, not the gRPC status.
+	// watch_unsupported is registered as Unimplemented — exactly what grpc-go
+	// returns for a method the server does not have — so a client switching on the
+	// status alone still cannot separate a cursor-less store from version skew; it
+	// has to read the code. That is the ADR 0248 design rather than a compromise:
+	// the sibling no_event_log refusal ships the same status for the same class of
+	// fact one level up, and moving this one to FailedPrecondition would make two
+	// sibling refusals disagree while breaking clients whose Unimplemented handling
+	// already covers it. What the feature flag buys is that a client never has to
+	// reach the error at all to know whether the build has the RPC.
 	FeatureWatchSessionEvents = "watch_session_events"
 )
 

@@ -120,3 +120,19 @@ func (l badCursorLog) ReadAfter(ctx context.Context, id session.SessionID, after
 		}
 	}
 }
+
+// failingReadLog is a legacy port.EventLog whose Read yields a fault instead of
+// events, so the older SSE replay route's mid-stream error frame is reachable.
+type failingReadLog struct{ inner port.EventLog }
+
+func (l failingReadLog) Append(ctx context.Context, id session.SessionID, ev session.Event) error {
+	return l.inner.Append(ctx, id, ev)
+}
+
+func (failingReadLog) Read(context.Context, session.SessionID) iter.Seq2[session.Event, error] {
+	return func(yield func(session.Event, error) bool) {
+		yield(session.Event{}, errors.New("backend read failed mid-stream"))
+	}
+}
+
+var _ port.EventLog = failingReadLog{}
