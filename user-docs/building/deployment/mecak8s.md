@@ -228,7 +228,7 @@ process-local; the default fails before refresh network when no writer exists.
 | Session retention / GC | Redis | `internal/adapter/redisstore` | `port.PrunableStore` |
 | Single-writer lease | k8s API server | `internal/adapter/k8slease` | `port.SessionLease` |
 
-The `redisstore` adapter reuses `sessnap.Marshal`/`Unmarshal` — the same snapshot format `jsonlstore` and the gRPC driver use (`sessnap-json/1`). It is a transport alternative, not a new format. Event log records use `RPUSH`/`LRANGE` so append order is preserved. The adapter is validated by the same `storeconformance.Run`, `eventlogconformance.Run`, and `storeconformance.RunPrunable` suites that `jsonlstore` passes, tested offline against `miniredis`.
+The `redisstore` adapter reuses `sessnap.Marshal`/`Unmarshal` — the same snapshot format `jsonlstore` and the gRPC driver use (`sessnap-json/1`). It is a transport alternative, not a new format. Event log records use `XADD`/`XRANGE` on a Redis Stream so append order is preserved, and the entry ID doubles as the durable resume cursor. The adapter is validated by the same `storeconformance.Run`, `eventlogconformance.Run`, and `storeconformance.RunPrunable` suites that `jsonlstore` passes, tested offline against `miniredis`.
 
 ## Production Helm chart
 
@@ -874,9 +874,18 @@ owner.
 
 That per-event actor is written only to the **durable event log** — it is not on
 any API response, gRPC or HTTP. Today the only way to read it is out of the store
-directly, e.g. `redis-cli LRANGE mecatl:events:<session-id> 0 -1`, where each
-record is `{"v":"redisstore-eventlog/1","ev":{…,"Actor":{…}}}`. If "who did what"
-needs to be queryable for you, say so — it is a known gap, not a design intent.
+directly, e.g. `redis-cli XRANGE mecatl:events:<session-id> - +`, where each entry
+carries an `r` field holding
+`{"v":"redisstore-eventlog/1","ev":{…,"Actor":{…}}}`. If "who did what" needs to
+be queryable for you, say so — it is a known gap, not a design intent.
+
+The event log is a **Redis Stream**. It was a LIST in earlier releases, so an
+older runbook may tell you to use `LRANGE` — that now fails with `WRONGTYPE`. You
+do not have to migrate anything: a LIST written by an earlier release stays
+readable, and the session's next appended event converts it in place, preserving
+every record and its order. Alongside the log, `mecatl:events-gen:<session-id>`
+holds an opaque token identifying the log's positional basis; it is deleted with
+the session and is not something to set or copy by hand.
 
 ### Troubleshooting: start here
 

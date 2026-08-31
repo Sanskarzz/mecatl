@@ -151,9 +151,16 @@ A single `Store` type meeting four ports:
 | Port | Redis operations |
 |---|---|
 | `port.SessionStore` (Save/Load) | `HSET mecatl:session:<id> blob <sessnap> mtime <now>` / `HGET mecatl:session:<id> blob` |
-| `port.EventLog` (Append/Read) | `RPUSH mecatl:events:<id> <json-line>` / `LRANGE mecatl:events:<id> 0 -1` |
-| `port.PrunableStore` (List/Delete) | `SCAN mecatl:session:*` / `DEL mecatl:session:<id> mecatl:events:<id> mecatl:tools:<id>` |
+| `port.EventLog` (Append/Read) | `XADD mecatl:events:<id> * r <json-line>` / `XRANGE mecatl:events:<id> - +` |
+| `port.CursorEventLog` (AppendEvent/ReadAfter) | `XADD` (the entry ID is the cursor) / `XREAD [BLOCK] COUNT n STREAMS mecatl:events:<id> <id>` |
+| `port.PrunableStore` (List/Delete) | `SCAN mecatl:session:*` / `DEL mecatl:session:<id> mecatl:events:<id> mecatl:tools:<id> mecatl:events-gen:<id>` |
 | `port.ToolCallRecorder` (Record/List) | `RPUSH mecatl:tools:<id> <json>` / `LRANGE mecatl:tools:<id> 0 -1` |
+
+The event log is the one **Stream** in this layout (the rest are hashes and
+lists): a LIST offers no blocking read and no stable per-entry identity, so
+durable cross-process follow and non-positional cursors both need `XADD` IDs.
+See [ADR 0250](../adr/0250-durable-cursors-and-watch.md). A LIST written by an
+earlier release stays readable and is converted in place by the next append.
 
 ### Key design decisions
 
@@ -163,15 +170,16 @@ A single `Store` type meeting four ports:
   (same as the gRPC driver contract). No new encoding.
 - **Event log format:** reuses the jsonlstore event record shape
   (`{V: "redisstore-eventlog/1", Ev: <event-json>}`). Append order is preserved
-  by `RPUSH`; `LRANGE` returns in append order (the conformance contract is raw
-  append order, NOT Seq order).
+  by `XADD`; `XRANGE` returns in append order (the conformance contract is raw
+  append order, NOT Seq order). A log still stored as a legacy LIST is read with
+  `LRANGE` until the next append migrates it in place (ADR 0250).
 - **Not-found:** `GET`/`HGET` returns redis.Nil → wrap `port.ErrSessionNotFound`
   (the contract every store adapter must follow).
-- **Durability:** `Append` uses `RPUSH` (synchronous, durable by Redis's
+- **Durability:** `Append` uses `XADD` (synchronous, durable by Redis's
   persistence config — for the MVP, Redis's default RDB/AOF is sufficient; the
   contract is "durable before nil returned," same as jsonlstore's fsync-less
   append).
-- **Concurrency:** Redis is single-threaded for commands; `HSET`/`HGET`/`RPUSH`
+- **Concurrency:** Redis is single-threaded for commands; `HSET`/`HGET`/`XADD`/`RPUSH`
   are atomic. No client-side mutex needed (unlike jsonlstore's in-process
   `sync.Mutex`). The lease serializes writers per session; Redis serializes the
   command execution.
@@ -276,13 +284,22 @@ internal/adapter/redisstore/
 - `New(addr string) (*Store, error)` — constructs a `go-redis/v9` client.
 - `Save` → `HSET mecatl:session:<id> blob <sessnap> mtime <now>`.
 - `Load` → `HGET mecatl:session:<id> blob`; redis.Nil → `port.ErrSessionNotFound`.
-- `Append` → `RPUSH mecatl:events:<id> <record-json>`.
-- `Read` → `LRANGE` + an iterator over LRANGE results yielding decoded events.
+- `Append` → `XADD mecatl:events:<id> * r <record-json>` (delegates to
+  `AppendEvent` and drops the cursor — one write path, so the two ports cannot
+  disagree on the datatype).
+- `Read` → `XRANGE` (or `LRANGE` for a log not yet migrated from a LIST) + an
+  iterator yielding decoded events, SKIPPING gap markers.
+- `AppendEvent`/`AppendGap`/`ReadAfter` → the `port.CursorEventLog` half: `XADD`
+  returns the entry ID that IS the cursor; `ReadAfter` is `XREAD` (exclusive of
+  the given ID), with `BLOCK` in bounded slices when following.
 - `List` → `SCAN MATCH mecatl:session:*` + `HGET mtime`.
-- `Delete` → `DEL mecatl:session:<id> mecatl:events:<id> mecatl:tools:<id>`.
+- `Delete` → `DEL mecatl:session:<id> mecatl:events:<id> mecatl:tools:<id>
+  mecatl:events-gen:<id>` (the generation key goes with the log, or a recreated
+  log would inherit the old positional basis).
 - `Close` → closes the Redis client.
 - Conformance: passes `storeconformance.Run` + `RunPrunable` +
-  `eventlogconformance.Run` over `miniredis` (offline).
+  `eventlogconformance.Run` + `eventlogconformance.RunCursor` over `miniredis`
+  (offline).
 
 ### 4b. `internal/app/build.go` — Redis wiring (MODIFIED, additive)
 
@@ -514,7 +531,7 @@ e2e/k8s/
 
 7. **Redis persistence config.** For the MVP, Redis's default RDB snapshots are
    sufficient. For production, enable AOF (`appendonly yes`) for the EventLog
-   durability contract. The adapter calls `RPUSH` (synchronous); Redis's
+   durability contract. The adapter calls `XADD` (synchronous); Redis's
    persistence config determines durability-on-crash.
 
 ---
