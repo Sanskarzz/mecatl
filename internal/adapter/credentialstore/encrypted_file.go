@@ -21,9 +21,8 @@ import (
 )
 
 const (
-	namespaceDomain = "mecatl/credentialstore/namespace/v1"
-	recordDomain    = "mecatl/credentialstore/record/v1"
-	lockRetryDelay  = 5 * time.Millisecond
+	recordDomain   = "mecatl/credentialstore/record/v1"
+	lockRetryDelay = 5 * time.Millisecond
 )
 
 type fileOps struct {
@@ -121,6 +120,60 @@ func NewEncryptedFile(root, namespace string, key []byte) (*EncryptedFileStore, 
 	return store, nil
 }
 
+// OpenExistingEncryptedFile opens an already-created encrypted-file namespace
+// without creating or changing the root or namespace permissions.
+func OpenExistingEncryptedFile(root, namespace string, key []byte) (*EncryptedFileStore, error) {
+	if err := validateNamespace(namespace); err != nil {
+		return nil, fmt.Errorf("open existing encrypted credential store: %w", err)
+	}
+	if err := validateEncryptionKey(key); err != nil {
+		return nil, fmt.Errorf("open existing encrypted credential store: %w", err)
+	}
+	if root == "" || !filepath.IsAbs(root) {
+		return nil, fmt.Errorf("open existing encrypted credential store: %w", ErrUnavailable)
+	}
+	ownedKey := bytes.Clone(key)
+	ok := false
+	defer func() {
+		if !ok {
+			clear(ownedKey)
+			runtime.KeepAlive(ownedKey)
+		}
+	}()
+
+	root = filepath.Clean(root)
+	canonicalRoot, err := canonicalPrivateRoot(root)
+	if err != nil {
+		return nil, fmt.Errorf("open existing encrypted credential store: %w", err)
+	}
+	root = canonicalRoot
+	if err := validateExistingPrivateRoot(root); err != nil {
+		return nil, fmt.Errorf("open existing encrypted credential store: %w", err)
+	}
+	rootHandle, err := os.OpenRoot(root)
+	if err != nil {
+		return nil, unavailable("open credential root", err)
+	}
+	defer func() { _ = rootHandle.Close() }()
+	nsName := namespacePhysicalName([]byte(namespace))
+	if err := validateExistingPrivateDir(rootHandle, nsName); err != nil {
+		return nil, err
+	}
+	nsRoot, err := rootHandle.OpenRoot(nsName)
+	if err != nil {
+		return nil, unavailable("open credential namespace", err)
+	}
+	store := &EncryptedFileStore{
+		key:       ownedKey,
+		namespace: []byte(namespace),
+		nsPath:    filepath.Join(root, nsName),
+		nsRoot:    nsRoot,
+		ops:       defaultFileOps(),
+	}
+	ok = true
+	return store, nil
+}
+
 // Get returns the authenticated current record.
 func (s *EncryptedFileStore) Get(ctx context.Context, key []byte) (Record, error) {
 	if err := validateRecordKey(key); err != nil {
@@ -161,6 +214,41 @@ func (s *EncryptedFileStore) Put(ctx context.Context, key, value []byte, expecte
 		case expected != nil && !exists:
 			return ErrNotFound
 		case expected != nil && (!expected.valid || !current.Equal(*expected)):
+			return ErrConflict
+		}
+		envelope, version, err := sealEnvelope(s.key, s.namespace, key, value, s.ops.random)
+		if err != nil {
+			return err
+		}
+		if err := s.commitEnvelope(ctx, names, envelope); err != nil {
+			return err
+		}
+		out = Record{Value: bytes.Clone(value), Version: version}
+		return nil
+	})
+	return out, err
+}
+
+// ReplaceCorrupt atomically replaces a record only while it remains unreadable
+// as an authenticated envelope. Valid, missing, and operationally unreadable
+// records are never overwritten.
+func (s *EncryptedFileStore) ReplaceCorrupt(ctx context.Context, key, value []byte) (Record, error) {
+	if err := validateRecordKey(key); err != nil {
+		return Record{}, err
+	}
+	if err := validateValue(value); err != nil {
+		return Record{}, err
+	}
+	var out Record
+	err := s.withRecordLock(ctx, key, func(names recordNames) error {
+		_, _, exists, err := s.readCurrent(names.data, key)
+		if err == nil || !errors.Is(err, ErrCorrupt) {
+			if err != nil {
+				return err
+			}
+			if !exists {
+				return ErrNotFound
+			}
 			return ErrConflict
 		}
 		envelope, version, err := sealEnvelope(s.key, s.namespace, key, value, s.ops.random)
@@ -383,11 +471,6 @@ func (s *EncryptedFileStore) recordNames(key []byte) recordNames {
 	digest := sha256.Sum256(frameFields(recordDomain, s.namespace, key))
 	stem := "rec-v1-" + hex.EncodeToString(digest[:])
 	return recordNames{stem: stem, lock: stem + ".lock", data: stem + ".cred"}
-}
-
-func namespacePhysicalName(namespace []byte) string {
-	digest := sha256.Sum256(frameFields(namespaceDomain, namespace))
-	return "ns-v1-" + hex.EncodeToString(digest[:])
 }
 
 func unavailable(operation string, err error) error {

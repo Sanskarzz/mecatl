@@ -399,6 +399,68 @@ locally and only afterward best-effort closes the old session; a failed create
 leaves the old session and UI unchanged. Usage and configuration are documented in
 `docs/tui.md`.
 
+**Remote mecatui OIDC.** The remote-login path is separate from the ToolHive LLM
+login: `mecatui llm login` remains the ToolHive gateway flow, while `mecatui login
+ADDRESS` performs public-client OIDC enrollment for one remote target. Login requires
+issuer, public client ID, audience, and an issuer CA bundle path/reference; only that
+reference, never CA contents, is saved. The login `--tls-ca` path is distinct from the
+optional server CA supplied to `connect`. It validates discovery, PKCE, and
+the resulting token before saving. `mecatui connect ADDRESS` never opens a browser or
+guesses missing settings. An enrolled target uses a root-scoped OS-keyring key and a
+keyring-wrapped encrypted credential store; under the root lock, the legacy unsuffixed
+keyring key is copied only when that encrypted namespace contains an actual credential
+record—opening an empty namespace is not migration evidence. Credentials are bound to
+the canonical target and
+complete OIDC identity; legacy records whose target used a zero-padded port need a
+one-time login because canonical decimal-port spelling changes their key. A
+target-bound dynamic bearer source validates, refreshes, and CAS-saves credentials on
+application token demand. Proactive refresh is activity-gated: an application-facing
+`Token` demand that obtains a bearer is activity, including one served from a valid
+access token; RPC success is not the signal, and background work cannot arm another
+refresh. This prevents a background refresh loop from sustaining itself; provider
+browser-SSO and refresh-token lifetimes remain provider-specific. Only an OAuth
+`RetrieveError` whose exact structured `ErrorCode` is `invalid_grant` triggers
+credential cleanup; provider prose never does. Local login-required errors retain the `ErrLoginRequired` sentinel and safe typed causes,
+which composition translates into the client's closed auth-reason contract; repairable
+credential corruption is distinct from unavailable local storage or issuer trust, which
+must not be overwritten and instead require remediation or a browser-free retry. Unknown
+adapter and transport failures remain unclassified. A server `Unauthenticated` verdict
+remains a transport-layer rejection. Refresh, enrollment, logout, and
+superseded-credential cleanup share one canonical-root-plus-target cross-process
+transaction lock; enrollment takes it only after interactive token acquisition. An
+ambiguous credential save is reread and accepted only when the intended token committed.
+A registry failure is likewise reread to distinguish a committed rename; a pre-commit
+failure compensates only the credential CAS version written by that operation. There is
+no journal: a crash between the registry and credential stores may leave partial state,
+and a missing credential requires login. `mecatui logout ADDRESS` removes the target's
+credential by
+CAS before deleting the matching registry snapshot, so a concurrent rotation is
+reloaded and retried once; a persistent conflict or re-enrollment retains reachable
+metadata and reports an incomplete logout rather than creating an orphan. It uses
+non-creating keyring access and spends one operation-wide fifteen-second provider budget,
+beginning before HTTP client construction and shared by discovery and every refresh- or
+access-token RFC 7009 revocation attempt, after local cleanup. A target absent from the
+registry is an idempotent success, but pre-existing credential-only orphans remain unreachable
+because the credential store has no enumeration contract. `/connect` is a confirmed
+chooser. Ordinary saved-target selection and every target switch start a fresh remote
+session; during same-target authentication recovery only, an ownership-authorized
+completed, cancelled, or failed session may be adopted. Missing, ownership-hidden,
+active, awaiting, and infrastructure-ambiguous candidates are discarded. The closed
+`ConnectAction` separates saved-target connect, explicit reauthentication, cleanup-only
+retry, and add-target intent; it preserves the server CA path only for same-target
+restarts, and a rejected static bearer offers no browser-login loop. Static
+`--auth-token` remains unmanaged, while a saved managed OIDC credential is validated and
+refreshed by mecatui. No session history crosses a target switch. Remote login uses the
+fixed `http://127.0.0.1:18473/oauth/callback`: unauthenticated wrong-state/pre-state
+probes are unlimited and do not burn state, while MCP OAuth keeps its random-path bounded
+matching-route policy. `--no-browser` uses Authorization Code + PKCE (not device flow)
+and lets SSH users forward that fixed callback with `ssh -N -L 18473:127.0.0.1:18473`.
+The shared private-HTTPS path reuses a finite, owner-closed scoped keep-alive pool;
+every new dial re-resolves DNS and intersects the approved addresses while retaining
+HTTPS, origin, CA, hostname, and redirect safeguards. Kind remote login is available after fixture setup with host aliases and
+the public CA, but is a live qualification path, not ordinary offline-test coverage.
+See [ADR 0275](adr/0275-bounded-scoped-https-keepalive-oidc.md), [ADR 0277](adr/0277-remote-mecatui-oidc.md) and [ADR 0274](adr/0274-remote-mecatui-logout-budget.md).
+
 **mecatequi — the single-shot headless runner (`cmd/mecatequi`).** A fourth composition
 root and a *peer of `mecademo`* over the same `app.Build`: it runs **one** prompt against
 an in-process `server.Service`, drives it to a terminal state, and emits three
@@ -944,8 +1006,8 @@ through `--oidc-issuer` / `--oidc-jwks-uri` / `--oidc-audience` /
 `--oidc-max-jwks-staleness`. A private HTTPS issuer may additionally opt into
 `--oidc-allow-private-https-issuer` with a required `--oidc-ca-cert-file`; an
 internal scoped transport admits only the configured issuer/JWKS hosts' resolved
-private addresses, re-checks them on every dial with keep-alives disabled, and
-keeps HTTPS, CA and hostname validation, and redirect refusal. The legacy
+private addresses, re-checks them on every new dial, and reuses only a finite,
+owner-closed keep-alive pool. It keeps HTTPS, CA and hostname validation, and redirect refusal. The legacy
 `--oidc-insecure-allow-private-issuer` remains deprecated compatibility-only and
 is the sole combined HTTP/private escape hatch ([ADR 0235](adr/0235-scoped-private-https-oidc-transport.md)).
 `internal/cliconfig/oidc.go` (`OIDCConfig`, `OIDCValidator`) makes a validator

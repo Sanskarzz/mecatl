@@ -37,7 +37,7 @@ require (
 	github.com/stacklok/mecatl/provider/openai v0.0.0-00010101000000-000000000000
 	github.com/stacklok/mecatl/provider/openaichat v0.0.0-00010101000000-000000000000
 	github.com/stacklok/toolhive v0.40.0
-	github.com/stacklok/toolhive-core v0.0.40
+	github.com/stacklok/toolhive-core v0.0.41
 	github.com/tiktoken-go/tokenizer v0.8.0
 	go.opentelemetry.io/contrib/instrumentation/runtime v0.69.0
 	go.opentelemetry.io/otel v1.45.0
@@ -58,7 +58,7 @@ require (
 	golang.org/x/sync v0.22.0
 	golang.org/x/term v0.45.0
 	golang.org/x/time v0.15.0
-	golang.org/x/tools v0.48.0
+	golang.org/x/tools v0.49.0
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260803160001-6ac0973c030d
 	google.golang.org/grpc v1.83.0
 	google.golang.org/protobuf v1.36.11
@@ -142,7 +142,7 @@ require (
 	github.com/go-openapi/jsonreference v1.0.0 // indirect
 	github.com/go-openapi/swag v0.26.1 // indirect
 	github.com/go-openapi/swag/cmdutils v0.27.0 // indirect
-	github.com/go-openapi/swag/conv v0.27.3 // indirect
+	github.com/go-openapi/swag/conv v0.28.0 // indirect
 	github.com/go-openapi/swag/fileutils v0.27.3 // indirect
 	github.com/go-openapi/swag/jsonname v0.26.1 // indirect
 	github.com/go-openapi/swag/jsonutils v0.27.3 // indirect
@@ -151,7 +151,7 @@ require (
 	github.com/go-openapi/swag/netutils v0.27.0 // indirect
 	github.com/go-openapi/swag/pools v0.27.3 // indirect
 	github.com/go-openapi/swag/stringutils v0.27.3 // indirect
-	github.com/go-openapi/swag/typeutils v0.27.3 // indirect
+	github.com/go-openapi/swag/typeutils v0.28.0 // indirect
 	github.com/go-openapi/swag/yamlutils v0.27.3 // indirect
 	github.com/go-task/slim-sprig/v3 v3.0.0 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
@@ -255,7 +255,7 @@ require (
 	github.com/yuin/goldmark-emoji v1.0.5 // indirect
 	github.com/yuin/gopher-lua v1.1.1 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
-	github.com/zalando/go-keyring v0.2.8 // indirect
+	github.com/zalando/go-keyring v0.2.8
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/httptrace/otelhttptrace v0.46.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.68.0 // indirect
@@ -275,7 +275,7 @@ require (
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f // indirect
 	golang.org/x/exp/event v0.0.0-20260611194520-c48552f49976 // indirect
 	golang.org/x/exp/jsonrpc2 v0.0.0-20260709172345-9ea1abe57597 // indirect
-	golang.org/x/mod v0.38.0 // indirect
+	golang.org/x/mod v0.40.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect

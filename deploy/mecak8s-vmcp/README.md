@@ -12,7 +12,7 @@ credential broker, SPIFFE, sidecars, or mecatui remote login.
 - Yardstick `v1.1.1`, commit `e5b8908ed6f53c1171ac805d82cf858d2982fa19e`,
   image `ghcr.io/stackloklabs/yardstick/yardstick-server:1.1.1`
 
-`versions.yaml` records the pins. `task mecak8s:vmcp-status` captures the actual
+`versions.yaml` records the pins. `task mecak8s-vmcp:vmcp-status` captures the actual
 Pod image IDs; the mecatl ToolHive Go-module version is not runtime proof.
 
 ## Scope
@@ -45,9 +45,9 @@ passwords.
 ## Lifecycle
 
 ```sh
-task mecak8s:vmcp-check
-task mecak8s:vmcp-setup
-task mecak8s:vmcp-status
+task mecak8s-vmcp:vmcp-check
+task mecak8s-vmcp:vmcp-setup
+task mecak8s-vmcp:vmcp-status
 kind delete cluster --name=mecatl-dev
 ```
 
@@ -80,10 +80,10 @@ them when finished. These tasks require `sudo`, never modify `/etc/hosts`
 silently, and removal creates `/etc/hosts.bak`:
 
 ```sh
-task mecak8s:kind-hosts-show
-task mecak8s:kind-hosts-add
+task mecak8s-vmcp:kind-hosts-show
+task mecak8s-vmcp:kind-hosts-add
 # use the browser/client journey
-task mecak8s:kind-hosts-remove
+task mecak8s-vmcp:kind-hosts-remove
 ```
 
 The exact entries managed by these tasks are:
@@ -113,27 +113,54 @@ the public fixture CA to `.scratch/` (the CA is public, but do not export or
 print any private-key Secret item):
 
 ```sh
-task mecak8s:kind-hosts-add
+task mecak8s-vmcp:kind-hosts-add
 # connect to mecak8s-mecak8s.mecatl-vmcp.svc.cluster.local:18081
 kubectl --kubeconfig=deploy/mecak8s-vmcp/kconfig.yaml --context=kind-mecatl-dev \
   --namespace=mecatl-vmcp get secret fixture-ca -o jsonpath='{.data.tls\.crt}' | base64 --decode > .scratch/mecak8s-vmcp-ca.crt
 ```
 
-A normal-terminal `mecatui connect` flow with custom-CA TLS and OIDC PKCE is
-not implemented in this fixture, so the live client connection demonstration
-is deferred. When that client support lands, it must use this loopback mapping,
-the exported fixture CA, and a Keycloak-issued token; plaintext and an untrusted CA
-must fail before an authenticated RPC is served. No token or credential is
-stored by this fixture.
+A normal-terminal `mecatui login` then `connect` flow with custom-CA TLS and OIDC
+Authorization Code + PKCE is available. After `kind-hosts-add`, use the documented
+Service-DNS host aliases and export the public fixture CA to `.scratch/`; then enroll
+with:
+
+```sh
+mecatui login mecak8s-mecak8s.mecatl-vmcp.svc.cluster.local:18081 --issuer https://keycloak.mecatl-vmcp.svc.cluster.local:8443/realms/mecatl --client-id mecatui-kind --audience http://127.0.0.1:18080/mcp \
+  --tls-ca .scratch/mecak8s-vmcp-ca.crt --scopes openid,profile,mcp:read,offline_access
+```
+
+Then connect with `mecatui connect mecak8s-mecak8s.mecatl-vmcp.svc.cluster.local:18081 --tls --tls-ca .scratch/mecak8s-vmcp-ca.crt`.
+The login uses Authorization Code + PKCE, not device flow. `offline_access` is optional on
+`mecatui-kind`, and the fixture users hold Keycloak's `offline_access` realm role, so this
+explicit request receives a refresh token. Mecatui stores it with the login and uses it to
+refresh the access token; omit the scope when a refreshable login is not needed. For SSH or
+another headless host, add
+`--no-browser`, open the printed URL in a browser on the operator workstation, and
+forward the fixed callback port back to the login host:
+
+```sh
+ssh -N -L 18473:127.0.0.1:18473 user@login-host
+```
+
+The callback remains `http://127.0.0.1:18473/oauth/callback`; do not substitute the
+vMCP resource audience for the separate `mecatui-kind` client ID.
+
+The security contract is fail-closed before any authenticated RPC: verified TLS
+using the supplied custom fixture CA is required, and plaintext, unauthenticated,
+or an untrusted CA must fail during transport/authentication setup. A successful
+live client qualification remains confirmation-gated; offline tests do not claim
+that live connection has been performed.
 
 ## Separate Keycloak public clients
 
 `vmcp-browser` remains the embedded-vMCP browser client and uses
 `http://127.0.0.1:18080/oauth/callback`. `mecatui-kind` is a separate public
 client reserved for a normal-terminal loopback PKCE journey at
-`http://127.0.0.1:18473/oauth/callback`. Neither client has a secret. The
-fixture does not implement mecatui login, device flow, headless login, or
-credential storage.
+`http://127.0.0.1:18473/oauth/callback`. Neither client has a secret. After setup,
+the host-side `mecatui login ADDRESS` flow may use `mecatui-kind` for the live remote
+mecak8s qualification; the resulting credential is stored by mecatui, not by this
+fixture. The fixture does not implement device flow or headless login, and the
+setup/journey remains confirmation-gated.
 
 ## Shared Keycloak HTTPS issuer
 
@@ -149,8 +176,8 @@ and JWKS at `https://keycloak.mecatl-vmcp.svc.cluster.local:8443/realms/mecatl/p
 there use that HTTPS URL as `iss`.
 
 Pods use that Service-DNS name directly. For temporary host access, run
-`task mecak8s:kind-hosts-add`; remove the exact aliases with
-`task mecak8s:kind-hosts-remove` when finished. The host and pod therefore use
+`task mecak8s-vmcp:kind-hosts-add`; remove the exact aliases with
+`task mecak8s-vmcp:kind-hosts-remove` when finished. The host and pod therefore use
 the same HTTPS issuer URL, with the Kind mapping bound to loopback only. The `keycloak-tls` certificate covers the Service DNS name, `localhost`, and `127.0.0.1`.
 Mecak8s trusts the fixture CA through its direct `--oidc-ca-cert-file` flag and
 admits only this private HTTPS Service issuer; it does not use the deprecated
@@ -201,7 +228,7 @@ Keycloak's built-ins and drops the `sub` claim).
 
 ### Getting a delegated token
 
-Requires the loopback aliases from `task mecak8s:kind-hosts-add` (Keycloak is
+Requires the loopback aliases from `task mecak8s-vmcp:kind-hosts-add` (Keycloak is
 reached by its in-cluster name, so one URL works from host and pod alike), plus a
 port-forward for vMCP:
 

@@ -67,6 +67,84 @@ func TestVMCPFixturePinsBackendAndBoundary(t *testing.T) {
 	}
 }
 
+func TestMecak8sVMCPFixtureDisablesKeycloakServiceAccountToken(t *testing.T) {
+	for _, path := range []string{"deploy/mecak8s-kind/keycloak.yaml", "deploy/mecak8s-vmcp/keycloak.yaml"} {
+		body := readRepoFile(t, path)
+		if !strings.Contains(body, "    spec:\n      automountServiceAccountToken: false\n      securityContext:") {
+			t.Errorf("%s must disable the Keycloak service-account token at PodSpec level", path)
+		}
+	}
+}
+
+func TestMecak8sVMCPREADMERemoteLoginContract(t *testing.T) {
+	readme := readRepoFile(t, "deploy/mecak8s-vmcp/README.md")
+	for _, required := range []string{
+		"mecatui-kind --audience http://127.0.0.1:18080/mcp",
+		"Authorization Code + PKCE, not device flow",
+		"ssh -N -L 18473:127.0.0.1:18473 user@login-host",
+		"fixed callback",
+	} {
+		if !strings.Contains(readme, required) {
+			t.Errorf("vMCP README missing remote-login contract %q", required)
+		}
+	}
+	if strings.Contains(readme, "--audience mecatui-kind") {
+		t.Error("vMCP README must not use the client ID as the resource audience")
+	}
+}
+
+// TestMecak8sVMCPFixtureOfflineAccess keeps the generated Keycloak realm and
+// the remote-login walkthrough aligned: requesting this optional scope is what
+// earns a refresh token for the fixture users.
+func TestMecak8sVMCPFixtureOfflineAccess(t *testing.T) {
+	generator := readRepoFile(t, "deploy/mecak8s-vmcp/keycloak-realm-generate.sh")
+	realm := readRepoFile(t, "deploy/mecak8s-vmcp/keycloak.yaml")
+	readme := readRepoFile(t, "deploy/mecak8s-vmcp/README.md")
+
+	for _, required := range []string{
+		`KEEP_SCOPES='["basic","profile","email","offline_access","mcp:read"]'`,
+		`optional-client-scopes/$OFFLINE_SCOPE_ID`,
+		`{roles: {realm: [.roles.realm[] | select(.name == "offline_access")]}}`,
+		`"realmRoles":["offline_access"]`,
+	} {
+		if !strings.Contains(generator, required) {
+			t.Errorf("realm generator missing offline-access configuration %q", required)
+		}
+	}
+	for _, required := range []string{
+		`"name": "offline_access"`,
+		`"description": "OpenID Connect built-in scope: offline_access"`,
+		`"clientId": "mecatui-kind"`,
+		"\"optionalClientScopes\": [\n            \"mcp:read\",\n            \"offline_access\"",
+		`"roles": {`,
+		`"realmRoles": [`,
+	} {
+		if !strings.Contains(realm, required) {
+			t.Errorf("generated Keycloak realm missing offline-access configuration %q", required)
+		}
+	}
+	for _, user := range []string{"alice", "bob"} {
+		userStart := strings.Index(realm, `"username": "`+user+`"`)
+		if userStart < 0 {
+			t.Errorf("generated Keycloak realm is missing fixture user %s", user)
+			continue
+		}
+		userEnd := strings.Index(realm[userStart:], "\n        }")
+		if userEnd < 0 || !strings.Contains(realm[userStart:userStart+userEnd], `"offline_access"`) {
+			t.Errorf("generated Keycloak realm does not assign offline_access to %s", user)
+		}
+	}
+	for _, required := range []string{
+		"--scopes openid,profile,mcp:read,offline_access",
+		"receives a refresh token",
+		"refresh the access token",
+	} {
+		if !strings.Contains(readme, required) {
+			t.Errorf("vMCP README missing offline-access walkthrough contract %q", required)
+		}
+	}
+}
+
 func TestVMCPFixtureDoesNotCommitCredentialValues(t *testing.T) {
 	for _, path := range []string{"deploy/mecak8s-vmcp/Taskfile.yml", "deploy/mecak8s-vmcp/README.md", "deploy/mecak8s-vmcp/versions.yaml", "deploy/mecak8s-vmcp/toolhive-redis.yaml", "deploy/mecak8s-vmcp/vmcp.yaml"} {
 		body := readRepoFile(t, path)
@@ -145,8 +223,9 @@ func TestMecak8sVMCPPOC_Scenario3_Mecak8sTLSConnection(t *testing.T) {
 		"18081",
 
 		"base64 --decode > .scratch/mecak8s-vmcp-ca.crt",
-		"plaintext and an untrusted CA",
-		"live client connection demonstration\nis deferred",
+		"verified TLS\nusing the supplied custom fixture CA",
+		"plaintext, unauthenticated,\nor an untrusted CA must fail during transport/authentication setup",
+		"live client qualification remains confirmation-gated",
 	} {
 		if !strings.Contains(readme, required) {
 			t.Errorf("mecak8s TLS connection contract missing %q", required)
