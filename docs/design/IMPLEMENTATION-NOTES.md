@@ -6466,6 +6466,91 @@ yet (a replay consumer is Phase 3b). See `CLOUD-NATIVE.md` (Phase 3, ledger row 
   `engine/adapter/memstore/memstore_test.go` (`TestEventLogAppendRead`,
   `TestEventLogReadEarlyBreak`).
 
+### Durable replay-then-follow: `WatchSessionEvents` (issue #821, ADR 0250)
+
+The TRANSPORT over the `port.CursorEventLog` seam: one operation that replays a
+session's durable log from a position, announces when it is caught up, and then
+follows the tail. See `0250-durable-cursors-and-watch.md`; the resources it
+allocates are `0027-cloud-native.md` List 1 rows 65–66.
+
+- **Why a third read path exists.** `port.EventLog.Read` is a complete, ordered,
+  durable replay with NO position and NO follow; `Service.Subscribe` (behind
+  `StreamSessionLive`) is live but process-local, in-memory, and DROPS for a slow
+  subscriber. "Catch up, then watch" composed from those two has a window between
+  the calls in which an append is silently lost, and no test of either half alone
+  can see it. Both legacy endpoints are UNCHANGED — a bounded replay that ends is
+  what several clients depend on.
+- **The delivery envelope is `{event, cursor, phase}`,** and `phase` is an OPEN
+  STRING (`replay`/`live`/`gap`), the `EvNoProgress`/`StopBudget` discipline. `Event`
+  is nil on a PHASE-ONLY frame; there are exactly two — the single replay→live
+  boundary marker and every gap.
+- **A gap is a phase, never a `session.Event`** (decision 5). The domain event
+  taxonomy, the proto `Event` message, and the kind-parity gate gain nothing;
+  `internal/adapter/server/cursor_event_log_surface_test.go`
+  (`TestADR_0250_GapAddsNoEventKind`) asserts that absence structurally, because
+  "just add an `EvGap` so clients can render it" would silently relocate a delivery
+  concern into the domain.
+- **The read is TWO-PHASE, and that is load-bearing.** `internal/adapter/server/watch.go`
+  (`pumpWatch`) drains with `Follow:false`, emits the boundary frame, then re-reads
+  with `Follow:true` from the exact cursor the first read stopped at.
+  `port.LogRecord.Live` marks records that arrived after a read caught up — but only
+  once such a record ARRIVES, so on an idle or finished session a client keyed on
+  that flag waits forever to learn it is caught up. Splitting the read loses nothing
+  (the cursor makes the seam exact: an append landing between the phases is
+  delivered by the follow) and is pinned by
+  `TestSDKServerEnablers_Scenario7_BoundaryFrameDoesNotWaitForAnEvent` plus a
+  cross-phase cursor-uniqueness assertion in
+  `TestSDKServerEnablers_Scenario7_ReplayThenFollow` (which catches the
+  duplicate-at-the-seam a follow resuming from the ORIGINAL cursor would produce —
+  a mutation the recomposition assertion alone missed).
+- **Slow watchers are TERMINATED, not dropped** (decision 7). Delivery is decoupled
+  from the log read by a bounded buffer (`watchDeliveryBuffer` 512) plus a grace
+  (`watchDeliveryGrace` 5s); a consumer that cannot keep up gets `ErrWatchLagging`.
+  Dropping is what `Service.Subscribe` does and stopping it is the entire point of a
+  durable cursor. **Neither terminal error carries a server-side cursor**, and that
+  is deliberate: the server's furthest-QUEUED position is not the client's, so
+  resuming from it would skip exactly the buffered envelopes the client never
+  received. The client's own last-received envelope is the only correct resume
+  point.
+- **Cursor assignment is at the ONE persistence chokepoint** (AC7.8):
+  `internal/adapter/server/service.go` (`appendEvent`) type-asserts the cursor seam
+  and calls `AppendEvent`. The returned cursor is DISCARDED — readers get positions
+  from `ReadAfter`, which is what lets a watcher in another process follow the same
+  append; remembering it locally would create a second source of truth only the
+  appending replica could see. "Exactly one append per event" means one append per
+  appended RECORD: `RunEventRecorder` still coalesces streaming text deltas, so a
+  turn of N delta events legitimately becomes one record. The loop stays
+  storage-agnostic — `engine/agent` never imports `port.CursorEventLog`, exactly as
+  it never imports `port.EventLog`.
+- **The append-gap response has two reachable tiers** (decision 6), both in
+  `noteAppendGap`: one best-effort durable `AppendGap` (cross-process — a watcher on
+  another replica sees a `gap` phase), then `faultWatchers` (guaranteed,
+  process-local — attached watchers terminate with `ActivityGapError`). The run
+  CONTINUES either way: `appendEvent` returns the original error and its caller still
+  WARNs once per run. `noteAppendGap` adds NO diagnostics line of its own — the
+  append failure is already reported, a landed marker is owned by the `gap` phase,
+  and the residual is documented rather than logged twice. **The guarantee is
+  deliberately weaker than issue #821 asked for**: a failed append consumed no
+  position, so it leaves nothing for another process to observe, and a total backend
+  outage plus process loss leaves an UNDETECTABLE gap. Do not restate it as an
+  absolute.
+- **Ownership is checked EAGERLY** in `watchLog`, via the same `GetSession` question
+  `StreamSessionEvents` asks, before any envelope is yielded — a watch is at least as
+  revealing as a read, since the durable log holds the whole transcript. The
+  classification registry row is `WatchSessionEvents` (`KindCallerOwned`).
+- **Both transports consume ONE service method,** which is what makes their envelope
+  sequences identical rather than merely similar: the gRPC handler and the NEW SSE
+  route `GET /v1/sessions/{id}/watch` are framing only.
+  `TestSDKServerEnablers_Scenario7_WatchTransportParity` compares them
+  envelope-for-envelope. The legacy `GET /v1/sessions/{id}/events` frame stays a BARE
+  Event (a separate route, not a query-parameter widening — overloading one path
+  would change an existing endpoint's termination behaviour).
+- **Feature identifier**: `watch_session_events` in
+  `internal/adapter/server/features.go`. It answers "does this BUILD implement the
+  watch?", NOT "will a watch succeed here" — the latter also needs the wired log to
+  implement the cursor seam, which is a deployment fact reported by
+  `watch_unsupported`.
+
 ### Durable event log — consumers (cloud-native Phase 3b)
 
 The CONSUMERS of the 3a log: a non-destructive compaction archive and a

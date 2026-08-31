@@ -32,6 +32,19 @@ const (
 	// never empty, so "empty means something went wrong" stays a usable
 	// assertion for every other consumer.
 	FeatureServerInfo = "server_info"
+
+	// FeatureWatchSessionEvents is the durable replay-then-follow watch — the
+	// WatchSessionEvents RPC and its SSE peer (issue #821, ADR 0250).
+	//
+	// It answers "does this BUILD implement the watch?", which is the question a
+	// client needs before it decides between one watch and the older
+	// replay-then-subscribe dance. It deliberately does NOT answer "will a watch
+	// succeed here": that additionally depends on the wired event log implementing
+	// the cursor seam, which is a DEPLOYMENT fact and is reported by the
+	// watch_unsupported error instead. Conflating the two is exactly the
+	// capabilities/features confusion ADR 0248 exists to prevent — a build that
+	// implements the RPC over a cursor-less store must not look like version skew.
+	FeatureWatchSessionEvents = "watch_session_events"
 )
 
 // allFeatures is the registry: the single source of truth both transports read.
@@ -47,6 +60,7 @@ const (
 // diffs and golden fixtures readable.
 var allFeatures = []string{
 	FeatureServerInfo,
+	FeatureWatchSessionEvents,
 }
 
 // serverFeatures returns the feature identifiers this build implements, as a

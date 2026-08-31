@@ -108,6 +108,25 @@ var errorRegistry = []errorCodeEntry{
 	{Sentinel: ErrTooManySessionEngines, Code: "too_many_session_engines", GRPC: codes.ResourceExhausted, HTTPStatus: http.StatusTooManyRequests, Title: "Too many live per-session engines"},
 	{Sentinel: ErrNoScheduleStore, Code: "no_schedule_store", GRPC: codes.Unimplemented, HTTPStatus: http.StatusNotImplemented, Title: "Scheduled tasks are not supported by the configured store"},
 	{Sentinel: ErrNoEventLog, Code: "no_event_log", GRPC: codes.Unimplemented, HTTPStatus: http.StatusNotImplemented, Title: "No durable event log configured"},
+	// The durable watch surface (ADR 0250). ErrWatchUnsupported sits beside
+	// ErrNoEventLog because it is the same class of honest refusal one level in:
+	// a log exists, it just cannot serve positions.
+	{Sentinel: ErrWatchUnsupported, Code: "watch_unsupported", GRPC: codes.Unimplemented, HTTPStatus: http.StatusNotImplemented, Title: "Durable event watch is not supported by the configured event log"},
+	// ResourceExhausted/429 says what actually happened — the bounded delivery
+	// buffer ran out — and marks the failure as the client's to retry. It is
+	// RESUMABLE: reconnect with the last cursor received.
+	{Sentinel: ErrWatchLagging, Code: "watch_lagging", GRPC: codes.ResourceExhausted, HTTPStatus: http.StatusTooManyRequests, Title: "Watch terminated because the client fell behind"},
+	// DataLoss is the one code that means what a gap means: events that should
+	// have been recorded were not. A retry does not recover them, so this is
+	// reported rather than dressed up as a transient fault.
+	{Sentinel: ErrActivityGap, Code: "activity_gap", GRPC: codes.DataLoss, HTTPStatus: http.StatusInternalServerError, Title: "Durable event-log append failed; the watch has a delivery gap"},
+	// The two cursor faults are port-level sentinels, classified here so both
+	// transports report them identically. Expired is RECOVERABLE by restarting
+	// from the beginning (the log's positional basis moved); malformed indicates a
+	// bug or tampering and must not be silently retried, which is why they are
+	// distinct codes rather than one "bad cursor".
+	{Sentinel: port.ErrCursorExpired, Code: "cursor_expired", GRPC: codes.FailedPrecondition, HTTPStatus: http.StatusConflict, Title: "Event-log cursor is from a superseded log generation"},
+	{Sentinel: port.ErrCursorMalformed, Code: "cursor_malformed", GRPC: codes.InvalidArgument, HTTPStatus: http.StatusBadRequest, Title: "Event-log cursor is malformed"},
 	{Sentinel: ErrSessionDeleteUnsupported, Code: "session_delete_unsupported", GRPC: codes.Unimplemented, HTTPStatus: http.StatusNotImplemented, Title: "Session deletion is not supported by the configured store"},
 	{Sentinel: port.ErrSessionMetadataCursorRestart, Code: "session_metadata_cursor_restart", GRPC: codes.Aborted, HTTPStatus: http.StatusConflict, Title: "Session metadata cursor must restart"},
 	{Sentinel: port.ErrSessionMetadataPagingUnsupported, Code: "session_metadata_paging_unsupported", GRPC: codes.Unimplemented, HTTPStatus: http.StatusNotImplemented, Title: "Session metadata paging is not supported"},

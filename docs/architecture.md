@@ -474,7 +474,22 @@ cloud-native Phase 3a) is now readable over the public `HarnessService` via the
 server-streaming `StreamSessionEvents` RPC (and `GET /v1/sessions/{id}/events` over HTTP) —
 the client-tier surface over the same `port.EventLog.Read` the operator-tier 3c
 `EventLogService.Read` serves, so a client opening a past session replays its full timeline
-(the loop stays storage-agnostic; it only emits). Unlike `mecated` it owns no listeners, TLS,
+(the loop stays storage-agnostic; it only emits). That replay is complete and ordered but
+has **no position and no follow**, so "catch up, then watch" was two calls with a window
+between them in which an append was silently lost; the live alternative
+(`StreamSessionLive`, over the in-memory `Service.Subscribe` registry) is process-local and
+drops for a slow subscriber. `WatchSessionEvents` (and `GET /v1/sessions/{id}/watch`) is
+the **one operation** that closes both gaps, over the additive `port.CursorEventLog` seam
+([ADR 0250](adr/0250-durable-cursors-and-watch.md)): it replays from an opaque cursor,
+emits one phase-only frame at the replay→live boundary, then follows the tail, delivering
+`{event, cursor, phase}` where `phase` is an open string (`replay`/`live`/`gap`). A gap is
+a **delivery-envelope phase, never a `session.Event`** — so the event taxonomy, the proto
+`Event` message, and the kind-parity gate are untouched. A watcher reads durable storage,
+so it structurally cannot backpressure a run; one that falls behind its bounded delivery
+buffer is **terminated with a resumable error rather than silently dropped**, which is the
+behaviour a durable cursor exists to make available. Cursor assignment happens at the ONE
+persistence chokepoint (`Service.appendEvent`), never at an emit site — the loop never
+imports `port.CursorEventLog`, exactly as it never imports `port.EventLog`. Unlike `mecated` it owns no listeners, TLS,
 auth, or telemetry pipeline; unlike `mecatui` it has no UI. It defaults `--headless`
 (inverted from `mecated`): a CI run has no approver, so a child ask auto-denies or routes
 to the opt-in ask-reviewer, and a *main-engine* ask under `posture strict` cancels the run

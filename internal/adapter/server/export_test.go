@@ -105,3 +105,24 @@ func (s *Service) TrackSteerMessageIDForTest(id session.SessionID, messageID str
 func SteerOutcomeToProtoForTest(o agent.SteerOutcome) mecatlv1.SteerOutcome {
 	return steerOutcomeToProto(o)
 }
+
+// ShrinkWatchDeliveryForTest narrows the bounded watch delivery state (ADR 0250)
+// for one test and returns the restore func.
+//
+// The bounds are deliberately NOT configuration: an operator has no reason to
+// tune them, and exporting a knob so a test can be cheap would put a production
+// surface on the wire for a test's convenience. Proving "a slow watcher is
+// terminated" against the production 512 envelopes and five-second grace would
+// take 512 events and five seconds to assert nothing the shrunk version does not.
+func ShrinkWatchDeliveryForTest(buffer int, grace time.Duration) (restore func()) {
+	prevBuffer, prevGrace := watchDeliveryBuffer, watchDeliveryGrace
+	watchDeliveryBuffer, watchDeliveryGrace = buffer, grace
+	return func() { watchDeliveryBuffer, watchDeliveryGrace = prevBuffer, prevGrace }
+}
+
+// ClassifyErrorCodeForTest exposes the stable error code the shared registry
+// assigns to err, so a test can assert the wire contract a client branches on
+// rather than an error string.
+func ClassifyErrorCodeForTest(err error) string {
+	return classifyError(err).Code
+}

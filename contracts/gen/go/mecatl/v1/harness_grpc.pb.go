@@ -67,6 +67,7 @@ const (
 	HarnessService_ListWorktrees_FullMethodName            = "/mecatl.v1.HarnessService/ListWorktrees"
 	HarnessService_StreamSessionEvents_FullMethodName      = "/mecatl.v1.HarnessService/StreamSessionEvents"
 	HarnessService_StreamSessionLive_FullMethodName        = "/mecatl.v1.HarnessService/StreamSessionLive"
+	HarnessService_WatchSessionEvents_FullMethodName       = "/mecatl.v1.HarnessService/WatchSessionEvents"
 	HarnessService_ListSessions_FullMethodName             = "/mecatl.v1.HarnessService/ListSessions"
 	HarnessService_GetStorageHealth_FullMethodName         = "/mecatl.v1.HarnessService/GetStorageHealth"
 	HarnessService_PlanSessionMigration_FullMethodName     = "/mecatl.v1.HarnessService/PlanSessionMigration"
@@ -278,6 +279,68 @@ type HarnessServiceClient interface {
 	// (absence is data — a never-created id is indistinguishable from a session
 	// with no live events yet).
 	StreamSessionLive(ctx context.Context, in *StreamSessionLiveRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Event], error)
+	// WatchSessionEvents is the DURABLE replay-then-follow stream: one operation
+	// that replays a session's durable event log from a position, transitions to
+	// live, and keeps following as the run appends (issue #821, ADR 0250).
+	//
+	// It exists because neither existing read path can do this. StreamSessionEvents
+	// is a complete, ordered replay with NO position and NO follow — it reads the
+	// whole log and stops, so a client that wants to catch up and then watch must
+	// read everything and THEN subscribe, and any event appended between those two
+	// steps is silently lost. StreamSessionLive is live but process-local,
+	// in-memory, and non-durable: a second replica sees nothing, a reconnecting tab
+	// sees nothing that happened while it was away, and a slow subscriber has its
+	// events DROPPED. Both remain, unchanged, for the callers that want exactly
+	// their semantics.
+	//
+	// CURSOR. `cursor` is an OPAQUE resume token meaning "I have durably received
+	// everything up to here". Treat it as bytes to hand back — never parse, build,
+	// or edit one. An EMPTY cursor means THE BEGINNING OF THE LOG, which is a real
+	// value and the common case (a client attaching for the first time wants
+	// replay-then-follow). A cursor from a superseded log generation returns
+	// `cursor_expired` (the log was deleted and recreated); one that cannot be
+	// decoded returns `cursor_malformed`. Neither is ever coerced to a position:
+	// resuming from approximately the right place is indistinguishable from
+	// resuming from the right place until data is already lost.
+	//
+	// PHASE is an OPEN STRING, not an enum — `replay`, `live`, `gap` today, and a
+	// client must tolerate a value it does not know (the same discipline the event
+	// `type`/`stop` fields already carry). `replay` records were already durable
+	// when the watch attached; `live` records arrived after it caught up. Exactly
+	// one PHASE-ONLY `live` frame (no `event`, cursor set) marks the replay to live
+	// boundary, so a client can render the transcript and then show a live view
+	// WITHOUT waiting for the next event to arrive — on an idle session that event
+	// may never come. `gap` marks a position where a durable append is KNOWN to
+	// have failed; it too carries no `event`, because a gap is a fact about
+	// DELIVERY rather than something that happened in the run (ADR 0250 decision
+	// 5 — this is why neither `session.Event` nor the `Event` message gains a gap
+	// field).
+	//
+	// RELAY DISCIPLINE mirrors StreamSessionEvents, NOT the live wire: this is the
+	// READ-BACK of the durable log, so it relays ALL events including the three
+	// log-only kinds (`approval`/`compaction_archive`/`user_prompt`) — a client
+	// replaying a session wants the verdicts and prompts, as they ARE the
+	// transcript. They are metadata-only/redacted by construction.
+	//
+	// `run_id` optionally narrows delivery to ONE run (ADR 0249). Gap frames are
+	// delivered regardless of the filter: a failed append leaves nothing to
+	// attribute to a run, so suppressing it would hide a real gap.
+	//
+	// TERMINATION. A watch ends when the client cancels, or with an error that says
+	// what to do next. A client that falls too far behind is TERMINATED with
+	// `watch_lagging` rather than having its events dropped — the cursor exists
+	// precisely so that termination is recoverable: reconnect with the last cursor
+	// received and nothing is lost. A durable append failure terminates the
+	// watchers in that process with `activity_gap` and never advances their cursor.
+	// In BOTH cases the run continues normally: a broken or slow watch must never
+	// break a live run, and a watcher never backpressures one.
+	//
+	// A server with no durable EventLog returns `no_event_log`; one whose log does
+	// not implement the cursor seam returns `watch_unsupported` — never a silent
+	// degrade to replaying the whole transcript, because a client asking to resume
+	// from a position and being handed everything is a correctness problem dressed
+	// as a performance one. Ownership is enforced exactly as on GetSession.
+	WatchSessionEvents(ctx context.Context, in *WatchSessionEventsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WatchSessionEventsResponse], error)
 	// ListSessions returns the stored-session inventory — the picker metadata a
 	// client renders to let an operator open an EXISTING session by id (issue #245
 	// Phase 1). It is backed by `port.PrunableStore.List` (type-asserted on the
@@ -699,6 +762,25 @@ func (c *harnessServiceClient) StreamSessionLive(ctx context.Context, in *Stream
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type HarnessService_StreamSessionLiveClient = grpc.ServerStreamingClient[Event]
 
+func (c *harnessServiceClient) WatchSessionEvents(ctx context.Context, in *WatchSessionEventsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WatchSessionEventsResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &HarnessService_ServiceDesc.Streams[3], HarnessService_WatchSessionEvents_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[WatchSessionEventsRequest, WatchSessionEventsResponse]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type HarnessService_WatchSessionEventsClient = grpc.ServerStreamingClient[WatchSessionEventsResponse]
+
 func (c *harnessServiceClient) ListSessions(ctx context.Context, in *ListSessionsRequest, opts ...grpc.CallOption) (*ListSessionsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListSessionsResponse)
@@ -1041,7 +1123,7 @@ func (c *harnessServiceClient) CancelTeammate(ctx context.Context, in *CancelTea
 
 func (c *harnessServiceClient) RunTeam(ctx context.Context, in *RunTeamRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TeamEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &HarnessService_ServiceDesc.Streams[3], HarnessService_RunTeam_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &HarnessService_ServiceDesc.Streams[4], HarnessService_RunTeam_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1080,7 +1162,7 @@ func (c *harnessServiceClient) CleanupTeam(ctx context.Context, in *CleanupTeamR
 
 func (c *harnessServiceClient) ApprovePlan(ctx context.Context, in *ApprovePlanRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Event], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &HarnessService_ServiceDesc.Streams[4], HarnessService_ApprovePlan_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &HarnessService_ServiceDesc.Streams[5], HarnessService_ApprovePlan_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1268,6 +1350,68 @@ type HarnessServiceServer interface {
 	// (absence is data — a never-created id is indistinguishable from a session
 	// with no live events yet).
 	StreamSessionLive(*StreamSessionLiveRequest, grpc.ServerStreamingServer[Event]) error
+	// WatchSessionEvents is the DURABLE replay-then-follow stream: one operation
+	// that replays a session's durable event log from a position, transitions to
+	// live, and keeps following as the run appends (issue #821, ADR 0250).
+	//
+	// It exists because neither existing read path can do this. StreamSessionEvents
+	// is a complete, ordered replay with NO position and NO follow — it reads the
+	// whole log and stops, so a client that wants to catch up and then watch must
+	// read everything and THEN subscribe, and any event appended between those two
+	// steps is silently lost. StreamSessionLive is live but process-local,
+	// in-memory, and non-durable: a second replica sees nothing, a reconnecting tab
+	// sees nothing that happened while it was away, and a slow subscriber has its
+	// events DROPPED. Both remain, unchanged, for the callers that want exactly
+	// their semantics.
+	//
+	// CURSOR. `cursor` is an OPAQUE resume token meaning "I have durably received
+	// everything up to here". Treat it as bytes to hand back — never parse, build,
+	// or edit one. An EMPTY cursor means THE BEGINNING OF THE LOG, which is a real
+	// value and the common case (a client attaching for the first time wants
+	// replay-then-follow). A cursor from a superseded log generation returns
+	// `cursor_expired` (the log was deleted and recreated); one that cannot be
+	// decoded returns `cursor_malformed`. Neither is ever coerced to a position:
+	// resuming from approximately the right place is indistinguishable from
+	// resuming from the right place until data is already lost.
+	//
+	// PHASE is an OPEN STRING, not an enum — `replay`, `live`, `gap` today, and a
+	// client must tolerate a value it does not know (the same discipline the event
+	// `type`/`stop` fields already carry). `replay` records were already durable
+	// when the watch attached; `live` records arrived after it caught up. Exactly
+	// one PHASE-ONLY `live` frame (no `event`, cursor set) marks the replay to live
+	// boundary, so a client can render the transcript and then show a live view
+	// WITHOUT waiting for the next event to arrive — on an idle session that event
+	// may never come. `gap` marks a position where a durable append is KNOWN to
+	// have failed; it too carries no `event`, because a gap is a fact about
+	// DELIVERY rather than something that happened in the run (ADR 0250 decision
+	// 5 — this is why neither `session.Event` nor the `Event` message gains a gap
+	// field).
+	//
+	// RELAY DISCIPLINE mirrors StreamSessionEvents, NOT the live wire: this is the
+	// READ-BACK of the durable log, so it relays ALL events including the three
+	// log-only kinds (`approval`/`compaction_archive`/`user_prompt`) — a client
+	// replaying a session wants the verdicts and prompts, as they ARE the
+	// transcript. They are metadata-only/redacted by construction.
+	//
+	// `run_id` optionally narrows delivery to ONE run (ADR 0249). Gap frames are
+	// delivered regardless of the filter: a failed append leaves nothing to
+	// attribute to a run, so suppressing it would hide a real gap.
+	//
+	// TERMINATION. A watch ends when the client cancels, or with an error that says
+	// what to do next. A client that falls too far behind is TERMINATED with
+	// `watch_lagging` rather than having its events dropped — the cursor exists
+	// precisely so that termination is recoverable: reconnect with the last cursor
+	// received and nothing is lost. A durable append failure terminates the
+	// watchers in that process with `activity_gap` and never advances their cursor.
+	// In BOTH cases the run continues normally: a broken or slow watch must never
+	// break a live run, and a watcher never backpressures one.
+	//
+	// A server with no durable EventLog returns `no_event_log`; one whose log does
+	// not implement the cursor seam returns `watch_unsupported` — never a silent
+	// degrade to replaying the whole transcript, because a client asking to resume
+	// from a position and being handed everything is a correctness problem dressed
+	// as a performance one. Ownership is enforced exactly as on GetSession.
+	WatchSessionEvents(*WatchSessionEventsRequest, grpc.ServerStreamingServer[WatchSessionEventsResponse]) error
 	// ListSessions returns the stored-session inventory — the picker metadata a
 	// client renders to let an operator open an EXISTING session by id (issue #245
 	// Phase 1). It is backed by `port.PrunableStore.List` (type-asserted on the
@@ -1492,6 +1636,9 @@ func (UnimplementedHarnessServiceServer) StreamSessionEvents(*StreamSessionEvent
 }
 func (UnimplementedHarnessServiceServer) StreamSessionLive(*StreamSessionLiveRequest, grpc.ServerStreamingServer[Event]) error {
 	return status.Errorf(codes.Unimplemented, "method StreamSessionLive not implemented")
+}
+func (UnimplementedHarnessServiceServer) WatchSessionEvents(*WatchSessionEventsRequest, grpc.ServerStreamingServer[WatchSessionEventsResponse]) error {
+	return status.Errorf(codes.Unimplemented, "method WatchSessionEvents not implemented")
 }
 func (UnimplementedHarnessServiceServer) ListSessions(context.Context, *ListSessionsRequest) (*ListSessionsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListSessions not implemented")
@@ -2052,6 +2199,17 @@ func _HarnessService_StreamSessionLive_Handler(srv interface{}, stream grpc.Serv
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type HarnessService_StreamSessionLiveServer = grpc.ServerStreamingServer[Event]
+
+func _HarnessService_WatchSessionEvents_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(WatchSessionEventsRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(HarnessServiceServer).WatchSessionEvents(m, &grpc.GenericServerStream[WatchSessionEventsRequest, WatchSessionEventsResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type HarnessService_WatchSessionEventsServer = grpc.ServerStreamingServer[WatchSessionEventsResponse]
 
 func _HarnessService_ListSessions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ListSessionsRequest)
@@ -2978,6 +3136,11 @@ var HarnessService_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "StreamSessionLive",
 			Handler:       _HarnessService_StreamSessionLive_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "WatchSessionEvents",
+			Handler:       _HarnessService_WatchSessionEvents_Handler,
 			ServerStreams: true,
 		},
 		{

@@ -206,13 +206,13 @@ The transport over the cursor seam. Depends on Scenarios 4 and 6.
 - AC7.4: A watch is authenticated and ownership-checked; a caller who may not read the session is refused.
   - verify: `TestSDKServerEnablers_Scenario7_WatchOwnershipEnforced`
 - AC7.5: A slow watcher is terminated with a **resumable** error and never backpressures the run; the run completes normally.
-  - verify: `TestADR_0246_SlowWatcherTerminatesWithoutBackpressure`
+  - verify: `TestADR_0250_SlowWatcherTerminatesWithoutBackpressure`
 - AC7.6: A durable append failure terminates watchers **in that process** with `ActivityGapError` without advancing their cursor, and the owned run continues.
-  - verify: `TestADR_0246_AppendFailureTerminatesLocalWatchers`
+  - verify: `TestADR_0250_AppendFailureTerminatesLocalWatchers`
 - AC7.7: The best-effort durable gap marker, when it lands, is observed by watchers in a **second** process.
-  - verify: `TestADR_0246_GapMarkerObservedCrossProcess`
+  - verify: `TestADR_0250_GapMarkerObservedCrossProcess`
 - AC7.8: Exactly one append occurs per event; cursor assignment happens at the persistence chokepoint, not at the emit site.
-  - verify: `TestADR_0246_OneAppendPerEvent`
+  - verify: `TestADR_0250_OneAppendPerEvent`
 - AC7.9: The existing `StreamSessionEvents` and `StreamSessionLive` endpoints behave identically to today.
   - verify: `TestSDKServerEnablers_Scenario7_LegacyStreamEndpointsUnchanged`
 

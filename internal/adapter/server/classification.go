@@ -280,6 +280,7 @@ var serviceAccessTable = map[string]ClassificationEntry{
 	"CancelSessionCleanup":      {KindCallerOwned, "gates on management authority; matches the verified principal against the bounded job registry — the underlying cleanup scope is store-wide, never caller-owned"},
 	"SessionCleanupJob":         {KindCallerOwned, "gates on management authority and returns only a caller-bound sanitized job projection; the underlying cleanup data is store-wide, not the caller's own sessions"},
 	"StreamSessionEvents":       {KindCallerOwned, "event log/live stream resolves through the owning session's authorizeSession check"},
+	"WatchSessionEvents":        {KindCallerOwned, "durable replay-then-follow watch (ADR 0250); watchLog resolves ownership through the same GetSession check StreamSessionEvents uses, EAGERLY — before any envelope is yielded — because the durable log holds the whole transcript"},
 	"Subscribe":                 {KindCallerOwned, "authorizes via GetSession before registering a live subscriber (issue #368)"},
 
 	// --- caller-owned: live run verbs ---
