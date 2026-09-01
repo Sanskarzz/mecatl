@@ -1280,6 +1280,76 @@ func (h *HarnessServer) StreamSessionLive(req *mecatlv1.StreamSessionLiveRequest
 	}
 }
 
+// WatchSessionEvents is the DURABLE replay-then-follow stream (issue #821, ADR
+// 0250): a thin transport over Service.WatchSessionEvents.
+//
+// The SSE route GET /v1/sessions/{id}/watch consumes the SAME service method, so
+// the two transports deliver identical envelope sequences by construction rather
+// than by parallel maintenance (AC7.3). Everything below is framing.
+//
+// Relay discipline mirrors StreamSessionEvents, NOT the live wire: this is the
+// READ-BACK of the durable log, so ALL events are relayed including the three
+// log-only kinds (EvApproval/EvCompactionArchive/EvUserPrompt) — a client
+// replaying a session wants the verdicts and prompts, as they ARE the transcript.
+// Do NOT copy relayLiveEvent's filter here.
+//
+// A Send error means the client is gone: break out of the iterator, which
+// releases the watch and its backend read per port.CursorEventLog's contract.
+// There is no drain-to-discard to do — unlike a live relay, this stream pulls
+// from durable storage and has no run whose emits could wedge behind it.
+func (h *HarnessServer) WatchSessionEvents(req *mecatlv1.WatchSessionEventsRequest, stream grpc.ServerStreamingServer[mecatlv1.WatchSessionEventsResponse]) error {
+	if req.GetSessionId() == "" {
+		return status.Error(codes.InvalidArgument, ErrInvalidArgument.Error())
+	}
+	envelopes, err := h.svc.WatchSessionEvents(stream.Context(),
+		session.SessionID(req.GetSessionId()), port.Cursor(req.GetCursor()), req.GetRunId())
+	if err != nil {
+		return toStatus(err)
+	}
+	for env, iterErr := range envelopes {
+		if iterErr != nil {
+			// toStatus classifies through the shared registry, so a lagging
+			// termination, a delivery gap, and a cursor fault each reach the client
+			// as the same code the HTTP surface would report.
+			return toStatus(iterErr)
+		}
+		if err := stream.Send(toProtoWatchEnvelope(env)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// toProtoWatchEnvelope projects one delivery envelope onto the wire.
+//
+// A nil Event stays nil — the phase-only frames (the replay/live boundary and
+// every gap) carry no event by design, and synthesising an empty one would make
+// a client's "did anything happen?" check answer yes.
+func toProtoWatchEnvelope(env WatchEnvelope) *mecatlv1.WatchSessionEventsResponse {
+	out := &mecatlv1.WatchSessionEventsResponse{
+		// Phase is a harness constant from a closed set, so it needs no repair.
+		//
+		// Cursor DOES get the producer-influenced-string repair, because it is not
+		// as harness-authored as it looks: the four in-tree backends mint ASCII
+		// (base64url, or a Redis XADD id), but the cursor is BACKEND-OWNED and a
+		// third-party port.CursorEventLog may mint anything. Without the repair,
+		// one invalid byte in a cursor kills the whole stream at proto marshal —
+		// the issue-#402 failure mode the mapper's mechanical backstop exists to
+		// prevent. Repairing it does corrupt that token, and that is the better
+		// failure: a corrupt cursor is rejected LOUDLY as ErrCursorMalformed at the
+		// next resume (never silently resolved to a wrong position), whereas a dead
+		// stream takes the session's whole live view with it. It also keeps the two
+		// transports byte-identical — SSE encodes this same struct through
+		// encoding/json, which would substitute U+FFFD on its own and diverge.
+		Cursor: valid(string(env.Cursor)),
+		Phase:  env.Phase,
+	}
+	if env.Event != nil {
+		out.Event = toProto(*env.Event)
+	}
+	return out
+}
+
 // relayLiveEvent reports whether a live-subscription event should be relayed on
 // the client wire. It mirrors the live Converse relay's log-only skip with ONE
 // narrow exception: a fire-result DELIVERY note (an EvUserPrompt whose text

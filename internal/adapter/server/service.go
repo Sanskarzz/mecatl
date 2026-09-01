@@ -1023,6 +1023,38 @@ type Service struct {
 	subscriptions       map[session.SessionID]map[int64]chan session.Event
 	subNextID           int64
 	subscriptionsClosed bool
+
+	// watches is the per-session DURABLE watch registry (ADR 0250): every
+	// attached WatchSessionEvents reader, so a failed durable append can terminate
+	// the ones in THIS process with a delivery gap (decision 6's guaranteed tier)
+	// and shutdown can stop them all.
+	//
+	// It is deliberately NOT the subscriptions registry above, and the difference
+	// is the whole feature. A subscription is an in-memory fan-out that DROPS for
+	// a slow client; a watch reads the durable log itself, so it is
+	// cross-process-capable, resumable from a cursor, and terminated — never
+	// silently dropped — when it falls behind. The Service holds only what it
+	// needs to stop a watcher and to tell it why: a watch's position, filter, and
+	// buffer live with its own goroutine, so a failing appender's walk of this map
+	// stays cheap on the relay thread.
+	//
+	// Guarded by watchMu, a THIRD mutex for the same reason subMu is a second one:
+	// appendEvent walks this map on the relay thread and must not contend with the
+	// run/registry hot path. watchesClosed permanently rejects new attachments
+	// after shutdown begins, so no pump goroutine outlives the Service.
+	watchMu       sync.Mutex
+	watches       map[session.SessionID]map[*watchRegistration]struct{}
+	watchesClosed bool
+
+	// cursorLog is cfg.EventLog narrowed to the cursor seam, or nil when the
+	// configured backend does not implement it.
+	//
+	// Resolved ONCE at construction rather than type-asserted per call: the backend
+	// cannot change at runtime, and appendEvent is on the relay hot path (every
+	// coalesced delta chunk of every turn goes through it). A nil here is the
+	// honest "this deployment cannot serve a watch" signal both appendEvent and
+	// watchLog read.
+	cursorLog port.CursorEventLog
 }
 
 // heldLease is one process-held session lease plus the cancel that stops its
@@ -1248,6 +1280,14 @@ func NewService(cfg Config) (*Service, error) {
 		cleanupPlans:        make(map[string]cleanupTokenPayload),
 		cleanupJobs:         make(map[string]cleanupJobRecord),
 		subscriptions:       make(map[session.SessionID]map[int64]chan session.Event),
+	}
+	// Narrow the durable log to the cursor seam once (ADR 0250). A backend that
+	// does not implement it leaves this nil, and the watch surface reports the
+	// feature unsupported rather than degrading to a full replay.
+	if cfg.EventLog != nil {
+		if cl, ok := cfg.EventLog.(port.CursorEventLog); ok {
+			svc.cursorLog = cl
+		}
 	}
 	// Seed the model inventory from the static snapshot. ListModels and the
 	// ModelSelection cap read this atomic so a later live-catalog SetModels swap is
@@ -2250,6 +2290,12 @@ func (s *Service) Close() {
 			_ = sch.Stop()
 		}
 	}
+	// Stop every attached durable watch (ADR 0250) so no pump goroutine outlives
+	// the Service, and refuse later attachments. A shutdown cancel is a CLEAN end,
+	// not a gap: no append failed, so the stream simply ends and the client
+	// reconnects with its cursor.
+	s.closeWatches()
+
 	s.mu.Lock()
 	engines := s.sessionEngines
 	s.sessionEngines = make(map[session.SessionID]*sessionEngine)
@@ -5047,6 +5093,29 @@ func (s *Service) appendEvent(ctx context.Context, id session.SessionID, ev sess
 	// actor answers "who did this?". PrincipalFromContext returns a COPY, so a
 	// later mutation cannot rewrite an already-recorded event.
 	ev.Actor = session.PrincipalFromContext(ctx)
+	// The cursor seam (ADR 0250) is used when the backend offers it, because THIS
+	// is where a durable position is assigned. AC7.8 is a structural claim, not a
+	// performance one: the position must be minted at the persistence chokepoint
+	// and nowhere else — never at an emit site in the loop, which stays
+	// storage-agnostic and never imports port.CursorEventLog at all.
+	//
+	// "Exactly one append per event" means one append per appended RECORD. The
+	// RunEventRecorder deliberately COALESCES streaming text deltas into bounded
+	// chunks before they reach here, so a turn of N delta events legitimately
+	// becomes one record; what must never happen is the same record being appended
+	// twice, or a second write path minting a rival position.
+	//
+	// The returned cursor is deliberately DISCARDED. Readers get their positions
+	// from the log itself via ReadAfter, which is exactly what lets a watcher in
+	// another process follow this append; remembering it here would create a second
+	// source of truth that only the appending replica could see.
+	if log := s.cursorLog; log != nil {
+		if _, err := log.AppendEvent(ctx, id, ev); err != nil {
+			s.noteAppendGap(ctx, id, log, err)
+			return err
+		}
+		return nil
+	}
 	return s.cfg.EventLog.Append(ctx, id, ev)
 }
 

@@ -16,6 +16,7 @@ import (
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
 	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/learning"
+	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/session"
 )
 
@@ -33,6 +34,8 @@ import (
 //	POST   /v1/sessions/{id}/cancel   -> cancel the in-flight run
 //	POST   /v1/sessions/{id}/cancel-child -> cancel ONE child (subagent) of the run
 //	POST   /v1/sessions/{id}/fork     -> ForkSession (peer session from a history snapshot; 201)
+//	GET    /v1/sessions/{id}/events   -> replay the durable event log; the stream ENDS
+//	GET    /v1/sessions/{id}/watch    -> durable replay-then-follow; the stream STAYS OPEN
 //
 // Every Event is emitted as one SSE `data:` line carrying the proto Event
 // marshalled to JSON, so the HTTP and gRPC surfaces share one event shape.
@@ -104,6 +107,7 @@ func NewHTTPHandler(svc *Service) *HTTPHandler {
 	h.mux.HandleFunc("POST /v1/storage/cleanup/jobs/{id}/cancel", h.cancelSessionCleanup)
 	h.mux.HandleFunc("GET /v1/storage/cleanup/jobs/{id}", h.getSessionCleanupJob)
 	h.mux.HandleFunc("GET /v1/sessions/{id}/events", h.streamSessionEvents)
+	h.mux.HandleFunc("GET /v1/sessions/{id}/watch", h.watchSessionEvents)
 	h.mux.HandleFunc("POST /v1/teams", h.createTeam)
 	h.mux.HandleFunc("POST /v1/teams/{id}/members", h.spawnTeammate)
 	h.mux.HandleFunc("POST /v1/teams/{id}/messages", h.sendTeammateMessage)
@@ -2090,9 +2094,7 @@ func (h *HTTPHandler) streamSessionEvents(w http.ResponseWriter, r *http.Request
 			// Mid-stream fault: emit an SSE error frame and stop. The iter.Seq2
 			// releases its file handle on early break per port.EventLog.Read's
 			// contract.
-			_ = enc.Encode(map[string]string{"error": iterErr.Error()})
-			_, _ = w.Write([]byte("\n"))
-			flusher.Flush()
+			writeSSEError(w, flusher, map[string]string{"error": iterErr.Error()})
 			return
 		}
 		if _, err := w.Write([]byte("data: ")); err != nil {
@@ -2108,7 +2110,101 @@ func (h *HTTPHandler) streamSessionEvents(w http.ResponseWriter, r *http.Request
 	}
 }
 
+// watchSessionEvents handles GET /v1/sessions/{id}/watch — the DURABLE
+// replay-then-follow watch as a Server-Sent Events stream (issue #821, ADR 0250).
+//
+// It is a NEW route, deliberately beside GET /v1/sessions/{id}/events rather than
+// a widening of it. That route is a bounded replay that ends; this one replays,
+// announces the boundary, and then stays open. Overloading one path with a query
+// parameter would change an existing endpoint's termination behaviour for every
+// client that already depends on the stream ending.
+//
+// Query parameters: `cursor` (opaque, empty = from the beginning) and `run_id`
+// (optional filter). Both are handed to the same Service.WatchSessionEvents the
+// gRPC handler uses, which is what makes the envelope sequences identical.
+//
+// Each frame is one WatchSessionEventsResponse — {event, cursor, phase} — so a
+// client reads its resume position off the same frame that carried the event.
+// This is the READ-BACK of the durable log, so ALL events are relayed including
+// the three log-only kinds; do NOT copy the live-relay filter here.
+func (h *HTTPHandler) watchSessionEvents(w http.ResponseWriter, r *http.Request) {
+	id := session.SessionID(r.PathValue("id"))
+	flusher, _ := w.(http.Flusher)
+	if flusher == nil {
+		writeError(w, http.StatusInternalServerError, "streaming unsupported")
+		return
+	}
+	// Resolved BEFORE any header is written, so a missing feature, a bad cursor, or
+	// a session this caller may not read is a real status code and an RFC 9457
+	// problem body rather than a 200 with an error frame inside it.
+	envelopes, err := h.svc.WatchSessionEvents(r.Context(), id,
+		port.Cursor(r.URL.Query().Get("cursor")), r.URL.Query().Get("run_id"))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	enc := json.NewEncoder(w)
+	for env, iterErr := range envelopes {
+		if iterErr != nil {
+			// Mid-stream fault, after the 200 is already committed: the status code
+			// is spent, so the terminal condition has to ride the stream. It carries
+			// the stable machine code so a client can tell a resumable lag from a
+			// delivery gap without parsing prose. Breaking out releases the watch.
+			entry := classifyError(iterErr)
+			writeSSEError(w, flusher, map[string]string{"code": entry.Code, "error": iterErr.Error()})
+			return
+		}
+		if _, err := w.Write([]byte("data: ")); err != nil {
+			return // client disconnected; breaking out releases the watch
+		}
+		if err := enc.Encode(toProtoWatchEnvelope(env)); err != nil { // Encode appends a newline
+			return
+		}
+		if _, err := w.Write([]byte("\n")); err != nil {
+			return
+		}
+		flusher.Flush()
+	}
+}
+
 // --- helpers ----------------------------------------------------------------
+
+// writeSSEError writes a TERMINAL error frame as valid Server-Sent Events.
+//
+// The payload has to ride a `data: ` line. Per the EventSource grammar a line is
+// split into `field: value` at the first colon, so a bare `{"code":"..."}` parses
+// as the unrecognised field `{"code"` and is DISCARDED — a conforming client sees
+// the stream go quiet and cannot tell a resumable fault from a delivery gap from
+// a clean end. That silence is precisely the failure the durable watch exists to
+// abolish (see ErrWatchLagging), so the framing here is load-bearing rather than
+// cosmetic.
+//
+// The frame is tagged `event: error` so a client can ROUTE it — an SSE consumer
+// otherwise has to shape-sniff the JSON against the success payload it is not,
+// and on the watch route the success payload is a WatchSessionEventsResponse
+// whose fields are all optional, so sniffing is unreliable by construction.
+//
+// Callers own the payload shape: the watch route carries the stable machine
+// `code`, the older replay route carries `error` alone. Both now ARRIVE, which is
+// the fix; unifying their bodies would change a shape clients may already read.
+func writeSSEError(w http.ResponseWriter, flusher http.Flusher, payload any) {
+	if _, err := w.Write([]byte("event: error\ndata: ")); err != nil {
+		return
+	}
+	if err := json.NewEncoder(w).Encode(payload); err != nil { // Encode appends a newline
+		return
+	}
+	if _, err := w.Write([]byte("\n")); err != nil {
+		return
+	}
+	flusher.Flush()
+}
 
 // modeFromString maps a JSON mode string to a session.PermissionMode. Unknown
 // or empty values fall through to the empty mode (Service applies its default).

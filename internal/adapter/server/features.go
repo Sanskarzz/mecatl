@@ -32,6 +32,28 @@ const (
 	// never empty, so "empty means something went wrong" stays a usable
 	// assertion for every other consumer.
 	FeatureServerInfo = "server_info"
+
+	// FeatureWatchSessionEvents is the durable replay-then-follow watch — the
+	// WatchSessionEvents RPC and its SSE peer (issue #821, ADR 0250).
+	//
+	// It answers "does this BUILD implement the watch?", which is the question a
+	// client needs before it decides between one watch and the older
+	// replay-then-subscribe dance. It deliberately does NOT answer "will a watch
+	// succeed here": that additionally depends on the wired event log implementing
+	// the cursor seam, which is a DEPLOYMENT fact and is reported by the
+	// watch_unsupported error instead.
+	//
+	// The DISAMBIGUATOR is the stable `code` string, not the gRPC status.
+	// watch_unsupported is registered as Unimplemented — exactly what grpc-go
+	// returns for a method the server does not have — so a client switching on the
+	// status alone still cannot separate a cursor-less store from version skew; it
+	// has to read the code. That is the ADR 0248 design rather than a compromise:
+	// the sibling no_event_log refusal ships the same status for the same class of
+	// fact one level up, and moving this one to FailedPrecondition would make two
+	// sibling refusals disagree while breaking clients whose Unimplemented handling
+	// already covers it. What the feature flag buys is that a client never has to
+	// reach the error at all to know whether the build has the RPC.
+	FeatureWatchSessionEvents = "watch_session_events"
 )
 
 // allFeatures is the registry: the single source of truth both transports read.
@@ -47,6 +69,7 @@ const (
 // diffs and golden fixtures readable.
 var allFeatures = []string{
 	FeatureServerInfo,
+	FeatureWatchSessionEvents,
 }
 
 // serverFeatures returns the feature identifiers this build implements, as a

@@ -56,6 +56,42 @@ A third event, `EvUserPrompt`, records every user turn (the genuine prompt plus 
 
 The loop stays storage-agnostic throughout. It only emits — it never imports `port.EventLog` or calls `Append`. Persistence is handled by the server relay in `internal/adapter/server/grpc.go` and `internal/adapter/server/http.go`.
 
+#### Watching a session durably
+
+A client that wants to catch up on a session and then keep watching it has one call
+for both: `WatchSessionEvents` over gRPC, or `GET /v1/sessions/{id}/watch` over
+HTTP/SSE. It replays the durable log from a position, announces when it is caught
+up, and then follows as the run appends — and because it reads durable storage
+rather than an in-process registry, it works when the client reconnects to a
+*different replica*, which is exactly the shape `mecak8s` deployments have.
+
+Each frame is `{event, cursor, phase}`:
+
+- **`cursor`** is an opaque resume token. Treat it as bytes to hand back — never
+  parse, build, or edit one. Persist it once per frame you have *processed*; on any
+  reconnect, pass that value back and the watch continues from the next record. An
+  empty cursor means "from the beginning", which is the normal first attachment.
+- **`phase`** is an open string, not an enum: `replay` (already durable when you
+  attached), `live` (appended while you were following), or `gap`. Tolerate a value
+  you do not recognise. Exactly one *event-less* `live` frame marks the replay→live
+  boundary, so you can render the transcript and switch to a live view without
+  waiting for a next event that, on an idle session, may never come.
+- **`run_id`** optionally narrows delivery to one run's events.
+
+Two terminations matter to an operator. A client that falls too far behind its
+bounded server-side delivery buffer is **terminated** with `watch_lagging` rather
+than having events silently dropped — reconnect with your last cursor and nothing
+is lost. A failed durable append terminates watchers with `activity_gap`, and an
+event-less `gap` frame marks the position when the marker itself lands. Neither
+affects the run: a broken or slow watch never breaks or slows a live session.
+
+That guarantee is deliberately bounded and worth stating plainly: it covers events
+that were **durably appended**. If a backend outage coincides with loss of the
+process holding the watchers, there is no mechanism to learn that events were
+missed. Requires a store whose event log implements the cursor seam — Redis, JSONL,
+and the gRPC driver do; a server without one answers `watch_unsupported` rather
+than silently replaying the whole transcript.
+
 ---
 
 ## How each deployment shape relates to the three properties
