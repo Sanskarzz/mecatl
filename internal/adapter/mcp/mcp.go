@@ -33,6 +33,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -188,6 +189,139 @@ func RedactURL(raw string) string {
 	}
 	safe := url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}
 	return safe.String()
+}
+
+// urlInText matches a scheme-bearing URL embedded in free text. The terminator set
+// is deliberately small — whitespace, quotes, angle brackets, backslash, backtick —
+// because transport errors render URLs inside quotes (`Post "https://..."`) and
+// over-capturing a trailing comma or paren is harmless: RedactURL drops the query
+// regardless, so any junk lands in the discarded tail rather than in the output.
+var urlInText = regexp.MustCompile(`(?i)\bhttps?://[^\s"'` + "`" + `<>\\]+`)
+
+// RedactText scrubs every URL embedded in free text, replacing each with its
+// RedactURL form (scheme://host/path — no userinfo, no query, no fragment).
+//
+// It exists because redacting a ServerConfig.URL at a log site is NOT sufficient:
+// the ERROR logged beside it embeds the full request URL independently.
+// net/http's *url.Error carries it, and the MCP SDK formats it into its own
+// message text (`rejected by transport: Post "http://host/mcp?access_token=..."`),
+// so the URL arrives as a STRING inside a wrapped message rather than as an
+// unwrappable field — innerURLError cannot reach it and neither can any
+// error-chain approach. A text scrub is the only thing that does.
+//
+// This is why the redaction is a TEXT operation rather than a URL one: the
+// sensitive value can appear anywhere in a message composed by a layer we do not
+// control, including a future SDK version that words it differently.
+func RedactText(s string) string {
+	if s == "" {
+		return s
+	}
+	return urlInText.ReplaceAllStringFunc(s, RedactURL)
+}
+
+// RedactError renders err for a log with every URL it embeds redacted. A nil error
+// renders as the empty string.
+//
+// Prefer this over logging err directly ANYWHERE an MCP server's URL could reach
+// the error — which in practice means every MCP transport error, since the URL is
+// what the transport was asked to reach.
+func RedactError(err error) string {
+	if err == nil {
+		return ""
+	}
+	return RedactText(err.Error())
+}
+
+// redactedError renders a redacted message while preserving the ORIGINAL error
+// chain, so errors.Is / errors.As still see through it. That combination is the
+// point: callers legitimately branch on sentinels (ErrOAuthLoginRequired,
+// ErrOAuthUnavailable) and must keep doing so, while anything that PRINTS the
+// error gets the scrubbed text.
+//
+// Unwrap does expose the unredacted original, so a caller can still leak by
+// unwrapping and printing deliberately. That is an explicit act rather than the
+// default, which is the distinction this type exists to create.
+type redactedError struct {
+	inner error
+	msg   string
+}
+
+func (e *redactedError) Error() string { return e.msg }
+func (e *redactedError) Unwrap() error { return e.inner }
+
+// RedactErrorValue wraps err so that printing it cannot leak an embedded URL.
+// An error with nothing to redact is returned AS-IS, so the common case adds no
+// wrapper and no allocation.
+func RedactErrorValue(err error) error {
+	if err == nil {
+		return nil
+	}
+	raw := err.Error()
+	msg := RedactText(raw)
+	if msg == raw {
+		return err
+	}
+	return &redactedError{inner: err, msg: msg}
+}
+
+// redactingDiagnostics wraps a port.Diagnostics so every message and every
+// string/error attribute logged THROUGH IT has its embedded URLs scrubbed.
+//
+// It is applied once, at this package's diagnostics ENTRY POINTS (Connect and
+// NewManager), rather than at each of the package's log sites. That is the point:
+// there were four in-package sites logging a transport error (resource listing,
+// prompt listing, list refresh, reconnect), every one of them able to carry a
+// credential-bearing URL, and dressing each call individually leaves the next one
+// added to leak by default. Wrapping the sink makes the safe behaviour the
+// automatic one.
+//
+// Attribute KEYS are scrubbed too. They are harness-authored constants that never
+// contain a URL, so this is a no-op on them — but treating every string uniformly
+// removes the need for the wrapper to reason about slog's key/value positions,
+// which is exactly the kind of assumption that breaks quietly.
+type redactingDiagnostics struct{ inner port.Diagnostics }
+
+// redactDiagnostics wraps diag unless it is already wrapped, so the
+// NewManager -> Connect path does not double-decorate. Double scrubbing would be
+// harmless (RedactText is idempotent — a redacted URL has no query left to drop)
+// but the guard keeps the log path cheap.
+func redactDiagnostics(diag port.Diagnostics) port.Diagnostics {
+	if diag == nil {
+		return port.NopDiagnostics{}
+	}
+	if _, already := diag.(redactingDiagnostics); already {
+		return diag
+	}
+	return redactingDiagnostics{inner: diag}
+}
+
+func (d redactingDiagnostics) Log(ctx context.Context, level port.Level, msg string, attrs ...any) {
+	d.inner.Log(ctx, level, RedactText(msg), redactAttrs(attrs)...)
+}
+
+func (d redactingDiagnostics) With(attrs ...any) port.Diagnostics {
+	return redactingDiagnostics{inner: d.inner.With(redactAttrs(attrs)...)}
+}
+
+// redactAttrs scrubs the string and error values in a slog-style attribute list,
+// leaving every other type untouched. It copies rather than mutating in place: the
+// caller may reuse the slice, and a logger must never edit its caller's data.
+func redactAttrs(attrs []any) []any {
+	if len(attrs) == 0 {
+		return attrs
+	}
+	out := make([]any, len(attrs))
+	for i, a := range attrs {
+		switch v := a.(type) {
+		case string:
+			out[i] = RedactText(v)
+		case error:
+			out[i] = RedactError(v)
+		default:
+			out[i] = a
+		}
+	}
+	return out
 }
 
 // innerURLError unwraps a *url.Error to its underlying reason, which — unlike the
@@ -408,9 +542,27 @@ func newMCPHTTPClient(cfg ServerConfig, oauth *OAuthController) *http.Client {
 // unavailable; callers (the composition root) are expected to log-and-skip such
 // a server rather than aborting the whole harness.
 func Connect(ctx context.Context, cfg ServerConfig, diag port.Diagnostics) (*Server, error) {
-	if diag == nil {
-		diag = port.NopDiagnostics{}
-	}
+	// REDACT AT THE SOURCE. Every error this package hands out is produced here or
+	// below, and net/http embeds the full request URL — query string included — in
+	// any connection error. Redacting at the one exit rather than at each consumer
+	// is what makes every downstream safe by default: NewManager's onError
+	// callback, NewManager's returned error, and the direct callers that return
+	// this error onward (internal/app's MCP login flow) all inherit it without
+	// needing to remember.
+	//
+	// The alternative — asking each consumer to call RedactError — was tried and
+	// demonstrably does not hold: of three NewManager callers, one logged the raw
+	// error and the raw URL, and the audit that was supposed to find it missed it.
+	srv, err := connect(ctx, cfg, diag)
+	return srv, RedactErrorValue(err)
+}
+
+func connect(ctx context.Context, cfg ServerConfig, diag port.Diagnostics) (*Server, error) {
+	// Wrap the sink so no log line from this package — nor from the *Server it
+	// builds, which inherits this diag — can carry a credential-bearing URL. See
+	// redactingDiagnostics for why this is a sink decoration rather than a fix at
+	// each call site.
+	diag = redactDiagnostics(diag)
 	if cfg.Name == "" {
 		return nil, errors.New("mcp: server config requires a Name")
 	}
@@ -875,9 +1027,16 @@ type Manager struct {
 // least one was configured, so the caller can distinguish "nothing usable" from
 // "all good".
 func NewManager(ctx context.Context, configs []ServerConfig, onError func(cfg ServerConfig, err error), diag port.Diagnostics) (*Manager, error) {
-	if diag == nil {
-		diag = port.NopDiagnostics{}
-	}
+	// Same sink decoration as Connect.
+	//
+	// Unlike an earlier version of this comment, callers do NOT have to redact what
+	// they are handed: the error reaches onError already redacted (Connect redacts
+	// at the source) and the ServerConfig is replaced with a safe view
+	// (safeCallbackConfig). The returned error is redacted too. That inversion is
+	// deliberate — "the consumer owns its own log site" was the documented contract,
+	// and one of three consumers still leaked, which is evidence the contract was
+	// the wrong shape rather than that the consumer was careless.
+	diag = redactDiagnostics(diag)
 	m := &Manager{}
 	if len(configs) == 0 {
 		return m, nil
@@ -915,16 +1074,40 @@ func NewManager(ctx context.Context, configs []ServerConfig, onError func(cfg Se
 		if r.err != nil {
 			lastErr = r.err
 			if onError != nil {
-				onError(r.cfg, r.err)
+				// The CONFIG is a second credential channel, independent of the error:
+				// a callback that logs sc.URL leaks a query token even when the error
+				// beside it is clean, and one that logs sc.Headers leaks a bearer
+				// outright. Connect's redaction cannot reach either, because the config
+				// is the caller's own value travelling back to it. So the callback gets
+				// a SAFE VIEW: URL redacted to scheme://host/path, Headers dropped.
+				//
+				// Names and everything else are preserved, which is what a callback
+				// actually needs — the three in-tree callbacks log Name, and one logs
+				// the URL for context. A future callback that genuinely needs the raw
+				// URL or the headers has to reach for the original config it passed in,
+				// which makes that a visible decision instead of an accident.
+				onError(safeCallbackConfig(r.cfg), r.err)
 			}
 			continue
 		}
 		m.servers = append(m.servers, r.srv)
 	}
 	if len(results) > 0 && len(m.servers) == 0 {
-		return m, fmt.Errorf("mcp: no servers could be connected: %w", lastErr)
+		// lastErr already arrives redacted from Connect; RedactErrorValue here is the
+		// belt on the braces, so a future change to this message cannot reintroduce a
+		// URL without the wrapper catching it.
+		return m, RedactErrorValue(fmt.Errorf("mcp: no servers could be connected: %w", lastErr))
 	}
 	return m, nil
+}
+
+// safeCallbackConfig returns cfg with its two credential-bearing fields made safe
+// for an error callback to log: the URL redacted, the headers dropped. Every other
+// field is preserved verbatim.
+func safeCallbackConfig(cfg ServerConfig) ServerConfig {
+	cfg.URL = RedactURL(cfg.URL)
+	cfg.Headers = nil
+	return cfg
 }
 
 // maxConnectConcurrency caps the number of MCP servers connecting in parallel.

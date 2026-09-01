@@ -8229,6 +8229,66 @@ because a parameter-name denylist misses the next spelling. It is exported and u
 second local copy is how two redactors drift. The `url.Parse` failure path echoes neither the raw
 string nor the `*url.Error` (which embeds the URL) — only the unwrapped inner reason.
 
+**The URL leaks through the ERROR too, which the first fix missed.** Redacting `sc.URL` at a log
+site is NOT sufficient: the `err` logged beside it embeds the complete request URL independently.
+`net/http`'s `*url.Error` carries it, and the MCP SDK formats it into its own message text
+(`rejected by transport: Post "http://host/mcp?access_token=..."`), so it arrives as a STRING inside
+a wrapped message — `innerURLError` cannot reach it and no error-chain approach can. Hence
+`mcp.RedactText` (regex-scrub every `scheme://` substring through `RedactURL`) and
+`mcp.RedactError`. This is why the redaction is a TEXT operation rather than a URL one: the
+sensitive value can appear anywhere in a message composed by a layer we do not control, including a
+future SDK version that words it differently.
+
+**The redaction moved to the SOURCE after a second review pass, because per-caller redaction did not
+hold.** The first version of this fix asked each consumer to call `RedactError` and documented that
+contract on `NewManager` ("the consumer owns its own log site"). Of the three in-tree `NewManager`
+callers, one — the inline agent-MCP callback in `agentdefs.go` — logged the raw URL *and* the raw
+error, and the grep-based audit that was supposed to find it missed it (the grep keyed on lines
+containing "mcp", which that call site's `err` line does not). One of three consumers leaking is
+evidence the CONTRACT was the wrong shape, not that the consumer was careless. So:
+
+- `Connect` redacts at its single exit (`RedactErrorValue`), making every downstream safe by
+  default — `NewManager`'s callback, `NewManager`'s returned error, and the direct callers that pass
+  the error onward (`internal/app/mcplogin.go` returns it to the CLI).
+- `RedactErrorValue` renders redacted while PRESERVING the chain via `Unwrap`, because callers
+  legitimately branch on `ErrOAuthLoginRequired`/`ErrOAuthUnavailable` and must keep doing so. An
+  error with nothing to redact is returned as-is, so the common path adds no wrapper.
+- `NewManager` replaces the `ServerConfig` handed to `onError` with `safeCallbackConfig` — URL
+  redacted, Headers dropped. That is a SECOND credential channel `Connect`'s error redaction cannot
+  reach, because the config is the caller's own value travelling back to it; a callback logging
+  `sc.Headers` leaks a bearer outright. Names survive, which is what a callback actually needs.
+- The app-side log sites keep their explicit `RedactError`/`RedactURL` calls as a deliberate SECOND
+  layer, mirroring the "keep BOTH" discipline AGENTS.md records for the UTF-8 semantic repair plus
+  mechanical backstop. A credential leak is worth two independent guards.
+
+The layers are separately tested, so a mutation removing any ONE of them fails a test naming that
+layer rather than passing on the strength of another.
+
+The fix is ALSO applied three ways at the logging layer, because the two originally-reported log
+sites were not the only ones:
+
+- The two `internal/app` client-MCP WARN sites (`onError`, and the every-server-failed aggregate)
+  call `mcp.RedactError(err)` explicitly. They log an error that crosses OUT of the mcp package as
+  a value, so no in-package decoration can reach them.
+- Four sites INSIDE the mcp package log a transport error — resource listing and prompt listing
+  (both inside `Connect`), `logRefreshErr`, and the reconnect failure — and every one can carry a
+  credential-bearing URL. Rather than dress each call, `Connect` and `NewManager` wrap their
+  `port.Diagnostics` with `redactingDiagnostics` (scrubbing the message and every string/error
+  attribute), so a log site added later is safe BY DEFAULT rather than leaking by default. The
+  `*Server` inherits that sink, so reconnect-time logging is covered too.
+  `TestRedactingSinkIsWiredAtTheEntryPoints` asserts the wiring white-box, because the earlier
+  version of that test drove `redactDiagnostics` directly and kept passing when the wrap was
+  deleted from the entry points.
+- `clampErr` REDACTS BEFORE CLAMPING. Order is load-bearing: clamping first can cut the middle of a
+  query string and leave a partial credential in the retained prefix, which the sink wrapper then
+  cannot recognise as a URL to scrub. The test fixture is sized so a 200-byte clamp lands INSIDE
+  the token, and it asserts no 6+ character prefix survives — an earlier fixture put the token
+  entirely past the cut, so truncation alone passed it.
+
+Note this redaction is NOT client-only. Operator MCP URLs are "token-bearing" in `internal/cliconfig`
+too, so scrubbing at the package sink protects both, and a redacted URL still carries
+scheme/host/path — enough to diagnose a connection failure without the credential.
+
 **Client endpoints may not redirect; operator endpoints still may.** `newMCPHTTPClient` set
 `CheckRedirect` only on the OAuth branch, so a client-supplied endpoint inherited Go's default:
 up to 10 hops to any host. Since `ValidateClientURL` is a shape allowlist with no IP-range
