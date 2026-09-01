@@ -18,6 +18,7 @@ import (
 	"github.com/stacklok/mecatl/engine/learning"
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/session"
+	"github.com/stacklok/mecatl/internal/adapter/mcp"
 )
 
 // HTTPHandler is the HTTP/SSE adapter over the shared Service. It serves the
@@ -179,6 +180,49 @@ type createSessionBody struct {
 	// one authorized target; it never copies target conversation state.
 	DebugTargetSessionID string   `json:"debug_target_session_id,omitempty"`
 	DebugMCPServers      []string `json:"debug_mcp_servers,omitempty"`
+	// MCPServers are CLIENT-PROVIDED streaming-HTTP MCP servers mounted for this
+	// session's lifetime, mirroring the proto field (issue #821, ADR 0237). Empty
+	// is byte-identical to today. Whether the field is accepted at all is a
+	// DEPLOYMENT policy: a deployment with any network-facing API listener refuses
+	// every non-empty value with a 501 "client_mcp_unsupported" problem. A stdio or
+	// sse entry is a 400 on every deployment.
+	MCPServers []mcpServerIn `json:"mcp_servers,omitempty"`
+}
+
+// mcpServerIn is one client-provided MCP server on the HTTP create body. It
+// mirrors the proto McpServerSpec field-for-field so the two transports accept
+// the same request, and carries Command ONLY so a command-shaped entry is
+// classified as stdio and rejected AS stdio — it is never executed.
+//
+// Headers values are secret-shaped: never logged, never echoed in the response,
+// never included in an error.
+type mcpServerIn struct {
+	Name    string            `json:"name,omitempty"`
+	URL     string            `json:"url,omitempty"`
+	Type    string            `json:"type,omitempty"`
+	Command string            `json:"command,omitempty"`
+	Headers map[string]string `json:"headers,omitempty"`
+}
+
+// clientMCPFromJSON maps the HTTP create body's MCP entries onto the
+// transport-neutral shape the shared classifier consumes. Like its gRPC peer it
+// is a pure field mapping and makes no decisions: classification and the
+// deployment policy both live behind Service.ClientMCPFromWire.
+func clientMCPFromJSON(in []mcpServerIn) []mcp.ClientServer {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]mcp.ClientServer, 0, len(in))
+	for _, m := range in {
+		out = append(out, mcp.ClientServer{
+			Name:    m.Name,
+			Command: m.Command,
+			URL:     m.URL,
+			Type:    m.Type,
+			Headers: m.Headers,
+		})
+	}
+	return out
 }
 
 type limitsIn struct {
@@ -395,8 +439,26 @@ type approveBody struct {
 // createSession handles POST /v1/sessions.
 func (h *HTTPHandler) createSession(w http.ResponseWriter, r *http.Request) {
 	var body createSessionBody
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+	// STRICT decode. An unknown field is a 400, not a silent drop.
+	//
+	// This body is where leniency stopped being harmless: a client coming from the
+	// gRPC surface (or using a generated client) naturally writes the protojson
+	// spelling {"mcpServers": [...]}, which a lenient decoder discards — returning
+	// 201 with a session that has none of the MCP servers the caller asked for, and
+	// no signal anywhere that it dropped them. That is the same silent-degradation
+	// class as a partial mount, on the transport where it is easiest to hit.
+	//
+	// The error detail is surfaced because encoding/json names the offending field
+	// ("unknown field \"mcpServers\""), which turns an otherwise baffling 400 into a
+	// self-diagnosing one. It describes the caller's own input, so it leaks nothing.
+	//
+	// It is a deliberate behaviour CHANGE: a request carrying a stray field used to
+	// succeed. The strictness matches decodeLearningJSON's existing posture on this
+	// same handler set.
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 		return
 	}
 	// Session profile (issue #55): the workspace requirement is PROFILE-AWARE and
@@ -425,6 +487,17 @@ func (h *HTTPHandler) createSession(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(body.DebugMCPServers) > 0 {
 		opts = append(opts, WithDebugMCP(body.DebugMCPServers))
+	}
+	// Client-provided MCP servers (issue #821, ADR 0237): the SAME Service seam the
+	// gRPC handler calls, so both transports classify through one validator and
+	// read one deployment policy. No filtering or classification happens here.
+	grant, err := h.svc.ClientMCPFromWire(clientMCPFromJSON(body.MCPServers))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	if !grant.IsEmpty() {
+		opts = append(opts, WithClientMCP(grant))
 	}
 	sess, err := h.svc.CreateSessionWithProfile(r.Context(), body.Workspace, modeFromString(body.Mode), limits, sel, profile, opts...)
 	if err != nil {

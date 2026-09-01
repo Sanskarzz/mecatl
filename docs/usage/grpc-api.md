@@ -84,6 +84,66 @@ allow-always executes only the current call: it is not learned and the next call
 The target is never entered, leased, or
 mutated by evidence reads. See [ADR 0256](../adr/0256-session-debugger-evidence-and-reporting.md).
 
+**Client-provided MCP servers.** `CreateSessionRequest.mcp_servers` mounts
+streaming-HTTP MCP servers for the lifetime of the created session, via a
+per-session engine, so their tools and their auth headers never leak into another
+session. Each entry carries `name`, `url`, `type` (`"http"`, or empty with a
+`url`), and optional `headers`.
+
+The field is **listener-scoped**, and the scope is a DEPLOYMENT property decided
+once at startup, not a per-connection one ([ADR 0237](../adr/0237-listener-scoped-workspace-authority.md)).
+Exactly one topology accepts it: a **`--grpc-unix-socket` listener with
+`--http-addr ""`** — the SDK-spawned daemon shape. Every other deployment,
+**loopback TCP included**, refuses every non-empty value with `UNIMPLEMENTED` /
+code `client_mcp_unsupported`. One `Service` backs both API listeners, so adding
+any TCP listener gives the field up on all of them, the UNIX socket included.
+
+That threshold is stricter than the one `--workspace-authority` derives, which
+does accept loopback. The asymmetry is deliberate: a workspace path selects among
+roots the operator already owns, while an MCP endpoint plus its headers points the
+daemon at a host of the caller's choosing and has it carry supplied credentials
+there. Loopback TCP is reachable by every local process and local user on the
+host; a UNIX socket is guarded by filesystem permissions on an owner-only
+directory. The refusal is the server's, so it holds against a client that never
+checked.
+
+Check `mcp_servers_on_create` in `GetCompatibilityInfo.features` before sending
+the field; the advertisement and the enforcement read the same value, so an
+advertised deployment will accept it and an unadvertised one will not. An empty
+list is not a use of the feature and is accepted everywhere.
+
+Mounting is **all-or-nothing**. Every requested server must connect or the create
+fails with `UNAVAILABLE` / code `client_mcp_unreachable`, naming the servers that
+did not answer; no session is created. The two codes are distinct on purpose:
+`client_mcp_unsupported` is permanent and a client should stop asking, while
+`client_mcp_unreachable` is transient and the client's own endpoint to fix. A
+partial mount is never reported as success — a session silently missing some of
+its tools is indistinguishable from a working one at the API.
+
+Transport is streaming-HTTP only on EVERY deployment, regardless of that policy: a
+`stdio` entry (or an untyped entry carrying a `command`) and an `sse` entry are
+`INVALID_ARGUMENT` — mecatl never spawns an MCP server process.
+
+Each `name` must be 1–64 characters of `[A-Za-z0-9._-]`, must not contain `__`,
+and must be unique within the request; a violation is `INVALID_ARGUMENT`. The
+rules are the tool namespace's, not cosmetic: names become
+`mcp__<name>__<tool>`, so `__` inside one would forge another server's namespace,
+and duplicates would collide in the catalog with one set silently dropped. Note
+the namespace is FLAT and shared with operator-configured servers, so a client
+naming its server `github` can inherit an operator permission rule written for
+the real one — one more reason the field is gated to a local-only daemon.
+
+Credentials belong in `headers`, and nowhere else. A URL carrying userinfo
+(`https://user:pass@host/mcp`) is `INVALID_ARGUMENT`, because Go promotes it to a
+`Basic` header that would bypass every protection `headers` gets. Header values
+are secret-shaped: never logged, never carried in an event, never included in an
+error. A URL is redacted to `scheme://host/path` wherever it is logged or echoed
+in a message, so a token in the query string does not reach the operator's log.
+
+A client endpoint may not redirect: a URL that passes validation is not permitted
+to send the daemon onward to a host that never did. Operator-configured servers
+are unaffected.
+
 **Manual compaction.** Check
 `CreateSessionResponse.capabilities.manual_compaction` before offering this action.
 Call `CompactSession` with the owned session ID. The server runs the configured

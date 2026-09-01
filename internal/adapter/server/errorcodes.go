@@ -108,6 +108,17 @@ var errorRegistry = []errorCodeEntry{
 	{Sentinel: ErrTooManySessionEngines, Code: "too_many_session_engines", GRPC: codes.ResourceExhausted, HTTPStatus: http.StatusTooManyRequests, Title: "Too many live per-session engines"},
 	{Sentinel: ErrNoScheduleStore, Code: "no_schedule_store", GRPC: codes.Unimplemented, HTTPStatus: http.StatusNotImplemented, Title: "Scheduled tasks are not supported by the configured store"},
 	{Sentinel: ErrNoEventLog, Code: "no_event_log", GRPC: codes.Unimplemented, HTTPStatus: http.StatusNotImplemented, Title: "No durable event log configured"},
+	// The listener-scoped client-MCP refusal (ADR 0237, Scenario 9). It sits with
+	// the two Unimplemented siblings above because it reports the same class of
+	// fact: the surface exists in this BUILD but this DEPLOYMENT does not offer it.
+	// It is deliberately NOT PermissionDenied — nothing about the CALLER is being
+	// judged; the field is simply not accepted here, for any principal.
+	{Sentinel: ErrClientMCPUnsupported, Code: "client_mcp_unsupported", GRPC: codes.Unimplemented, HTTPStatus: http.StatusNotImplemented, Title: "Client-provided MCP servers are not accepted on this deployment"},
+	// Unavailable/503 marks the failure as TRANSIENT and the client's own to fix:
+	// the deployment accepted the field, the caller's endpoint did not answer.
+	// Distinct from client_mcp_unsupported above (permanent, stop asking) so an SDK
+	// can retry one and not the other.
+	{Sentinel: ErrClientMCPUnreachable, Code: "client_mcp_unreachable", GRPC: codes.Unavailable, HTTPStatus: http.StatusServiceUnavailable, Title: "A requested client-provided MCP server could not be connected"},
 	// The durable watch surface (ADR 0250). ErrWatchUnsupported sits beside
 	// ErrNoEventLog because it is the same class of honest refusal one level in:
 	// a log exists, it just cannot serve positions.

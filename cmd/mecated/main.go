@@ -1051,6 +1051,7 @@ func appConfig(cfg config, sink port.EventSink, recorder port.ToolCallRecorder, 
 		Workspace:                     cfg.workspace,
 		WorkspaceAuthority:            mustWorkspaceAuthority(cfg),
 		AuthoritativeWorkspace:        cfg.workspace,
+		ClientMCPOnCreate:             clientMCPOnCreateForListeners(cfg),
 		Model:                         cfg.model,
 		DefaultProvider:               cfg.defaultProvider,
 		DefaultModel:                  cfg.defaultModel,
@@ -1400,6 +1401,55 @@ func workspaceAuthorityForListeners(cfg config) (server.WorkspaceAuthority, erro
 	default:
 		return 0, fmt.Errorf("--workspace-authority %q: want client-selected or server-assigned", cfg.workspaceAuthority)
 	}
+}
+
+// clientMCPOnCreateForListeners derives whether this deployment accepts
+// CLIENT-PROVIDED MCP servers on a session-creating API request (issue #821).
+//
+// The rule is a UNIX-SOCKET gRPC listener WITH HTTP DISABLED, and nothing else.
+// That is deliberately STRICTER than workspaceAuthorityForListeners, which
+// accepts a loopback TCP bind. The two look like the same question about
+// different authority, and the difference between them is the whole point:
+//
+//   - A workspace path lends the daemon's FILESYSTEM authority over a root the
+//     operator already chose. Loopback is accepted there as ADR 0237's shipped
+//     precedent.
+//   - An MCP endpoint plus its auth headers lends the daemon's OUTBOUND NETWORK
+//     authority: the caller names a host and the daemon connects to it carrying
+//     caller-supplied credentials. That is a strictly larger grant, and loopback
+//     TCP is reachable by EVERY local process and every local user account on the
+//     host — for the HTTP surface, by a browser page as well. A UNIX socket is
+//     guarded by filesystem permissions on a path the spawning process owns
+//     (listenUnixSocket creates the parent directory owner-only).
+//
+// So this is the fail-closed reading of AC9.2 — "the same request over a TCP
+// listener is refused" — and of ADR 0248, which already publishes the words "a
+// feature that is only reachable on a UDS listener is advertised only on that
+// listener". A loopback TCP daemon is a TCP daemon.
+//
+// It costs the intended consumer nothing: the SDK-spawned daemon shape from
+// Scenario 8 is exactly --grpc-unix-socket with --http-addr "", which is the one
+// topology this returns true for.
+//
+// DEPLOYMENT-SCOPED, not per-connection, per ADR 0237's Decision: authority is "a
+// deployment/composition policy, not an inference made from a request or from the
+// server package's socket state". One *Service backs both listeners, so adding
+// ANY TCP listener gives the feature up on all of them, the UNIX socket included.
+// A per-connection answer would contradict 0237 as written and would need its own
+// ADR.
+//
+// The two tests are asymmetric because the two listeners are. HTTP is always TCP
+// (serve() binds it with net.Listen("tcp", ...)), so an empty --http-addr — the
+// disable path — is the only way for it not to be a network surface. gRPC has no
+// disable path, which is why its test is the POSITIVE grpcUnixSocket != "" rather
+// than an absence check on grpcAddr: --grpc-unix-socket is what suppresses the TCP
+// bind (listenGRPC), while an empty --grpc-addr is a WILDCARD bind, not an absent
+// listener.
+//
+// The SAME value feeds the mcp_servers_on_create advertisement, so the daemon
+// cannot advertise a field it will refuse.
+func clientMCPOnCreateForListeners(cfg config) bool {
+	return cfg.grpcUnixSocket != "" && cfg.httpAddr == ""
 }
 
 // mustWorkspaceAuthority is used only after validateEffectiveConfig has accepted

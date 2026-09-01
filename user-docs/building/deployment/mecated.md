@@ -755,14 +755,17 @@ exists, you can dial:
   "grpc_address": "/run/user/1000/myapp/mecated.sock",
   "socket_path": "/run/user/1000/myapp/mecated.sock",
   "api_major": 1,
-  "features": ["server_info"],
+  "features": ["mcp_servers_on_create", "server_info"],
   "deployment": "eu-west-1 staging"
 }
 ```
 
 The descriptive half comes from the same projection `GetCompatibilityInfo` serves,
 so `api_major` and `features` let a parent refuse an incompatible daemon before its
-first RPC. The field set is a short allowlist and carries **no credential, TLS
+first RPC. `features` reports what this build implements **and** this deployment
+permits, so a listener-scoped identifier like `mcp_servers_on_create` appears here
+exactly when the daemon will honour it — which is why the example above, a
+socket-only daemon, lists it. The field set is a short allowlist and carries **no credential, TLS
 detail, or capability set** — the file is a local artefact with no authentication in
 front of it, and it is written `0600`. Ask over the socket for anything more.
 
@@ -782,6 +785,69 @@ non-interactive shell.
 
 All four flags are off by default, and a daemon that sets none of them behaves
 exactly as before.
+
+### What a local-only daemon additionally unlocks
+
+Your choice of listener also decides one capability, without a flag of its own:
+**client-provided MCP servers on session creation**.
+
+A client may pass `mcp_servers` on `CreateSession` (and on `POST /v1/sessions`) to
+mount streaming-HTTP MCP servers for that session's lifetime — its own tools, with
+its own auth headers, isolated to that session. Whether the daemon accepts the
+field depends on where it listens:
+
+| Listener topology | `mcp_servers` |
+|---|---|
+| `--grpc-unix-socket` **and** `--http-addr ""` | accepted |
+| Anything else — including plain loopback TCP | refused on **every** listener, with `UNIMPLEMENTED` / `501` and the code `client_mcp_unsupported` |
+
+Only the fully socket-bound daemon qualifies. A loopback TCP port does **not**, and
+neither does a socket-plus-HTTP daemon: serving HTTP at all means serving TCP.
+
+That bar is higher than the one for workspaces, which does accept loopback, and the
+difference is deliberate. A workspace path picks among roots you already own. An MCP
+endpoint plus a credential points the daemon's **outbound network authority**
+wherever the caller chooses and has it carry the caller's token there — a larger
+grant, and one worth a narrower door. A loopback port is reachable by every process
+and every user account on the machine, browser pages included; a UNIX socket is
+guarded by filesystem permissions on a directory created for you alone.
+
+The decision is made once at startup from your listener topology, so a daemon that
+serves both a socket and a port refuses the field on both — the same `Service`
+answers for each, and the wider listener decides.
+
+The refusal is the **server's**, not a convention clients are asked to honour: a
+client that never checks still gets a clean, typed error rather than a mounted
+server. Clients that do check read `mcp_servers_on_create` from
+`GetCompatibilityInfo` (`GET /v1/compatibility`) — a deployment advertises it
+exactly when it will accept it.
+
+**Either all of them mount, or none does.** If a server you asked for cannot be
+reached, the create fails with `UNAVAILABLE` / `503` and the code
+`client_mcp_unreachable`, naming the ones that did not answer — no session is
+created. That code is distinct from `client_mcp_unsupported` because the fix is
+different: the unsupported one means this daemon will never accept the field, while
+the unreachable one means your own endpoint was down and a retry may work. A
+half-mounted session is never reported as success, since from the API it would look
+exactly like a working one while quietly missing tools.
+
+Two client-side rules are worth knowing before you wire an SDK. **Server names**
+must be 1-64 characters of `[A-Za-z0-9._-]` with no `__` and no duplicates in one
+request — they become `mcp__<name>__<tool>`, so `__` would forge another server's
+namespace and a duplicate would collide in the tool catalog. **Credentials go in
+`headers`**, never in the URL: `https://user:pass@host/mcp` is rejected, because
+the standard library turns userinfo into a `Basic` header that would bypass the
+protections `headers` values get. Anything logged or echoed shows the URL as
+`scheme://host/path`, so a token in a query string stays out of your operator log.
+
+Client endpoints also may not redirect, so a vetted URL cannot bounce the daemon on
+to a host that was never vetted. Servers you configure yourself are unaffected.
+
+One rule holds regardless of topology: transport is streaming-HTTP only. A `stdio`
+entry — or an untyped one carrying a `command` — and an `sse` entry are rejected as
+malformed requests everywhere, because mecatl never spawns an MCP server process.
+Header values are never written to logs, never carried in an event, and never
+echoed in an error.
 
 ---
 

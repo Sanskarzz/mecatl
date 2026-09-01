@@ -152,6 +152,26 @@ type SessionEngineResult struct {
 	// DebugMCPTools is the exact direct-tool ceiling resolved by a debug factory.
 	// It contains model-facing tool names only and is persisted on the session.
 	DebugMCPTools []string
+	// MountedClientMCP names the client-provided MCP servers that ACTUALLY
+	// CONNECTED for this session — never an echo of what was requested. It is nil
+	// when no specs were passed, and SHORTER than the request when some server was
+	// unreachable (mcp.NewManager keeps only successful connections).
+	//
+	// It exists because connecting is best-effort in composition and that is the
+	// right default for ONE of the two callers, not both. The ACP adapter wants a
+	// usable session even when an editor's MCP server is down; a gRPC/HTTP
+	// CreateSession caller cannot see composition's WARN and would otherwise be
+	// handed a session ID for a session missing tools it asked for, with no way to
+	// detect it. So the factory reports the mounted set and the Service enforces
+	// all-or-nothing on the wire path only (see verifyClientMCPMounted).
+	//
+	// A factory reached through the WIRE path MUST populate it. Leaving it empty
+	// while servers were requested is treated as "nothing mounted" and fails the
+	// create, rather than as "no claim made" — a guarantee a factory can silently
+	// opt out of by forgetting a field is not a guarantee. Only WithClientMCP
+	// (the wire-only option) turns the check on, so the ACP path and every
+	// selector-only factory are unaffected.
+	MountedClientMCP []string
 	// Close tears down the session's MCP manager. Never nil (a no-op when no specs).
 	Close func() error
 }
@@ -284,6 +304,31 @@ type Config struct {
 	// It must be EMPTY under WorkspaceAuthorityFileless and is ignored under
 	// WorkspaceAuthorityClientSelected.
 	AuthoritativeWorkspace string
+	// ClientMCPOnCreate permits CLIENT-PROVIDED MCP servers on a session-creating
+	// API request (CreateSessionRequest.mcp_servers and its HTTP peer). It is a
+	// deployment/composition policy in the shape ADR 0237 requires, NOT an
+	// inference the server package makes from its own socket state.
+	//
+	// The zero value FAILS CLOSED: a Service built without an explicit grant
+	// refuses the field. That direction is deliberate — accepting an arbitrary
+	// outbound endpoint plus its auth headers from an API caller lends the server's
+	// ambient network authority to a remote principal, so a composition root that
+	// has not thought about it must not accidentally grant it. mecated derives it
+	// from listener topology (clientMCPOnCreateForListeners): permitted only on a
+	// UNIX-socket gRPC listener with HTTP disabled. That is STRICTER than the
+	// loopback-tolerant WorkspaceAuthority derivation above, because an
+	// attacker-named endpoint carrying caller-supplied credentials is a larger
+	// grant than a root the operator chose, and loopback TCP is reachable by every
+	// local process on the host.
+	//
+	// It gates the WIRE surface only. The in-process CreateSessionWithMCP /
+	// LoadSessionWithMCP entries are unaffected: their caller is the ACP adapter,
+	// which is a stdio peer of the operator's own editor and has no listener at
+	// all, so listener-derived policy is meaningless there.
+	//
+	// The SAME value drives the mcp_servers_on_create advertisement (FeatureScope),
+	// so a deployment cannot advertise what it will refuse.
+	ClientMCPOnCreate bool
 	// CommandRunner is the MAIN session's bound command runner (issue #462). It is
 	// the runner the main session's Environment binds when the session runs on the
 	// DEFAULT workspace; a session whose workspace DIFFERS (a worktree binding, an
@@ -1472,6 +1517,15 @@ type createSessionOpts struct {
 	debugTargetID          session.SessionID
 	debugTargetIncarnation session.IncarnationID
 	debugMCPServers        []string
+	// clientMCP are the client-provided MCP servers to mount for this session,
+	// already classified AND policy-checked by Service.ClientMCPFromWire. Empty is
+	// the byte-identical shared-engine path.
+	clientMCP []mcp.ServerConfig
+	// clientMCPStrict requires every server in clientMCP to actually connect, or
+	// the create fails with ErrClientMCPUnreachable. Set only by WithClientMCP,
+	// which is the wire path's only entry — the ACP path keeps composition's
+	// best-effort mount. See verifyClientMCPMounted.
+	clientMCPStrict bool
 }
 
 // WithSessionID overrides the session id a CreateSession* call mints. When set,
@@ -1511,6 +1565,55 @@ func WithDebugTarget(id session.SessionID) CreateSessionOption {
 // cross this seam.
 func WithDebugMCP(names []string) CreateSessionOption {
 	return func(o *createSessionOpts) { o.debugMCPServers = append([]string(nil), names...) }
+}
+
+// ClientMCPGrant is a DECIDED client-MCP result: specs that have passed the shared
+// classifier AND this deployment's policy gate. Only Service.ClientMCPFromWire
+// mints a non-empty one, because specs is unexported — so the invariant is carried
+// by the TYPE rather than by a doc comment asking callers to behave.
+//
+// That matters because WithClientMCP and the CreateSession* entries are all
+// exported: before this, any in-process caller (the scheduler, a future
+// composition root, a later refactor of the ACP adapter) could construct the
+// option from raw specs and bypass both the classifier and the gate. A
+// ClientMCPGrant{} built outside this package is EMPTY, which is inert — the
+// worst a bypass attempt achieves is a session with no client MCP, never an
+// unvalidated mount.
+type ClientMCPGrant struct {
+	specs []mcp.ServerConfig
+}
+
+// IsEmpty reports whether the grant carries no servers — either because the
+// request declared none, or because it is a zero value built outside this package.
+func (g ClientMCPGrant) IsEmpty() bool { return len(g.specs) == 0 }
+
+// WithClientMCP mounts client-provided streaming-HTTP MCP servers for the new
+// session's lifetime, via a per-session engine (which requires
+// Config.SessionEngine, else ErrInvalidArgument).
+//
+// It takes a ClientMCPGrant, not raw specs: the grant is unforgeable outside this
+// package, so "validated and policy-checked" is a type-level fact rather than a
+// convention. This option does not validate and must not — one classifier, one
+// gate, at the wire seam.
+//
+// It also arms the ALL-OR-NOTHING mount requirement (clientMCPStrict): every
+// requested server must actually connect or the create fails. That is the wire
+// contract, and this option is the wire's only entry, so the two travel
+// together rather than as a separate flag a handler could forget. The ACP path
+// (CreateSessionWithMCP) deliberately does not come through here and keeps
+// composition's best-effort behaviour.
+//
+// An EMPTY grant is a no-op: it arms nothing, so a caller that passes a zero
+// value gets the ordinary shared-engine create rather than a strict-mode session
+// with nothing to mount.
+func WithClientMCP(grant ClientMCPGrant) CreateSessionOption {
+	return func(o *createSessionOpts) {
+		if grant.IsEmpty() {
+			return
+		}
+		o.clientMCP = append([]mcp.ServerConfig(nil), grant.specs...)
+		o.clientMCPStrict = true
+	}
 }
 
 func debugMCPNameRune(r rune) bool {
@@ -1638,7 +1741,7 @@ func (s *Service) createSessionWithOptions(ctx context.Context, workspace string
 	if err := validateDebugMCPNames(opts.debugTargetID, opts.debugMCPServers); err != nil {
 		return nil, err
 	}
-	return s.createSession(ctx, workspace, mode, limits, sel, nil, profile, opts)
+	return s.createSession(ctx, workspace, mode, limits, sel, opts.clientMCP, profile, opts)
 }
 
 // createSession is the single create path generalizing the shared-engine fast
@@ -2111,6 +2214,17 @@ func (s *Service) createPerSessionEngine(ctx context.Context, mintID func() sess
 		return nil, err
 	}
 	eng, closeFn := res.Engine, res.Close
+	// All-or-nothing client MCP on the WIRE path, BEFORE an id is minted or
+	// anything is persisted: a caller that asked for tools must not be handed a
+	// session quietly missing them. Teardown uses the same closeFn idiom as every
+	// other rejection below, so a refused create leaks neither a connection nor a
+	// registry slot.
+	if err := verifyClientMCPMounted(specs, res.MountedClientMCP, opts.clientMCPStrict); err != nil {
+		if closeFn != nil {
+			_ = closeFn()
+		}
+		return nil, err
+	}
 	sess, err := newCreatedSession(mintID(), mode, workspace, limits, s.cfg.Now(), opts)
 	if err != nil {
 		if closeFn != nil {
@@ -2285,9 +2399,99 @@ func (s *Service) CompatibilityInfo(context.Context) *mecatlv1.GetCompatibilityI
 	return &mecatlv1.GetCompatibilityInfoResponse{
 		ApiMajor:     APIMajor,
 		Capabilities: s.capabilities(),
-		Features:     serverFeatures(),
+		Features:     serverFeatures(s.featureScope()),
 		Deployment:   s.cfg.DeploymentID,
 	}
+}
+
+// featureScope projects the deployment policy the feature registry filters on.
+// It reads the SAME Config value the enforcement seam reads, which is what keeps
+// the advertisement and the refusal from disagreeing.
+func (s *Service) featureScope() FeatureScope {
+	return FeatureScope{ClientMCPOnCreate: s.cfg.ClientMCPOnCreate}
+}
+
+// verifyClientMCPMounted enforces the wire path's ALL-OR-NOTHING client-MCP
+// contract: every requested server must appear in the factory's mounted set.
+//
+// The problem it closes: connecting client MCP is best-effort in composition
+// (mcp.NewManager keeps the servers that answered and drops the rest, and returns
+// an error only when EVERY one fails). That is right for the ACP adapter, whose
+// peer is the operator's own editor and for whom a degraded session beats no
+// session. It is wrong for a wire caller, which sees none of composition's WARNs
+// and would receive an ordinary session id for a session missing some or all of
+// the tools it asked for — with nothing in the response to tell it apart from
+// success. Silent partial success is the failure mode worth engineering against.
+//
+// strict is set only by WithClientMCP, so the ACP path is untouched. When strict
+// and servers were requested, an EMPTY mounted set fails: a factory that reports
+// nothing has mounted nothing as far as this check can tell, and a guarantee that
+// a factory can opt out of by omitting a field is not a guarantee.
+//
+// The error names the SERVER NAMES that did not mount — client-supplied
+// identifiers, which the caller already knows. It carries no URL and, per AC9.5,
+// no header value: those are secret-shaped and never appear in an error.
+func verifyClientMCPMounted(requested []mcp.ServerConfig, mounted []string, strict bool) error {
+	if !strict || len(requested) == 0 {
+		return nil
+	}
+	mountedSet := make(map[string]struct{}, len(mounted))
+	for _, name := range mounted {
+		mountedSet[name] = struct{}{}
+	}
+	var missing []string
+	for _, spec := range requested {
+		if _, ok := mountedSet[spec.Name]; !ok {
+			missing = append(missing, spec.Name)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%w: %d of %d requested server(s) did not connect: %s",
+		ErrClientMCPUnreachable, len(missing), len(requested), strings.Join(missing, ", "))
+}
+
+// ClientMCPFromWire is the SINGLE enforcement seam for client-provided MCP
+// servers arriving on a session-creating API request. Both wire transports call
+// it; neither classifies an entry itself.
+//
+// Order is load-bearing, and it is the ordinary "400 before 501" shape:
+//
+//  1. CLASSIFY, unconditionally, through the shared mcp.PartitionClientServers —
+//     the same validator the ACP surface uses. A stdio or sse entry is rejected
+//     AS SUCH on every deployment, so "No stdio MCP, ever" (AGENTS.md) stays an
+//     invariant of the request shape rather than a downstream consequence of a
+//     policy flag that some future composition root might flip. Classification is
+//     pure string work: it opens no connection and has no side effect, so running
+//     it on a deployment that will refuse anyway costs nothing.
+//  2. GATE on the deployment policy. A well-formed request that this deployment
+//     does not accept is refused with the typed ErrClientMCPUnsupported
+//     (UNIMPLEMENTED / 501), never silently dropped — a client whose servers were
+//     quietly ignored would run a session it believes has tools it does not have.
+//
+// An empty list returns an EMPTY grant and no error on EVERY deployment: sending
+// no MCP servers is not a use of the feature, so a TCP deployment must not fail an
+// ordinary create that merely carries an empty repeated field.
+//
+// It returns a ClientMCPGrant rather than raw specs so that "these specs were
+// classified and permitted" is enforced by the type system: WithClientMCP accepts
+// nothing else, and the grant's field is unexported, so this function is the only
+// place a non-empty one comes from.
+//
+// Header values never appear in the returned error (they are secret-shaped).
+func (s *Service) ClientMCPFromWire(servers []mcp.ClientServer) (ClientMCPGrant, error) {
+	if len(servers) == 0 {
+		return ClientMCPGrant{}, nil
+	}
+	specs, err := mcp.PartitionClientServers(servers)
+	if err != nil {
+		return ClientMCPGrant{}, fmt.Errorf("%w: %w", ErrInvalidArgument, err)
+	}
+	if !s.cfg.ClientMCPOnCreate {
+		return ClientMCPGrant{}, fmt.Errorf("%w: this API surface is reachable over TCP; client-provided MCP servers require a UNIX-socket listener with HTTP disabled", ErrClientMCPUnsupported)
+	}
+	return ClientMCPGrant{specs: specs}, nil
 }
 
 // CreateSessionWithMCP creates a session that mounts the client-provided

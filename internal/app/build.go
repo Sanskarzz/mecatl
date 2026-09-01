@@ -141,9 +141,15 @@ type Config struct {
 	// WorkspaceAuthorityServerAssigned, which requires it. A file-less deployment
 	// selects WorkspaceAuthorityFileless and leaves this empty.
 	AuthoritativeWorkspace string
-	Model                  string
-	UseOpenAI              bool
-	OpenAIKey              string
+	// ClientMCPOnCreate permits client-provided MCP servers on a session-creating
+	// API request (issue #821, ADR 0237 applied to outbound MCP). Like
+	// WorkspaceAuthority it is a deployment policy the cmd/ main decides from its
+	// listener topology and Build passes through verbatim; the zero value fails
+	// closed, so a composition root that never sets it refuses the field.
+	ClientMCPOnCreate bool
+	Model             string
+	UseOpenAI         bool
+	OpenAIKey         string
 	// OpenAICodexCredential is the validated, immutable manual ChatGPT token
 	// snapshot consumed only by the distinct openai-codex registry entry.
 	OpenAICodexCredential openaicodex.Credential
@@ -1811,6 +1817,10 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		// main from its listener topology and passed through verbatim.
 		WorkspaceAuthority:     cfg.WorkspaceAuthority,
 		AuthoritativeWorkspace: cfg.AuthoritativeWorkspace,
+		// ADR 0237 applied to outbound MCP: the same deployment-policy discipline —
+		// decided by the cmd/ main from its listener topology, passed through here,
+		// never inferred from the server package's socket state.
+		ClientMCPOnCreate: cfg.ClientMCPOnCreate,
 		// CommandRunner (issue #462): the MAIN session's bound runner — the
 		// Environment seam hands it to Tool.Execute so Bash observes the session
 		// namespace. nil when Bash is disabled (the catalog omits Bash and the
@@ -2508,6 +2518,28 @@ func debugSessionEngineFactory(cfg Config, reg *providerRegistry, fallback port.
 	}
 }
 
+// mountedClientMCPNames reports the client MCP servers that actually CONNECTED,
+// for the Service's all-or-nothing check on the wire path. mcp.NewManager keeps
+// only successful connections in Servers(), so this is the honest mounted set —
+// never an echo of what was requested.
+//
+// Scoped to CONNECTION deliberately. A connected server whose tool name is
+// shadowed by a server-global tool of the same name still counts as mounted: that
+// is an operator-side name collision with its own WARN in mountClientMCP, not a
+// failure to reach the client's server, and conflating the two would make an
+// operator's global MCP config able to fail an unrelated client's create.
+func mountedClientMCPNames(mgr *mcp.Manager) []string {
+	if mgr == nil {
+		return nil
+	}
+	servers := mgr.Servers()
+	names := make([]string, 0, len(servers))
+	for _, srv := range servers {
+		names = append(names, srv.Name())
+	}
+	return names
+}
+
 func sessionEngineFactory(
 	cfg Config,
 	reg *providerRegistry,
@@ -2646,19 +2678,36 @@ func sessionEngineFactory(
 		windowFn := reg.windowResolver(cfg, resolvedProviderID, resolvedModel)
 
 		onError := func(sc mcp.ServerConfig, err error) {
+			// REDACTED url (CWE-532). The header map is secret-shaped and never logged,
+			// but a credential can also ride the URL itself — "?access_token=..." — and
+			// logging sc.URL verbatim put it in the operator's diagnostics. userinfo is
+			// now rejected outright by ValidateClientURL; a query-string token cannot be
+			// (it is indistinguishable from an ordinary parameter), so the URL is
+			// redacted at the log site instead of trusted to be clean. mcp.RedactURL is
+			// the SAME policy the validator's own messages use — one redactor, so the
+			// log and the error cannot drift.
 			cfg.diag().Log(ctx, port.LevelWarn, "client MCP server unreachable; skipping for this session",
-				"server", sc.Name, "url", sc.URL, "err", err)
+				"server", sc.Name, "url", mcp.RedactURL(sc.URL), "err", err)
 		}
 		var mgr *mcp.Manager
 		if len(specs) > 0 {
 			m, err := mcp.NewManager(ctx, specs, onError, cfg.diag())
 			if err != nil {
-				// Best-effort: every server failed. The session still gets a usable engine
-				// (core tools only) rather than failing session creation outright.
+				// Best-effort HERE, by design: every server failed and the session still
+				// gets a usable engine (core tools only) rather than failing outright.
+				// This is the ACP contract — an editor's flaky MCP server should not cost
+				// the user their session, and ACP has its own channel to say so.
+				//
+				// It is NOT the wire contract. A gRPC/HTTP CreateSession caller cannot
+				// see this WARN, so the Service enforces all-or-nothing on that path
+				// using MountedClientMCP below. Reporting which servers connected is
+				// this factory's job; deciding whether a partial mount is acceptable
+				// belongs to the caller, and the two callers disagree.
 				cfg.diag().Log(ctx, port.LevelWarn, "client MCP: no servers connected for this session; mounting core tools only", "err", err)
 			}
 			mgr = m
 		}
+		mountedClientMCP := mountedClientMCPNames(mgr)
 
 		// Assemble the per-session catalog through the SAME assembleCatalog the
 		// build-time shared catalog uses (issue #42 — the anti-drift seam): core +
@@ -2775,7 +2824,12 @@ func sessionEngineFactory(
 			// Service stamps sessionEngine.builtForMode from this one source and detects a
 			// later mode→model staleness — the SAME single-source discipline as the ids.
 			BuiltForMode: mode,
-			Close:        closeFn,
+			// The client MCP servers that actually connected (nil when none were
+			// requested). The factory REPORTS; the Service decides whether a partial
+			// mount is acceptable, because its two callers disagree — see the
+			// best-effort comment on the NewManager error above.
+			MountedClientMCP: mountedClientMCP,
+			Close:            closeFn,
 		}, nil
 	}
 }
