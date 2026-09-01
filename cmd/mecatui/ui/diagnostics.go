@@ -23,14 +23,15 @@ type ServerInfoGetter interface {
 
 // diagnosticsMsg carries a remote server-info result back to the update loop.
 type diagnosticsMsg struct {
-	info client.ServerInfo
-	err  error
+	info      client.ServerInfo
+	err       error
+	diagnosis string
 }
 
-func (m Model) diagnosticsCmd() tea.Cmd {
+func (m Model) diagnosticsCmd(diagnosis string) tea.Cmd {
 	return func() tea.Msg {
 		info, err := m.deps.ServerInfo.GetServerInfo(m.deps.Ctx, m.resolvedSessionModel.ProviderID)
-		return diagnosticsMsg{info: info, err: err}
+		return diagnosticsMsg{info: info, err: err, diagnosis: diagnosis}
 	}
 }
 
@@ -47,7 +48,7 @@ func (m Model) runDiagnostics() (tea.Model, tea.Cmd) {
 		m.prompt.Rewrite(m.diagnosticsReport("", "", "", "", "invalid-response"))
 		return m.submitDiagnosticsReport()
 	}
-	return m, m.diagnosticsCmd()
+	return m, m.diagnosticsCmd("")
 }
 
 func (m Model) diagnosticsReport(serverBuild, serverImplementation, displayServerEndpoint, llmProviderDisplayEndpoint, lookup string) string {
@@ -124,8 +125,54 @@ func (m Model) handleDiagnostics(msg diagnosticsMsg) (tea.Model, tea.Cmd) {
 	if msg.err == nil {
 		build, implementation, displayServerEndpoint, providerDisplayEndpoint, lookup = msg.info.BuildID, msg.info.ServerImplementation, msg.info.DisplayServerEndpoint, msg.info.LLMProviderDisplayEndpoint, "ok"
 	}
-	m.prompt.Rewrite(m.diagnosticsReport(build, implementation, displayServerEndpoint, providerDisplayEndpoint, lookup))
+	report := m.diagnosticsReport(build, implementation, displayServerEndpoint, providerDisplayEndpoint, lookup)
+	if msg.diagnosis != "" {
+		report = debuggerInitialPrompt(report, msg.diagnosis)
+	}
+	m.prompt.Rewrite(report)
 	return m.submitDiagnosticsReport()
+}
+
+func debuggerInitialPrompt(report, diagnosis string) string {
+	return "Objective\n" + diagnosis +
+		"\n\nRequired workflow\n" +
+		"1. Call InspectSession with view=status first.\n" +
+		"2. Read the authoritative transcript next; paginate until scan_complete=true when needed.\n" +
+		"3. Based on symptoms, call activity for tool/lifecycle clues, performance for turn timing/usage, and network for retry/provider/transport clues.\n" +
+		"4. Use the runtime context below only for debugger compatibility/transport context, never as evidence about the target.\n" +
+		"\nExpected report\n" +
+		"- Observed facts, each naming its evidence source\n" +
+		"- Likely root cause and confidence\n" +
+		"- Missing or unavailable evidence\n" +
+		"- Recommended checks or corrective action\n" +
+		"\n<<<CURRENT_DEBUGGER_RUNTIME_CONTEXT (not target evidence)\n" + report +
+		"\nCURRENT_DEBUGGER_RUNTIME_CONTEXT>>>"
+}
+
+func (m Model) startInitialPrompt() (tea.Model, tea.Cmd, bool) {
+	diagnosis := strings.TrimSpace(m.pendingInitialPrompt)
+	if diagnosis == "" {
+		return m, nil, false
+	}
+	m.pendingInitialPrompt = ""
+	if m.deps.DebugTarget == "" {
+		m.prompt.Rewrite(diagnosis)
+		mm, cmd := m.submitPrompt()
+		return mm, cmd, true
+	}
+	if m.deps.Embedded {
+		report := m.diagnosticsReport(m.deps.ClientBuild, m.deps.ServerImpl, m.deps.Server, "", "embedded")
+		m.prompt.Rewrite(debuggerInitialPrompt(report, diagnosis))
+		mm, cmd := m.submitDiagnosticsReport()
+		return mm, cmd, true
+	}
+	if m.deps.ServerInfo == nil {
+		report := m.diagnosticsReport("", "", "", "", "invalid-response")
+		m.prompt.Rewrite(debuggerInitialPrompt(report, diagnosis))
+		mm, cmd := m.submitDiagnosticsReport()
+		return mm, cmd, true
+	}
+	return m, m.diagnosticsCmd(diagnosis), true
 }
 
 func (m Model) submitDiagnosticsReport() (tea.Model, tea.Cmd) {

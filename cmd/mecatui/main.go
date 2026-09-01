@@ -176,6 +176,7 @@ func runWithOptions(argv []string, options runOptions) error {
 	if err != nil {
 		return err
 	}
+	emitDebugPrivacyWarning(os.Stderr, cfg.debugTarget, cfg.debugMCP...)
 
 	// UNIVERSAL global-slog floor: redirect the stdlib default to io.Discard (or, under
 	// --quiet, still discard) BEFORE transport setup or the Bubble Tea program.
@@ -268,17 +269,12 @@ func runWithOptions(argv []string, options runOptions) error {
 	// os/xdg. The connect-time ListModels reconcile clears a now-unavailable provider
 	// before the create carries it (see ui.Init / updateModelsMsg).
 	store := newSelectionStore(xdgconfig.OSEnv)
-	initialSel := store.Load(uiWorkspace)
-	// Provenance inputs for the /models picker (display-only): the un-collapsed
-	// per-workspace entry and the global default, kept separate so the picker can tell
-	// "workspace default" from "global default" without a server round-trip.
-	wsDefault, wsDefaultSet := store.LoadWorkspace(uiWorkspace)
-	globalDefault := store.LoadGlobalDefault()
+	initialSel, wsDefault, wsDefaultSet, globalDefault := launchSelections(store, uiWorkspace, cfg.debugTarget)
 	defer func() { _ = statusSource.Close(context.Background()) }()
 
 	connectionMode := resolveConnectionMode(cfg)
 	deps := applyLaunchIntent(cfg, ui.Deps{
-		Session:                &sessionAdapter{cl: cl, workspace: cfg.workspace, mode: cfg.mode},
+		Session:                &sessionAdapter{cl: cl, workspace: cfg.workspace, mode: cfg.mode, debugTarget: cfg.debugTarget, debugMCP: cfg.debugMCP},
 		Conv:                   cl,
 		MCP:                    cl,
 		Cmds:                   cl,
@@ -362,7 +358,8 @@ func runWithOptions(argv []string, options runOptions) error {
 		// Seed prompt from -p/--prompt + --prompt-file: joined at startup and
 		// auto-submitted once the first session is ready (interactive-seed, NOT a
 		// one-shot — the TUI stays open for follow-ups). Empty = no seed.
-		InitialPrompt: cliconfig.JoinPromptBody(cfg.prompt, cfg.promptFileBody),
+		InitialPrompt: initialPromptForConfig(cfg),
+		DebugTarget:   cfg.debugTarget,
 	})
 	deps.ServerImpl = mecatuiServerImplementation
 	wireManualCompaction(&deps, cl)
@@ -399,6 +396,7 @@ func parseRunConfig(res invocationResolution) (config, error) {
 		return config{}, err
 	}
 	cfg.connectAddress = res.address
+	cfg.debugTarget = res.debugTarget
 	if err := configureWorkspaceForTransport(&cfg); err != nil {
 		return config{}, err
 	}
@@ -580,6 +578,39 @@ func restartFromConnectIntentWith(argv []string, intent ui.ConnectRestartIntent,
 func applyLaunchIntent(cfg config, deps ui.Deps) ui.Deps {
 	deps.BrowseSessions = cfg.browseSessions
 	return deps
+}
+
+const defaultDebugPrompt = "Diagnose the bound target session and explain the most likely cause of its reported behavior."
+
+func initialPromptForConfig(cfg config) string {
+	if prompt := cliconfig.JoinPromptBody(cfg.prompt, cfg.promptFileBody); strings.TrimSpace(prompt) != "" {
+		return prompt
+	}
+	if cfg.debugTarget != "" {
+		if len(cfg.debugMCP) > 0 {
+			return defaultDebugPrompt + " Selected reporting servers are available: " + strings.Join(cfg.debugMCP, ", ") + ". Their availability does not authorize publication or sending."
+		}
+		return defaultDebugPrompt
+	}
+	return ""
+}
+
+func launchSelections(store *selectionStore, workspace, debugTarget string) (client.ModelSelection, client.ModelSelection, bool, client.ModelSelection) {
+	if debugTarget != "" {
+		return client.ModelSelection{}, client.ModelSelection{}, false, client.ModelSelection{}
+	}
+	initial := store.Load(workspace)
+	workspaceDefault, set := store.LoadWorkspace(workspace)
+	return initial, workspaceDefault, set, store.LoadGlobalDefault()
+}
+
+func emitDebugPrivacyWarning(w io.Writer, target string, servers ...string) {
+	if target != "" {
+		_, _ = fmt.Fprintln(w, "mecatui: PRIVACY: bounded evidence from the target session sent to the configured model may include prompts, assistant output, tool arguments and results, file paths, and secrets")
+		if len(servers) > 0 {
+			_, _ = fmt.Fprintf(w, "mecatui: PRIVACY: selected reporting servers available to this debug session: %s\n", strings.Join(servers, ", "))
+		}
+	}
 }
 
 // emitAuthFileWarning is the command-root's single warning emission seam.
@@ -867,15 +898,17 @@ func resolveTransport(ctx context.Context, cfg config) (target string, dial clie
 	}
 	fmt.Fprintf(os.Stderr, "mecatui: hosting an embedded mecated at %s\n", srv.Target())
 	if addr := srv.AdminAddr(); addr != "" {
-		// Mirror mecated's loopback/unauth note: the perf surface can leak prompt
-		// text/file paths/goroutine stacks, so it is loopback-bound only.
 		paths := "/metrics /debug/pprof /debug/vars /debug/flightrecorder"
 		if cfg.perfMCP {
 			paths += " /mcp"
 		}
-		fmt.Fprintf(os.Stderr, "mecatui: perf admin surface (loopback, UNAUTHENTICATED) at http://%s — %s\n", addr, paths)
-		if cfg.perfMCP {
-			fmt.Fprintf(os.Stderr, "mecatui: perf MCP ready at http://%s/mcp — point an MCP client here\n", addr)
+		if srv.AdminNetwork() == "unix" {
+			fmt.Fprintf(os.Stderr, "mecatui: perf admin surface (private UNIX socket, UNAUTHENTICATED) at %s — %s\n", addr, paths)
+		} else {
+			fmt.Fprintf(os.Stderr, "mecatui: perf admin surface (loopback, UNAUTHENTICATED) at http://%s — %s\n", addr, paths)
+			if cfg.perfMCP {
+				fmt.Fprintf(os.Stderr, "mecatui: perf MCP ready at http://%s/mcp — point an MCP client here\n", addr)
+			}
 		}
 	}
 	// The embedded server has no auth/TLS — it is a private UNIX socket dialled
@@ -1107,10 +1140,10 @@ func embeddedConfig(cfg config, diag port.Diagnostics) app.Config {
 }
 
 // perfConfig maps the TUI config onto the embedded server's perf-observability
-// options (decision 7). It is OFF unless --perf is passed; when on, it carries the
-// loopback admin address (empty → an ephemeral port chosen and logged by embed)
-// and the optional goroutine-leak watchdog threshold. The Logger is set to the
-// SAME file-backed (or, under --quiet, discarding) writer the Diagnostics sink uses
+// options (decision 7). It is OFF unless --perf is passed. Plain perf defaults
+// to a private per-instance UNIX socket; --perf-mcp defaults to resolved ephemeral
+// loopback TCP, and an explicit address selects loopback TCP for either mode.
+// Logger uses the same file-backed (or, under --quiet, discarding) Diagnostics sink
 // — so the perf surface's startup/teardown/watchdog lines land in
 // $XDG_STATE_HOME/mecatl/mecatui.log, NEVER on stderr where they would corrupt the
 // Bubble Tea alt-screen. (Belt-and-suspenders: resolveTransport also redirects the
@@ -1283,14 +1316,28 @@ func themeDirs(workspace, extraDir string) []string {
 // worktree); CreateSession delegates to it with the launch workspace so the
 // existing restart + connect paths are byte-identical.
 type sessionAdapter struct {
-	cl        *client.Client
-	workspace string
-	mode      string
+	cl          *client.Client
+	workspace   string
+	mode        string
+	debugTarget string
+	debugMCP    []string
 }
 
 func (s *sessionAdapter) CreateSession(ctx context.Context, sel client.ModelSelection, mode string) (string, client.Capabilities, client.ResolvedModel, error) {
+	if s.debugTarget != "" {
+		if mode == "" {
+			mode = s.mode
+		}
+		id, target, caps, resolved, err := s.cl.CreateDebugSession(ctx, s.debugTarget, client.ModeFromString(mode), sel, s.debugMCP...)
+		if target != "" {
+			s.debugTarget = target
+		}
+		return id, caps, resolved, err
+	}
 	return s.CreateSessionInWorkspace(ctx, s.workspace, sel, mode)
 }
+
+func (s *sessionAdapter) DebugTargetID() string { return s.debugTarget }
 
 func (s *sessionAdapter) CreateSessionInWorkspace(ctx context.Context, workspace string, sel client.ModelSelection, mode string) (string, client.Capabilities, client.ResolvedModel, error) {
 	if mode == "" {

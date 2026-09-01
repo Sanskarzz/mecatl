@@ -175,6 +175,10 @@ type createSessionBody struct {
 	// running/awaiting source is a 4xx (FailedPrecondition). Empty means no
 	// carryover.
 	SourceSessionID string `json:"source_session_id,omitempty"`
+	// DebugTargetSessionID creates a separate no-fs diagnostic session bound to
+	// one authorized target; it never copies target conversation state.
+	DebugTargetSessionID string   `json:"debug_target_session_id,omitempty"`
+	DebugMCPServers      []string `json:"debug_mcp_servers,omitempty"`
 }
 
 type limitsIn struct {
@@ -245,6 +249,8 @@ type serverCapabilitiesJSON struct {
 	StorageMigration  bool                              `json:"storage_migration"`
 	StorageCleanup    bool                              `json:"storage_cleanup"`
 	LegacyAdoption    bool                              `json:"legacy_adoption"`
+	SessionDebug      bool                              `json:"session_debug"`
+	DebugMCP          bool                              `json:"debug_mcp"`
 	ManualDream       *mecatlv1.ManualDreamCapabilities `json:"manual_dream,omitempty"`
 	Steer             bool                              `json:"steer"`
 	ManualCompaction  bool                              `json:"manual_compaction"`
@@ -273,6 +279,8 @@ func capabilitiesJSON(c *mecatlv1.ServerCapabilities) *serverCapabilitiesJSON {
 		StorageMigration:  c.GetStorageMigration(),
 		StorageCleanup:    c.GetStorageCleanup(),
 		LegacyAdoption:    c.GetLegacyAdoption(),
+		SessionDebug:      c.GetSessionDebug(),
+		DebugMCP:          c.GetDebugMcp(),
 		ManualDream:       c.GetManualDream(),
 		Steer:             c.GetSteer(),
 		ManualCompaction:  c.GetManualCompaction(),
@@ -298,7 +306,9 @@ type sessionResp struct {
 	// read surface is consistent with gRPC GetSession: the EFFECTIVE provider+model
 	// this session resolved to (from Service.ResolvedModel, the composition single
 	// source). Omitted (nil) when no model resolved (older-server-equivalent).
-	ResolvedModel *resolvedModelJSON `json:"resolved_model,omitempty"`
+	ResolvedModel *resolvedModelJSON            `json:"resolved_model,omitempty"`
+	Kind          string                        `json:"kind,omitempty"`
+	Relationship  *mecatlv1.SessionRelationship `json:"relationship,omitempty"`
 }
 
 type dreamGenerateBody struct {
@@ -409,6 +419,12 @@ func (h *HTTPHandler) createSession(w http.ResponseWriter, r *http.Request) {
 	var opts []CreateSessionOption
 	if body.SourceSessionID != "" {
 		opts = append(opts, WithSourceSession(session.SessionID(body.SourceSessionID)))
+	}
+	if body.DebugTargetSessionID != "" {
+		opts = append(opts, WithDebugTarget(session.SessionID(body.DebugTargetSessionID)))
+	}
+	if len(body.DebugMCPServers) > 0 {
+		opts = append(opts, WithDebugMCP(body.DebugMCPServers))
 	}
 	sess, err := h.svc.CreateSessionWithProfile(r.Context(), body.Workspace, modeFromString(body.Mode), limits, sel, profile, opts...)
 	if err != nil {
@@ -583,6 +599,8 @@ func (h *HTTPHandler) writeSession(w http.ResponseWriter, status int, sess *sess
 		Title:           title,
 		TitleProvenance: string(sess.TitleProvenance),
 		ResolvedModel:   resolvedModelToJSON(h.svc.ResolvedModel(sess.ID)),
+		Kind:            string(sess.Kind),
+		Relationship:    toProtoSessionRelationship(sess.Relationship),
 	})
 }
 
@@ -1253,6 +1271,9 @@ func (h *HTTPHandler) runTeam(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 	out, err := h.svc.RunTeam(ctx, id, func(te agent.TeamEvent) {
+		if !isPublicEvent(te.Event) {
+			return
+		}
 		writeFrame(&mecatlv1.TeamEvent{Member: te.Member, Event: toProto(te.Event)})
 	})
 	if err != nil {
@@ -2088,6 +2109,8 @@ func (h *HTTPHandler) streamSessionEvents(w http.ResponseWriter, r *http.Request
 	// (they ARE the transcript). So relay ALL events through toProto, including the
 	// three log-only kinds. They are already metadata-only/redacted by construction
 	// (gauntlet #7). Do NOT copy the live-relay filter here.
+	// RequestManifest and NetworkAttempt remain debugger-only even on durable
+	// read-back; neither has a public proto projection.
 	enc := json.NewEncoder(w)
 	for ev, iterErr := range events {
 		if iterErr != nil {
@@ -2096,6 +2119,9 @@ func (h *HTTPHandler) streamSessionEvents(w http.ResponseWriter, r *http.Request
 			// contract.
 			writeSSEError(w, flusher, map[string]string{"error": iterErr.Error()})
 			return
+		}
+		if !isPublicEvent(ev) {
+			continue
 		}
 		if _, err := w.Write([]byte("data: ")); err != nil {
 			return // client disconnected; the iter releases its file handle on break

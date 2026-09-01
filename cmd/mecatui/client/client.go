@@ -11,6 +11,7 @@ import (
 	"os"
 	pathpkg "path"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -254,6 +255,85 @@ func (c *Client) CreateSession(ctx context.Context, workspace string, mode mecat
 		ModelId:         sel.ModelID,
 		ReasoningEffort: sel.ReasoningEffort,
 	})
+}
+
+// SessionIDDisplayWidth is the one session-ID width used by the TUI header and
+// by debug-target prefix resolution.
+const SessionIDDisplayWidth = 12
+
+// DisplaySessionID returns the session ID exactly as shown in the TUI header.
+func DisplaySessionID(id string) string {
+	if len(id) <= SessionIDDisplayWidth {
+		return id
+	}
+	return id[:SessionIDDisplayWidth]
+}
+
+// CreateDebugSession creates a separate no-filesystem analysis session bound to
+// targetID. A target written exactly as the TUI's 12-character header ID is
+// resolved against the caller-visible session inventory; the server still receives
+// and authorizes only an exact ID. Capability absence is detected from the create
+// response (the first common response carrying ServerCapabilities); an older server
+// may ignore the new target field, so that accidentally-created ordinary session is
+// closed before this method fails closed.
+func (c *Client) CreateDebugSession(ctx context.Context, targetID string, mode mecatlv1.PermissionMode, sel ModelSelection, debugMCP ...string) (string, string, Capabilities, ResolvedModel, error) {
+	resolvedTarget, err := c.resolveDebugTarget(ctx, targetID)
+	if err != nil {
+		return "", "", Capabilities{}, ResolvedModel{}, err
+	}
+	id, caps, resolved, err := c.createSession(ctx, &mecatlv1.CreateSessionRequest{
+		Profile:              "no-fs",
+		Mode:                 mode,
+		ProviderId:           sel.ProviderID,
+		ModelId:              sel.ModelID,
+		ReasoningEffort:      sel.ReasoningEffort,
+		DebugTargetSessionId: resolvedTarget,
+		DebugMcpServers:      append([]string(nil), debugMCP...),
+	})
+	if err != nil {
+		return "", resolvedTarget, Capabilities{}, ResolvedModel{}, err
+	}
+	if !caps.SessionDebug || len(debugMCP) > 0 && !caps.DebugMCP {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_ = c.CloseSession(cleanupCtx, id)
+		if len(debugMCP) > 0 && !caps.DebugMCP {
+			return "", resolvedTarget, Capabilities{}, ResolvedModel{}, errors.New("server does not support selected MCP tools in debug sessions")
+		}
+		return "", resolvedTarget, Capabilities{}, ResolvedModel{}, errors.New("server does not support dedicated session debugging")
+	}
+	return id, resolvedTarget, caps, resolved, nil
+}
+
+func (c *Client) resolveDebugTarget(ctx context.Context, targetID string) (string, error) {
+	if len(targetID) != SessionIDDisplayWidth {
+		return targetID, nil
+	}
+	sessions, err := c.ListSessions(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resolve debug target: list sessions: %w", err)
+	}
+	for _, item := range sessions {
+		if item.ID == targetID {
+			return targetID, nil
+		}
+	}
+	match := ""
+	for _, item := range sessions {
+		if !strings.HasPrefix(item.ID, targetID) {
+			continue
+		}
+		if match != "" {
+			return "", fmt.Errorf("session ID prefix %q is ambiguous; use the full session ID", targetID)
+		}
+		match = item.ID
+	}
+	if match != "" {
+		return match, nil
+	}
+	// Preserve the server's ordinary not-found posture. The caller-filtered
+	// inventory is only a convenience resolver; the server remains authoritative.
+	return targetID, nil
 }
 
 // CreateSessionWithCarryover is CreateSession seeded with the source session's

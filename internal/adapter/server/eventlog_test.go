@@ -1,10 +1,12 @@
 package server_test
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"iter"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -25,6 +27,7 @@ import (
 	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/session"
+	"github.com/stacklok/mecatl/engine/team"
 	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/server"
 	"github.com/stacklok/mecatl/internal/adapter/store/jsonlstore"
@@ -112,6 +115,244 @@ func TestGRPCRelayStreamsOriginalChunksAndDurablyCoalesces(t *testing.T) {
 	}
 	if len(folded.Conversation.Messages) != 2 || folded.Conversation.Messages[1].Text != "alpha-雪" {
 		t.Fatalf("folded messages = %+v, want exact assistant text", folded.Conversation.Messages)
+	}
+}
+
+func TestLiveRelaysPersistButOmitObservedNetworkAttempt(t *testing.T) {
+	for _, transport := range []string{"grpc", "http"} {
+		t.Run(transport, func(t *testing.T) {
+			log := memstore.NewEventLog()
+			digest, ok := session.NetworkCorrelationDigest("request", "Bearer-SECRET")
+			if !ok {
+				t.Fatal("digest rejected test correlation")
+			}
+			llm := &observedAttemptProvider{observations: []session.NetworkAttemptPayload{
+				{Attempt: 1, MaxAttempts: 2, RetryDisposition: "sk-live-SECRET", StreamProgress: "precommit", Decision: "retry", FailureClass: "connect"},
+				{Attempt: 1, MaxAttempts: 2, RetryDisposition: "retryable", StreamProgress: "precommit", Decision: "retry", FailureClass: "connect", CorrelationKind: "request", CorrelationDigest: "Bearer-SECRET"},
+				{
+					Attempt: 1, MaxAttempts: 2, RetryDisposition: "retryable", StreamProgress: "precommit",
+					Decision: "retry", BackoffMs: 7, FailureClass: "connect",
+					CorrelationKind: "request", CorrelationDigest: digest,
+				},
+			}}
+			engine := agent.NewEngine(agent.Deps{LLM: llm, Catalog: tool.NewCatalog(), Policy: permpolicy.NewPolicy(nil, nil), Model: "test-model", EnableDurableEvidence: true})
+			svc, err := server.NewService(server.Config{
+				Engine: engine, Store: memstore.New(), EventLog: log,
+				Workspaces: func(root string) tool.Workspace { return memfs.NewWorkspace(root) },
+				Now:        func() time.Time { return time.Unix(0, 0) }, DefaultCapabilities: llm.Capabilities(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			sess, err := svc.CreateSession(context.Background(), "/ws", session.ModeDefault, session.Limits{})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var wireTypes []string
+			switch transport {
+			case "grpc":
+				client, cleanup := dialGRPC(t, svc)
+				defer cleanup()
+				stream, err := client.Converse(context.Background())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := stream.Send(&mecatlv1.ConverseRequest{Kind: &mecatlv1.ConverseRequest_Prompt{Prompt: &mecatlv1.Prompt{SessionId: string(sess.ID), Text: "go"}}}); err != nil {
+					t.Fatal(err)
+				}
+				_ = stream.CloseSend()
+				for {
+					resp, err := stream.Recv()
+					if errors.Is(err, io.EOF) {
+						break
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					wireTypes = append(wireTypes, resp.GetEvent().GetType())
+				}
+			case "http":
+				srv := httptest.NewServer(server.NewHTTPHandler(svc))
+				defer srv.Close()
+				resp, err := http.Post(srv.URL+"/v1/sessions/"+string(sess.ID)+"/prompt", "application/json", strings.NewReader(`{"text":"go"}`))
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer resp.Body.Close()
+				for _, ev := range parseSSE(t, bufio.NewReader(resp.Body)) {
+					wireTypes = append(wireTypes, ev.GetType())
+				}
+			}
+			for _, typ := range wireTypes {
+				if typ == string(session.EvNetworkAttempt) || typ == string(session.EvRequestManifest) {
+					t.Fatalf("live %s stream exposed debugger-only event %q: %v", transport, typ, wireTypes)
+				}
+			}
+			logged := readEventLog(t, log, sess.ID)
+			var attempts []session.NetworkAttemptPayload
+			var manifests []session.RequestManifestPayload
+			for _, ev := range logged {
+				if ev.Type == session.EvRequestManifest {
+					if ev.RequestManifest == nil {
+						t.Fatal("durable request.manifest has nil payload")
+					}
+					manifests = append(manifests, *ev.RequestManifest)
+				}
+				if ev.Type == session.EvNetworkAttempt {
+					if ev.NetworkAttempt == nil {
+						t.Fatal("durable network.attempt has nil payload")
+					}
+					attempts = append(attempts, *ev.NetworkAttempt)
+				}
+			}
+			if len(attempts) != 1 || attempts[0].SessionID != sess.ID || attempts[0].RunSerial < 1 || attempts[0].Turn != 0 || attempts[0].CorrelationDigest != digest {
+				t.Fatalf("durable attempts = %+v", attempts)
+			}
+			if len(manifests) != 1 || manifests[0].Model != "test-model" || manifests[0].MessageCount != 1 || manifests[0].MessageBytes <= 0 {
+				t.Fatalf("durable request manifests = %+v", manifests)
+			}
+			encoded, err := json.Marshal(logged)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, secret := range []string{"sk-live-SECRET", "Bearer-SECRET"} {
+				if strings.Contains(string(encoded), secret) {
+					t.Fatalf("durable log leaked producer token %q: %s", secret, encoded)
+				}
+			}
+		})
+	}
+}
+
+type observedAttemptProvider struct {
+	observations []session.NetworkAttemptPayload
+}
+
+func (*observedAttemptProvider) Capabilities() port.ProviderCapabilities {
+	return port.ProviderCapabilities{}
+}
+func (p *observedAttemptProvider) Stream(ctx context.Context, _ port.LLMRequest) (iter.Seq2[port.Chunk, error], error) {
+	for _, observation := range p.observations {
+		port.ObserveAttempt(ctx, observation)
+	}
+	return func(yield func(port.Chunk, error) bool) {
+		yield(port.Chunk{Kind: port.ChunkText, Text: "done"}, nil)
+		yield(port.Chunk{Kind: port.ChunkDone, Stop: session.StopEndTurn}, nil)
+	}, nil
+}
+
+type durableEventSink struct {
+	log port.EventLog
+	id  session.SessionID
+}
+
+func (s durableEventSink) Emit(ctx context.Context, ev session.Event) {
+	_ = s.log.Append(context.WithoutCancel(ctx), s.id, ev)
+}
+
+func observedAttemptTeamService(t *testing.T, log port.EventLog, logID session.SessionID) *server.Service {
+	t.Helper()
+	llm := &observedAttemptProvider{observations: []session.NetworkAttemptPayload{{
+		Attempt: 1, MaxAttempts: 2, RetryDisposition: "retryable", StreamProgress: "precommit",
+		Decision: "retry", FailureClass: "connect",
+	}}}
+	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
+	memberEngine := func(tm *team.Team, spec agent.MemberSpec, _ string) agent.MemberBuild {
+		cat := tool.NewCatalog()
+		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
+			cat.MustRegister(tl)
+		}
+		return agent.MemberBuild{Engine: agent.NewEngine(agent.Deps{
+			LLM: llm, Catalog: cat, Policy: allow, Model: "mock", EnableDurableEvidence: true,
+			Sink: durableEventSink{log: log, id: logID},
+		})}
+	}
+	engine := agent.NewEngine(agent.Deps{
+		LLM: mockllm.New(mockllm.TextTurn("unused")), Catalog: tool.NewCatalog(), Policy: allow, Model: "mock",
+	})
+	svc, err := server.NewService(server.Config{
+		Engine: engine, Store: memstore.New(), EventLog: log,
+		Workspaces: func(root string) tool.Workspace { return memfs.NewWorkspace(root) },
+		Now:        func() time.Time { return time.Unix(0, 0) }, MemberEngine: memberEngine,
+	})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	return svc
+}
+
+func TestDirectTeamTransportsOmitNetworkAttemptWithoutAffectingDurableObservation(t *testing.T) {
+	for _, transport := range []string{"grpc", "http"} {
+		t.Run(transport, func(t *testing.T) {
+			log := memstore.NewEventLog()
+			logID := session.SessionID("team-member-observed")
+			svc := observedAttemptTeamService(t, log, logID)
+			var wireTypes []string
+
+			switch transport {
+			case "grpc":
+				client, cleanup := dialGRPC(t, svc)
+				defer cleanup()
+				created, err := client.CreateTeam(context.Background(), &mecatlv1.CreateTeamRequest{
+					Workspace: "/ws", Name: "test",
+					Members: []*mecatlv1.TeammateSpec{{Name: "lead", Lead: true, InitialPrompt: "go"}},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				stream, err := client.RunTeam(context.Background(), &mecatlv1.RunTeamRequest{TeamId: created.GetTeamId()})
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, te := range recvAllTeamEvents(t, stream) {
+					if te.GetEvent() != nil {
+						wireTypes = append(wireTypes, te.GetEvent().GetType())
+					}
+				}
+			case "http":
+				srv := httptest.NewServer(server.NewHTTPHandler(svc))
+				defer srv.Close()
+				create, err := http.Post(srv.URL+"/v1/teams", "application/json", strings.NewReader(`{"workspace":"/ws","name":"test","members":[{"name":"lead","lead":true,"initial_prompt":"go"}]}`))
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer create.Body.Close()
+				var created mecatlv1.CreateTeamResponse
+				if err := json.NewDecoder(create.Body).Decode(&created); err != nil {
+					t.Fatal(err)
+				}
+				run, err := http.Post(srv.URL+"/v1/teams/"+created.GetTeamId()+"/run", "application/json", strings.NewReader(`{}`))
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer run.Body.Close()
+				for _, te := range parseTeamSSE(t, bufio.NewReader(run.Body)) {
+					if te.GetEvent() != nil {
+						wireTypes = append(wireTypes, te.GetEvent().GetType())
+					}
+				}
+			}
+
+			var ordinary bool
+			for _, typ := range wireTypes {
+				if typ == string(session.EvNetworkAttempt) || typ == string(session.EvRequestManifest) {
+					t.Fatalf("direct Team %s stream exposed debugger-only event %q: %v", transport, typ, wireTypes)
+				}
+				ordinary = ordinary || typ == string(session.EvTurnStart) || typ == string(session.EvMessageDelta)
+			}
+			if !ordinary {
+				t.Fatalf("direct Team %s stream omitted ordinary member events: %v", transport, wireTypes)
+			}
+			var durableAttempt, durableManifest bool
+			for _, ev := range readEventLog(t, log, logID) {
+				durableAttempt = durableAttempt || ev.Type == session.EvNetworkAttempt
+				durableManifest = durableManifest || ev.Type == session.EvRequestManifest
+			}
+			if !durableAttempt || !durableManifest {
+				t.Fatalf("transport filtering removed debugger-only durable observation: attempt=%t manifest=%t", durableAttempt, durableManifest)
+			}
+		})
 	}
 }
 

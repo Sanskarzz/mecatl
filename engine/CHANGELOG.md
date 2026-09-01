@@ -26,6 +26,40 @@ The covered surface is the eight core packages (`session`, `governance`, `learni
   `LogRecordGap` is a log-record ENVELOPE variant, never a `session.Event`. A gap is a fact about delivery rather than something that happened in the run, so `session.Event`, the proto `Event` message, and the event kind-parity surface all gain nothing; a gap occupies a real append position so cursors advance past it correctly, and the legacy `EventLog.Read` SKIPS it, preserving that port's contract of returning only events.
 
   All additions are **Added = minor**: new types and functions alongside an untouched `EventLog`, with no existing signature changed.
+- **Cryptographic session incarnations and incarnation-bound lineage** — adds the
+  opaque `session.IncarnationID`, a 128-bit `crypto/rand` identity minted by every
+  `session.New`, persisted by `sessnap.Snapshot` and `eventsource.SessionMeta`, plus a
+  prefix-disjoint deterministic identity for legacy snapshots. Related-session
+  constructors and `SessionRelationship` now carry the parent/origin/target
+  incarnation; delegation events carry internal child incarnations; and
+  `port.SessionLineageQuery` requires the root incarnation. The constructor and query
+  signature changes are breaking (pre-v1 minor); the new identity APIs are Added.
+
+- **Durable selected debug MCP ceiling and target incarnation** — adds
+  `session.Session.DebugMCPServers`, `DebugMCPTools`, and
+  `DebugTargetFingerprint` plus their `sessnap.Snapshot` and `eventsource.SessionMeta`
+  fields, and adds `session.IncarnationFingerprint` /
+  `DebugTargetFingerprint`. The MCP fields persist only bounded configured server names
+  and exact model-facing direct-tool names; the non-projectable fingerprint binds target
+  ID, cryptographic incarnation, and owner scope. Added (minor).
+
+- **Content-safe request manifests** — adds `session.EvRequestManifest`,
+  `RequestManifestPayload` and its closed prompt/tool metadata (including
+  catalog/overlay/MCP source labels), plus
+  `prompt.AssembleWithManifest`/`InstructionManifest`, and the opt-in
+  `agent.Deps.EnableDurableEvidence` gate. The loop emits the log-only manifest
+  from the final provider-neutral request without retaining prompt, message, tool-spec, or
+  provider-private bodies. Hosts enable it only when their relay has durable EventLog
+  retention; zero/default Deps skip all manifest construction. Built-in instruction assemblers report provenance; custom
+  `InstructionAssembler` implementations remain compatible as `custom`/`unknown`. Added
+  (minor).
+
+- **Durable session lineage port** — adds the optional `port.SessionLineageReader`,
+  bounded `SessionLineageQuery`/`SessionLineageResult`, content-free
+  `SessionLineageRecord`, and closed retained/pruned `SessionLineageState`. Store
+  adapters can expose authoritative direct relationships and deletion tombstones
+  without widening the minimal `SessionStore` or loading transcript content.
+  Added (minor).
 
 - **`agent.Run.RunID()`** (issue #821, [ADR 0249](../docs/adr/0249-durable-run-identity.md)) — reports the run's host-minted identity, or `""` when none was supplied.
 
@@ -45,9 +79,27 @@ The covered surface is the eight core packages (`session`, `governance`, `learni
 
 ### Changed
 
+- **`agent.Deps.EnableDurableEvidence`** — adds the explicit opt-in gate for
+  debugger-only request-manifest construction/emission and sanitized network-attempt capture. The zero value preserves the allocation-sensitive
+  default loop; composition enables it only alongside durable EventLog retention. Adding a field
+  to an exported struct breaks external unkeyed literals, so this is Changed/breaking (pre-v1 a
+  minor bump).
+
 - **`agent.Run.EnqueueSteer`** (issue #861, [ADR 0251](../docs/adr/0251-multimodal-steer.md)) — changes from `EnqueueSteer(text string)` to `EnqueueSteer(text string, parts []session.Content)`, making one canonical text, media, or mixed steer entry point. Changed/breaking (pre-v1 a minor bump).
 
 - **`session.SteerPayload.Parts`** (issue #861, [ADR 0251](../docs/adr/0251-multimodal-steer.md)) — adds the committed media parts to the steer echo. Adding a field to an exported struct breaks external unkeyed literals, so this is Changed/breaking (pre-v1 a minor bump).
+
+- **`session.Event.RequestManifest`** — adds the log-only, content-safe final-request
+  manifest payload. Adding a field to an exported struct breaks external unkeyed literals,
+  so this is Changed/breaking (pre-v1 a minor bump).
+
+- **`session.Event.NetworkAttempt`** — adds the log-only sanitized provider-attempt
+  payload used by the dedicated debugger. Adding a field to an exported struct breaks
+  external unkeyed literals, so this is Changed/breaking (pre-v1 a minor bump).
+
+- **`session.SessionRelationship.DebugTargetID`** — adds the durable target link
+  for dedicated debug sessions. Adding a field to an exported struct breaks
+  external unkeyed literals, so this is Changed/breaking (pre-v1 a minor bump).
 
 - **`agent.AgentMeta.WritableAuthorityCeiling`** (issue #517, [ADR 0242](../docs/adr/0242-route-unpinned-writable-named-specialists.md)) — adds the exported mode-specific managed-authority ceiling used when a fresh named specialist runs with direct write. Adding a field to an exported struct breaks external unkeyed literals, so this is Changed/breaking (pre-v1 a minor bump).
 
@@ -77,10 +129,22 @@ The covered surface is the eight core packages (`session`, `governance`, `learni
 
 ### Added
 
+- **Sanitized provider-attempt observation** — adds `session.EvNetworkAttempt`,
+  `session.NetworkAttemptPayload`, `session.CanonicalNetworkAttempt`,
+  `session.NetworkCorrelationDigest`, `port.AttemptObserver`, `port.WithAttemptObserver`,
+  and `port.ObserveAttempt`. The run-local observer lets provider decorators return
+  typed evidence to the loop, whose canonicalization rejects invalid observations,
+  binds trusted run correlation, omits provider codes, and retains correlation values
+  only as fixed domain-separated SHA-256 digests. Added (minor).
+
 - **Manual session compaction core** — `session.ReplaceHistoryAtBoundary` provides
   the pairing-validated, non-active aggregate rewrite seam; `agent.Engine.CompactSession`
   and `agent.ManualCompactionResult` run the configured compactor once and expose the
   archive/summary needed by a durable service operation. Added (minor).
+
+- **Debug session identity** — adds `session.SessionKindDebug` and
+  `session.NewDebug`, creating a separate empty-workspace session bound to one
+  target session without copying target conversation state. Added (minor).
 
 - **`agent.WithAgentWritableModelEngineFactory`** (issue #517, [ADR 0242](../docs/adr/0242-route-unpinned-writable-named-specialists.md)) — a `SubagentOption` factory that rebuilds an unpinned named `mode:"read-write"` specialist on the semantic router's selected model while preserving its specialist scope, direct-write environment, same-provider boundary, and per-definition limits. A declined target falls back to the ordinary writable specialist. Added (minor).
 

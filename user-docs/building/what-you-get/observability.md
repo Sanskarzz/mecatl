@@ -60,6 +60,18 @@ The admin endpoint also serves runtime introspection paths:
 
 The flight recorder is armed at startup when `--flight-recorder=true` (default). The mutex and block pprof profiles are off by default; enable them with `--mutex-profile-fraction` and `--block-profile-rate` only while investigating contention, as they carry runtime overhead.
 
+### Embedded mecatui admin transport
+
+`mecatui --perf` serves the same sensitive endpoints, but its default is an owner-private
+per-instance UNIX `admin.sock` beside the embedded gRPC socket. Concurrent mecatui
+instances therefore do not collide. `--perf-addr` explicitly selects TCP and accepts only
+loopback addresses.
+
+`--perf-mcp` with no explicit address uses ephemeral loopback TCP and logs the resolved
+URL because the supported MCP transport is streaming HTTP. There is no stdio fallback.
+Raw admin data remains an operator surface and is not injected into mecatui's session
+debugger or any model context.
+
 ### Perf MCP server (opt-in)
 
 `--perf-mcp` mounts a read-only MCP server at `/mcp` on the admin listener. It exposes the same runtime data as reduced numeric summaries (goroutine counts, latency percentiles, allocation rankings, slow-turn lists) so an agent can query performance state directly. Raw pprof blobs are offered as user-audience resource links, not injected into model context.
@@ -148,12 +160,23 @@ The token-accounting facets already surface cache activity per-turn: `mecatl_tok
 
 ### Resilience diagnostics
 
-The resilience decorator emits structured diagnostics through the injected diagnostics channel. These are provider-level lifecycle lines, not session-correlated:
+The resilience decorator emits structured diagnostics through the injected diagnostics channel. Failed-attempt decision lines carry session/run/turn correlation when a model call belongs to a run:
 
 - **DEBUG** on each retry and per-attempt-timeout event
 - **INFO** on idle-stall terminal, breaker open/half-open/close transitions, and retry exhaustion
 
-Every line is metadata-only. The decorator sees only the request metadata and errors, not prompt text. Error strings are clamped.
+Decision metadata never includes a raw error. The same sanitized classification feeds a
+log-only `network.attempt` event emitted by the agent loop and persisted by the ordinary
+EventLog relay. A dedicated session debugger can read this target-correlated evidence through
+`InspectSession {"view":"network"}`; it includes bounded retry/terminal decisions and safe
+transport/provider classifications, not request/response content or credentials. The same
+single tool exposes `related`, `delegation`, `history`, and `manifest`: related retained
+sessions are addressed only with target-bound opaque handles, compaction archives remain
+pageable, team/task/finding and parent-result facts come only from typed events, and request
+manifests contain tool decisions and digests but no prompt bodies. Every view reports incomplete
+scan/projection/retention honestly; snapshot latest-run counters are distinct from EventLog
+lifetime totals. No session
+ID is added to metric labels.
 
 ---
 

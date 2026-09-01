@@ -28,6 +28,74 @@ mecatui: final-session-id="01JOPAQUESESSIONID"
 
 Save that value and use it with `--resume`.
 
+## Diagnose a stored session
+
+A debugger is intentionally different from continuing a chat:
+
+```sh
+mecatui debug 01JOPAQUESESSIONID
+mecatui connect 127.0.0.1:8080 debug 01JOPAQUESESSIONID
+
+# Add one or more already-configured global reporting servers by name.
+mecatui debug 01JOPAQUESESSIONID --debug-mcp github
+mecatui connect 127.0.0.1:8080 debug 01JOPAQUESESSIONID --debug-mcp github
+
+# Replace the automatic diagnosis question with a focused one.
+mecatui debug 01JOPAQUESESSIONID \
+  --prompt "Why did the final tool call fail?"
+```
+
+### What happens
+
+1. Use the full target ID from `/session`, `/sessions`, or the
+   `mecatui: final-session-id=...` line printed when its TUI exits. You can instead
+   type the exact 12-byte ID displayed in the TUI header. If multiple visible
+   sessions share that prefix, mecatui creates nothing and asks for the full ID.
+2. Run `mecatui debug` against the same embedded store, or use
+   `mecatui connect ADDRESS debug` against the server that owns the target.
+3. mecatui prints a privacy disclosure before entering the alternate screen.
+   Running the command is consent to send bounded target evidence—which may
+   include prompts, model output, tool arguments/results, paths, and secrets—to
+   the selected model.
+4. The server authorizes the target and creates a **different**, durable,
+   no-filesystem analysis session. The normal padded header shows amber/bold
+   `DEBUG target #<digest>` after `mecatui`, and the terminal title carries the digest.
+   `/session` shows the safely quoted exact target ID and copies it with `t`.
+5. The debugger submits one first user turn ordered as your diagnosis objective, the required
+   status/transcript/pagination workflow, the expected report sections, and finally a delimited
+   sanitized current-debugger client/server runtime block. `--prompt` replaces only the
+   objective. Runtime context is compatibility/transport context, not target evidence; a
+   safely classified remote lookup failure does not block launch or reveal its raw error.
+6. Ask follow-up questions normally. The debugger can inspect bounded status,
+   transcript, activity, performance, network, related, delegation, history, and manifest
+   views for the target and retained related handles. Related rows distinguish retained
+   children from pruned tombstones without accepting arbitrary session IDs. History includes
+   compaction archives; status separates latest-run, cumulative snapshot, and lifetime counters.
+   Event-derived views report availability/completeness. Network includes sanitized failed/interesting
+   attempt decisions and classes, never raw errors, URLs, headers, bodies, prompts, tool
+   arguments, or credentials; successful-attempt and per-phase DNS/TCP/TLS timing are not measured.
+7. Quit normally when finished. The target remains unchanged and unleased; the
+   debug conversation is stored separately.
+
+The debugger cannot switch targets, browse the filesystem, run a shell, or act
+on the target. By default it has only `InspectSession`. Repeatable `--debug-mcp NAME`
+selects direct tools from already-configured server-global streaming-HTTP MCP servers;
+unknown/disconnected/tool-empty names fail, and no URL, headers, inline/client MCP,
+stdio, or resource/query meta-tools are accepted. Mutating MCP tools always ask for a
+one-call interactive approval (including under yolo); Deny still wins, headless mutation
+is refused, and Allow Always applies only to the current call and is not learned. Ask the debugger to draft an
+issue/message first, then explicitly request publication in a later prompt and approve the
+resulting call once. A second mutation asks again.
+
+It never resumes, approves, cancels, steers, or mutates the
+original session. `/clear`, `/sessions`, `/models`, `/effort`, and `/worktrees`
+are hidden in debug mode because they could replace the analysis binding.
+
+For local process-level investigation, adding `--perf` starts an owner-private,
+per-instance `admin.sock`. That raw metrics/pprof surface is for the human
+operator and is **not** placed in model context; the debugger's performance view
+is the bounded event-derived projection.
+
 ## Start fresh with `/clear`
 
 Use `/clear` when you want a fresh session and empty context while staying in the

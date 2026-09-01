@@ -165,6 +165,147 @@ automatic, or client-transcript-upload path.
 
 ---
 
+## Dedicated session debugger
+
+A debug session is a normal durable conversation for the analyst, but its authority is
+not normal. `engine/session/kind.go` (`SessionKindDebug`) persists an exact
+`DebugTargetID` plus `DebugTargetIncarnation` relationship. `internal/adapter/server/service.go`
+(`validateDebugCreate`) requires the no-fs profile, empty workspace, no carryover,
+schedule, or client-MCP relationship, and a distinct target ID. Target authorization
+uses the ordinary ownership check but maps absent and unauthorized targets to the same
+not-found result.
+
+Composition's `internal/app/build.go` (`debugSessionEngineFactory`) constructs a fresh
+per-session engine containing target-bound `InspectSession` plus only direct tools from
+explicitly selected server-global MCP names. `internal/adapter/mcp/mcp.go`
+(`Manager.SelectedTools`) borrows the shared manager without reconnecting or owning its
+lifecycle and requires exact equality with the persisted tool-name ceiling; unknown,
+disconnected, tool-empty, added, removed, or renamed-on-restart selections fail closed, and
+meta-tools are never part of this view. `internal/adapter/sessiondebug/permission.go`
+(`PermissionPolicy`) delegates every call to the base deployment policy first, preserving
+Deny and configured Ask provenance. It grants `InspectSession` only as a lower debugger floor;
+for selected MCP calls it revalidates the target incarnation and, when enabled, stable
+issuer+subject owner/principal identity, turns every otherwise-admitted call (including a
+positive read-only hint) into a fresh interactive Ask, denies all selected calls headlessly,
+and never learns an Allow Always verdict. `internal/adapter/sessiondebug/mcpguard.go` (`BindSelectedMCP`) repeats the same check
+at execution after an approval wait. The durable server names, exact tool ceiling, and
+non-projectable target-incarnation fingerprint and the session's persisted opaque 128-bit
+`crypto/rand` `IncarnationID` live on `session.Session`/`sessnap.Snapshot`;
+none carries URLs, headers, or credentials. `internal/adapter/sessiondebug/sessiondebug.go`
+(`New`) binds `InspectSession` to the trusted target; its arguments select only
+`status`, `transcript`, `activity`, `performance`, `network`, `related`, `delegation`,
+`history`, or `manifest`, never a session ID. Snapshot
+status and paged transcript use the authoritative snapshot. Transcript rows project
+model-visible `Message.Parts` and preferred `ToolResult.Parts`; bounded textual and
+structured values remain visible, while binary/media bytes become explicit metadata-only
+omissions. Per-field truncation, item omission, page scan completion, and overall projection
+completion are separate fields, so `complete: true` never masks missing model-visible data.
+If a projected row cannot fit, `omitted_rows` reports its index, role, projected byte size,
+and reason while `next_offset` still advances past it; pagination can never stall on one
+oversized row. Text repaired by `session.ToValidUTF8` is marked on its field and page and
+makes the projection incomplete. Tool arguments remain `json.RawMessage` rather than passing through `any`, preserving JSON
+number tokens larger than 2^53; malformed JSON or UTF-8 is explicitly marked omitted.
+EventLog activity and aggregate performance are non-authoritative, optional, and potentially
+incomplete. Performance therefore keeps `complete: false`; `scan_complete` only reports that
+an available log reached EOF. `internal/adapter/llmresilience/llmresilience.go`
+(`logAttemptDecision`) also builds one `session.NetworkAttemptPayload` from the same sanitized
+decision and metadata classification used by diagnostics. When
+`agent.Deps.EnableDurableEvidence` is enabled, a run-local `port.AttemptObserver`
+returns it to `engine/agent/loop.go` (`runTurn`), which emits the log-only
+`network.attempt`; the server relay persists it through the ordinary EventLog path. The
+disabled/default path does not install the observer context. The
+adapter never appends directly. It has no public protobuf projection; every ordinary client
+relay suppresses it, including live, durable read-back, and direct Team gRPC/HTTP streams,
+leaving the target-bound `InspectSession` view as its only
+model-visible path. This evidence contract is [ADR 0255](../adr/0255-sanitized-network-attempt-evidence.md). The payload retains target/run/turn correlation,
+attempt/max, elapsed, backoff, retry disposition, stream progress, decision and suppression,
+a closed failure class (`dns`, `connect`, `tls`, `timeout`, `connection_reset`,
+`stream_idle`, `breaker`, `rate_limit`, `http`, `provider`, or `unknown`), validated statuses,
+and a closed correlation kind plus a domain-separated, fixed SHA-256 digest. Raw provider codes,
+raw correlation IDs, errors, URLs, queries, headers,
+bodies, prompts, tool arguments, cookies, credentials, and environment values never enter it.
+The `network` view pages 50 rows while scanning at most 10,000 events and explicitly reports
+availability, completeness, truncation, and the absence of successful-attempt and DNS/TCP/TLS
+phase timing. Transcript pages contain at most 20 rows, activity 100,
+performance 50 turns/10,000 scanned events, and every response is bounded to 64 KiB after
+canonical fencing and framing neutralisation.
+
+The loop also emits `session.EvRequestManifest` once per turn when the explicit
+`agent.Deps.EnableDurableEvidence` gate is enabled, after `buildRequest` and
+`maybeCompact` have produced the exact final `port.LLMRequest`, immediately before `runTurn`
+invokes the provider. Composition enables the gate exactly when its relay has a durable
+EventLog, for main, per-session, and child engine shapes; a live `port.EventSink` is not a
+durability proxy. The disabled/default path skips the manifest builder entirely, including
+JSON encoding, counting, maps, and slices. `engine/agent/request_manifest.go` canonical-JSON encodes the neutral
+message slice only to calculate message count/bytes. Prompt components retain kind,
+provenance, and byte count, but no content digest: a digest would create an offline oracle.
+`prompt.AssembleWithManifest` classifies built-in project/soul/memory/rules/user-model
+assemblers without parsing rendered text; an arbitrary existing assembler still runs once and
+is honestly tagged `custom`/`unknown`. Tool names preserve the final request order, and each
+observed decision carries only a closed `catalog`, run `overlay`, or canonical MCP source label.
+Tool projection decisions are derived only at gates the loop observes: advertised,
+progressive-disclosure body hidden, mode filtered, carried-authority filtered, shell mount
+unavailable, or catalog entry shadowed by a run overlay. A profile-specific catalog that never
+contained a tool supplies no invented exclusion reason, and no adapter-private MCP discovery or
+mount failure is guessed. Payload values contain no prompt/message bodies, tool
+schemas/descriptions/arguments, reasoning blobs, URLs, headers, credentials, or
+provider-private content. The relay persists the event before the shared debugger-only
+predicate suppresses it from normal live, replay, subscription, direct-Team, and ACP surfaces.
+`InspectSession` projects manifests with bounded pagination. Its `history` catalog separately
+addresses the current snapshot, every retained `compaction.archive`, and the EventLog
+reconstruction with target-bound history handles; pages reuse the transcript projection, so
+pre-compaction tool calls/results remain visible without mutating the snapshot. `delegation`
+uses only typed subagent, parallel, team, and schedule payloads, including task, finding,
+disposition, error-round, stop, and parent CallID-to-ToolResult facts; it never parses prose or
+claims causality. Status labels snapshot counters as `latest_run_counters` and cumulative
+snapshot usage separately, while its EventLog lifetime aggregate groups RunID-bearing runs
+(legacy terminal boundaries otherwise) and sums TurnEnd usage exactly once.
+
+`related` prefers `port.SessionLineageReader`, requiring both the root ID and its
+incarnation, and supplements it with typed parent-event evidence only when the event carries
+the constructed child's incarnation. It returns only deterministic target-bound SHA-256 scope
+handles containing the child incarnation. Durable rows are keyed by `(session ID, incarnation)`, so recreation preserves
+old tombstones beside the current retained row while descendants match only the exact
+parent/origin incarnation. Legacy ID-only edges and events degrade without an inspectable
+handle rather than guessing. A selected child scope
+returns only its descendants, never sibling branches/members. Every scoped call rescans
+at most depth 8 / 500 records and revalidates root/child incarnation, each typed edge, the
+deployment ownership posture, and retained state. Enforced ownership compares only stable
+issuer+subject identity; changed display/grant metadata remains valid, while ownership-disabled
+deployments omit owner filtering consistently. Pruned, inaccessible, not-retained, never-produced, and absent labels are
+emitted only from supporting evidence; unsupported/unavailable and scan/retention/projection
+completeness remain explicit. Foreign rows never expose raw IDs.
+
+This evidence and approval boundary is [ADR 0257](../adr/0257-session-debugger-hardening.md),
+with cryptographic incarnation and edge semantics superseded by
+[ADR 0258](../adr/0258-cryptographic-session-incarnations.md); ADR 0257 supersedes ADR 0256 where stricter.
+
+All evidence is repaired to valid UTF-8 and wrapped with `governance.FenceUntrusted` before it
+reaches the model.
+
+`applyDebugSessionPosture` adds the trusted stable-prefix contract: inspect status
+first, prefer transcript truth, treat target content as hostile, distinguish evidence
+from hypotheses, and never mutate/resume/approve/cancel/steer the target. The debug
+session gets its own no-fs environment and ordinary lifecycle; no operation loads the
+target into a run-entry path or acquires its lease. On restart,
+`Service.rehydrateSession` recognizes the durable kind/relationship and calls the
+dedicated factory. Invalid no-fs metadata, a missing factory, or unavailable target
+fails closed rather than using the shared or generic no-fs engine.
+
+The first genuine user turn is ordered objective → required InspectSession workflow →
+expected report sections → delimited debugger-runtime context. The objective is the default
+or custom `--prompt`; the runtime block is compatibility/transport context, never target
+evidence. A safely classified lookup failure leaves unavailable fields but does not block
+that turn or expose the raw error. Durable authority, safety, and source hierarchy remain in
+`applyDebugSessionPosture`'s stable Role rather than dynamic runtime text. The ordinary padded header carries
+amber/bold `DEBUG target #<digest>` immediately after `mecatui`; width pressure removes
+model/mode/server detail before that complete identity, `/session` shows and copies the
+safely quoted exact target ID, and the target-derived title remains. Binding-breaking
+controls stay disabled. Live target following, raw audit/tool-record inspection, packet capture,
+raw logs/pprof, and support bundles remain out of scope. See [ADR 0254](../adr/0254-session-debugger-admin-transport.md) and [ADR 0255](../adr/0255-sanitized-network-attempt-evidence.md).
+
+---
+
 ## Domain — `engine/session/` (lifecycle recovery)
 
 A turn always drives the `Session` aggregate to a terminal state within one
@@ -543,10 +684,11 @@ backoff or a closed suppression reason. It never logs `err.Error()`. Optional me
 rides `engine/port/attemptmetadata.go` (`ProviderErrorMetadataError`) as primitive
 structural getters so independently versioned provider modules do not depend on a new
 engine-owned value type. `internal/adapter/llmresilience/llmresilience.go`
-(`attemptMetadataArgs`) assembles and emits it only when the whole value validates:
-HTTP/in-band status, bounded printable provider code, and one closed-kind bounded
-correlation ID. Error bodies, prompts, URLs, headers, and credentials never enter
-these fields.
+(`attemptMetadata`) accepts the structural carrier only when statuses and the closed correlation
+kind are valid and arbitrary values are bounded. Diagnostics retain only numeric HTTP/in-band
+status and the closed correlation kind with the same domain-separated SHA-256 digest used by
+`network.attempt`; raw provider codes and raw correlation IDs are omitted. Error bodies, prompts,
+URLs, headers, and credentials never enter emitted fields.
 
 The three provider modules attach only safe facts exposed by their wire protocols:
 `provider/openai/stream.go`, `provider/openaichat/openaichat.go`, and

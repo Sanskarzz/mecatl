@@ -45,8 +45,21 @@ mecatui --workspace "$PWD" \
 ```
 
 The TUI can browse and continue stored sessions, switch models without losing the
-visible conversation, approve permission requests, and steer a running session
-when the connected server supports it.
+visible conversation, approve permission requests, steer a running session, and launch
+a dedicated debugger when the connected server supports it:
+
+```sh
+mecatui debug SESSION_ID
+mecatui connect ADDRESS debug SESSION_ID
+```
+
+Debug invocation accepts the full opaque session ID or the exact 12-byte ID shown
+in the TUI header; an ambiguous short ID creates nothing and requires the full ID. It
+creates a separate no-filesystem analysis session and is explicit consent
+to send bounded stored-session evidence—which may include secrets—to the selected model.
+It never resumes or mutates the target. Its bounded network view can correlate persisted,
+sanitized retry/transport evidence to that target without exposing raw errors or request data.
+See [Sessions](../mecatui/sessions.md#diagnose-a-stored-session).
 
 Use the dedicated guides for those workflows:
 

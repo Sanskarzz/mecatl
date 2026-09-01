@@ -63,8 +63,8 @@ Every shipped executable accepts exact top-level `--version` and prints its buil
 ## mecatui command discovery
 
 `mecatui --help`, `mecatui -h`, and `mecatui help` render the concise command index.
-`mecatui help sessions`, `mecatui help connect`, and `mecatui help login` alias the
-corresponding command-specific help; direct `sessions --help`, `connect --help`, and
+`mecatui help sessions`, `mecatui help connect`, `mecatui help debug`, and `mecatui help login` alias the
+corresponding command-specific help; direct `sessions --help`, `connect --help`, `debug --help`, and
 `login --help` remain available. Use bare `mecatui --help-flags` for common embedded-mode
 flags, or `--help-all` with bare `mecatui`, `sessions`, or `connect` for every applicable
 flag. `mecatui llm login` supports standard help and `--skip-browser`; it opens
@@ -111,6 +111,65 @@ recovers the byte-exact final active ID after any rebind. Keep it to launch
 `mecatui --resume SESSION_ID` later. No handoff is claimed when setup fails, no session
 exists, the TUI fails, or a signal interrupts/forces exit; stdout is unchanged. See the
 [full TUI reference](tui.md#continue-a-chat-at-startup).
+
+## Debug a stored session
+
+Use `mecatui debug SESSION_ID` against the embedded store, or
+`mecatui connect ADDRESS debug SESSION_ID` against a running server. `SESSION_ID`
+may be the full opaque ID or the exact 12-byte ID displayed in the TUI header.
+The short form must identify one caller-visible inventory row; an ambiguous prefix
+creates nothing and requires the full ID. The command creates a **separate durable
+debug session** and submits one first user turn containing the sanitized current debugger
+client/server diagnostics baseline plus a request to inspect the bound target's status and
+authoritative transcript. A custom `--prompt` replaces that diagnosis request, not the
+baseline. Remote baseline lookup failures are safely classified and do not block diagnosis.
+The invocation itself is consent:
+mecatui prints a privacy warning because stored prompts, outputs, tool arguments/results,
+paths, and secrets may be sent to the selected model.
+
+The debug engine has an empty workspace, the no-filesystem profile, and the
+read-only `InspectSession` tool. Add repeatable `--debug-mcp NAME` flags to expose direct
+tools from only those already-configured server-global streaming-HTTP MCP servers:
+
+```sh
+mecatui debug SESSION_ID --debug-mcp github
+mecatui connect ADDRESS debug SESSION_ID --debug-mcp github --debug-mcp slack
+```
+
+Unknown, disconnected, duplicate, or tool-empty selections fail creation. No inline/client
+MCP configuration, URL, header, stdio transport, resource tool, or query meta-tool is accepted.
+The selected server names and exact initial tool-name ceiling are persisted; restart requires
+every selected server/tool still to exist and never adds newly advertised tools. Read-only
+annotations are honored, while absent/false means mutating. Every mutating call requires a
+fresh interactive approval even under configured/yolo/learned Allow; Deny remains absolute,
+headless use is denied, and Allow Always executes only the current call without learning.
+The model must draft an outward action first and may call a mutating reporting tool only after
+a later genuine current operator request explicitly asks to publish/send it.
+
+InspectSession's status and transcript views come from the target
+snapshot; activity and performance are optional EventLog projections. `related` returns only
+opaque target-bound handles for inspectable same-owner retained descendants; those handles can
+scope every ordinary view without accepting raw session IDs. `delegation` reports typed
+subagent/parallel/team/schedule evidence and parent result linkage. `history` catalogs the
+current snapshot, retained compaction archives, and retained-event reconstruction with separate
+opaque handles, and `manifest` lists content-free request manifests. Each reports scan,
+projection, and retention gaps explicitly; a pruned, inaccessible, absent, never-produced, or
+not-retained child is labelled only when the available lineage/event evidence proves it.
+Snapshot latest-run counters and cumulative usage are named separately from lifetime EventLog
+aggregates. The `network` view
+shows bounded failed/interesting resilience attempts with retry/terminal decisions, elapsed
+and safe failure classes, validated provider statuses, and closed correlation kinds with fixed
+SHA-256 digests. It never exposes raw provider codes, correlation IDs, errors, URLs, headers, bodies, prompts,
+tool arguments, or credentials, and states that successful-attempt and DNS/TCP/TLS phase
+timing are unavailable.
+Evidence is bounded and fenced as hostile data. The target ID is fixed by the server,
+not supplied by the model, and the debug run never resumes, mutates, approves, cancels,
+steers, or leases the target. The normal padded header places amber/bold
+`DEBUG target #<digest>` immediately after `mecatui` and keeps that complete identity when
+less important model/mode/server details are shed. `/session` shows the safely quoted exact
+target ID and copies it with `t`; the target-derived terminal title is unchanged.
+Model/mode/session-changing affordances are disabled. See
+[ADR 0254](adr/0254-session-debugger-admin-transport.md).
 
 ## Scheduled tasks
 

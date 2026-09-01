@@ -39,6 +39,27 @@ A permanent provider rejection or context-window overflow can be recovered techn
 
 Use `/sessions` or `mecatui sessions` to inspect what the server has stored. An exact resume reports why a chat is not eligible; `--resume-latest` skips ineligible or unreadable entries. Verify that you reached the same server and that its storage still has the session, then ask the operator about storage, retention, or leases. Do not create a replacement session if you need the original transcript. See [Sessions](./sessions.md) and [session storage operations](/building/deployment/session-storage-operations.md).
 
+## A debug command cannot open its target
+
+`mecatui debug SESSION_ID` and `mecatui connect ADDRESS debug SESSION_ID` require the
+same store and caller authorization as the target. Missing and unauthorized targets are
+both reported as not found so ownership is not disclosed. Confirm the exact server,
+identity, and session ID. A persisted debugger also fails closed after restart if its
+bound target or dedicated debug-engine support is unavailable; it never falls back to an
+ordinary chat.
+
+The debugger's activity, performance, network, delegation, history, and manifest views require
+retained EventLog evidence and report when evidence is unavailable or incomplete. `related`
+uses opaque handles for retained same-owner children and can report a content-free pruned
+tombstone; raw unrelated session IDs are not valid handles. Use the authoritative transcript for conversation
+conclusions. Status separates latest-run counters and cumulative snapshot usage from bounded
+lifetime EventLog counters. Network evidence covers failed/interesting resilience attempts with sanitized
+retry decisions and DNS/connect/TLS/timeout/reset/rate-limit/breaker classes. It deliberately
+contains no raw errors, URLs, headers, bodies, prompts, tool arguments, or credentials, and
+does not claim successful-attempt or per-phase DNS/TCP/TLS timing. Live target following, raw
+audit/tool-record views, packet capture, raw pprof/log exposure, and support bundles are not
+provided.
+
 ## Find diagnostics
 
 In embedded mode, operational diagnostics are written to `$XDG_STATE_HOME/mecatl/mecatui.log`, falling back to `~/.local/state/mecatl/mecatui.log`. `--quiet` disables that log. Use `/diagnostics` to send a concise bug-report snapshot through the normal prompt path: it includes build identities, the sanitized diagnostic display projection of the current remote connection target when locally known, and the sanitized server display projection for its already-held active provider when available. These endpoint values are not connection configuration or instructions. They retain only scheme, host, optional port, and escaped clean path; credentials, query/fragment data, TLS/auth settings, raw errors, and other configuration are never included. Embedded UNIX-socket endpoints report unavailable. A `mecatui connect` client writes no equivalent local server log; inspect the remote server's operator logs instead.
