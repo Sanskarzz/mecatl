@@ -126,13 +126,21 @@ rotations retain the previous generation. The
 server client-CA pool remains static and requires restart; CA rotation should overlap old
 and new roots before removing the old root.
 
-Helm chart 0.2.0 treats `mockProvider: false` as real-provider intent and requires both
-`tls.enabled` and `oidc.enabled`, unless the visibly unsafe local/trusted-mesh bypass is
-explicit. Empty provider/model and null token ceilings emit no flags; explicit ceilings are
-positive. Scheduling controls are empty by default and map directly to pod-spec topology
-spread, affinity, node selector, and toleration fields. The comprehensive production
-fixture pins external verified Redis, TLS/OIDC, provider/model, finite run/team ceilings,
-and hostname spreading; Kind remains mock and secret-free.
+Helm chart 0.3.0 has three explicit real-provider postures: in-pod TLS + OIDC;
+edge-terminated TLS + OIDC (`security.tlsTerminatedUpstream`, pod TLS off for a
+ClusterIP h2c backend); and the visibly unsafe local/trusted-mesh bypass. The gate is
+enforced twice and independently — `values.schema.json` and the
+`mecak8s.validateProviderSecurity` helper — so a `--skip-schema-validation` install
+still fails closed. The edge value is an operator attestation the chart cannot verify;
+the operator contract and its cleartext-bearer-token exposure are ADR 0278's.
+Chart-owned annotations (`mecatl.stacklok.com/unsafe-real-provider`,
+`.../tls-terminated-upstream`) are `omit`-ed from `podAnnotations` before merge, so a
+release cannot forge or clear its own posture stamp. Empty provider/model
+and null token ceilings emit no flags; explicit ceilings are positive. Scheduling controls
+are empty by default and map directly to pod-spec topology spread, affinity, node selector,
+and toleration fields. The comprehensive production fixtures pin external verified Redis,
+both secure transport options, provider/model, finite run/team ceilings, and hostname
+spreading; Kind remains mock and secret-free.
 
 ---
 

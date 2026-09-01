@@ -186,6 +186,10 @@ mecak8s --redis-url redis.example:6379 --redis-tls          # multi-replica, tic
 mecated serve --store-dir ./state --no-scheduler                  # opt out (manual management still works)
 ```
 
+The mecak8s Helm chart offers three secure real-provider transport postures — in-pod
+TLS, operator-attested edge-terminated TLS, and the explicit unsafe bypass. Picking one
+is [the mecak8s guide's](usage/mecak8s.md) job, not this page's.
+
 Flags:
 
 | Flag | Default | Description |

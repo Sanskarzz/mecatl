@@ -656,6 +656,9 @@ or the `preStop` `httpGet /drain` fires; **in-flight runs are cancelled, not dra
 multi-minute LLM turn cannot survive a rolling update within
 `terminationGracePeriodSeconds: 60`); the pod is disposable, the session is not — it is
 `Recover`-able on the successor (issue #51) from the Redis snapshot + durable event log.
+Its Helm chart offers three secure real-provider transport postures — in-pod TLS, an
+operator-attested edge-terminated TLS boundary, and the explicit unsafe bypass —
+detailed in [deployment and hardening](architecture/deployment-and-hardening.md).
 See `docs/adr/0048-mecak8s.md`.
 
 Two deliberate cycle-breaks worth noting, documented in code:

@@ -36,6 +36,13 @@ and `cmd/mecated` wires the knobs:
   the unchanged post-validation `(issuer, subject)` limiter.
 - **Health** — HTTP `/healthz` (liveness) + `/readyz` (readiness) mounted outside
   auth/rate-limit, plus standard `grpc_health_v1` `SERVING` (`internal/adapter/server/health.go`).
+- **mecak8s secure real-provider transport** — three postures: in-pod TLS + OIDC,
+  edge-terminated TLS + OIDC (`security.tlsTerminatedUpstream=true`, ClusterIP-only h2c),
+  and the explicit unsafe bypass. The upstream value is an operator attestation the chart
+  cannot verify, and edge mode puts caller bearer tokens on the pod network in cleartext:
+  restricting backend reachability to the gateway or mesh is the load-bearing control,
+  and the chart ships no NetworkPolicy to do it. Full operator contract in
+  [ADR 0278](../adr/0278-mecak8s-edge-terminated-tls.md).
 - **Graceful shutdown** — gRPC `GracefulStop` + HTTP `Shutdown`.
 - **Daemon config file (`daemon.yaml`, ADR 0088)** — the serve-time topology
   slice (gRPC/HTTP/metrics listen addresses, TLS cert/key/CA paths,

@@ -83,12 +83,18 @@ mounted
 {{- end -}}
 {{- end -}}
 {{- define "mecak8s.validateProviderSecurity" -}}
-{{- if and (not .Values.mockProvider) (not .Values.security.allowUnsafeRealProvider) -}}
-{{- if not .Values.tls.enabled -}}
-{{- fail "mockProvider=false requires tls.enabled=true (TLS protects transport); set security.allowUnsafeRealProvider=true only for local or trusted-mesh deployments" -}}
+{{- if and .Values.mockProvider .Values.security.tlsTerminatedUpstream -}}
+{{- fail "security.tlsTerminatedUpstream applies only to a real provider; it is ignored when mockProvider=true, so setting both is a mistake" -}}
 {{- end -}}
+{{- if and (not .Values.mockProvider) (not .Values.security.allowUnsafeRealProvider) -}}
 {{- if not .Values.oidc.enabled -}}
 {{- fail "mockProvider=false requires oidc.enabled=true (OIDC authenticates callers); set security.allowUnsafeRealProvider=true only for local or trusted-mesh deployments" -}}
+{{- end -}}
+{{- if and (not .Values.tls.enabled) (not .Values.security.tlsTerminatedUpstream) -}}
+{{- fail "mockProvider=false requires tls.enabled=true (TLS protects transport); set security.allowUnsafeRealProvider=true only for local or trusted-mesh deployments" -}}
+{{- end -}}
+{{- if and (not .Values.tls.enabled) .Values.security.tlsTerminatedUpstream (ne .Values.service.type "ClusterIP") -}}
+{{- fail "security.tlsTerminatedUpstream=true with tls.enabled=false requires service.type=ClusterIP" -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
