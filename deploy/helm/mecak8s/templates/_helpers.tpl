@@ -98,3 +98,73 @@ mounted
 {{- end -}}
 {{- end -}}
 {{- end -}}
+
+{{/* Validate cross-entry MCP invariants that JSON Schema cannot express. */}}
+{{- define "mecak8s.validateMCP" -}}
+{{- $seen := dict -}}
+{{- $ownedEnv := dict -}}
+{{- range $server := .Values.mcp.servers -}}
+{{- $folded := lower $server.name -}}
+{{- if hasKey $seen $folded -}}{{ fail (printf "mcp.servers name %q is duplicated case-insensitively" $server.name) }}{{- end -}}
+{{- $_ := set $seen $folded true -}}
+{{- $envBase := upper $server.name -}}
+{{- if and $server.insecureHTTP (eq $server.auth.mode "oauth") -}}{{ fail (printf "mcp.servers[%s].insecureHTTP is invalid for oauth" $server.name) }}{{- end -}}
+{{- if eq $server.auth.mode "staticBearer" -}}
+{{- $_ := set $ownedEnv (printf "MCP_%s_TOKEN" $envBase) true -}}
+{{- end -}}
+{{- if eq $server.auth.mode "oauth" -}}
+{{- range $field, $value := dict "profile" $server.auth.oauth.profile "principal" $server.auth.oauth.principal -}}
+{{- if or (eq (trim $value) "") (regexMatch "[\x00-\x1f\x7f]" $value) -}}{{ fail (printf "mcp.servers[%s].auth.oauth.%s must be non-blank and contain no control characters" $server.name $field) }}{{- end -}}
+{{- end -}}
+{{- range $scope := $server.auth.oauth.scopes -}}{{- if or (eq (trim $scope) "") (regexMatch "[\x00-\x1f\x7f]" $scope) -}}{{ fail (printf "mcp.servers[%s].auth.oauth.scopes must be non-blank and contain no control characters" $server.name) }}{{- end -}}{{- end -}}
+{{- if eq $server.auth.oauth.client.mode "preregistered" -}}
+{{- $clientID := $server.auth.oauth.client.preregistered.id -}}
+{{- if or (eq (trim $clientID) "") (regexMatch "[\x00-\x1f\x7f]" $clientID) -}}{{ fail (printf "mcp.servers[%s].auth.oauth.client.preregistered.id must be non-blank and contain no control characters" $server.name) }}{{- end -}}
+{{- $_ := set $ownedEnv (printf "MECATL_MCP_%s_CLIENT_SECRET" $envBase) true -}}
+{{- end -}}
+{{- $_ := set $ownedEnv (printf "MECATL_MCP_%s_CREDENTIAL" $envBase) true -}}
+{{- end -}}
+{{- end -}}
+{{- range $env := .Values.extraEnv -}}
+{{- if and (hasKey $env "name") (hasKey $ownedEnv $env.name) -}}{{ fail (printf "extraEnv name %q collides with an MCP authentication environment variable owned by the chart" $env.name) }}{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Strict runtime operator profile generated only for OAuth entries. */}}
+{{- define "mecak8s.mcpOAuthSettings" -}}
+mcp:
+  servers:
+{{- range $server := .Values.mcp.servers }}
+{{- if eq $server.auth.mode "oauth" }}
+    - name: {{ $server.name | quote }}
+      url: {{ $server.url | quote }}
+      auth:
+        mode: oauth
+        oauth:
+          profile: {{ $server.auth.oauth.profile | quote }}
+          principal: {{ $server.auth.oauth.principal | quote }}
+          issuer: {{ $server.auth.oauth.issuer | quote }}
+          client:
+            mode: {{ $server.auth.oauth.client.mode }}
+{{- if eq $server.auth.oauth.client.mode "preregistered" }}
+            preregistered:
+              id: {{ $server.auth.oauth.client.preregistered.id | quote }}
+              secret_env: {{ printf "MECATL_MCP_%s_CLIENT_SECRET" (upper $server.name) }}
+{{- else }}
+            cimd:
+              document_url: {{ $server.auth.oauth.client.cimd.documentURL | quote }}
+{{- end }}
+          scopes: {{ toJson $server.auth.oauth.scopes }}
+          request_refresh_token: {{ default false $server.auth.oauth.requestRefreshToken }}
+          credentials:
+            mode: environment
+            environment:
+              credential_env: {{ printf "MECATL_MCP_%s_CREDENTIAL" (upper $server.name) }}
+              allow_process_local_refresh: {{ default false $server.auth.oauth.credentials.allowProcessLocalRefresh }}
+          network:
+            additional_origins: {{ toJson $server.auth.oauth.network.additionalOrigins }}
+            private_origins: {{ toJson $server.auth.oauth.network.privateOrigins }}
+            max_redirects: {{ $server.auth.oauth.network.maxRedirects }}
+{{- end }}
+{{- end }}
+{{- end -}}
