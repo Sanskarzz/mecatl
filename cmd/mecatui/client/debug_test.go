@@ -3,12 +3,13 @@ package client
 import (
 	"context"
 	"errors"
+	"net"
 	"strings"
 	"testing"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/test/bufconn"
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
 )
@@ -47,8 +48,48 @@ func (f *debugHarness) CloseSession(_ context.Context, req *mecatlv1.CloseSessio
 	return &mecatlv1.CloseSessionResponse{}, nil
 }
 
+type invalidUTF8DebugServer struct {
+	mecatlv1.UnimplementedHarnessServiceServer
+	createCalls int
+}
+
+func (s *invalidUTF8DebugServer) CreateSession(context.Context, *mecatlv1.CreateSessionRequest) (*mecatlv1.CreateSessionResponse, error) {
+	s.createCalls++
+	return &mecatlv1.CreateSessionResponse{}, nil
+}
+
+func TestPredictableSessionHandles_Scenario1_InvalidUTF8HasNoHandleOrDebugCreate(t *testing.T) {
+	target := string([]byte{0xff, 'x'})
+	if got := SessionHandle(target); got != "" {
+		t.Fatalf("SessionHandle(invalid UTF-8) = %q, want empty", got)
+	}
+
+	listener := bufconn.Listen(1 << 20)
+	server := grpc.NewServer()
+	service := &invalidUTF8DebugServer{}
+	mecatlv1.RegisterHarnessServiceServer(server, service)
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(server.Stop)
+
+	conn, err := grpc.NewClient("passthrough:///invalid-utf8-debug", grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
+		return listener.Dial()
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	cl := &Client{svc: mecatlv1.NewHarnessServiceClient(conn)}
+	if _, _, _, _, err := cl.CreateDebugSession(context.Background(), target, 0, ModelSelection{}); err == nil {
+		t.Fatal("CreateDebugSession accepted invalid UTF-8 target")
+	}
+	if service.createCalls != 0 {
+		t.Fatalf("server CreateSession calls = %d, want 0", service.createCalls)
+	}
+}
+
 func TestCreateDebugSessionProjectsBoundNoFSRequest(t *testing.T) {
-	fake := &debugHarness{caps: &mecatlv1.ServerCapabilities{SessionDebug: true}}
+	fake := &debugHarness{caps: &mecatlv1.ServerCapabilities{SessionDebug: true}, sessions: []*mecatlv1.SessionSummary{{SessionId: "target-123"}}}
 	cl := &Client{svc: fake}
 	id, target, caps, _, err := cl.CreateDebugSession(context.Background(), "target-123", mecatlv1.PermissionMode_PERMISSION_MODE_PLAN, ModelSelection{ProviderID: "p", ModelID: "m"})
 	if err != nil {
@@ -60,13 +101,10 @@ func TestCreateDebugSessionProjectsBoundNoFSRequest(t *testing.T) {
 	if got := fake.request; got.GetProfile() != "no-fs" || got.GetWorkspace() != "" || got.GetDebugTargetSessionId() != "target-123" {
 		t.Fatalf("request = %+v, want no-fs, empty workspace, bound target", got)
 	}
-	if fake.listCalls != 0 {
-		t.Fatalf("non-header-width full ID listed inventory %d times", fake.listCalls)
-	}
 }
 
 func TestCreateDebugSessionFailsClosedAndCleansUpUnsupportedCreate(t *testing.T) {
-	fake := &debugHarness{caps: &mecatlv1.ServerCapabilities{}}
+	fake := &debugHarness{caps: &mecatlv1.ServerCapabilities{}, sessions: []*mecatlv1.SessionSummary{{SessionId: "target"}}}
 	cl := &Client{svc: fake}
 	id, _, _, _, err := cl.CreateDebugSession(context.Background(), "target", 0, ModelSelection{})
 	if err == nil || !strings.Contains(err.Error(), "does not support") || id != "" {
@@ -77,104 +115,113 @@ func TestCreateDebugSessionFailsClosedAndCleansUpUnsupportedCreate(t *testing.T)
 	}
 }
 
-func TestDisplaySessionIDUsesSharedWidth(t *testing.T) {
-	if got := DisplaySessionID("123456789012-rest"); got != "123456789012" {
-		t.Fatalf("DisplaySessionID = %q", got)
+func TestPredictableSessionHandles_Scenario1_OnlyHandleWidthAPI(t *testing.T) {
+	if got := SessionHandle("123456789012-rest"); got != "123456789012" {
+		t.Fatalf("SessionHandle = %q", got)
 	}
-	if got := DisplaySessionID("short"); got != "short" {
-		t.Fatalf("DisplaySessionID short = %q", got)
+	if got := SessionHandle("short"); got != "short" {
+		t.Fatalf("SessionHandle short = %q", got)
 	}
-}
-
-func TestCreateDebugSessionResolvesUniqueHeaderID(t *testing.T) {
-	fake := &debugHarness{
-		caps: &mecatlv1.ServerCapabilities{SessionDebug: true},
-		sessions: []*mecatlv1.SessionSummary{
-			{SessionId: "123456789012-full-target"},
-			{SessionId: "unrelated-session"},
-		},
-	}
-	cl := &Client{svc: fake}
-	_, resolvedTarget, _, _, err := cl.CreateDebugSession(context.Background(), "123456789012", 0, ModelSelection{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resolvedTarget != "123456789012-full-target" {
-		t.Fatalf("resolved target = %q", resolvedTarget)
-	}
-	if got := fake.request.GetDebugTargetSessionId(); got != "123456789012-full-target" {
-		t.Fatalf("debug target = %q", got)
+	if SessionHandleWidth != 12 {
+		t.Fatalf("SessionHandleWidth = %d, want 12", SessionHandleWidth)
 	}
 }
 
-func TestCreateDebugSessionExactHeaderWidthIDPrecedesPrefix(t *testing.T) {
-	const target = "123456789012"
-	fake := &debugHarness{
-		caps: &mecatlv1.ServerCapabilities{SessionDebug: true},
-		sessions: []*mecatlv1.SessionSummary{
-			{SessionId: target + "-longer"},
-			{SessionId: target},
-		},
+func TestCreateDebugSessionResolution(t *testing.T) {
+	const handle = "123456789012"
+	tests := []struct {
+		name        string
+		target      string
+		sessions    []*mecatlv1.SessionSummary
+		listErr     error
+		createErr   error
+		wantTarget  string
+		wantErr     string
+		wantCreates int
+		wantLists   int
+	}{
+		{name: "exact equality precedes projection", target: handle, sessions: []*mecatlv1.SessionSummary{{SessionId: handle + "-projected"}, {SessionId: handle}}, wantTarget: handle, wantCreates: 1, wantLists: 1},
+		{name: "unique projection", target: handle, sessions: []*mecatlv1.SessionSummary{{SessionId: handle + "-full"}, {SessionId: "other"}}, wantTarget: handle + "-full", wantCreates: 1, wantLists: 1},
+		{name: "duplicate inventory row is one match", target: handle, sessions: []*mecatlv1.SessionSummary{{SessionId: handle + "-full"}, {SessionId: handle + "-full"}}, wantTarget: handle + "-full", wantCreates: 1, wantLists: 1},
+		{name: "ambiguous projection", target: handle, sessions: []*mecatlv1.SessionSummary{{SessionId: handle + "-one"}, {SessionId: handle + "-two"}}, wantErr: "full exact session ID", wantLists: 1},
+		{name: "no match falls through exact", target: handle, createErr: errors.New("server exact lookup: not found"), wantTarget: handle, wantErr: "server exact lookup: not found", wantCreates: 1, wantLists: 1},
+		{name: "inventory failure falls through exact", target: handle, listErr: errors.New("inventory unavailable"), createErr: errors.New("server exact lookup: denied"), wantTarget: handle, wantErr: "server exact lookup: denied", wantCreates: 1, wantLists: 1},
+		{name: "long exact bypasses inventory", target: handle + "-full", wantTarget: handle + "-full", wantCreates: 1},
+		{name: "non-handle exact bypasses inventory", target: "-leading", wantTarget: "-leading", wantCreates: 1},
 	}
-	cl := &Client{svc: fake}
-	if _, _, _, _, err := cl.CreateDebugSession(context.Background(), target, 0, ModelSelection{}); err != nil {
-		t.Fatal(err)
-	}
-	if got := fake.request.GetDebugTargetSessionId(); got != target {
-		t.Fatalf("debug target = %q", got)
-	}
-}
-
-func TestCreateDebugSessionRejectsAmbiguousHeaderIDBeforeCreate(t *testing.T) {
-	const target = "123456789012"
-	fake := &debugHarness{sessions: []*mecatlv1.SessionSummary{
-		{SessionId: target + "-one"},
-		{SessionId: target + "-two"},
-	}}
-	cl := &Client{svc: fake}
-	_, _, _, _, err := cl.CreateDebugSession(context.Background(), target, 0, ModelSelection{})
-	if err == nil || !strings.Contains(err.Error(), "prefix") || !strings.Contains(err.Error(), "ambiguous") || !strings.Contains(err.Error(), "full session ID") {
-		t.Fatalf("error = %v", err)
-	}
-	if fake.createCalls != 0 {
-		t.Fatalf("CreateSession calls = %d", fake.createCalls)
-	}
-}
-
-func TestCreateDebugSessionMissingHeaderIDPreservesServerNotFound(t *testing.T) {
-	const target = "123456789012"
-	notFound := status.Error(codes.NotFound, "session not found")
-	fake := &debugHarness{createErr: notFound}
-	cl := &Client{svc: fake}
-	_, _, _, _, err := cl.CreateDebugSession(context.Background(), target, 0, ModelSelection{})
-	if status.Code(err) != codes.NotFound {
-		t.Fatalf("error = %v, want NotFound", err)
-	}
-	if got := fake.request.GetDebugTargetSessionId(); got != target {
-		t.Fatalf("debug target = %q", got)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &debugHarness{caps: &mecatlv1.ServerCapabilities{SessionDebug: true}, sessions: tc.sessions, listErr: tc.listErr, createErr: tc.createErr}
+			cl := &Client{svc: fake}
+			_, resolved, _, _, err := cl.CreateDebugSession(context.Background(), tc.target, 0, ModelSelection{})
+			if tc.wantErr == "" && err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("error = %v, want %q", err, tc.wantErr)
+			}
+			if fake.createCalls != tc.wantCreates || fake.listCalls != tc.wantLists {
+				t.Fatalf("calls create=%d list=%d, want create=%d list=%d", fake.createCalls, fake.listCalls, tc.wantCreates, tc.wantLists)
+			}
+			if tc.wantCreates > 0 {
+				if got := fake.request.GetDebugTargetSessionId(); got != tc.wantTarget || resolved != tc.wantTarget {
+					t.Fatalf("request target=%q resolved=%q, want %q", got, resolved, tc.wantTarget)
+				}
+			}
+		})
 	}
 }
 
-func TestCreateDebugSessionListFailurePreventsCreate(t *testing.T) {
-	fake := &debugHarness{listErr: errors.New("inventory unavailable")}
-	cl := &Client{svc: fake}
-	_, _, _, _, err := cl.CreateDebugSession(context.Background(), "123456789012", 0, ModelSelection{})
-	if err == nil || !strings.Contains(err.Error(), "list sessions") || !strings.Contains(err.Error(), "inventory unavailable") {
-		t.Fatalf("error = %v", err)
+func TestPredictableSessionHandles_Scenario2_HandleGrammarAndUnifiedTarget(t *testing.T) {
+	tests := []struct {
+		name      string
+		target    string
+		fullID    string
+		candidate bool
+		reject    bool
+	}{
+		{name: "empty", target: "", reject: true},
+		{name: "one safe atom", target: "a", fullID: "a", candidate: true},
+		{name: "exactly twelve safe", target: "abcdefghijkl", fullID: "abcdefghijkl", candidate: true},
+		{name: "uppercase escape exactly fits", target: "123456789%2F", fullID: "123456789/", candidate: true},
+		{name: "uppercase escapes", target: "%C3%A9", fullID: "é", candidate: true},
+		{name: "escape cannot fit", target: "1234567890%2F"},
+		{name: "too long", target: "abcdefghijklm"},
+		{name: "lowercase escape", target: "%2f"},
+		{name: "truncated escape", target: "%2"},
+		{name: "malformed escape", target: "%GG"},
+		{name: "leading hyphen", target: "-legacy"},
+		{name: "literal percent", target: "abc%def"},
+		{name: "other ascii", target: "abc/def"},
+		{name: "multibyte", target: "é"},
+		{name: "invalid utf8", target: string([]byte{0xff}), reject: true},
 	}
-	if fake.createCalls != 0 {
-		t.Fatalf("CreateSession calls = %d", fake.createCalls)
-	}
-}
-
-func TestCreateDebugSessionLongFullIDBypassesInventory(t *testing.T) {
-	const target = "123456789012-full-target"
-	fake := &debugHarness{caps: &mecatlv1.ServerCapabilities{SessionDebug: true}, listErr: errors.New("must not list")}
-	cl := &Client{svc: fake}
-	if _, _, _, _, err := cl.CreateDebugSession(context.Background(), target, 0, ModelSelection{}); err != nil {
-		t.Fatal(err)
-	}
-	if fake.listCalls != 0 || fake.request.GetDebugTargetSessionId() != target {
-		t.Fatalf("list calls=%d target=%q", fake.listCalls, fake.request.GetDebugTargetSessionId())
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &debugHarness{caps: &mecatlv1.ServerCapabilities{SessionDebug: true}}
+			if tc.candidate {
+				fake.sessions = []*mecatlv1.SessionSummary{{SessionId: tc.fullID}}
+			}
+			cl := &Client{svc: fake}
+			_, _, _, _, err := cl.CreateDebugSession(context.Background(), tc.target, 0, ModelSelection{})
+			if tc.reject {
+				if err == nil || fake.createCalls != 0 || fake.listCalls != 0 {
+					t.Fatalf("rejected target error=%v create=%d list=%d", err, fake.createCalls, fake.listCalls)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantLists := 0
+			wantTarget := tc.target
+			if tc.candidate {
+				wantLists = 1
+				wantTarget = tc.fullID
+			}
+			if fake.listCalls != wantLists || fake.request.GetDebugTargetSessionId() != wantTarget {
+				t.Fatalf("lists=%d target=%q, want lists=%d target=%q", fake.listCalls, fake.request.GetDebugTargetSessionId(), wantLists, wantTarget)
+			}
+		})
 	}
 }

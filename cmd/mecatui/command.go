@@ -64,15 +64,15 @@ var topLevelCommands = []topLevelCommand{
 	},
 	{
 		name:     "debug",
-		synopsis: "debug SESSION_ID [flags]",
-		purpose:  "diagnose a stored session by full ID or its 12-character header ID in a separate no-filesystem analysis session; ambiguous header IDs require the full ID",
+		synopsis: "debug TARGET [flags]",
+		purpose:  "diagnose by an exact session ID or displayed 12-column short handle; exact identity wins, a unique handle resolves automatically, and ambiguity asks for the full exact ID",
 		resolve: func(args []string) invocationResolution {
 			return resolveDebugCommand(modeLocal, "", args)
 		},
 	},
 	{
 		name:     "connect",
-		synopsis: "connect ADDRESS [sessions | debug SESSION_ID] [flags]",
+		synopsis: "connect ADDRESS [sessions | debug TARGET] [flags]",
 		purpose:  "dial a running mecated at ADDRESS (host:port), optionally browsing or debugging a stored session",
 		resolve:  resolveConnectCommand,
 	},
@@ -106,6 +106,7 @@ type invocationResolution struct {
 	address        string // connect or remote-login target; empty for local/login help
 	browseSessions bool   // launch directly into the shared stored-session inventory
 	debugTarget    string // immutable target for a dedicated no-filesystem debug session
+	debugHelp      bool   // render dedicated debug help instead of transport flag help
 	helpIndex      bool   // render the top-level command index
 	remaining      []string
 	err            error
@@ -276,10 +277,10 @@ func resolveConnectCommand(args []string) invocationResolution {
 
 func resolveDebugCommand(mode transportMode, address string, args []string) invocationResolution {
 	if len(args) == 1 && isHelpMetaFlag(args[0]) {
-		return invocationResolution{mode: mode, address: address, remaining: args}
+		return invocationResolution{mode: mode, address: address, debugHelp: true}
 	}
-	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
-		return invocationResolution{err: helpUsageError("debug requires SESSION_ID before flags")}
+	if len(args) == 0 || args[0] == "" {
+		return invocationResolution{err: helpUsageError("debug requires TARGET")}
 	}
 	return invocationResolution{mode: mode, address: address, debugTarget: args[0], remaining: args[1:]}
 }
@@ -333,8 +334,8 @@ func writeSoftWrapped(out io.Writer, indent, text string, width int) {
 // spellings and after a leading-word usage error.
 func writeTopLevelHelp(out io.Writer) {
 	_, _ = fmt.Fprintln(out, "Usage: mecatui [flags]")
-	_, _ = fmt.Fprintln(out, "       mecatui debug SESSION_ID [flags]")
-	_, _ = fmt.Fprintln(out, "       mecatui connect ADDRESS debug SESSION_ID [flags]")
+	_, _ = fmt.Fprintln(out, "       mecatui debug TARGET [flags]")
+	_, _ = fmt.Fprintln(out, "       mecatui connect ADDRESS debug TARGET [flags]")
 	_, _ = fmt.Fprintln(out, "       mecatui <command> [flags]")
 	_, _ = fmt.Fprintln(out)
 	_, _ = fmt.Fprintln(out, "Bare 'mecatui [flags]' hosts an embedded mecated server in-process (no loopback probe).")
@@ -344,6 +345,20 @@ func writeTopLevelHelp(out io.Writer) {
 	_, _ = fmt.Fprintln(out, "      mecatui help <command> aliases mecatui <command> --help")
 	_, _ = fmt.Fprintln(out, "      mecatui --version prints the build version and exits")
 	_, _ = fmt.Fprintln(out, "\nRun 'mecatui --help-flags' for common embedded-mode flags or '--help-all' for the exhaustive bare reference.")
+}
+
+// writeDebugHelp renders the debug command contract without falling through to
+// the generic transport flag reference.
+func writeDebugHelp(out io.Writer, connect bool) {
+	usage := "mecatui debug TARGET [flags]"
+	if connect {
+		usage = "mecatui connect ADDRESS debug TARGET [flags]"
+	}
+	_, _ = fmt.Fprintf(out, "Usage: %s\n\n", usage)
+	_, _ = fmt.Fprintln(out, "TARGET is either the exact session ID (including the ID printed on exit) or the displayed 12-column short handle.")
+	_, _ = fmt.Fprintln(out, "Exact identity wins automatically. A unique short handle resolves from the caller-visible session inventory.")
+	_, _ = fmt.Fprintln(out, "If a handle is ambiguous, open /session, copy the full exact ID, and pass it as TARGET to the same command.")
+	_, _ = fmt.Fprintln(out, "If inventory is unavailable or no handle matches, TARGET is sent unchanged for the server to authorize or reject as an exact ID.")
 }
 
 // unknownCommandError builds the error message for an unknown leading bare word.

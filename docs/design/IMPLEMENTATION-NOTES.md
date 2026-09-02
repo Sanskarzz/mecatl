@@ -305,10 +305,18 @@ expected report sections → delimited debugger-runtime context. The objective i
 or custom `--prompt`; the runtime block is compatibility/transport context, never target
 evidence. A safely classified lookup failure leaves unavailable fields but does not block
 that turn or expose the raw error. Durable authority, safety, and source hierarchy remain in
-`applyDebugSessionPosture`'s stable Role rather than dynamic runtime text. The ordinary padded header carries
-amber/bold `DEBUG target #<digest>` immediately after `mecatui`; width pressure removes
+`applyDebugSessionPosture`'s stable Role rather than dynamic runtime text. The ordinary padded
+header carries amber/bold `DEBUG target <handle>` immediately after `mecatui`; its fixed
+12-column handle renders safe `[A-Za-z0-9._-]` bytes literally except that a leading `-` is
+encoded as `%2D`, and renders every other UTF-8 byte as uppercase `%HH`, keeping only complete
+atoms that fit. It has no leading `#`. A syntactically valid short target consults the complete
+caller-visible inventory: exact full-ID equality wins, otherwise one unique projected match
+resolves. Multiple projected matches stop before create and direct the operator to copy the exact
+ID from `/session` and pass it as `TARGET` through the same command. A zero match or inventory
+failure passes `TARGET` unchanged to the server's existing exact-ID authorization/not-found path.
+Width pressure removes
 model/mode/server detail before that complete identity, `/session` shows and copies the
-safely quoted exact target ID, and the target-derived title remains. Binding-breaking
+safely quoted exact target ID, and the target-derived title uses the same handle. Binding-breaking
 controls stay disabled. Live target following, raw audit/tool-record inspection, packet capture,
 raw logs/pprof, and support bundles remain out of scope. See [ADR 0254](../adr/0254-session-debugger-admin-transport.md) and [ADR 0255](../adr/0255-sanitized-network-attempt-evidence.md).
 

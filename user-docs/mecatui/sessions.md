@@ -33,12 +33,15 @@ Save that value and use it with `--resume`.
 A debugger is intentionally different from continuing a chat:
 
 ```sh
+# Exact ID or displayed short handle: both use the same TARGET grammar.
+mecatui debug 01JOPAQUESES
+mecatui connect 127.0.0.1:8080 debug 01JOPAQUESES
 mecatui debug 01JOPAQUESESSIONID
 mecatui connect 127.0.0.1:8080 debug 01JOPAQUESESSIONID
 
 # Add one or more already-configured global reporting servers by name.
-mecatui debug 01JOPAQUESESSIONID --debug-mcp github
-mecatui connect 127.0.0.1:8080 debug 01JOPAQUESESSIONID --debug-mcp github
+mecatui debug 01JOPAQUESES --debug-mcp github
+mecatui connect 127.0.0.1:8080 debug 01JOPAQUESES --debug-mcp github
 
 # Replace the automatic diagnosis question with a focused one.
 mecatui debug 01JOPAQUESESSIONID \
@@ -47,20 +50,25 @@ mecatui debug 01JOPAQUESESSIONID \
 
 ### What happens
 
-1. Use the full target ID from `/session`, `/sessions`, or the
-   `mecatui: final-session-id=...` line printed when its TUI exits. You can instead
-   type the exact 12-byte ID displayed in the TUI header. If multiple visible
-   sessions share that prefix, mecatui creates nothing and asks for the full ID.
-2. Run `mecatui debug` against the same embedded store, or use
-   `mecatui connect ADDRESS debug` against the server that owns the target.
+1. Pass the full target ID from `/session`, `/sessions`, or the
+   `mecatui: final-session-id=...` line printed when its TUI exits as `TARGET`. You can instead
+   pass the displayed 12-column short handle unchanged: safe `[A-Za-z0-9._-]` bytes are literal
+   except that a leading `-` is encoded as `%2D`; other UTF-8 bytes are uppercase `%HH` atoms,
+   and only complete atoms that fit are shown. It has no leading `#`. A syntactically valid short
+   target consults the complete visible inventory. Exact full-ID equality wins; otherwise one
+   unique projected match resolves. If projections are ambiguous, open `/session`, copy the full
+   exact ID, and pass it as `TARGET` through the same command. If inventory fails or no handle
+   matches, mecatui sends `TARGET` unchanged and reports the ordinary server exact-ID result.
+2. Run `mecatui debug TARGET` against the same embedded store, or use
+   `mecatui connect ADDRESS debug TARGET` against the server that owns the target.
 3. mecatui prints a privacy disclosure before entering the alternate screen.
    Running the command is consent to send bounded target evidence—which may
    include prompts, model output, tool arguments/results, paths, and secrets—to
    the selected model.
 4. The server authorizes the target and creates a **different**, durable,
    no-filesystem analysis session. The normal padded header shows amber/bold
-   `DEBUG target #<digest>` after `mecatui`, and the terminal title carries the digest.
-   `/session` shows the safely quoted exact target ID and copies it with `t`.
+   `DEBUG target <handle>` after `mecatui`, and the terminal title carries the same
+   handle. `/session` shows the safely quoted exact target ID and copies it with `t`.
 5. The debugger submits one first user turn ordered as your diagnosis objective, the required
    status/transcript/pagination workflow, the expected report sections, and finally a delimited
    sanitized current-debugger client/server runtime block. `--prompt` replaces only the
