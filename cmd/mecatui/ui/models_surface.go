@@ -191,7 +191,11 @@ func modelsPanelFixedRows(picker modelsState, prov string, hk helpKeys) int {
 	}
 	b.WriteString(picker.filter.View() + "\n\n")
 	b.WriteString(modelSwitchDisclosure + "\n\n")
-	for range renderProviderStatusLines(picker.catalog.statuses, len(picker.catalog.models) == 0) {
+	statuses := renderProviderStatusLines(picker.catalog.statuses, len(picker.catalog.models) == 0)
+	if modelsRowsRendered(picker) && len(statuses) > 0 {
+		b.WriteString("separator\n")
+	}
+	for range statuses {
 		b.WriteString("status\n")
 	}
 	b.WriteString("row\n\n")
@@ -199,6 +203,10 @@ func modelsPanelFixedRows(picker modelsState, prov string, hk helpKeys) int {
 	b.WriteString("● current  ★ global default\n")
 	b.WriteString("reason = emits reasoning · set its effort tier with /effort")
 	return strings.Count(b.String(), "\n")
+}
+
+func modelsRowsRendered(picker modelsState) bool {
+	return !picker.loading && picker.err == nil && len(picker.catalog.models) > 0 && len(picker.filtered) > 0
 }
 
 const modelsDisabledNote = "Model selection is not available on this server.\nConfigure a provider on the server, then reconnect."
@@ -226,12 +234,20 @@ func promotedStatus(statuses []client.ProviderStatus) (client.ProviderStatus, bo
 	return client.ProviderStatus{}, false
 }
 
+var customProviderStatusCopy = map[string]string{
+	"unreachable":  "model service not reachable — check provider configuration",
+	"unauthorized": "model service rejected access — check provider access configuration",
+	"empty":        "no selectable models",
+}
 var toolhiveStatusCopy = map[string]string{"unreachable": "proxy not reachable", "unauthorized": "gateway rejected the credential", "empty": "credential lists no models"}
 var openAICodexStatusCopy = map[string]string{"unreachable": "ChatGPT Codex service not reachable", "unauthorized": "manual token rejected", "empty": "account lists no selectable models"}
 
 func providerStatusLine(s client.ProviderStatus) string {
-	copyByState := toolhiveStatusCopy
-	if s.ProviderID == "openai-codex" {
+	copyByState := customProviderStatusCopy
+	switch s.ProviderID {
+	case "toolhive":
+		copyByState = toolhiveStatusCopy
+	case "openai-codex":
 		copyByState = openAICodexStatusCopy
 	}
 	clause := copyByState[s.State]
@@ -287,8 +303,12 @@ func renderModelsPanel(th theme.Theme, catalog modelCatalog, picker modelsState,
 		}
 	}
 	if picker.err == nil {
-		for _, line := range renderProviderStatusLines(catalog.statuses, len(catalog.models) == 0) {
-			b.WriteString(th.Style("muted").Render(sanitizeTerminal(line)) + "\n")
+		statuses := renderProviderStatusLines(catalog.statuses, len(catalog.models) == 0)
+		if modelsRowsRendered(picker) && len(statuses) > 0 {
+			b.WriteString("\n")
+		}
+		for _, line := range statuses {
+			b.WriteString(th.Style("errorText").Render(sanitizeTerminal(line)) + "\n")
 		}
 	}
 	b.WriteString("\n" + th.Style("muted").Render("type to filter · ↑/↓/"+hk.scrollUp+" move · "+hk.choose+" use · "+hk.setGlobalDefault+" set global default · "+hk.closeOnly+" clear filter / close"))
