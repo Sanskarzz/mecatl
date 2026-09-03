@@ -3508,8 +3508,21 @@ Both layers classify targets with the SINGLE predicate `cmd/mecatui/client/clien
 per-RPC credential can never disagree about one target.
 A registry hit overrides the loopback default to verified gRPC TLS and rejects explicit
 plaintext or `--insecure`; the saved issuer CA is passed only to the issuer client, never
-to `DialConfig.TLSCAFile`.
-A missing target enrollment returns the CLI-login instruction. The UI `/connect`
+to `DialConfig.TLSCAFile`. Credential resolution is static `--auth-token`, explicit
+`--anonymous`, saved OIDC enrollment, then a credential-free dial on any clean enrollment
+miss. The server is authoritative: only an actual `Unauthenticated` RPC establishes that
+caller authentication is required. Corrupt or unreadable registry, keyring, and credential
+state remains a storage failure rather than a miss. A static token flag or environment
+fallback wins even when `--anonymous` is also present; otherwise `--anonymous` bypasses saved
+state. Remote use retains
+verified-TLS-by-default with `--tls=false` as a separate plaintext decision. Neither a
+private IP nor a DNS/Tailscale-like name changes those TLS rules. In a credential-free
+Tailscale deployment, tailnet membership and ACLs become the shared authority, so every
+admitted peer shares the unauthenticated server authority. `--no-saved-auth` is removed under
+the ADR-0089 one-spelling rule. On the server side, startup listener posture counts only
+static bearer, OIDC, or verified client certificates as caller authentication. Ordinary
+TLS is transport encryption/server authentication and therefore does not suppress the
+prominent non-loopback anonymous warning. The UI `/connect`
 overlay lists public saved-target metadata, confirms a selection, and requests a
 restart; a new-target selection exits to the same CLI login flow before reconnecting.
 Ordinary target selection and every target switch start a new remote session. During
