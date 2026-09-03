@@ -282,7 +282,7 @@ func TestContextCancelPassthrough(t *testing.T) {
 func TestSaveLoadOverWire(t *testing.T) {
 	st := newWiredSessionStore(t)
 	ctx := context.Background()
-	s := session.New("wire-1", session.ModeDefault, "/ws", session.Limits{}, time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC))
+	s := session.New("wire-1", session.ModeDefault, session.EnvironmentRef{Kind: session.EnvKindLocal, ID: "/ws", Revision: "in-tree-v1"}, session.Limits{}, time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC))
 	if err := s.RecordUserPrompt("hello driver", nil); err != nil {
 		t.Fatalf("RecordUserPrompt: %v", err)
 	}
@@ -298,6 +298,21 @@ func TestSaveLoadOverWire(t *testing.T) {
 	}
 }
 
+func TestADR_0291_DriverStorageCarriesExactPrivateEnvironmentRef(t *testing.T) {
+	want := session.EnvironmentRef{Kind: "remote", ID: "opaque-private-id", Revision: "inventory-r17"}
+	entry, err := metadataToProto(port.SessionDiscoveryMeta{ID: "s1", EnvironmentRef: want})
+	if err != nil {
+		t.Fatalf("metadataToProto: %v", err)
+	}
+	if entry.GetEnvironmentRef() == nil || entry.GetEnvironmentRef().GetRevision() != want.Revision {
+		t.Fatalf("driver environment ref = %+v, want exact private ref %+v", entry.GetEnvironmentRef(), want)
+	}
+	got := metadataFromProto(entry)
+	if got.EnvironmentRef != want {
+		t.Fatalf("round-tripped environment ref = %+v, want %+v", got.EnvironmentRef, want)
+	}
+}
+
 // TestServerWrapperSaveRejectsBadEnvelope pins the server wrapper's Save
 // pre-validation: every malformed envelope shape — blank session_id, missing
 // snapshot, unknown format, empty payload, undecodable payload, and a
@@ -308,7 +323,7 @@ func TestServerWrapperSaveRejectsBadEnvelope(t *testing.T) {
 	srv := NewSessionStoreServer(memstore.New())
 	ctx := context.Background()
 
-	goodPayload, err := sessnap.Marshal(session.New("id-1", session.ModeDefault, "/ws", session.Limits{}, time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)))
+	goodPayload, err := sessnap.Marshal(session.New("id-1", session.ModeDefault, session.EnvironmentRef{Kind: session.EnvKindLocal, ID: "/ws", Revision: "in-tree-v1"}, session.Limits{}, time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)))
 	if err != nil {
 		t.Fatalf("sessnap.Marshal: %v", err)
 	}

@@ -5,7 +5,6 @@ package server
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -14,6 +13,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protowire"
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
 	"github.com/stacklok/mecatl/engine/agent"
@@ -40,11 +40,13 @@ var _ mecatlv1.HarnessServiceServer = (*HarnessServer)(nil)
 
 // CreateSession allocates a new session and returns its id.
 func (h *HarnessServer) CreateSession(ctx context.Context, req *mecatlv1.CreateSessionRequest) (*mecatlv1.CreateSessionResponse, error) {
-	// Session profile (issue #55): "" = default (full filesystem), "no-fs" = the
-	// no-filesystem profile; anything else is a loud InvalidArgument. The
-	// workspace requirement is PROFILE-AWARE and enforced in the service
-	// (createSession): default requires a workspace, no-fs requires an EMPTY one
-	// — so there is deliberately NO unconditional empty-workspace guard here.
+	if hasLegacyCreateSessionField(req.ProtoReflect().GetUnknown()) {
+		return nil, status.Error(codes.InvalidArgument, "legacy workspace placement fields are unsupported")
+	}
+	// Session profile: "" binds the server-owned default placement and "no-fs"
+	// requests explicit filesystem attenuation; anything else is a loud
+	// InvalidArgument. Binding and exact EnvironmentRef validation happen in the
+	// service, so this transport never accepts or derives a workspace.
 	profile, err := ParseSessionProfile(req.GetProfile())
 	if err != nil {
 		return nil, toStatus(err)
@@ -55,9 +57,6 @@ func (h *HarnessServer) CreateSession(ctx context.Context, req *mecatlv1.CreateS
 	// provider_id, surfaces as InvalidArgument via toStatus.
 	sel := ProviderSelector{ProviderID: req.GetProviderId(), ModelID: req.GetModelId(), ReasoningEffort: req.GetReasoningEffort()}
 	var opts []CreateSessionOption
-	if src := req.GetSourceSessionId(); src != "" {
-		opts = append(opts, WithSourceSession(session.SessionID(src)))
-	}
 	if target := req.GetDebugTargetSessionId(); target != "" {
 		opts = append(opts, WithDebugTarget(session.SessionID(target)))
 	}
@@ -76,7 +75,7 @@ func (h *HarnessServer) CreateSession(ctx context.Context, req *mecatlv1.CreateS
 	if !grant.IsEmpty() {
 		opts = append(opts, WithClientMCP(grant))
 	}
-	sess, err := h.svc.CreateSessionWithProfile(ctx, req.GetWorkspace(), modeFromProto(req.GetMode()), limitsFromProto(req.GetLimits()), sel, profile, opts...)
+	sess, err := h.svc.CreateSessionWithProfile(ctx, modeFromProto(req.GetMode()), limitsFromProto(req.GetLimits()), sel, profile, opts...)
 	if err != nil {
 		return nil, toStatus(err)
 	}
@@ -97,7 +96,27 @@ func (h *HarnessServer) CreateSession(ctx context.Context, req *mecatlv1.CreateS
 			Audio: scaps.Audio,
 		},
 		ResolvedModel: resolvedModelToProto(h.svc.ResolvedModel(sess.ID)),
+		Placement:     placementMetadataToProto(sess.Placement),
 	}, nil
+}
+
+func hasLegacyCreateSessionField(raw []byte) bool {
+	for len(raw) > 0 {
+		number, wireType, n := protowire.ConsumeTag(raw)
+		if n < 0 {
+			return false
+		}
+		raw = raw[n:]
+		if number == 1 || number == 8 {
+			return true
+		}
+		n = protowire.ConsumeFieldValue(number, wireType, raw)
+		if n < 0 {
+			return false
+		}
+		raw = raw[n:]
+	}
+	return false
 }
 
 // clientMCPFromProto maps the wire McpServerSpec list onto the transport-neutral
@@ -222,72 +241,39 @@ func (h *HarnessServer) CompactSession(ctx context.Context, req *mecatlv1.Compac
 	return &mecatlv1.CompactSessionResponse{Compacted: result.Changed}, nil
 }
 
-// ForkSession creates a peer session from an existing session's history snapshot
-// (ADR 0065). The new session inherits the source's mode, workspace, limits, and
-// provider/model/profile labels; same provider and model only, with the ONE
-// optional selector delta being a reasoning-effort override (ADR 0068, empty
-// inherits). The source must be at a turn boundary (idle/terminal); a
-// running/awaiting source is rejected with FailedPrecondition. No streaming — the
-// fork is synchronous.
+// ClearSession creates a distinct empty-history successor.
+func (h *HarnessServer) ClearSession(ctx context.Context, req *mecatlv1.ClearSessionRequest) (*mecatlv1.ClearSessionResponse, error) {
+	if req.GetSourceSessionId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "source_session_id is required")
+	}
+	id, err := h.svc.ClearSessionSuccessor(ctx, session.SessionID(req.GetSourceSessionId()), SuccessorPlacement{Selector: req.GetWorktreeSelector(), SelectorPresent: req.WorktreeSelector != nil})
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	created, err := h.svc.GetSession(ctx, id)
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	return &mecatlv1.ClearSessionResponse{SessionId: string(id), Placement: placementMetadataToProto(created.Placement)}, nil
+}
+
+// ForkSession creates a history-carrying successor.
 func (h *HarnessServer) ForkSession(ctx context.Context, req *mecatlv1.ForkSessionRequest) (*mecatlv1.ForkSessionResponse, error) {
 	if req.GetSourceSessionId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "source_session_id is required")
 	}
-	id, err := h.svc.ForkSession(ctx, session.SessionID(req.GetSourceSessionId()), req.GetTitle(), req.GetReasoningEffort())
+	id, err := h.svc.ForkSessionSuccessor(ctx, ForkSuccessorRequest{
+		Source: session.SessionID(req.GetSourceSessionId()), Placement: SuccessorPlacement{Selector: req.GetWorktreeSelector(), SelectorPresent: req.WorktreeSelector != nil},
+		Title: req.GetTitle(), ProviderID: req.GetProviderId(), ModelID: req.GetModelId(), ReasoningEffort: req.GetReasoningEffort(),
+	})
 	if err != nil {
 		return nil, toStatus(err)
 	}
-	return &mecatlv1.ForkSessionResponse{SessionId: string(id)}, nil
-}
-
-func adoptionBindingsFromProto(binding *mecatlv1.AdoptionBindings) (AdoptionBindings, error) {
-	if binding == nil {
-		return AdoptionBindings{}, fmt.Errorf("%w: bindings are required", ErrInvalidArgument)
-	}
-	profile, err := ParseSessionProfile(binding.GetProfile())
-	if err != nil {
-		return AdoptionBindings{}, err
-	}
-	return AdoptionBindings{
-		Workspace:      binding.GetWorkspace(),
-		EnvironmentRef: session.EnvironmentRef{Kind: session.EnvironmentKind(binding.GetEnvironmentKind()), ID: binding.GetEnvironmentId()},
-		ProviderID:     binding.GetProviderId(), ModelID: binding.GetModelId(), Profile: profile,
-	}, nil
-}
-
-func adoptionBindingsToProto(binding AdoptionBindings) *mecatlv1.AdoptionBindings {
-	return &mecatlv1.AdoptionBindings{Workspace: binding.Workspace, EnvironmentKind: string(binding.EnvironmentRef.Kind), EnvironmentId: binding.EnvironmentRef.ID, ProviderId: binding.ProviderID, ModelId: binding.ModelID, Profile: string(binding.Profile)}
-}
-
-func (h *HarnessServer) PreflightSessionAdoption(ctx context.Context, req *mecatlv1.PreflightSessionAdoptionRequest) (*mecatlv1.PreflightSessionAdoptionResponse, error) {
-	if req.GetSourceSessionId() == "" {
-		return nil, status.Error(codes.InvalidArgument, "source_session_id is required")
-	}
-	bindings, err := adoptionBindingsFromProto(req.GetBindings())
+	created, err := h.svc.GetSession(ctx, id)
 	if err != nil {
 		return nil, toStatus(err)
 	}
-	result, err := h.svc.PreflightSessionAdoption(ctx, session.SessionID(req.GetSourceSessionId()), bindings)
-	if err != nil {
-		return nil, toStatus(err)
-	}
-	return &mecatlv1.PreflightSessionAdoptionResponse{Eligible: result.Eligible, ReasonCode: string(result.Reason), Bindings: adoptionBindingsToProto(result.Bindings)}, nil
-}
-
-func (h *HarnessServer) AdoptSession(ctx context.Context, req *mecatlv1.AdoptSessionRequest) (*mecatlv1.AdoptSessionResponse, error) {
-	if req.GetSourceSessionId() == "" || req.GetIdempotencyKey() == "" {
-		return nil, status.Error(codes.InvalidArgument, "source_session_id and idempotency_key are required")
-	}
-	bindings, err := adoptionBindingsFromProto(req.GetBindings())
-	if err != nil {
-		return nil, toStatus(err)
-	}
-	sess, err := h.svc.AdoptSession(ctx, session.SessionID(req.GetSourceSessionId()), req.GetIdempotencyKey(), bindings)
-	if err != nil {
-		return nil, toStatus(err)
-	}
-	caps := h.svc.SessionCapabilities(sess.ID)
-	return &mecatlv1.AdoptSessionResponse{SessionId: string(sess.ID), SourceSessionId: string(adoptionSourceID(sess)), Capabilities: h.svc.capabilities(), SessionCapabilities: &mecatlv1.SessionCapabilities{Image: caps.Image, Audio: caps.Audio}, ResolvedModel: resolvedModelToProto(h.svc.ResolvedModel(sess.ID))}, nil
+	return &mecatlv1.ForkSessionResponse{SessionId: string(id), Placement: placementMetadataToProto(created.Placement)}, nil
 }
 
 // Converse drives one run over a bidi stream. The first frame MUST be a Prompt
@@ -1215,23 +1201,28 @@ func (h *HarnessServer) ListSkillChanges(ctx context.Context, req *mecatlv1.List
 	return resp, nil
 }
 
-// ListCommands returns the available slash commands for the requested workspace.
+// ListCommands returns commands for an owned session placement.
 func (h *HarnessServer) ListCommands(ctx context.Context, req *mecatlv1.ListCommandsRequest) (*mecatlv1.ListCommandsResponse, error) {
-	cmds, err := h.svc.ListCommands(ctx, req.GetWorkspace())
+	if req.GetSessionId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "session_id is required")
+	}
+	cmds, err := h.svc.ListCommandsForSession(ctx, session.SessionID(req.GetSessionId()))
 	if err != nil {
 		return nil, toStatus(err)
 	}
 	return &mecatlv1.ListCommandsResponse{Commands: toProtoCommands(cmds)}, nil
 }
 
-// ListWorktrees returns the git worktrees of the repo rooted at the requested
-// workspace (issue #102).
+// ListWorktrees returns scoped placement choices for an owned session.
 func (h *HarnessServer) ListWorktrees(ctx context.Context, req *mecatlv1.ListWorktreesRequest) (*mecatlv1.ListWorktreesResponse, error) {
-	wts, err := h.svc.ListWorktrees(ctx, req.GetWorkspace())
+	if req.GetSessionId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "session_id is required")
+	}
+	wts, err := h.svc.ListWorktreesForSession(ctx, session.SessionID(req.GetSessionId()))
 	if err != nil {
 		return nil, toStatus(err)
 	}
-	return &mecatlv1.ListWorktreesResponse{Worktrees: toProtoWorktrees(wts)}, nil
+	return &mecatlv1.ListWorktreesResponse{Worktrees: toProtoScopedWorktrees(wts)}, nil
 }
 
 // StreamSessionEvents replays a session's durable event log as a server stream

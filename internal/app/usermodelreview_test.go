@@ -218,7 +218,7 @@ func TestBuildSharesLearningAdmissionAcrossSharedAndSelectedProviderEngines(t *t
 	}
 	defer built.Close()
 
-	defaultSession, err := built.Service.CreateSession(ctx, workspace, session.ModeDefault, defaultLimits())
+	defaultSession, err := built.Service.CreateSession(ctx, session.ModeDefault, defaultLimits())
 	if err != nil {
 		t.Fatalf("CreateSession(default): %v", err)
 	}
@@ -241,7 +241,7 @@ func TestBuildSharesLearningAdmissionAcrossSharedAndSelectedProviderEngines(t *t
 
 	runSelected := func(prompt string) {
 		t.Helper()
-		sess, createErr := built.Service.CreateSessionWithProvider(ctx, workspace, session.ModeDefault, defaultLimits(), server.ProviderSelector{ProviderID: providerOpenRouter, ModelID: "test-model"})
+		sess, createErr := built.Service.CreateSessionWithProvider(ctx, session.ModeDefault, defaultLimits(), server.ProviderSelector{ProviderID: providerOpenRouter, ModelID: "test-model"})
 		if createErr != nil {
 			t.Fatalf("CreateSessionWithProvider: %v", createErr)
 		}
@@ -283,7 +283,7 @@ func TestStartupProjectOffKeepsAlternateRootAutomaticAssets(t *testing.T) {
 			}
 			provider := mockllm.New(mockllm.TextTurn("completed"), mockllm.TextTurn(`{"kind":"abstained","candidates":[]}`))
 			built, err := Build(context.Background(), Config{
-				Model: "model", DefaultProvider: providerOpenAI, Workspace: startupRoot, TrustProject: true, NoSoul: true,
+				Model: "model", DefaultProvider: providerOpenAI, Workspace: alternateRoot, TrustProject: true, NoSoul: true,
 				PermissionConfigs: []string{operator}, PermissionsConventional: true, permConfigEnv: isolatedPermConfigEnv(t),
 				UserModelDir: t.TempDir(), envDetector: fakeEnv(map[string]string{"OPENAI_API_KEY": "test"}), liveModelHTTPClient: offlineHTTPClient(),
 				providerConstructor: func(_ Config, id, _, _ string) port.LLMProvider {
@@ -297,7 +297,7 @@ func TestStartupProjectOffKeepsAlternateRootAutomaticAssets(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer built.Close()
-			sess, err := built.Service.CreateSession(context.Background(), alternateRoot, session.ModeDefault, defaultLimits())
+			sess, err := built.Service.CreateSession(context.Background(), session.ModeDefault, defaultLimits())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -357,7 +357,7 @@ func TestExplicitReflectionUsesPersistedSessionProvider(t *testing.T) {
 	if _, statErr := os.Stat(filepath.Join(userModelDir, "reflections")); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("off mode eagerly initialized reflection repository: %v", statErr)
 	}
-	sess, err := built.Service.CreateSessionWithProvider(ctx, workspace, session.ModeDefault, defaultLimits(), server.ProviderSelector{ProviderID: providerOpenRouter})
+	sess, err := built.Service.CreateSessionWithProvider(ctx, session.ModeDefault, defaultLimits(), server.ProviderSelector{ProviderID: providerOpenRouter})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -392,14 +392,13 @@ func TestExplicitReflectionUsesPersistedSessionProvider(t *testing.T) {
 
 func TestExplicitReflectionAlternateRootStagesButCannotPromoteProjectProposal(t *testing.T) {
 	ctx := context.Background()
-	configuredRoot := t.TempDir()
 	alternateRoot := t.TempDir()
 	provider := mockllm.New(
 		mockllm.TextTurn("completed"),
 		mockllm.TextTurn(`{"kind":"proposed","candidates":[{"kind":"project_fact","key":"project/build","value":"task build","evidence":["m:0"]}]}`),
 	)
 	built, err := Build(ctx, Config{
-		Model: "model", Workspace: configuredRoot, TrustProject: true, NoSoul: true,
+		Model: "model", Workspace: alternateRoot, TrustProject: true, NoSoul: true,
 		LearningMode: learning.Off, UserModelDir: t.TempDir(), MemoryDir: t.TempDir(),
 		envDetector: fakeEnv(map[string]string{"OPENAI_API_KEY": "test"}), liveModelHTTPClient: offlineHTTPClient(),
 		providerConstructor: func(_ Config, id, _, _ string) port.LLMProvider {
@@ -413,7 +412,7 @@ func TestExplicitReflectionAlternateRootStagesButCannotPromoteProjectProposal(t 
 		t.Fatal(err)
 	}
 	defer built.Close()
-	sess, err := built.Service.CreateSession(ctx, alternateRoot, session.ModeDefault, defaultLimits())
+	sess, err := built.Service.CreateSession(ctx, session.ModeDefault, defaultLimits())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -431,11 +430,11 @@ func TestExplicitReflectionAlternateRootStagesButCannotPromoteProjectProposal(t 
 		t.Fatalf("alternate-root project proposals=%+v err=%v", page.GetProposals(), err)
 	}
 	proposal := page.GetProposals()[0]
-	if proposal.GetPromotionAvailable() || proposal.GetPromotionUnavailableReason() == "" {
-		t.Fatalf("alternate-root proposal unexpectedly promotable: %+v", proposal)
+	if !proposal.GetPromotionAvailable() || proposal.GetPromotionUnavailableReason() != "" {
+		t.Fatalf("configured-placement proposal unexpectedly unavailable: %+v", proposal)
 	}
-	if _, err = built.Service.DecideLearningProposal(ctx, proposal.GetId(), proposal.GetVersion(), "approve", "", alternateRoot); !errors.Is(err, server.ErrFailedPrecondition) {
-		t.Fatalf("alternate-root approval err=%v, want failed precondition", err)
+	if _, err = built.Service.DecideLearningProposal(ctx, proposal.GetId(), proposal.GetVersion(), "approve", "", alternateRoot); err != nil {
+		t.Fatalf("configured-placement approval err=%v", err)
 	}
 }
 
@@ -470,7 +469,7 @@ func TestBuildGRPCReflectionPartitionsVerifiedPrincipals(t *testing.T) {
 	}
 	for _, principal := range principals {
 		principalCtx := session.WithPrincipal(ctx, principal)
-		sess, createErr := built.Service.CreateSession(principalCtx, workspace, session.ModeDefault, defaultLimits())
+		sess, createErr := built.Service.CreateSession(principalCtx, session.ModeDefault, defaultLimits())
 		if createErr != nil {
 			t.Fatal(createErr)
 		}
@@ -529,7 +528,7 @@ func TestServiceExplicitReflectionReceiptsMatchReviewAndAutoPolicy(t *testing.T)
 				t.Fatal(err)
 			}
 			defer built.Close()
-			sess, err := built.Service.CreateSession(context.Background(), workspace, session.ModeDefault, defaultLimits())
+			sess, err := built.Service.CreateSession(context.Background(), session.ModeDefault, defaultLimits())
 			if err != nil {
 				t.Fatal(err)
 			}

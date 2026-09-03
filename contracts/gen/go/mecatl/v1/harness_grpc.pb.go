@@ -52,9 +52,8 @@ const (
 	HarnessService_RenameSession_FullMethodName            = "/mecatl.v1.HarnessService/RenameSession"
 	HarnessService_DeleteSession_FullMethodName            = "/mecatl.v1.HarnessService/DeleteSession"
 	HarnessService_CompactSession_FullMethodName           = "/mecatl.v1.HarnessService/CompactSession"
+	HarnessService_ClearSession_FullMethodName             = "/mecatl.v1.HarnessService/ClearSession"
 	HarnessService_ForkSession_FullMethodName              = "/mecatl.v1.HarnessService/ForkSession"
-	HarnessService_PreflightSessionAdoption_FullMethodName = "/mecatl.v1.HarnessService/PreflightSessionAdoption"
-	HarnessService_AdoptSession_FullMethodName             = "/mecatl.v1.HarnessService/AdoptSession"
 	HarnessService_Converse_FullMethodName                 = "/mecatl.v1.HarnessService/Converse"
 	HarnessService_ListMcpResources_FullMethodName         = "/mecatl.v1.HarnessService/ListMcpResources"
 	HarnessService_ReadMcpResource_FullMethodName          = "/mecatl.v1.HarnessService/ReadMcpResource"
@@ -149,10 +148,10 @@ type HarnessServiceClient interface {
 	// remains authoritative: a mid-turn change is rejected with InvalidArgument, so
 	// clients that want "next prompt" semantics must defer and retry once idle.
 	SetMode(ctx context.Context, in *SetModeRequest, opts ...grpc.CallOption) (*SetModeResponse, error)
-	// CloseSession ends a session and releases its server-side resources (per-session
-	// learned permission rules, per-session engine/workspace). Idempotent: closing an
-	// unknown or already-closed session via the wire returns NotFound only for a
-	// never-created id; an already-released session succeeds.
+	// CloseSession ends a session and releases its server-side resources (learned
+	// permission rules, bound placement, and any per-session engine). Idempotent:
+	// closing an unknown or already-closed session via the wire returns NotFound only
+	// for a never-created id; an already-released session succeeds.
 	CloseSession(ctx context.Context, in *CloseSessionRequest, opts ...grpc.CallOption) (*CloseSessionResponse, error)
 	// RenameSession explicitly replaces an idle main session's title.
 	RenameSession(ctx context.Context, in *RenameSessionRequest, opts ...grpc.CallOption) (*RenameSessionResponse, error)
@@ -161,19 +160,12 @@ type HarnessServiceClient interface {
 	// CompactSession applies one manual compaction pass to an owned main-chat
 	// session at a turn boundary. It creates no model turn.
 	CompactSession(ctx context.Context, in *CompactSessionRequest, opts ...grpc.CallOption) (*CompactSessionResponse, error)
-	// ForkSession creates a new peer session whose conversation history is a
-	// snapshot of an existing session's, inheriting the source's mode, workspace,
-	// limits, and provider/model/profile labels. Same provider and model only;
-	// the ONE permitted selector delta is an OPTIONAL reasoning-effort override
-	// (ADR 0068). The source must be at a turn boundary (idle/terminal); a
-	// running/awaiting source is rejected. No streaming.
+	// ClearSession creates a distinct empty-history successor that inherits the
+	// source session's placement unless a fresh source-scoped selector is supplied.
+	ClearSession(ctx context.Context, in *ClearSessionRequest, opts ...grpc.CallOption) (*ClearSessionResponse, error)
+	// ForkSession creates a history-carrying successor with optional placement and
+	// model-routing overrides.
 	ForkSession(ctx context.Context, in *ForkSessionRequest, opts ...grpc.CallOption) (*ForkSessionResponse, error)
-	// PreflightSessionAdoption evaluates one authenticated caller-owned legacy
-	// source against explicit workspace/environment/provider/model bindings.
-	PreflightSessionAdoption(ctx context.Context, in *PreflightSessionAdoptionRequest, opts ...grpc.CallOption) (*PreflightSessionAdoptionResponse, error)
-	// AdoptSession atomically publishes a new explicit-main copy of one eligible
-	// legacy source. Retries are caller+source-bound by idempotency_key.
-	AdoptSession(ctx context.Context, in *AdoptSessionRequest, opts ...grpc.CallOption) (*AdoptSessionResponse, error)
 	// Converse drives one run. The first frame MUST be `prompt`; subsequent
 	// frames are zero or more `resume_approval` / `cancel` control frames. The
 	// server streams `Event` envelopes until the terminal `result` event, then
@@ -207,21 +199,18 @@ type HarnessServiceClient interface {
 	// model, its effective read-only tool scope, permission mode, and UX color.
 	// Derived from the snapshot taken at startup; it performs no live discovery.
 	ListAgents(ctx context.Context, in *ListAgentsRequest, opts ...grpc.CallOption) (*ListAgentsResponse, error)
-	// ListCommands returns the available slash commands (name + short
-	// description) discovered under the configured command directories of the
-	// requested workspace. It powers the client's in-input command palette; it is
-	// DISCOVERY only — expanding a command remains a run-path concern (the server's
-	// CommandExpander handles it when a "/<cmd> args" prompt is submitted). An
-	// empty workspace, or a server with no command expander, returns an empty list.
+	// ListCommands returns slash commands discovered for one owned session's exact
+	// server-bound placement. It authorizes and reattaches that session before
+	// discovery and accepts no workspace/root input. It powers the client's command
+	// palette; command expansion remains a run-path concern. A no-FS session or a
+	// server with no command expander returns an empty list.
 	ListCommands(ctx context.Context, in *ListCommandsRequest, opts ...grpc.CallOption) (*ListCommandsResponse, error)
-	// ListWorktrees returns the git worktrees of the repo rooted at the requested
-	// workspace (issue #102). It powers the client's /worktrees overlay — the
-	// first-class operator workflow for binding a session to an EXISTING sibling
-	// worktree (a new session rooted there, not a live-session switch). It is
-	// DISCOVERY only, composition-injected (nil-safe: a no-FS/cloud server, or an
-	// untrusted workspace, returns an empty list); it never performs a live
-	// model/network call and never mutates anything. An empty workspace or a server
-	// with no worktree lister also returns an empty list.
+	// ListWorktrees discovers eligible alternatives for one owned source session's
+	// exactly reattached placement. Results carry bounded display metadata and an
+	// opaque source-scoped selector accepted only by ClearSession or ForkSession.
+	// The server re-enumerates and matches current choices on use; selectors are not
+	// paths, are not persisted, and expire on restart. A no-FS session or a server
+	// with no worktree lister returns an empty list.
 	ListWorktrees(ctx context.Context, in *ListWorktreesRequest, opts ...grpc.CallOption) (*ListWorktreesResponse, error)
 	// StreamSessionEvents replays a session's durable event log as a server stream
 	// of `Event` envelopes (cloud-native Phase 3a read-back). It is the client-tier
@@ -591,30 +580,20 @@ func (c *harnessServiceClient) CompactSession(ctx context.Context, in *CompactSe
 	return out, nil
 }
 
+func (c *harnessServiceClient) ClearSession(ctx context.Context, in *ClearSessionRequest, opts ...grpc.CallOption) (*ClearSessionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ClearSessionResponse)
+	err := c.cc.Invoke(ctx, HarnessService_ClearSession_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *harnessServiceClient) ForkSession(ctx context.Context, in *ForkSessionRequest, opts ...grpc.CallOption) (*ForkSessionResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ForkSessionResponse)
 	err := c.cc.Invoke(ctx, HarnessService_ForkSession_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *harnessServiceClient) PreflightSessionAdoption(ctx context.Context, in *PreflightSessionAdoptionRequest, opts ...grpc.CallOption) (*PreflightSessionAdoptionResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(PreflightSessionAdoptionResponse)
-	err := c.cc.Invoke(ctx, HarnessService_PreflightSessionAdoption_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *harnessServiceClient) AdoptSession(ctx context.Context, in *AdoptSessionRequest, opts ...grpc.CallOption) (*AdoptSessionResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(AdoptSessionResponse)
-	err := c.cc.Invoke(ctx, HarnessService_AdoptSession_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1220,10 +1199,10 @@ type HarnessServiceServer interface {
 	// remains authoritative: a mid-turn change is rejected with InvalidArgument, so
 	// clients that want "next prompt" semantics must defer and retry once idle.
 	SetMode(context.Context, *SetModeRequest) (*SetModeResponse, error)
-	// CloseSession ends a session and releases its server-side resources (per-session
-	// learned permission rules, per-session engine/workspace). Idempotent: closing an
-	// unknown or already-closed session via the wire returns NotFound only for a
-	// never-created id; an already-released session succeeds.
+	// CloseSession ends a session and releases its server-side resources (learned
+	// permission rules, bound placement, and any per-session engine). Idempotent:
+	// closing an unknown or already-closed session via the wire returns NotFound only
+	// for a never-created id; an already-released session succeeds.
 	CloseSession(context.Context, *CloseSessionRequest) (*CloseSessionResponse, error)
 	// RenameSession explicitly replaces an idle main session's title.
 	RenameSession(context.Context, *RenameSessionRequest) (*RenameSessionResponse, error)
@@ -1232,19 +1211,12 @@ type HarnessServiceServer interface {
 	// CompactSession applies one manual compaction pass to an owned main-chat
 	// session at a turn boundary. It creates no model turn.
 	CompactSession(context.Context, *CompactSessionRequest) (*CompactSessionResponse, error)
-	// ForkSession creates a new peer session whose conversation history is a
-	// snapshot of an existing session's, inheriting the source's mode, workspace,
-	// limits, and provider/model/profile labels. Same provider and model only;
-	// the ONE permitted selector delta is an OPTIONAL reasoning-effort override
-	// (ADR 0068). The source must be at a turn boundary (idle/terminal); a
-	// running/awaiting source is rejected. No streaming.
+	// ClearSession creates a distinct empty-history successor that inherits the
+	// source session's placement unless a fresh source-scoped selector is supplied.
+	ClearSession(context.Context, *ClearSessionRequest) (*ClearSessionResponse, error)
+	// ForkSession creates a history-carrying successor with optional placement and
+	// model-routing overrides.
 	ForkSession(context.Context, *ForkSessionRequest) (*ForkSessionResponse, error)
-	// PreflightSessionAdoption evaluates one authenticated caller-owned legacy
-	// source against explicit workspace/environment/provider/model bindings.
-	PreflightSessionAdoption(context.Context, *PreflightSessionAdoptionRequest) (*PreflightSessionAdoptionResponse, error)
-	// AdoptSession atomically publishes a new explicit-main copy of one eligible
-	// legacy source. Retries are caller+source-bound by idempotency_key.
-	AdoptSession(context.Context, *AdoptSessionRequest) (*AdoptSessionResponse, error)
 	// Converse drives one run. The first frame MUST be `prompt`; subsequent
 	// frames are zero or more `resume_approval` / `cancel` control frames. The
 	// server streams `Event` envelopes until the terminal `result` event, then
@@ -1278,21 +1250,18 @@ type HarnessServiceServer interface {
 	// model, its effective read-only tool scope, permission mode, and UX color.
 	// Derived from the snapshot taken at startup; it performs no live discovery.
 	ListAgents(context.Context, *ListAgentsRequest) (*ListAgentsResponse, error)
-	// ListCommands returns the available slash commands (name + short
-	// description) discovered under the configured command directories of the
-	// requested workspace. It powers the client's in-input command palette; it is
-	// DISCOVERY only — expanding a command remains a run-path concern (the server's
-	// CommandExpander handles it when a "/<cmd> args" prompt is submitted). An
-	// empty workspace, or a server with no command expander, returns an empty list.
+	// ListCommands returns slash commands discovered for one owned session's exact
+	// server-bound placement. It authorizes and reattaches that session before
+	// discovery and accepts no workspace/root input. It powers the client's command
+	// palette; command expansion remains a run-path concern. A no-FS session or a
+	// server with no command expander returns an empty list.
 	ListCommands(context.Context, *ListCommandsRequest) (*ListCommandsResponse, error)
-	// ListWorktrees returns the git worktrees of the repo rooted at the requested
-	// workspace (issue #102). It powers the client's /worktrees overlay — the
-	// first-class operator workflow for binding a session to an EXISTING sibling
-	// worktree (a new session rooted there, not a live-session switch). It is
-	// DISCOVERY only, composition-injected (nil-safe: a no-FS/cloud server, or an
-	// untrusted workspace, returns an empty list); it never performs a live
-	// model/network call and never mutates anything. An empty workspace or a server
-	// with no worktree lister also returns an empty list.
+	// ListWorktrees discovers eligible alternatives for one owned source session's
+	// exactly reattached placement. Results carry bounded display metadata and an
+	// opaque source-scoped selector accepted only by ClearSession or ForkSession.
+	// The server re-enumerates and matches current choices on use; selectors are not
+	// paths, are not persisted, and expire on restart. A no-FS session or a server
+	// with no worktree lister returns an empty list.
 	ListWorktrees(context.Context, *ListWorktreesRequest) (*ListWorktreesResponse, error)
 	// StreamSessionEvents replays a session's durable event log as a server stream
 	// of `Event` envelopes (cloud-native Phase 3a read-back). It is the client-tier
@@ -1592,14 +1561,11 @@ func (UnimplementedHarnessServiceServer) DeleteSession(context.Context, *DeleteS
 func (UnimplementedHarnessServiceServer) CompactSession(context.Context, *CompactSessionRequest) (*CompactSessionResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CompactSession not implemented")
 }
+func (UnimplementedHarnessServiceServer) ClearSession(context.Context, *ClearSessionRequest) (*ClearSessionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ClearSession not implemented")
+}
 func (UnimplementedHarnessServiceServer) ForkSession(context.Context, *ForkSessionRequest) (*ForkSessionResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ForkSession not implemented")
-}
-func (UnimplementedHarnessServiceServer) PreflightSessionAdoption(context.Context, *PreflightSessionAdoptionRequest) (*PreflightSessionAdoptionResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method PreflightSessionAdoption not implemented")
-}
-func (UnimplementedHarnessServiceServer) AdoptSession(context.Context, *AdoptSessionRequest) (*AdoptSessionResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method AdoptSession not implemented")
 }
 func (UnimplementedHarnessServiceServer) Converse(grpc.BidiStreamingServer[ConverseRequest, ConverseResponse]) error {
 	return status.Errorf(codes.Unimplemented, "method Converse not implemented")
@@ -1955,6 +1921,24 @@ func _HarnessService_CompactSession_Handler(srv interface{}, ctx context.Context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _HarnessService_ClearSession_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ClearSessionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HarnessServiceServer).ClearSession(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HarnessService_ClearSession_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HarnessServiceServer).ClearSession(ctx, req.(*ClearSessionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _HarnessService_ForkSession_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ForkSessionRequest)
 	if err := dec(in); err != nil {
@@ -1969,42 +1953,6 @@ func _HarnessService_ForkSession_Handler(srv interface{}, ctx context.Context, d
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(HarnessServiceServer).ForkSession(ctx, req.(*ForkSessionRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _HarnessService_PreflightSessionAdoption_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(PreflightSessionAdoptionRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(HarnessServiceServer).PreflightSessionAdoption(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: HarnessService_PreflightSessionAdoption_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(HarnessServiceServer).PreflightSessionAdoption(ctx, req.(*PreflightSessionAdoptionRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _HarnessService_AdoptSession_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(AdoptSessionRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(HarnessServiceServer).AdoptSession(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: HarnessService_AdoptSession_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(HarnessServiceServer).AdoptSession(ctx, req.(*AdoptSessionRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -2929,16 +2877,12 @@ var HarnessService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _HarnessService_CompactSession_Handler,
 		},
 		{
+			MethodName: "ClearSession",
+			Handler:    _HarnessService_ClearSession_Handler,
+		},
+		{
 			MethodName: "ForkSession",
 			Handler:    _HarnessService_ForkSession_Handler,
-		},
-		{
-			MethodName: "PreflightSessionAdoption",
-			Handler:    _HarnessService_PreflightSessionAdoption_Handler,
-		},
-		{
-			MethodName: "AdoptSession",
-			Handler:    _HarnessService_AdoptSession_Handler,
 		},
 		{
 			MethodName: "ListMcpResources",

@@ -11,7 +11,6 @@ import (
 	"time"
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
-	"github.com/stacklok/mecatl/engine/adapter/memfs"
 	"github.com/stacklok/mecatl/engine/adapter/memstore"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
@@ -34,11 +33,11 @@ func titleService(t *testing.T, store port.SessionStore) *server.Service {
 		Policy:  permpolicy.NewPolicy(nil, nil),
 		Model:   "test-model",
 	})
-	svc, err := server.NewService(server.Config{
-		Engine:     eng,
-		Store:      store,
-		Workspaces: func(root string) tool.Workspace { return memfs.NewWorkspace(root) },
-		Now:        func() time.Time { return time.Unix(0, 0) },
+	svc, err := newPlacementTestService(server.Config{
+		Engine: eng,
+		Store:  store,
+
+		Now: func() time.Time { return time.Unix(0, 0) },
 		DefaultResolvedModel: server.ResolvedModel{
 			ProviderID: "openai",
 			ModelID:    "test-model",
@@ -57,7 +56,7 @@ func titleService(t *testing.T, store port.SessionStore) *server.Service {
 // non-empty snapshot branch. It returns the session after Save.
 func saveSessionWithPrompt(ctx context.Context, t *testing.T, st port.SessionStore, id session.SessionID, promptText string, seedTitle bool) *session.Session {
 	t.Helper()
-	s := session.New(id, session.ModeDefault, "/ws", session.Limits{}, time.Unix(1700000000, 0).UTC())
+	s := session.New(id, session.ModeDefault, session.EnvironmentRef{Kind: session.EnvKindLocal, ID: "/ws", Revision: "in-tree-v1"}, session.Limits{}, time.Unix(1700000000, 0).UTC())
 	if err := s.BeginTurn(); err != nil {
 		t.Fatalf("BeginTurn: %v", err)
 	}
@@ -112,7 +111,7 @@ func TestDeriveTitleFromFirstGenuine(t *testing.T) {
 func TestDeriveTitleSkipsSynthesisedSummary(t *testing.T) {
 	ctx := context.Background()
 	st := memstore.New()
-	s := session.New("t2", session.ModeDefault, "/ws", session.Limits{}, time.Unix(1700000000, 0).UTC())
+	s := session.New("t2", session.ModeDefault, session.EnvironmentRef{Kind: session.EnvKindLocal, ID: "/ws", Revision: "in-tree-v1"}, session.Limits{}, time.Unix(1700000000, 0).UTC())
 	if err := s.BeginTurn(); err != nil {
 		t.Fatalf("BeginTurn: %v", err)
 	}
@@ -149,7 +148,7 @@ func TestDeriveTitleSkipsSynthesisedSummary(t *testing.T) {
 func TestDeriveTitleEmptyForCompacted(t *testing.T) {
 	ctx := context.Background()
 	st := memstore.New()
-	s := session.New("t3", session.ModeDefault, "/ws", session.Limits{}, time.Unix(1700000000, 0).UTC())
+	s := session.New("t3", session.ModeDefault, session.EnvironmentRef{Kind: session.EnvKindLocal, ID: "/ws", Revision: "in-tree-v1"}, session.Limits{}, time.Unix(1700000000, 0).UTC())
 	if err := s.BeginTurn(); err != nil {
 		t.Fatalf("BeginTurn: %v", err)
 	}

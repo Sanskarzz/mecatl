@@ -89,8 +89,8 @@ func TestAttemptObserverRejectsProducerControlledPayloadsAtLoopChokePoint(t *tes
 		{SessionID: "forged", RunSerial: 999, Turn: 999, Attempt: 1, MaxAttempts: 2, RetryDisposition: "retryable", StreamProgress: "precommit", Decision: "retry", FailureClass: "connect", CorrelationKind: "request", CorrelationDigest: digest},
 	}}
 	engine := agent.NewEngine(agent.Deps{LLM: provider, Catalog: tool.NewCatalog(), Policy: permpolicy.NewPolicy(nil, nil), Model: "test", EnableDurableEvidence: true})
-	sess := session.New("target", session.ModeDefault, "/ws", session.Limits{}, time.Now())
-	env := tool.MustEnvironment(session.EnvironmentRef{Kind: session.EnvKindMem, ID: "/ws"}, memfs.NewWorkspace("/ws"), nil)
+	sess := session.New("target", session.ModeDefault, session.EnvironmentRef{Kind: session.EnvKindLocal, ID: "/ws", Revision: "in-tree-v1"}, session.Limits{}, time.Now())
+	env := tool.MustEnvironment(session.EnvironmentRef{Kind: session.EnvKindLocal, ID: "/ws", Revision: "in-tree-v1"}, memfs.NewWorkspace("/ws"), nil)
 	var attempts []session.NetworkAttemptPayload
 	var events []session.Event
 	for ev := range engine.Run(context.Background(), sess, env, agent.RunRequest{Text: "go"}).Events() {
@@ -144,9 +144,9 @@ func TestModelCallsCarryRunAndTurnCorrelation(t *testing.T) {
 		Model:  "test", Compactor: compactor, TokenCounter: alwaysCompactCounter{},
 		ContextWindow: func() int { return 2 }, CompactionRatio: 0.5,
 	})
-	sess := session.New("correlation", session.ModeDefault, "/ws", session.Limits{}, time.Now())
+	sess := session.New("correlation", session.ModeDefault, session.EnvironmentRef{Kind: session.EnvKindLocal, ID: "/ws", Revision: "in-tree-v1"}, session.Limits{}, time.Now())
 	ws := memfs.NewWorkspace("/ws")
-	env := tool.MustEnvironment(session.EnvironmentRef{Kind: session.EnvKindMem, ID: "/ws"}, ws, nil)
+	env := tool.MustEnvironment(session.EnvironmentRef{Kind: session.EnvKindLocal, ID: "/ws", Revision: "in-tree-v1"}, ws, nil)
 	for range engine.Run(context.Background(), sess, env, agent.RunRequest{Text: "go"}).Events() {
 	}
 	if len(provider.turns) != 2 || provider.turns[0] != 0 || provider.turns[1] != 1 {

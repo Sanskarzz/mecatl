@@ -13,6 +13,12 @@ The covered surface is the eight core packages (`session`, `governance`, `learni
 
 ### Added
 
+- **Session placement authority repair** — removes the orphan exported `session.PlacementSelector` protocol, adds persisted display-only `session.PlacementMetadata`, requires a valid `EnvironmentRef` at aggregate construction, and rejects direct engine runs whose live environment does not match the session identity. Changed (breaking, pre-v1 minor).
+
+- **Delegation artifact boundary (ADR 0288)** — adds the distinct `agent.ArtifactHandle` type, changes `agent.PreservedForkStore.Preserve` to key retained forks by that opaque handle rather than a physical root, and removes `Workspace`/`WinnerWorkspace` from `session.ParallelPayload`. Parallel results now expose an opaque preserved-artifact handle while physical fork roots remain private orchestration state. Changed (breaking, pre-v1 minor).
+
+- **Unified environment and placement identity** — adds `Revision` and `Valid` to `session.EnvironmentRef`, makes that exact `{Kind, ID, Revision}` value the runtime and durable placement identity, and removes the short-lived duplicate `session.PlacementRef`/`PlacementKind` types. Engine-created Subagent, Parallel, and Team child sessions now persist the identity carried by their `tool.Environment`; `port.ScheduleSpec` and `port.SessionDiscoveryMeta` replace workspace paths with the exact private environment identity, with schedules also retaining their trusted placement scope. Changed (breaking, pre-v1 minor).
+
 - **`port.CursorEventLog`, `port.Cursor`, `port.EncodeCursor`/`DecodeCursor`, `port.LogRecord`/`LogRecordKind`, `port.ReadOptions`, `port.ErrCursorMalformed`/`ErrCursorExpired`** (issue #821, [ADR 0250](../docs/adr/0250-durable-cursors-and-watch.md)) — durable positions over the event log: an append reports WHERE the record landed, and a read resumes from a position rather than always from the start.
 
   It exists because the two read paths the engine shipped cannot express replay-then-follow as one operation. `port.EventLog.Read` is a complete, ordered, durable replay with no position and no follow — it reads the whole log and stops — so catching up and then watching means reading everything and THEN subscribing, and any event appended between those two steps is silently lost. `CursorEventLog.ReadAfter` closes that window: `ReadOptions.Follow` keeps the iterator open at the tail, and `LogRecord.Live` reports the replay/live boundary a follower needs in order to tell a caller it is caught up.

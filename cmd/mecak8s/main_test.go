@@ -178,7 +178,7 @@ func TestAppConfigHeadlessDefault(t *testing.T) {
 	}
 }
 
-func TestListenerScopedWorkspaceAuthority_Scenario4_Mecak8sDefaultsToNoFS(t *testing.T) {
+func TestMecak8sDefaultsToNoFS(t *testing.T) {
 	cfg, err := parseFlags([]string{"--mock", "--posture", "strict", "--no-soul", "--no-user-model", "--permissions-conventional=false", "--agents-conventional=false"})
 	if err != nil {
 		t.Fatalf("parseFlags: %v", err)
@@ -210,12 +210,12 @@ func TestListenerScopedWorkspaceAuthority_Scenario4_Mecak8sDefaultsToNoFS(t *tes
 	if sess.Profile != string(server.ProfileNoFS) {
 		t.Errorf("session profile = %q, want %q", sess.Profile, server.ProfileNoFS)
 	}
-	if sess.Workspace != "" {
-		t.Errorf("session workspace = %q, want empty for no-FS", sess.Workspace)
+	if sess.EnvironmentRef.Kind != session.EnvKindNoFS {
+		t.Errorf("session workspace = %q, want empty for no-FS", sess.EnvironmentRef)
 	}
 }
 
-func TestListenerScopedWorkspaceAuthority_Scenario4_Mecak8sRejectsFilesystemProfileAndWorkspace(t *testing.T) {
+func TestMecak8sRejectsUnsupportedFilesystemProfile(t *testing.T) {
 	cfg, err := parseFlags([]string{"--mock", "--posture", "strict", "--no-soul", "--no-user-model", "--permissions-conventional=false", "--agents-conventional=false"})
 	if err != nil {
 		t.Fatalf("parseFlags: %v", err)
@@ -236,8 +236,6 @@ func TestListenerScopedWorkspaceAuthority_Scenario4_Mecak8sRejectsFilesystemProf
 		name string
 		req  *mecatlv1.CreateSessionRequest
 	}{
-		{name: "empty wire profile with workspace", req: &mecatlv1.CreateSessionRequest{Workspace: "/caller/workspace"}},
-		{name: "no-fs with workspace", req: &mecatlv1.CreateSessionRequest{Profile: string(server.ProfileNoFS), Workspace: "/caller/workspace"}},
 		{name: "unsupported filesystem profile", req: &mecatlv1.CreateSessionRequest{Profile: "filesystem"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -249,7 +247,7 @@ func TestListenerScopedWorkspaceAuthority_Scenario4_Mecak8sRejectsFilesystemProf
 	}
 }
 
-func TestListenerScopedWorkspaceAuthority_Scenario4_Mecak8sMountedWorkspaceIsServerAssigned(t *testing.T) {
+func TestMecak8sMountedWorkspaceIsServerAssigned(t *testing.T) {
 	// A configured --workspace (a mounted PVC path) is an operator-enabled
 	// filesystem deployment: server-assigned authority rooted at the mount, so a
 	// default-profile session mints on that root and a client cannot select
@@ -262,11 +260,8 @@ func TestListenerScopedWorkspaceAuthority_Scenario4_Mecak8sMountedWorkspaceIsSer
 	// Disable the k8s session lease (no kubeconfig in this offline test).
 	cfg.sessionLeaseK8sNamespace = ""
 	ac := appConfig(cfg, port.NopDiagnostics{}, observability{})
-	if ac.WorkspaceAuthority != server.WorkspaceAuthorityServerAssigned {
-		t.Fatalf("WorkspaceAuthority = %v, want ServerAssigned for a configured mount", ac.WorkspaceAuthority)
-	}
-	if ac.AuthoritativeWorkspace != mount || ac.Workspace != mount {
-		t.Fatalf("authoritative/workspace = %q/%q, want the mount %q", ac.AuthoritativeWorkspace, ac.Workspace, mount)
+	if ac.Workspace != mount {
+		t.Fatalf("workspace = %q, want the mount %q", ac.Workspace, mount)
 	}
 
 	built, err := app.Build(context.Background(), ac)
@@ -289,15 +284,11 @@ func TestListenerScopedWorkspaceAuthority_Scenario4_Mecak8sMountedWorkspaceIsSer
 	if sess.Profile != "" {
 		t.Errorf("session profile = %q, want default (filesystem) on a mounted deployment", sess.Profile)
 	}
-	if sess.Workspace != mount {
-		t.Errorf("session workspace = %q, want the deployment mount %q", sess.Workspace, mount)
+	if sess.EnvironmentRef.ID != mount {
+		t.Errorf("private session placement ID = %q, want exact configured mount %q", sess.EnvironmentRef.ID, mount)
 	}
 
-	// A client cannot select a different root: server-assigned rejects a non-empty
-	// client workspace before any filesystem access.
-	if _, err := harness.CreateSession(context.Background(), &mecatlv1.CreateSessionRequest{Workspace: "/client/root"}); status.Code(err) != codes.InvalidArgument {
-		t.Fatalf("CreateSession(client workspace) status = %s, want InvalidArgument", status.Code(err))
-	}
+	// A client cannot send placement authority; the generated request has no such field.
 }
 
 func TestParseFlagsMecak8sRejectsRelativeWorkspace(t *testing.T) {
@@ -306,7 +297,7 @@ func TestParseFlagsMecak8sRejectsRelativeWorkspace(t *testing.T) {
 	}
 }
 
-func TestListenerScopedWorkspaceAuthority_Scenario4_Mecak8sFixtureRunsNoFS(t *testing.T) {
+func TestMecak8sFixtureRunsNoFS(t *testing.T) {
 	cfg, err := parseFlags([]string{"--mock", "--posture", "strict", "--no-soul", "--no-user-model", "--permissions-conventional=false", "--agents-conventional=false"})
 	if err != nil {
 		t.Fatalf("parseFlags: %v", err)
@@ -324,7 +315,7 @@ func TestListenerScopedWorkspaceAuthority_Scenario4_Mecak8sFixtureRunsNoFS(t *te
 	}
 	defer built.Close()
 
-	sess, err := built.Service.CreateSession(context.Background(), "", session.ModeDefault, session.Limits{})
+	sess, err := built.Service.CreateSession(context.Background(), session.ModeDefault, session.Limits{})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -377,7 +368,7 @@ func TestBuildOverRedisDrivesRunToCompletion(t *testing.T) {
 	}
 	defer built.Close()
 
-	sess, err := built.Service.CreateSession(context.Background(), t.TempDir(), session.ModeDefault, session.Limits{})
+	sess, err := built.Service.CreateSession(context.Background(), session.ModeDefault, session.Limits{})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -429,7 +420,7 @@ func TestDrainRejectsNewRunsViaComposition(t *testing.T) {
 	if built.Service.IsDraining() {
 		t.Fatal("IsDraining = true on a fresh service, want false")
 	}
-	sess, err := built.Service.CreateSession(context.Background(), t.TempDir(), session.ModeDefault, session.Limits{})
+	sess, err := built.Service.CreateSession(context.Background(), session.ModeDefault, session.Limits{})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}

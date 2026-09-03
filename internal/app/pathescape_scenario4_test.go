@@ -48,7 +48,11 @@ func installRelaxedWorkspace(t *testing.T, built *Built, sessID session.SessionI
 	if err != nil {
 		t.Fatalf("NewWorkspace: %v", err)
 	}
-	env, err := tool.NewEnvironment(session.EnvironmentRef{Kind: session.EnvKindLocal, ID: root},
+	sess, err := built.Service.GetSession(context.Background(), sessID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	env, err := tool.NewEnvironment(sess.EnvironmentRef,
 		newEscapeWorkspace(base, clf), nil)
 	if err != nil {
 		t.Fatalf("NewEnvironment: %v", err)
@@ -57,8 +61,8 @@ func installRelaxedWorkspace(t *testing.T, built *Built, sessID session.SessionI
 }
 
 // TestPathEscapePosture_Scenario4_FactoryServesApprovedEscape pins the
-// COMPOSITION half the e2e tests bypass: the REAL workspace factory (the one
-// Build wires into server.Config.Workspaces) must produce the relaxed
+// COMPOSITION half the e2e tests bypass: the local PlacementProvider's private
+// workspace construction must produce the relaxed
 // escape-capable workspace at EVERY posture — at strict/trusted it is what
 // lets an APPROVED escape ask execute; without it the ask is approved and the
 // tool body still dead-ends on ErrPathEscape. A default Build at strict +
@@ -72,7 +76,7 @@ func TestPathEscapePosture_Scenario4_FactoryServesApprovedEscape(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 	defer built.Close()
-	sess, err := built.Service.CreateSession(context.Background(), f.workspace, session.ModeDefault, session.Limits{})
+	sess, err := built.Service.CreateSession(context.Background(), session.ModeDefault, session.Limits{})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -121,7 +125,7 @@ func TestPathEscapePosture_Scenario4_StrictReadEscapeAsks(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 	defer built.Close()
-	sess, err := built.Service.CreateSession(context.Background(), f.workspace, session.ModeDefault, session.Limits{})
+	sess, err := built.Service.CreateSession(context.Background(), session.ModeDefault, session.Limits{})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -179,7 +183,7 @@ func TestPathEscapePosture_Scenario4_TrustedWriteEscapeAsks(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 	defer built.Close()
-	sess, err := built.Service.CreateSession(context.Background(), f.workspace, session.ModeDefault, session.Limits{})
+	sess, err := built.Service.CreateSession(context.Background(), session.ModeDefault, session.Limits{})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -235,7 +239,7 @@ func TestPathEscapePosture_Scenario4_HeadlessEscapeAskDoesNotHang(t *testing.T) 
 		t.Fatalf("Build: %v", err)
 	}
 	defer built.Close()
-	sess, err := built.Service.CreateSession(context.Background(), f.workspace, session.ModeDefault, session.Limits{})
+	sess, err := built.Service.CreateSession(context.Background(), session.ModeDefault, session.Limits{})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}

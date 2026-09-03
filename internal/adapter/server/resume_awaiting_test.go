@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stacklok/mecatl/engine/adapter/memfs"
 	"github.com/stacklok/mecatl/engine/adapter/memstore"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
@@ -63,11 +62,11 @@ func newAskingService(t *testing.T, store port.SessionStore, ps *permstore.Memor
 		Model:   "test-model",
 		Store:   engineStore,
 	})
-	svc, err := server.NewService(server.Config{
-		Engine:     engine,
-		Store:      store,
-		Workspaces: func(root string) tool.Workspace { return memfs.NewWorkspace(root) },
-		Now:        func() time.Time { return time.Unix(0, 0) },
+	svc, err := newPlacementTestService(server.Config{
+		Engine: engine,
+		Store:  store,
+
+		Now: func() time.Time { return time.Unix(0, 0) },
 	})
 	if err != nil {
 		t.Fatalf("new service: %v", err)
@@ -115,7 +114,7 @@ func TestApproveAfterRestartResumesAwaiting(t *testing.T) {
 	// svc1's engine: a Write tool call that parks awaiting (one turn only).
 	svc1 := newAskingService(t, store1, ps1, &ran1,
 		mockllm.New(mockllm.ToolCallTurn(session.NewToolCall("w1", "Write", json.RawMessage(`{"path":"a.go"}`)))), false)
-	sess, err := svc1.CreateSession(context.Background(), "/ws", session.ModeDefault, session.Limits{})
+	sess, err := svc1.CreateSession(context.Background(), session.ModeDefault, session.Limits{})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -182,7 +181,7 @@ func TestApproveNonAwaitingYieldsNoActiveRun(t *testing.T) {
 	ps := permstore.New()
 	var ran atomic.Int64
 	svc1 := newAskingService(t, store1, ps, &ran, mockllm.New(mockllm.TextTurn("done")), true)
-	sess, err := svc1.CreateSession(context.Background(), "/ws", session.ModeDefault, session.Limits{})
+	sess, err := svc1.CreateSession(context.Background(), session.ModeDefault, session.Limits{})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -215,7 +214,7 @@ func TestApproveNonAwaitingYieldsNoActiveRun(t *testing.T) {
 func TestApproveFailedSessionYieldsNoActiveRun(t *testing.T) {
 	store := memstore.New()
 	svc := newServiceWithStore(t, store)
-	sess, err := svc.CreateSession(context.Background(), "/ws", session.ModeDefault, session.Limits{})
+	sess, err := svc.CreateSession(context.Background(), session.ModeDefault, session.Limits{})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -250,7 +249,7 @@ func TestApproveSameProcessUsesLiveRun(t *testing.T) {
 			mockllm.ToolCallTurn(session.NewToolCall("w1", "Write", json.RawMessage(`{"path":"a.go"}`))),
 			mockllm.TextTurn("done"),
 		), true)
-	sess, err := svc.CreateSession(context.Background(), "/ws", session.ModeDefault, session.Limits{})
+	sess, err := svc.CreateSession(context.Background(), session.ModeDefault, session.Limits{})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -306,7 +305,7 @@ func TestConcurrentApproveAfterRestartExecutesOnce(t *testing.T) {
 	var ran1 atomic.Int64
 	svc1 := newAskingService(t, store1, permstore.New(), &ran1,
 		mockllm.New(mockllm.ToolCallTurn(session.NewToolCall("w1", "Write", json.RawMessage(`{"path":"a.go"}`)))), false)
-	sess, err := svc1.CreateSession(context.Background(), "/ws", session.ModeDefault, session.Limits{})
+	sess, err := svc1.CreateSession(context.Background(), session.ModeDefault, session.Limits{})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}

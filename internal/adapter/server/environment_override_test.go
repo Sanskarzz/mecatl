@@ -29,13 +29,10 @@ func TestSetSessionEnvironmentOverrideIsUsedVerbatim(t *testing.T) {
 		Policy:  permpolicy.NewPolicy(nil, nil),
 		Model:   "test-model",
 	})
-	svc, err := server.NewService(server.Config{
+	svc, err := newPlacementTestService(server.Config{
 		Engine: shared,
 		Store:  memstore.New(),
-		Workspaces: func(root string) tool.Workspace {
-			t.Fatalf("shared Workspaces factory must not be consulted for an override session, got root %q", root)
-			return nil
-		},
+
 		DefaultLimits: session.Limits{MaxTurns: 5},
 		Now:           func() time.Time { return time.Unix(0, 0) },
 	})
@@ -43,8 +40,7 @@ func TestSetSessionEnvironmentOverrideIsUsedVerbatim(t *testing.T) {
 		t.Fatalf("NewService: %v", err)
 	}
 
-	cwd := t.TempDir()
-	sess, err := svc.CreateSession(context.Background(), cwd, session.ModeDefault, session.Limits{})
+	sess, err := svc.CreateSession(context.Background(), session.ModeDefault, session.Limits{})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -52,8 +48,8 @@ func TestSetSessionEnvironmentOverrideIsUsedVerbatim(t *testing.T) {
 	// Register a complete shell-less Environment with an ACCURATE local ref — the
 	// shape the ACP adapter installs (real FS workspace, no shell). The Service
 	// must use this verbatim: ref Kind local, ID the workspace root, no runner.
-	ws := memfs.NewWorkspace(cwd)
-	wantRef := session.EnvironmentRef{Kind: session.EnvKindLocal, ID: cwd}
+	ws := memfs.NewWorkspace(sess.EnvironmentRef.ID)
+	wantRef := sess.EnvironmentRef
 	override := tool.MustEnvironment(wantRef, ws, nil)
 	svc.SetSessionEnvironment(sess.ID, override)
 

@@ -584,12 +584,12 @@ ahead of lower-priority details, `/session` exposes and copies the safely quoted
 and the target-derived terminal title uses the same handle. See [ADR 0254](adr/0254-session-debugger-admin-transport.md), [ADR 0255](adr/0255-sanitized-network-attempt-evidence.md), [ADR 0256](adr/0256-session-debugger-evidence-and-reporting.md), and [ADR 0257](adr/0257-session-debugger-hardening.md). Each
 inventory row also carries server-authored action capabilities. The TUI uses those bits—not
 ID spelling—to expose exact-ID copy, detached transcript view, peer fork, operator-title
-rename, and confirmed physical deletion. The server also exposes authenticated legacy-adoption
-preflight and apply RPCs: an owned, transcript-complete `unknown` source can be copied into a
-new explicit-main session only with explicit workspace/environment and provider/model bindings.
-Apply revalidates under run-entry serialization and the mutation lease, persists a
-caller+source-bound idempotency proof and source audit link, and never rewrites the legacy source.
-The TUI adoption affordance is a separate client workflow. Fork/rename/delete are revalidated under the
+rename, and confirmed physical deletion. Unknown legacy/custom rows remain inspect-only:
+the server exposes no adoption or preflight API and accepts no replacement workspace or
+placement authority for them. Clear and fork instead create new main-session successors
+from an owned main source: Clear carries no history, Fork carries valid history, and both
+inherit the source's exact placement unless given a fresh source-scoped worktree selector.
+Fork/clear/rename/delete are revalidated under the
 server's run-entry serialization with ownership, kind, state, liveness, and optional lease
 checks; a stale UI row therefore cannot bypass the server gates, and a failed action does
 not rebind the prompt target. The
@@ -612,11 +612,11 @@ never ambient environment values; reserved baseline and source-owned terminal-di
 names are rejected during settings validation. Before StatusML parsing, command output trims only boundary
 ASCII whitespace, so a normal `print` newline is accepted without changing internal
 text. This preserves `ui` as a pure render layer
-while allowing autonomous source updates. Its `/clear` command uses the existing
-create-session RPC to create a new empty session first (preserving the current
-workspace, effective model/reasoning effort, and permission mode), then rebinds
-locally and only afterward best-effort closes the old session; a failed create
-leaves the old session and UI unchanged. Usage and configuration are documented in
+while allowing autonomous source updates. Its `/clear` command calls `ClearSession`
+to create a non-destructive empty-history successor that inherits the current session's
+exact placement, effective model/reasoning effort, and permission mode. It rebinds locally
+only after the successor and its authoritative snapshot are available; any failure leaves
+the source session and UI unchanged. Usage and configuration are documented in
 `docs/tui.md`.
 
 **Remote mecatui OIDC.** The remote-login path is separate from the ToolHive LLM
@@ -669,7 +669,7 @@ registry is an idempotent success, but pre-existing credential-only orphans rema
 because the credential store has no enumeration contract. `/connect` is a confirmed
 chooser. Ordinary saved-target selection and every target switch start a fresh remote
 session; during same-target authentication recovery only, an ownership-authorized
-completed, cancelled, or failed session may be adopted. Missing, ownership-hidden,
+completed, cancelled, or failed session may be resumed. Missing, ownership-hidden,
 active, awaiting, and infrastructure-ambiguous candidates are discarded. The closed
 `ConnectAction` separates saved-target connect, explicit reauthentication, cleanup-only
 retry, and add-target intent; it preserves the server CA path only for same-target
@@ -809,17 +809,20 @@ Two deliberate cycle-breaks worth noting, documented in code:
   `engine/port`, because `port` already imports `tool` while
   `tool.Tool.Execute` takes an `Environment`; defining them in `port` would form
   a `port↔tool` cycle. See the package note in `engine/tool/tool.go`.
-  `Environment` bundles a `Workspace`, an optional bound `CommandRunner`, and a
-  backend identity `EnvironmentRef`. FS tools obtain `env.Workspace()`; the Bash
-  tool obtains `env.CommandRunner()`. Workspace file mutation is version-aware:
-  agent-facing Read records an opaque `FileVersion`, new-file Write is create-only,
-  and Edit/existing-file Write finish with conditional replace. Public Workspace
-  exposes no unconditional mutation; its ledger belongs to the live
-  Environment instance and resets whenever the default Service factory rebuilds it.
-  As of [ADR 0214](adr/0214-environment-persistence.md), `EnvironmentRef` is a DURABLE
-  snapshot field: a non-in-tree ref persists across a restart and reattaches a live
-  `Environment` at run entry through `server.Config.EnvironmentResolver`; the in-tree
-  Kinds never reach the resolver, and a nil/mismatch/nil-Workspace result fails loudly.
+  `Environment` bundles a `Workspace`, an optional bound `CommandRunner`, and an
+  exact backend identity `EnvironmentRef{Kind, ID, Revision}`. FS tools obtain
+  `env.Workspace()`; Bash obtains `env.CommandRunner()`. Workspace mutation remains
+  version-aware: Read records an opaque `FileVersion`, new-file Write is create-only,
+  and Edit/existing-file Write conditionally replace. The read ledger belongs to the
+  live Environment and resets when that Environment is rebuilt.
+
+  [ADR 0291](adr/0291-server-owned-session-placement.md) makes `EnvironmentRef` the
+  sole durable runtime identity. Every session is bound to a valid exact ref before
+  persistence; snapshots and trusted driver storage retain it, while public Harness,
+  HTTP, event, and client projections expose only bounded display metadata. There is
+  no persisted `Session.Workspace`, zero-ref fallback, lazy stamping, or inferred
+  default. Run entry exactly reattaches the persisted ref/revision; missing providers,
+  authorization/revision drift, nil Workspace, or identity mismatch fail closed.
   See [ADR 0208](adr/0208-execution-environment.md),
   [ADR 0211](adr/0211-execution-environment-runtime-seam.md),
   [ADR 0214](adr/0214-environment-persistence.md), and the
@@ -870,33 +873,45 @@ server's `audience:["user"]` is not a suppression control). Server-returned
 fetched by the `FetchMcpResource` tool through `ValidateMediaURL` (SSRF
 backstop, CWE-918). See `docs/adr/0078-mcp-typed-tool-results.md`.
 
-**Conversation fork.** `Service.ForkSession` (`internal/adapter/server/service.go`)
-creates a new peer session whose conversation history is a snapshot of an existing
-session's, inheriting the source's mode, workspace, limits, and
-provider/model/profile labels (ADR 0065). The ONE permitted selector delta is an
-optional `reasoning_effort` override (ADR 0068): empty inherits the source's effort
-verbatim, while a non-empty value replaces only the effort label/engine — provider
-and model always inherit. This is how a mid-conversation effort switch works
-non-destructively (the mecatui `/effort` fork-resume): the transcript survives on
-the peer. It reuses the domain primitives the
-subagent `fork:true` path already exercises — `session.ForkSnapshot`
-(`engine/session/conversation.go`) clones the conversation with a fresh backing
-array and strips trailing unanswered tool calls (tool-pairing-valid), and
-`session.SeedHistory` (`engine/session/session.go`) loads it into a fresh
-`session.New` aggregate that starts idle with zeroed `Counters`/`Usage`. The
-source is authorized and revalidated under the same per-session run-entry mutex used by
-prompt starts and the rename/delete management paths. The gate accepts only owned main
-sessions at a turn boundary, rejects legacy child-ID prefixes even when stale metadata says
-`main`, and acquires the optional cross-process session lease before recovering or snapshotting
-the source. A terminal source is recovered to idle first; a running/awaiting source or a live
-in-process run is rejected with `ErrFailedPrecondition`. A mutation-scoped lease is released on
-every exit, while a lease already held by this process for the session lifetime is preserved.
-The forked engine is
-rehydrated ONLY when the source needed a per-session engine (non-default selector
-/ no-fs profile / worktree workspace), mirroring `createSession`'s branching; a
-default-FS fork rides the shared engine. Same provider and model only — the
-snapshot carries provider-private replay blobs a different provider cannot
-consume. Wire surface: the `ForkSession` gRPC RPC and `POST /v1/sessions/{id}/fork`.
+**Server-owned placement.** Trusted composition installs one placement provider and
+scope before listeners serve. `CreateSession` accepts only the provider's deployment
+`default` or explicit `no-fs`; the public request has no workspace, cwd, placement ID,
+or selector. Local embedded and daemon deployments configure their root privately with
+`--workspace`; remote/cloud-native providers may bind another backend without widening
+the public API. ACP's required cwd is only checked against the trusted local binding and
+cannot select authority.
+
+Discovery is source-session scoped. `ListCommands(session_id)` and
+`ListWorktrees(session_id)` first authorize the owner and exactly reattach that source.
+No-FS returns empty before filesystem discovery. Worktree entries contain bounded
+kind/label/branch/revision metadata and an opaque selector. The local selector is an
+HMAC-SHA256 digest scoped to caller and source session using one random Build-owned key;
+use re-enumerates current eligible choices and constant-time matches. No selector is
+decoded, persisted, or stored in a registry/map, and restart requires clients to relist.
+
+`ClearSession` creates a distinct empty-history successor; `ForkSession` creates a
+distinct history-carrying successor. With no selector both inherit and exactly reattach
+the source placement. A fresh source-scoped selector may move either successor to an
+eligible worktree; Fork may also atomically apply provider/model/effort overrides.
+Source ownership, run-entry serialization, and leases are checked before publication,
+and any failure leaves the source and client binding unchanged. Schedules similarly
+persist their resolved exact ref, durable owner, and placement scope—not a selector or
+"current default" intent—and reauthorize and exactly reattach at each fire.
+
+Delegation never accepts placement input: Team derives the owning session environment;
+Subagent and Parallel share or server-fork the parent Environment. Preserved-fork,
+delegation, inspection, and artifact handles are typed capabilities, not worktree
+selectors, and public results/events do not reveal fork roots or exact refs. Trusted
+driver storage is the deliberate private exception: it transports exact
+`EnvironmentRef` values so another process can reattach, but public mappers never project
+them.
+
+**Conversation successors.** `Service.ClearSessionSuccessor` and
+`Service.ForkSessionSuccessor` implement the two operations above. Fork snapshots valid
+history with `session.ForkSnapshot` and `session.SeedHistory`; Clear starts with empty
+history. Both create fresh idle aggregates with fresh counters/usage and preserve the
+source session. Wire surfaces are `ClearSession`/`ForkSession` over gRPC and the matching
+HTTP successor routes.
 
 ## See also
 
@@ -914,7 +929,12 @@ that run **autonomously, durably, and exactly-once** across a multi-replica
 deployment — with no human present at fire time.
 
 It is a **composition-layer** subsystem (no `engine/agent` changes) that reuses
-the existing run-entry funnel. The pieces:
+the existing run-entry funnel. Schedule creation resolves the source/default placement
+immediately and persists the exact private `EnvironmentRef`, durable owner, and trusted
+placement scope. It never persists a worktree selector or an instruction to follow a
+future deployment default. Every fire reauthorizes that owner/scope and exactly reattaches;
+drift or unavailability records a failure before session creation or filesystem access.
+The pieces:
 
 - **`port.ScheduleStore`** (`engine/port/schedule.go`) — the durable registry,
   a peer of `port.SessionLease`/`port.EventLog`. The store is ground truth; an

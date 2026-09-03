@@ -40,9 +40,10 @@
 // carry, in a richer event schema) this contract boundary. This is a DOCUMENTED
 // CONTRACT LIMITATION (engine/COMPATIBILITY.md, ADR 0038), not a bug.
 //
-// CREATION METADATA is supplied via SessionMeta: the id, mode, limits, workspace,
-// profile, provider/model selector, reasoning effort, authoritative title/provenance,
-// kind/relationship, adoption source/request digest, and createdAt are facts that NO event carries, so the caller
+// CREATION METADATA is supplied via SessionMeta: id, mode, limits, exact
+// EnvironmentRef, display-only placement metadata, profile, provider/model selector,
+// reasoning effort, authoritative title/provenance, kind/relationship, and createdAt
+// are facts that NO event carries, so the caller
 // (who created or discovered the session and thus knows them) provides them alongside
 // the stream. A legacy empty title falls back to the first genuine EvUserPrompt.
 // There is deliberately no EvSessionCreated event (ADR 0038 records that as a
@@ -55,8 +56,8 @@
 // pre-compaction span recovered from EvCompactionArchive carries its user messages
 // verbatim. The reconstructed conversation is therefore COMPLETE except the
 // provider-private replay fields above. (Project-instruction messages discovered at
-// turn 0 — AGENTS.md/CLAUDE.md — are NOT event-carried; they are derivable from the
-// workspace and are out of the conversation the fold rebuilds.)
+// turn 0 — AGENTS.md/CLAUDE.md — are NOT event-carried; they are reassembled from
+// the exactly reattached environment and are out of the conversation the fold rebuilds.)
 //
 // This is an EXCLUDED reference adapter (engine/COMPATIBILITY.md): it carries no
 // public-API stability promise and is not part of the guarded core surface.
@@ -85,8 +86,10 @@ type SessionMeta struct {
 	Mode session.PermissionMode
 	// Limits are the configured stop conditions.
 	Limits session.Limits
-	// Workspace is the root directory tools operate against.
-	Workspace string
+	// EnvironmentRef is the exact durable execution-environment identity.
+	EnvironmentRef session.EnvironmentRef
+	// Placement is safe display-only metadata; it is never used for reattachment.
+	Placement session.PlacementMetadata
 	// Profile is the opaque tool-surface profile label ("" = default).
 	Profile string
 	// ProviderID and ModelID are the opaque neutral provider+model selector pair
@@ -118,11 +121,6 @@ type SessionMeta struct {
 	// metadata. Nil is a documented pre-feature legacy record; a present payload
 	// is validated and bound before reconstruction proceeds.
 	Authority *session.Authority
-	// AdoptionSourceID and AdoptionRequestDigest are the immutable legacy-session
-	// adoption proof. They mirror sessnap's flat AdoptionMetadata fields because
-	// events do not carry creation metadata.
-	AdoptionSourceID      session.SessionID
-	AdoptionRequestDigest string
 	// CreatedAt is the creation timestamp.
 	CreatedAt time.Time
 }
@@ -159,7 +157,10 @@ func Fold(meta SessionMeta, events iter.Seq2[session.Event, error]) (*session.Se
 	}
 	f.finalizeOpenTurn()
 
-	s := session.New(meta.ID, meta.Mode, meta.Workspace, meta.Limits, meta.CreatedAt)
+	if !meta.EnvironmentRef.Valid() {
+		return nil, fmt.Errorf("%w: missing or invalid environment ref", ErrReconstruct)
+	}
+	s := session.New(meta.ID, meta.Mode, meta.EnvironmentRef, meta.Limits, meta.CreatedAt)
 	if err := s.RestoreSessionMetadata(meta.Kind, meta.Relationship); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrReconstruct, err)
 	}
@@ -175,6 +176,7 @@ func Fold(meta SessionMeta, events iter.Seq2[session.Event, error]) (*session.Se
 	// Inert creation labels — opaque to the domain, restored by direct assignment
 	// exactly as sessnap.Restore does (these are authoritative exported values, not
 	// state transitions).
+	s.Placement = meta.Placement
 	s.Profile = meta.Profile
 	s.ProviderID = meta.ProviderID
 	s.ModelID = meta.ModelID
@@ -182,12 +184,6 @@ func Fold(meta SessionMeta, events iter.Seq2[session.Event, error]) (*session.Se
 	s.DebugMCPServers = append([]string(nil), meta.DebugMCPServers...)
 	s.DebugMCPTools = append([]string(nil), meta.DebugMCPTools...)
 	s.DebugTargetFingerprint = meta.DebugTargetFingerprint
-	if meta.AdoptionSourceID != "" || meta.AdoptionRequestDigest != "" {
-		s.Adoption = &session.AdoptionMetadata{
-			AdoptionSourceID:      meta.AdoptionSourceID,
-			AdoptionRequestDigest: meta.AdoptionRequestDigest,
-		}
-	}
 	s.Title = meta.Title
 	s.TitleProvenance = meta.TitleProvenance
 

@@ -5,7 +5,6 @@ import (
 	"os"
 	"testing"
 
-	"github.com/stacklok/mecatl/engine/adapter/memfs"
 	"github.com/stacklok/mecatl/engine/adapter/memstore"
 	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/governance"
@@ -67,16 +66,16 @@ func TestADR_0233_AuthorityEvaluator_Scenario6_MintedRootCanDescend(t *testing.T
 
 func TestADR_0233_AuthorityEvaluator_Scenario6_NonSpawnDerivationPointsAreExplicit(t *testing.T) {
 	root := mintRootAuthority(rootAuthorityCatalog(t), nil, session.SessionKindMain)
-	svc, err := server.NewService(server.Config{
-		Engine:        agent.NewEngine(agent.Deps{Catalog: tool.NewCatalog()}),
-		Store:         memstore.New(),
-		Workspaces:    func(root string) tool.Workspace { return memfs.NewWorkspace(root) },
+	svc, err := newTestServerService(server.Config{
+		Engine: agent.NewEngine(agent.Deps{Catalog: tool.NewCatalog()}),
+		Store:  memstore.New(),
+
 		RootAuthority: func(session.SessionKind) session.Authority { return root },
 	})
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
-	main, err := svc.CreateSession(context.Background(), "/workspace", session.ModeDefault, session.Limits{})
+	main, err := svc.CreateSession(context.Background(), session.ModeDefault, session.Limits{})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -84,7 +83,7 @@ func TestADR_0233_AuthorityEvaluator_Scenario6_NonSpawnDerivationPointsAreExplic
 	if !bound {
 		t.Fatal("ordinary root has no authority")
 	}
-	forkID, err := svc.ForkSession(context.Background(), main.ID, "", "")
+	forkID, err := svc.ForkSessionSuccessor(context.Background(), server.ForkSuccessorRequest{Source: main.ID})
 	if err != nil {
 		t.Fatalf("ForkSession: %v", err)
 	}
@@ -96,7 +95,7 @@ func TestADR_0233_AuthorityEvaluator_Scenario6_NonSpawnDerivationPointsAreExplic
 	if !bound || !forkAuthority.CapabilitySet.Contains(mainAuthority.CapabilitySet) || !mainAuthority.CapabilitySet.Contains(forkAuthority.CapabilitySet) || forkAuthority.Provenance != mainAuthority.Provenance {
 		t.Fatalf("fork authority = %+v bound=%t, want verbatim source authority %+v", forkAuthority, bound, mainAuthority)
 	}
-	scheduled, err := svc.CreateSessionWithProfile(context.Background(), "/workspace", session.ModeDefault, session.Limits{}, server.ProviderSelector{}, server.ProfileDefault,
+	scheduled, err := svc.CreateSessionWithProfile(context.Background(), session.ModeDefault, session.Limits{}, server.ProviderSelector{}, server.ProfileDefault,
 		server.WithScheduledRelationship("nightly", main.ID))
 	if err != nil {
 		t.Fatalf("CreateSessionWithProfile(scheduled): %v", err)

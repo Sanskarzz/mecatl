@@ -30,7 +30,6 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
-	"github.com/stacklok/mecatl/engine/adapter/memfs"
 	"github.com/stacklok/mecatl/engine/adapter/memstore"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
@@ -483,36 +482,6 @@ func TestSDKServerEnablers_Scenario8_DisabledAndSocketListenersAreNotNetworkBoun
 				t.Fatalf("listenerIsNetworkBoundary(%q, unix=%v) = %v, want %v", tc.addr, tc.unixSocket, got, tc.want)
 			}
 		})
-	}
-
-	// The composed decision: a socket-plus-no-HTTP daemon keeps client-selected
-	// authority and therefore does not require --workspace.
-	cfg := udsConfig("/tmp/mecated/g.sock")
-	got, err := workspaceAuthorityForListeners(cfg)
-	if err != nil {
-		t.Fatalf("workspaceAuthorityForListeners: %v", err)
-	}
-	if got != server.WorkspaceAuthorityClientSelected {
-		t.Fatalf("authority = %v, want client-selected for a socket-only daemon", got)
-	}
-	if err := validateWorkspaceAuthority(cfg); err != nil {
-		t.Fatalf("a socket-only daemon must not require --workspace: %v", err)
-	}
-
-	// An empty --grpc-addr with NO socket is a wildcard-bound, unauthenticated
-	// gRPC listener. It must stay server-assigned: client-selected authority
-	// there would let any reachable caller name an arbitrary absolute workspace
-	// root, and would drop the --workspace requirement that is the backstop.
-	wildcard := config{grpcAddr: "", httpAddr: ""}
-	got, err = workspaceAuthorityForListeners(wildcard)
-	if err != nil {
-		t.Fatalf("workspaceAuthorityForListeners: %v", err)
-	}
-	if got != server.WorkspaceAuthorityServerAssigned {
-		t.Fatalf("authority = %v, want server-assigned: an empty --grpc-addr binds every interface", got)
-	}
-	if err := validateWorkspaceAuthority(wildcard); err == nil {
-		t.Fatal("validateWorkspaceAuthority = nil, want --workspace required for a wildcard-bound gRPC listener")
 	}
 }
 
@@ -1393,11 +1362,14 @@ func offlineServiceWithDeployment(t *testing.T, deploymentID string) *server.Ser
 			Policy:  permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil),
 			Model:   "test-model",
 		}),
-		Store:               memstore.New(),
-		Workspaces:          func(root string) tool.Workspace { return memfs.NewWorkspace(root) },
+		Store: memstore.New(),
+
 		Now:                 func() time.Time { return time.Unix(0, 0) },
 		DefaultCapabilities: llm.Capabilities(),
 		DeploymentID:        deploymentID,
+		PlacementProvider:   offlinePlacementProvider{},
+		PlacementScope:      "test",
+		SharedEngineRoot:    "/ws",
 	})
 	if err != nil {
 		t.Fatalf("new offline service: %v", err)

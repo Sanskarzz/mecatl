@@ -132,19 +132,17 @@ type Config struct {
 	// Empty safely reports as "unknown" for generic embeddings.
 	ServerImplementation string
 	Workspace            string
-	// WorkspaceAuthority is the deployment's workspace-selection policy (ADR 0237).
-	// The zero value is client-selectable, preserving embedded and loopback use.
-	// The cmd/ main owns this decision: listener topology never reaches the server
-	// adapter.
-	WorkspaceAuthority server.WorkspaceAuthority
-	// AuthoritativeWorkspace is the root assigned to every filesystem session under
-	// WorkspaceAuthorityServerAssigned, which requires it. A file-less deployment
-	// selects WorkspaceAuthorityFileless and leaves this empty.
-	AuthoritativeWorkspace string
+	// PlacementProvider optionally replaces the trusted local default with one
+	// deployment-owned provider implementing ADR 0291's Bind/Reattach and scoped
+	// worktree-discovery protocol. The provider owns private placement identity and
+	// inventory; Build creates no public registry, cache, or path-derived identifier.
+	PlacementProvider server.PlacementProvider
+	// PlacementScope is the trusted authorization scope passed to the provider.
+	// Empty defaults to the process deployment scope.
+	PlacementScope server.PlacementScope
 	// ClientMCPOnCreate permits client-provided MCP servers on a session-creating
-	// API request (issue #821, ADR 0237 applied to outbound MCP). Like
-	// WorkspaceAuthority it is a deployment policy the cmd/ main decides from its
-	// listener topology and Build passes through verbatim; the zero value fails
+	// API request (issue #821, ADR 0237 applied to outbound MCP). It is a
+	// deployment policy the cmd/ main decides from its listener topology and Build passes through verbatim; the zero value fails
 	// closed, so a composition root that never sets it refuses the field.
 	ClientMCPOnCreate bool
 	Model             string
@@ -1781,6 +1779,30 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	commandLister := buildCommandLister(cfg, mcpProvider)
 	cfg.storageMaintenance = &storageMaintenanceState{}
 	dreamReviewer, dreamCapabilities := buildDreamReview(cfg, assets, provider != nil)
+	workspaceFactory := osfsWorkspaceFactory(cfg.diag())
+	placementScope := cfg.PlacementScope
+	if placementScope == "" {
+		placementScope = defaultPlacementScope
+	}
+	var placementSelectorKey [32]byte
+	if _, err := rand.Read(placementSelectorKey[:]); err != nil {
+		return nil, fmt.Errorf("initialize placement selector signer: %w", err)
+	}
+	placementProvider := cfg.PlacementProvider
+	worktreeLister := buildWorktreeLister(cfg)
+	if placementProvider == nil {
+		selectorIssuer, err := server.NewWorktreeSelectorIssuer(placementSelectorKey[:])
+		if err != nil {
+			return nil, fmt.Errorf("initialize placement selector issuer: %w", err)
+		}
+		placementProvider = &localPlacementProvider{
+			scope: placementScope, root: cfg.Workspace, workspace: workspaceFactory,
+			runnerForRoot: func(root string) tool.CommandRunner {
+				return buildCommandRunnerForRoot(cfg, root)
+			},
+			worktrees: worktreeLister, selectors: selectorIssuer,
+		}
+	}
 	svcCfg := server.Config{
 		BuildID:              buildinfo.BuildID,
 		ServerImplementation: cfg.ServerImplementation,
@@ -1809,34 +1831,20 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		},
 		StorageMaintenanceStatus: cfg.storageMaintenance.snapshot,
 		StorageMaintenanceUpdate: cfg.storageMaintenance.update,
-		Workspaces:               osfsWorkspaceFactory(cfg.diag()),
+
+		PlacementProvider: placementProvider,
+		PlacementScope:    placementScope,
 		RootAuthority: func(kind session.SessionKind) session.Authority {
 			return mintRootAuthority(assets.rootCatalog, mcpResourceCapabilities(assets.globalMgr), kind)
 		},
-		DefaultWorkspace: cfg.Workspace, // the launch root; a session on a DIFFERENT root routes through the per-session factory (issue #102, docs/adr/0032)
-		// ADR 0237: the deployment's workspace-selection policy, decided by the cmd/
-		// main from its listener topology and passed through verbatim.
-		WorkspaceAuthority:     cfg.WorkspaceAuthority,
-		AuthoritativeWorkspace: cfg.AuthoritativeWorkspace,
+		SharedEngineRoot: cfg.Workspace, // the launch root; a session on a DIFFERENT root routes through the per-session factory (issue #102, docs/adr/0032)
 		// ADR 0237 applied to outbound MCP: the same deployment-policy discipline —
 		// decided by the cmd/ main from its listener topology, passed through here,
 		// never inferred from the server package's socket state.
 		ClientMCPOnCreate: cfg.ClientMCPOnCreate,
-		// CommandRunner (issue #462): the MAIN session's bound runner — the
-		// Environment seam hands it to Tool.Execute so Bash observes the session
-		// namespace. nil when Bash is disabled (the catalog omits Bash and the
-		// Environment's Bash surfaces ErrNoShell). CommandRunnerFactory builds a
-		// runner bound to a DIFFERENT session root (a worktree binding) with the
-		// SAME env-scrub the main runner gets, so a worktree session's Bash
-		// observes its own root, not the launch root.
-		CommandRunner: buildCommandRunner(cfg),
-		CommandRunnerFactory: func(root string) tool.CommandRunner {
-			return buildCommandRunnerForRoot(cfg, root)
-		},
-		Worktrees:     buildWorktreeLister(cfg),
-		DefaultLimits: defaultLimits(),
-		MCPProvider:   mcpProvider,
-		MCPSources:    mcpInventory,
+		DefaultLimits:     defaultLimits(),
+		MCPProvider:       mcpProvider,
+		MCPSources:        mcpInventory,
 		// Schedule manager (ADR 0076): the pre-Service store-shaped schedule
 		// seam, constructed by buildEngine from the store (the eager bind —
 		// the SAME manager the shared catalog's Schedule tool factory
@@ -2033,8 +2041,9 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		ReflectSession: func(ctx context.Context, sess *session.Session) (server.ReflectionReceipt, error) {
 			reflectionCfg := cfg
 			reflectionProvider := provider
-			reflectionCfg.Workspace = sess.Workspace
-			reflectionCfg.LearningMode, reflectionCfg.LearningSensitivity, reflectionCfg.SkillActivationPolicy = learningPolicyForWorkspace(cfg, sess.Workspace)
+			workspace := memory.WorkspaceFromContext(ctx)
+			reflectionCfg.Workspace = workspace
+			reflectionCfg.LearningMode, reflectionCfg.LearningSensitivity, reflectionCfg.SkillActivationPolicy = learningPolicyForWorkspace(cfg, workspace)
 			reflectionCfg.Model = sess.ModelID
 			if sess.ProviderID != "" {
 				entry, ok := reg.Lookup(sess.ProviderID)
@@ -2056,7 +2065,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 				return server.ReflectionReceipt{}, errors.New("reflection is not configured")
 			}
 			stop, _ := sess.StopReason()
-			trajectory := learning.NewTrajectory(sess.ID, sess.Workspace, stop, sess.Usage, sess.Conversation.Messages)
+			trajectory := learning.NewTrajectory(sess.ID, workspace, stop, sess.Usage, sess.Conversation.Messages)
 			trajectory.Principal = sess.Owner.Clone()
 			trajectory.Kind = sess.Kind
 			trajectory.Counters = sess.Counters
@@ -2217,7 +2226,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	}
 	applyTeamConfig(&svcCfg, cfg, reg, provider, mainMgr, agentReg, assets.skillIndex, assets)
 
-	svc, err := server.NewService(svcCfg)
+	svc, err := server.NewServiceContext(ctx, svcCfg)
 	if err != nil {
 		mcpClose()
 		agentClose()
@@ -4116,9 +4125,9 @@ func buildCommandExpander(cfg Config, mcpProvider mcp.Provider) prompt.CommandEx
 // engine consumes on the run path — so the palette enumerates exactly the
 // commands a "/<cmd>" prompt would expand. It returns nil (RPC yields an empty
 // list) when the expander cannot enumerate, i.e. it is the NoopExpander (commands
-// disabled) or does not implement prompt.CommandLister. The lister opens a fresh
-// osfs Workspace per request rooted at the requested workspace, so discovery
-// reflects the CURRENT command files on disk (not a startup snapshot).
+// disabled) or does not implement prompt.CommandLister. After Service authorizes
+// and exactly reattaches the owned session, this lister opens a fresh osfs Workspace
+// at that provider-verified private root so discovery reflects current command files.
 func buildCommandLister(cfg Config, mcpProvider mcp.Provider) server.CommandLister {
 	exp := buildCommandExpander(cfg, mcpProvider)
 	lister, ok := exp.(prompt.CommandLister)
@@ -5706,10 +5715,9 @@ func buildCommandRunner(cfg Config) tool.CommandRunner {
 
 // buildCommandRunnerForRoot is the ONE implementation of the no-bash/shell
 // gate + envscrub.Scrub(os.Environ()) + osfs constructor, parameterised by the
-// root the runner is bound to. buildCommandRunner (the main-session runner,
-// bound to cfg.Workspace) and Config.CommandRunnerFactory (a worktree-bound
-// session runner) both route through here, so the secret-scrubbing cannot
-// drift between the default-root and alternate-root paths (security review
+// root the runner is bound to. The main runner and the placement provider's
+// private environment construction both route through here, so secret scrubbing
+// cannot drift between default-root and alternate-root paths (security review
 // "Finding B"). It returns nil when command execution is disabled
 // (NoBash or an empty Shell); on a construction error it WARNs and returns nil.
 func buildCommandRunnerForRoot(cfg Config, root string) tool.CommandRunner {
@@ -8409,23 +8417,16 @@ func defaultLimits() session.Limits {
 // POLICY's call (read: allow at auto/yolo, ask at strict/trusted; write:
 // allow at yolo, ask everywhere below), and an escape the policy leaves at
 // Ask never reaches the tool body unapproved. At strict/trusted the relaxed
-// workspace is what lets an APPROVED escape execute (the Scenario-4 ask would
-// otherwise be un-actionable — approve and still hit ErrPathEscape); a
-// NON-approved escape still dead-ends exactly as before. The SAME factory is
-// the create-time AND the rehydration workspace source (the run-entry seam
-// rebuilds from the persisted root through Workspaces), so a restarted
-// session rehydrates the SAME escape-capable workspace. Child engines never
-// see this factory (their workspaces come from newForkWorkspace), so the
-// relax is main-session-only by construction.
+// options let an approved escape execute; a non-approved escape still dead-ends.
+// The same factory is used by the composition-owned local placement provider
+// whenever it binds or exactly reattaches a local EnvironmentRef. Child engines
+// never call it directly: their workspaces come from newForkWorkspace, so the
+// relaxation remains main-session-only by construction.
 //
-// EMPTY-ROOT CHOKEPOINT (issue #55): an empty root NEVER reaches osfs. An empty
-// persisted Session.Workspace can only be a no-fs session, and osfs.NewWorkspace("")
-// would MkdirAll/OpenRoot the server process's cwd — a filesystem escalation. The
-// Service intercepts this first (no-fs sessions carry a per-session workspace
-// override, restored by rehydrateSession after a restart), so this branch is
-// the defense a FUTURE caller cannot bypass: it serves the honest no-filesystem
-// workspace and logs loudly, because reaching it means a no-fs guard upstream
-// regressed.
+// EMPTY-ROOT CHOKEPOINT: an empty root never reaches osfs. Server-owned placement
+// binds no-FS through the nofs adapter before this factory and rejects invalid exact
+// refs; this guard prevents any future private composition caller from turning an
+// empty path into the server process cwd.
 func osfsWorkspaceFactory(d port.Diagnostics) server.WorkspaceFactory {
 	return func(root string) tool.Workspace {
 		if root == "" {

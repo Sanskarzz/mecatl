@@ -18,16 +18,16 @@ import (
 type SessionSnapshot struct {
 	Mode            string
 	State           string
-	Workspace       string
+	Placement       Placement
 	CreatedAt       int64
 	ResolvedModel   ResolvedModel
 	Title           string
 	TitleProvenance string
 	// Capabilities is the server's feature-advertisement snapshot from the Session
-	// proto (the SAME value CreateSessionResponse carries). A client that re-hydrates
-	// a persisted session on adopt (continue, /effort fork) reads this to re-derive
-	// its affordances. An older server (nil field) yields the zero value, which the
-	// consumer treats as "keep current caps" (fail-conservative).
+	// proto (the SAME value CreateSessionResponse carries). A client that reloads
+	// or switches to a persisted session (continue, /effort fork, /clear successor)
+	// reads this to re-derive its affordances. An older server (nil field) yields
+	// the zero value, which the consumer treats as "keep current caps".
 	Capabilities Capabilities
 }
 
@@ -38,7 +38,7 @@ func snapshotFrom(s *mecatlv1.Session) SessionSnapshot {
 	return SessionSnapshot{
 		Mode:            ModeString(s.GetMode()),
 		State:           s.GetState(),
-		Workspace:       s.GetWorkspace(),
+		Placement:       placementFrom(s.GetPlacement()),
 		CreatedAt:       s.GetCreatedAtUnix(),
 		ResolvedModel:   resolvedModelFrom(s.GetResolvedModel()),
 		Title:           s.GetTitle(),
@@ -107,7 +107,7 @@ type ResolvedModelMsg struct {
 	Resolved  ResolvedModel
 	Mode      string
 	State     string
-	Workspace string
+	Placement Placement
 	CreatedAt int64
 	// Title is the session's stored title from the snapshot (self-heal channel for
 	// the window title). See the struct doc.
@@ -166,7 +166,7 @@ func RefreshResolvedModelCmd(ctx context.Context, g SessionGetter, id string) te
 		snap, err := g.GetSession(ctx, id)
 		return ResolvedModelMsg{
 			SessionID: id, Resolved: snap.ResolvedModel, Mode: snap.Mode,
-			State: snap.State, Workspace: snap.Workspace, CreatedAt: snap.CreatedAt,
+			State: snap.State, Placement: snap.Placement, CreatedAt: snap.CreatedAt,
 			Title: snap.Title, Capabilities: snap.Capabilities, Err: err,
 		}
 	}
