@@ -21,9 +21,8 @@ import (
 // leaseBaseCfg returns a Config wired for a SHARED jsonl store + a SHARED flock
 // session lease, so two Builds in one process model two replicas over one store
 // (each Build gets a DISTINCT lease owner via the per-Build nonce, so neither can
-// renew/release the other's hold). The TTL is generous so an actively-renewing
-// holder keeps its lease for the whole test (the release-takeover leg); the
-// TTL-EXPIRY takeover leg has its own config (see TestCrossProcessLeaseExpiryTakeover).
+// renew/release the other's hold). The default TTL is generous so an actively-renewing
+// holder keeps its lease for the whole test.
 func leaseBaseCfg(t *testing.T, storeDir, leaseDir, workspace, memoryDir string) Config {
 	t.Helper()
 	return Config{
@@ -143,18 +142,10 @@ func TestCrossProcessLeaseExclusion(t *testing.T) {
 	built2.Service.FinishRun(sess.ID, run2)
 }
 
-// TestCrossProcessLeaseExpiryTakeover is the TTL-EXPIRY takeover leg (the honest
-// closure for the S5 finding): a holder whose lease LAPSES (it stopped renewing —
-// a stalled/slow holder, the in-process analogue of a crash the flock could not
-// observe) is taken over by a second replica once the TTL passes, WITHOUT an
-// explicit release.
-//
-// Build #1 is wired with a short TTL (1s) and a renew interval LONGER than the TTL
-// (10s), so its renewer never refreshes before the lease lapses — modelling a
-// holder that stopped renewing. Build #2 is refused immediately, then succeeds
-// after the lease expires (a bounded real-clock poll; the conformance suite covers
-// the fake-clock expiry contract, so this only needs to confirm the composition
-// wiring honours expiry).
+// TestCrossProcessLeaseExpiryTakeover verifies the generic SessionLease contract:
+// after a lease expires, another replica takes over even if the prior holder is
+// still live. The successor must receive a strictly greater fencing token and
+// successfully drive the recovered session.
 func TestCrossProcessLeaseExpiryTakeover(t *testing.T) {
 	ctx := context.Background()
 	storeDir := t.TempDir()
@@ -163,12 +154,10 @@ func TestCrossProcessLeaseExpiryTakeover(t *testing.T) {
 	memoryDir := t.TempDir()
 
 	cfg1 := leaseBaseCfg(t, storeDir, leaseDir, workspace, memoryDir)
-	cfg1.SessionLeaseTTL = 1 * time.Second            // lease lapses 1s after acquire...
-	cfg1.SessionLeaseRenewInterval = 10 * time.Second // ...and the renewer never fires first.
+	cfg1.SessionLeaseTTL = time.Second
+	cfg1.SessionLeaseRenewInterval = 10 * time.Second
 	cfg1.providerConstructor = func(_ Config, _, _, _ string) port.LLMProvider {
-		return mockllm.New(mockllm.ToolCallTurn(
-			session.NewToolCall("w1", "Write", json.RawMessage(`{"path":"note.txt","content":"replica one"}`)),
-		))
+		return mockllm.New(mockllm.TextTurn("replica one"))
 	}
 	built1, err := Build(ctx, cfg1)
 	if err != nil {
@@ -180,26 +169,18 @@ func TestCrossProcessLeaseExpiryTakeover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	run1, err := built1.Service.StartRun(ctx, sess.ID, "write the note")
+	run1, err := built1.Service.StartRun(ctx, sess.ID, "first run")
 	if err != nil {
 		t.Fatalf("StartRun #1: %v", err)
 	}
-	var askID string
-	for ev := range run1.Events() {
-		if ev.Type == session.EvPermissionAsk && ev.Ask != nil {
-			askID = ev.Ask.AskID
-			built1.Service.Persist(ctx, sess.ID)
-			break
-		}
-	}
-	if askID == "" {
-		t.Fatal("run #1 never parked at a permission ask")
-	}
+	drain(run1)
+	built1.Service.FinishRun(sess.ID, run1)
+	firstToken := leaseToken(t, leaseDir)
 
 	cfg2 := leaseBaseCfg(t, storeDir, leaseDir, workspace, memoryDir)
-	cfg2.SessionLeaseTTL = 1 * time.Second
+	cfg2.SessionLeaseTTL = time.Second
 	cfg2.providerConstructor = func(_ Config, _, _, _ string) port.LLMProvider {
-		return mockllm.New(mockllm.TextTurn("took over after ttl"))
+		return mockllm.New(mockllm.TextTurn("replica two"))
 	}
 	built2, err := Build(ctx, cfg2)
 	if err != nil {
@@ -207,30 +188,63 @@ func TestCrossProcessLeaseExpiryTakeover(t *testing.T) {
 	}
 	defer built2.Close()
 
-	// Immediately, built2 is refused — #1's lease is still live (just acquired).
-	if _, err := built2.Service.StartRun(ctx, sess.ID, "too soon"); !errors.Is(err, server.ErrSessionLeasedElsewhere) {
-		t.Fatalf("StartRun #2 before TTL = %v, want ErrSessionLeasedElsewhere", err)
+	if _, err := built2.Service.StartRun(ctx, sess.ID, "take over before expiry"); !errors.Is(err, server.ErrSessionLeasedElsewhere) {
+		t.Fatalf("StartRun #2 before expiry = %v, want ErrSessionLeasedElsewhere", err)
 	}
 
-	// After the TTL lapses (and #1 never renewed), built2 takes over. Bounded poll.
 	var run2 *agent.Run
-	deadline := time.After(10 * time.Second)
-	for {
-		run2, err = built2.Service.StartRun(ctx, sess.ID, "take over after ttl")
-		if err == nil {
-			break
-		}
-		if !errors.Is(err, server.ErrSessionLeasedElsewhere) {
-			t.Fatalf("StartRun #2 during TTL poll = %v, want ErrSessionLeasedElsewhere or success", err)
-		}
+	deadline := time.After(5 * time.Second)
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for run2 == nil {
 		select {
 		case <-deadline:
-			t.Fatal("built2 never took over after the lease TTL lapsed (expiry not honoured)")
-		case <-time.After(100 * time.Millisecond):
+			t.Fatal("StartRun #2 never took over after lease expiry")
+		case <-ticker.C:
+			run2, err = built2.Service.StartRun(ctx, sess.ID, "take over after expiry")
+			if err != nil && !errors.Is(err, server.ErrSessionLeasedElsewhere) {
+				t.Fatalf("StartRun #2 while waiting for expiry: %v", err)
+			}
 		}
 	}
 	drain(run2)
 	built2.Service.FinishRun(sess.ID, run2)
+	final, err := built2.Service.GetSession(ctx, sess.ID)
+	if err != nil {
+		t.Fatalf("GetSession after successor run: %v", err)
+	}
+	if final.State != session.StateCompleted {
+		t.Fatalf("successor run state = %q, want completed", final.State)
+	}
+	if successorToken := leaseToken(t, leaseDir); successorToken <= firstToken {
+		t.Fatalf("successor token = %d, want > expired token %d", successorToken, firstToken)
+	}
+}
+
+func leaseToken(t *testing.T, leaseDir string) uint64 {
+	t.Helper()
+	entries, err := os.ReadDir(leaseDir)
+	if err != nil {
+		t.Fatalf("ReadDir lease directory: %v", err)
+	}
+	for _, entry := range entries {
+		if filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join(leaseDir, entry.Name()))
+		if err != nil {
+			t.Fatalf("ReadFile lease record: %v", err)
+		}
+		var record struct {
+			Token uint64 `json:"token"`
+		}
+		if err := json.Unmarshal(body, &record); err != nil {
+			t.Fatalf("decode lease record: %v", err)
+		}
+		return record.Token
+	}
+	t.Fatal("lease record not found")
+	return 0
 }
 
 // TestCrossProcessDoubleExecutionPreventedByLease is the twin of

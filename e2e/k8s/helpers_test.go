@@ -61,11 +61,15 @@ const (
 	liveProviderID = "openrouter"
 )
 
-// liveProviderEnabled reports whether OPENROUTER_API_KEY is set in the test
-// process's environment — the gate for the live LLM specs. The mock specs run
-// unconditionally; the live specs Skip when this is false.
+// liveProviderConfigured records that BeforeSuite received and scrubbed an
+// OpenRouter key before any live-provider command ran.
+var liveProviderConfigured bool
+
+// liveProviderEnabled reports whether BeforeSuite enabled the live-provider
+// variant. The key itself is removed from the process environment before the
+// fixture invokes kubectl or any credential plugin.
 func liveProviderEnabled() bool {
-	return os.Getenv("OPENROUTER_API_KEY") != ""
+	return liveProviderConfigured
 }
 
 // --- tool availability / cluster lifecycle -----------------------------------
@@ -215,13 +219,13 @@ func helmInstallMecak8sChart() {
 		"pod-security.kubernetes.io/warn=restricted",
 		"--overwrite")
 
-	installOut, err := exec.CommandContext(ctx, "helm", "upgrade", "--install", "mecak8s", chartDir,
+	installOut, err := boundedCommandOutput(ctx, 1<<20, "helm", "upgrade", "--install", "mecak8s", chartDir,
 		"--namespace", k8sNamespace,
 		"--values", filepath.Join(chartDir, "values-kind.yaml"),
 		"--set", "image.repository=ko.local/mecak8s",
 		"--set", "image.tag=e2e",
 		"--set", "fullnameOverride=mecak8s-agent",
-		"--wait", "--timeout=4m").CombinedOutput()
+		"--wait", "--timeout=4m")
 	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred(),
 		"helm upgrade --install mecak8s failed\n--- output ---\n%s", installOut)
 
@@ -538,6 +542,47 @@ func freeLocalPort() int {
 
 // --- HTTP API helpers --------------------------------------------------------
 
+// createLiveSessionOverHTTP creates a session on the explicit OpenRouter/Haiku
+// selector path. The live lane intentionally does not rely on deployment defaults:
+// it verifies the CreateSession resolved-model echo before starting the real stream.
+func createLiveSessionOverHTTP(ctx context.Context, addr string) string {
+	ginkgo.GinkgoHelper()
+	body, err := json.Marshal(map[string]any{
+		"mode":        "default",
+		"provider_id": liveProviderID,
+		"model_id":    liveProviderModel,
+	})
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred(), "marshal live session create body")
+	url := fmt.Sprintf("http://%s/v1/sessions", addr)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred(), "POST %s", url)
+	defer func() { _ = resp.Body.Close() }()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	gomega.ExpectWithOffset(1, resp.StatusCode).To(gomega.Equal(http.StatusCreated),
+		"create live session: status %d, body %s", resp.StatusCode, string(raw))
+	var respBody struct {
+		SessionID     string `json:"session_id"`
+		ResolvedModel *struct {
+			ProviderID string `json:"provider_id"`
+			ModelID    string `json:"model_id"`
+		} `json:"resolved_model"`
+	}
+	gomega.ExpectWithOffset(1, json.Unmarshal(raw, &respBody)).To(gomega.Succeed(),
+		"create live session: unmarshal %s", string(raw))
+	gomega.ExpectWithOffset(1, respBody.SessionID).NotTo(gomega.BeEmpty(), "empty live session_id")
+	gomega.ExpectWithOffset(1, respBody.ResolvedModel).NotTo(gomega.BeNil(),
+		"live session response omitted resolved_model: %s", string(raw))
+	gomega.ExpectWithOffset(1, respBody.ResolvedModel.ProviderID).To(gomega.Equal(liveProviderID),
+		"live session resolved provider_id = %q, want explicit selector %q (response: %s)",
+		respBody.ResolvedModel.ProviderID, liveProviderID, string(raw))
+	gomega.ExpectWithOffset(1, respBody.ResolvedModel.ModelID).To(gomega.Equal(liveProviderModel),
+		"live session resolved model_id = %q, want explicit selector %q (response: %s)",
+		respBody.ResolvedModel.ModelID, liveProviderModel, string(raw))
+	return respBody.SessionID
+}
+
 // createSessionOverHTTP creates a session via POST /v1/sessions and returns the
 // session id. The request is path-free: mecak8s composition binds the configured
 // deployment workspace.
@@ -586,7 +631,7 @@ func httpPrompt(ctx context.Context, addr, sessionID, text string) (status int, 
 // provider completes a run quickly, and draining ensures the run has fully ended
 // (the session reaches a terminal state) before subsequent assertions. A 409
 // (lease held elsewhere) returns immediately — there is no stream to drain.
-func drainRun(ctx context.Context, addr, sessionID, text string) int {
+func drainRun(ctx context.Context, addr, sessionID, text string) (int, error) {
 	ginkgo.GinkgoHelper()
 	reqBody, _ := json.Marshal(map[string]any{"text": text})
 	url := fmt.Sprintf("http://%s/v1/sessions/%s/prompt", addr, sessionID)
@@ -594,13 +639,17 @@ func drainRun(ctx context.Context, addr, sessionID, text string) int {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
 	resp, err := http.DefaultClient.Do(req)
-	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred(), "POST %s", url)
+	if err != nil {
+		return 0, fmt.Errorf("POST %s: %w", url, err)
+	}
 	defer func() { _ = resp.Body.Close() }()
 	// Drain the SSE stream fully so the run reaches terminal server-side. A 409
 	// has a tiny body (the error JSON) and closes immediately. A 2xx streams
 	// events until the run ends; read to EOF.
-	_, _ = io.Copy(io.Discard, resp.Body)
-	return resp.StatusCode
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		return resp.StatusCode, fmt.Errorf("drain POST %s response: %w", url, err)
+	}
+	return resp.StatusCode, nil
 }
 
 // httpGetSession GETs /v1/sessions/{id} and returns (status, body). Used to
@@ -638,21 +687,185 @@ func httpDeleteSession(ctx context.Context, addr, sessionID string) int {
 // survivor mid-acquire) should RETRY, not abort the attempt.
 func drainRunSoft(ctx context.Context, addr, sessionID, text string) (status int, ok bool) {
 	ginkgo.GinkgoHelper()
-	reqBody, _ := json.Marshal(map[string]any{"text": text})
-	url := fmt.Sprintf("http://%s/v1/sessions/%s/prompt", addr, sessionID)
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(reqBody))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "text/event-stream")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return 0, false
-	}
-	defer func() { _ = resp.Body.Close() }()
-	_, _ = io.Copy(io.Discard, resp.Body)
-	return resp.StatusCode, true
+	status, err := drainRun(ctx, addr, sessionID, text)
+	return status, err == nil
 }
 
 // --- live-provider patching (the live LLM e2e path) ------------------------
+
+// liveProviderPatch returns a JSON Patch that preserves the chart-rendered
+// container configuration while switching only the provider selectors and key
+// reference. Pointer fields distinguish absent args/env (JSON Patch add) from
+// present fields (replace).
+func liveProviderPatch(deploymentJSON []byte) ([]byte, error) {
+	var deployment struct {
+		Spec struct {
+			Template struct {
+				Spec struct {
+					Containers []struct {
+						Name string            `json:"name"`
+						Args *[]string         `json:"args"`
+						Env  *[]map[string]any `json:"env"`
+					} `json:"containers"`
+				} `json:"spec"`
+			} `json:"template"`
+		} `json:"spec"`
+	}
+	if err := json.Unmarshal(deploymentJSON, &deployment); err != nil {
+		return nil, fmt.Errorf("decode agent Deployment: %w", err)
+	}
+
+	containerIndex := -1
+	for i, container := range deployment.Spec.Template.Spec.Containers {
+		if container.Name == agentComponent {
+			containerIndex = i
+			break
+		}
+	}
+	if containerIndex < 0 {
+		return nil, fmt.Errorf("agent Deployment has no %q container", agentComponent)
+	}
+	container := deployment.Spec.Template.Spec.Containers[containerIndex]
+
+	var currentArgs []string
+	if container.Args != nil {
+		currentArgs = *container.Args
+	}
+	args := liveProviderArgs(currentArgs)
+
+	keyRef := map[string]any{
+		"name": "OPENROUTER_API_KEY",
+		"valueFrom": map[string]any{"secretKeyRef": map[string]any{
+			"name": liveProviderSecret,
+			"key":  "OPENROUTER_API_KEY",
+		}},
+	}
+
+	type patchOp struct {
+		Op    string `json:"op"`
+		Path  string `json:"path"`
+		Value any    `json:"value"`
+	}
+	fieldOp := func(present bool) string {
+		if present {
+			return "replace"
+		}
+		return "add"
+	}
+	base := fmt.Sprintf("/spec/template/spec/containers/%d", containerIndex)
+	patch := []patchOp{{Op: fieldOp(container.Args != nil), Path: base + "/args", Value: args}}
+	if container.Env == nil {
+		patch = append(patch, patchOp{Op: "add", Path: base + "/env", Value: []map[string]any{keyRef}})
+	} else {
+		envPath := base + "/env/-"
+		envOp := "add"
+		for i, item := range *container.Env {
+			if item["name"] == "OPENROUTER_API_KEY" {
+				envPath = fmt.Sprintf("%s/env/%d", base, i)
+				envOp = "replace"
+				break
+			}
+		}
+		patch = append(patch, patchOp{Op: envOp, Path: envPath, Value: keyRef})
+	}
+	return json.Marshal(patch)
+}
+
+func liveProviderArgs(current []string) []string {
+	args := make([]string, 0, len(current)+2)
+	for i := 0; i < len(current); i++ {
+		arg := current[i]
+		name := arg
+		if before, _, ok := strings.Cut(arg, "="); ok {
+			name = before
+		}
+		switch name {
+		case "--mock", "--model", "--default-provider", "--default-model":
+			if arg == name && i+1 < len(current) && !strings.HasPrefix(current[i+1], "-") {
+				i++
+			}
+			continue
+		default:
+			args = append(args, arg)
+		}
+	}
+	return append(args,
+		"--default-provider="+liveProviderID,
+		"--default-model="+liveProviderModel,
+	)
+}
+
+type boundedDrainWriter struct {
+	mu    sync.Mutex
+	buf   bytes.Buffer
+	limit int
+}
+
+func (w *boundedDrainWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	remaining := w.limit - w.buf.Len()
+	if remaining > len(p) {
+		remaining = len(p)
+	}
+	if remaining > 0 {
+		_, _ = w.buf.Write(p[:remaining])
+	}
+	return len(p), nil // keep draining the child even after the capture fills.
+}
+
+func (w *boundedDrainWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
+}
+
+func liveRolloutDiagnostics(parent context.Context, key string) string {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 30*time.Second)
+	defer cancel()
+
+	var report strings.Builder
+	run := func(title string, args ...string) {
+		captured := &boundedDrainWriter{limit: 16 * 1024}
+		cmd := exec.CommandContext(ctx, "kubectl", args...)
+		cmd.Stdout = captured
+		cmd.Stderr = captured
+		err := cmd.Run()
+		fmt.Fprintf(&report, "\n--- %s ---\n", title)
+		if err != nil {
+			fmt.Fprintf(&report, "command failed: %v\n", err)
+		}
+		report.WriteString(boundedRedacted(captured.String(), key, 16*1024))
+	}
+	run("deployment replicas", "get", "deployment/mecak8s-agent", "-n", k8sNamespace,
+		"-o", "custom-columns=NAME:.metadata.name,DESIRED:.spec.replicas,CURRENT:.status.replicas,UPDATED:.status.updatedReplicas,READY:.status.readyReplicas,AVAILABLE:.status.availableReplicas,UNAVAILABLE:.status.unavailableReplicas")
+	run("agent pod status", "get", "pods", "-n", k8sNamespace,
+		"-l", "app.kubernetes.io/component="+agentComponent,
+		"-o", `custom-columns=NAME:.metadata.name,PHASE:.status.phase,READY:.status.containerStatuses[*].ready,RESTARTS:.status.containerStatuses[*].restartCount,WAITING:.status.containerStatuses[*].state.waiting.reason`)
+
+	podOut, _ := exec.CommandContext(ctx, "kubectl", "get", "pods", "-n", k8sNamespace,
+		"-l", "app.kubernetes.io/component="+agentComponent, "-o", "name").Output()
+	for _, pod := range strings.Fields(string(podOut)) {
+		run(pod+" agent logs (current)", "logs", "-n", k8sNamespace, pod,
+			"-c", agentComponent, "--tail=80", "--limit-bytes=16384")
+		run(pod+" agent logs (previous)", "logs", "-n", k8sNamespace, pod,
+			"-c", agentComponent, "--previous", "--tail=80", "--limit-bytes=16384")
+	}
+	run("recent warning events", "get", "events", "-n", k8sNamespace,
+		"--field-selector=type=Warning", "--sort-by=.lastTimestamp",
+		"-o", "custom-columns=LAST:.lastTimestamp,REASON:.reason,OBJECT:.involvedObject.name,MESSAGE:.message")
+	return boundedRedacted(report.String(), key, 64*1024)
+}
+
+func boundedRedacted(value, secret string, limit int) string {
+	if secret != "" {
+		value = strings.ReplaceAll(value, secret, "[REDACTED]")
+	}
+	if len(value) <= limit {
+		return value
+	}
+	return value[:limit] + "\n...[diagnostics truncated]...\n"
+}
 
 // enableLiveProvider swaps the agent Deployment from --mock to the real
 // OpenRouter provider + the default-lane model, staged via a k8s Secret so the
@@ -662,17 +875,17 @@ func drainRunSoft(ctx context.Context, addr, sessionID, text string) (status int
 // provider pods (their assertions are provider-agnostic), and the live specs run
 // after. No un-patching — kind delete cluster (AfterSuite) destroys everything.
 //
-// SECURITY: the key is read from os.Getenv ONCE and written to a Secret via a
-// `kubectl apply -f -` of a `stringData` JSON manifest (kubectl carries the value
-// to the API server over its stdin; it is never echoed to stdout/stderr, never a
-// bare argv token, never in a file). The Secret NAME is the only identifier
-// surfaced in logs — the value never is. The patch then consumes it via an
-// envFrom secretKeyRef, so the key reaches the pod ONLY through the Secret, never
-// a pod arg or a Deployment spec field.
-func enableLiveProvider() {
+// SECURITY: key is supplied by BeforeSuite after it reads and removes
+// OPENROUTER_API_KEY from the Go test process environment. It is written to a
+// Secret via a `kubectl apply -f -` of a `stringData` JSON manifest (kubectl
+// carries the value to the API server over its stdin; it is never echoed to
+// stdout/stderr, never a bare argv token, never in a file). The Secret NAME is
+// the only identifier surfaced in logs — the value never is. The patch then
+// consumes it via an envFrom secretKeyRef, so the key reaches the pod ONLY
+// through the Secret, never a pod arg or a Deployment spec field.
+func enableLiveProvider(key string) {
 	ginkgo.GinkgoHelper()
 	ctx := ginkgoSuiteCtx()
-	key := os.Getenv("OPENROUTER_API_KEY")
 	gomega.ExpectWithOffset(1, key).NotTo(gomega.BeEmpty(),
 		"enableLiveProvider called without OPENROUTER_API_KEY")
 
@@ -687,34 +900,28 @@ func enableLiveProvider() {
 		liveProviderSecret, k8sNamespace, key)
 	applySecret := exec.CommandContext(ctx, "kubectl", "apply", "-f", "-")
 	applySecret.Stdin = strings.NewReader(envSecretApply)
-	out, err := applySecret.CombinedOutput()
+	secretOutput := &boundedDrainWriter{limit: 16 * 1024}
+	applySecret.Stdout = secretOutput
+	applySecret.Stderr = secretOutput
+	err := applySecret.Run()
 	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred(),
-		"kubectl apply secret %s failed\n--- output ---\n%s", liveProviderSecret, out)
+		"kubectl apply secret %s failed\n--- output ---\n%s", liveProviderSecret,
+		boundedRedacted(secretOutput.String(), key, 16*1024))
 
-	// 2. Patch the Deployment: drop --mock, set --default-provider=openrouter +
-	//    --default-model=<haiku>, and consume the key from the Secret via an
-	//    envFrom-secretKeyRef. The args REPLACE the whole container args list, so
-	//    they must carry every flag the pod needs (the storage-free defaults).
+	// 2. Patch the Deployment: preserve every chart-rendered flag and env entry,
+	//    dropping only --mock and conflicting provider/model selectors before
+	//    appending one OpenRouter selector pair and upserting the Secret key ref.
 	ginkgo.By("patching mecak8s-agent to the real OpenRouter provider + model")
-	newArgs := []string{
-		"--grpc-addr=0.0.0.0:8080",
-		"--http-addr=0.0.0.0:8081",
-		"--redis-url=redis:6379",
-		"--session-lease-k8s-namespace=mecatl",
-		"--headless=true",
-		"--posture=auto",
-		"--workspace=/tmp",
-		"--default-provider=" + liveProviderID,
-		"--default-model=" + liveProviderModel,
-	}
-	argsJSON, _ := json.Marshal(newArgs)
-	patch := fmt.Sprintf(
-		`[{"op":"replace","path":"/spec/template/spec/containers/0/args","value":%s},`+
-			`{"op":"replace","path":"/spec/template/spec/containers/0/env","value":[{"name":"OPENROUTER_API_KEY","valueFrom":{"secretKeyRef":{"name":%q,"key":"OPENROUTER_API_KEY"}}}]}]`,
-		argsJSON, liveProviderSecret)
+	deploymentJSON, err := exec.CommandContext(ctx, "kubectl", "get",
+		"deployment/mecak8s-agent", "-n", k8sNamespace, "-o", "json").Output()
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred(),
+		"kubectl get deployment before live-provider patch failed")
+	patch, err := liveProviderPatch(deploymentJSON)
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred(),
+		"build live-provider Deployment patch")
 	patchOut, err := exec.CommandContext(ctx, "kubectl", "patch",
 		"deployment/mecak8s-agent", "-n", k8sNamespace,
-		"--type=json", "-p", patch).CombinedOutput()
+		"--type=json", "-p", string(patch)).CombinedOutput()
 	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred(),
 		"kubectl patch deployment to live provider failed\n--- output ---\n%s", patchOut)
 
@@ -725,11 +932,15 @@ func enableLiveProvider() {
 	ginkgo.By("waiting for the live-provider rollout to complete")
 	rolloutCtx, rolloutCancel := context.WithTimeout(ctx, 300*time.Second)
 	defer rolloutCancel()
-	rolloutOut, err := exec.CommandContext(rolloutCtx, "kubectl", "rollout", "status",
+	rolloutOut, err := boundedCommandOutput(rolloutCtx, 16*1024, "kubectl", "rollout", "status",
 		"deployment/mecak8s-agent", "-n", k8sNamespace,
-		"--timeout=290s").CombinedOutput()
-	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred(),
-		"kubectl rollout status (live provider) failed\n--- output ---\n%s", rolloutOut)
+		"--timeout=290s")
+	if err != nil {
+		diagnostics := liveRolloutDiagnostics(ctx, key)
+		ginkgo.Fail(fmt.Sprintf(
+			"kubectl rollout status (live provider) failed: %v\n--- output ---\n%s%s",
+			err, boundedRedacted(string(rolloutOut), key, 16*1024), diagnostics), 1)
+	}
 
 	ginkgo.By("waiting for all mecak8s pods to be Ready (after the live-provider patch)")
 	waitPodsReady()
@@ -753,11 +964,30 @@ func enableLiveProvider() {
 // usage" helper for the live specs — distinct from drainRun (which discards the
 // body, fine for the mock's instant completion but blind to a real run's stop).
 type sseResult struct {
-	Stop   string `json:"stop"`
-	Text   string `json:"text"`
-	Input  int64  `json:"input_tokens"`
-	Output int64  `json:"output_tokens"`
+	Stop            string   `json:"stop"`
+	Text            string   `json:"text"`
+	Input           int64    `json:"input_tokens"`
+	Output          int64    `json:"output_tokens"`
+	EventTypes      []string `json:"-"`
+	NoProgressTexts []string `json:"-"`
 }
+
+func (r *sseResult) diagnostic() string {
+	return fmt.Sprintf("events=%v result_text=%q no_progress=%q", r.EventTypes, r.Text, r.NoProgressTexts)
+}
+
+// sseDiagnosticText bounds model- or server-produced text included in a failed
+// live assertion. The live lane never sends credentials in prompts, but diagnostics
+// must not turn an unexpected verbose event into unbounded test output.
+func sseDiagnosticText(text string) string {
+	const limit = 512
+	if len(text) <= limit {
+		return text
+	}
+	return text[:limit] + "...[truncated]"
+}
+
+const maxSSEDiagnosticEvents = 12
 
 // drainRunSSE starts a prompt run, drains the SSE stream to terminal, and parses
 // the terminal `result` event (stop + usage). It is the live-spec counterpart of
@@ -791,6 +1021,7 @@ func drainRunSSE(ctx context.Context, addr, sessionID, text string) (status int,
 	// A single event JSON is small, but a reasoning turn's text can be long; raise
 	// the per-line budget so a large result text is not truncated.
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	var eventTypes, noProgressTexts []string
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data: ") {
@@ -802,6 +1033,7 @@ func drainRunSSE(ctx context.Context, addr, sessionID, text string) (status int,
 		}
 		var ev struct {
 			Type   string `json:"type"`
+			Text   string `json:"text"`
 			Result *struct {
 				Stop  string `json:"stop"`
 				Text  string `json:"text"`
@@ -814,8 +1046,19 @@ func drainRunSSE(ctx context.Context, addr, sessionID, text string) (status int,
 		if jerr := json.Unmarshal([]byte(payload), &ev); jerr != nil {
 			continue // not a JSON event frame (e.g. a keep-alive comment); skip
 		}
+		if len(eventTypes) < maxSSEDiagnosticEvents {
+			eventTypes = append(eventTypes, ev.Type)
+		}
+		if ev.Type == "no_progress" && len(noProgressTexts) < maxSSEDiagnosticEvents {
+			noProgressTexts = append(noProgressTexts, sseDiagnosticText(ev.Text))
+		}
 		if ev.Type == "result" && ev.Result != nil {
-			res = &sseResult{Stop: ev.Result.Stop, Text: ev.Result.Text}
+			res = &sseResult{
+				Stop:            ev.Result.Stop,
+				Text:            sseDiagnosticText(ev.Result.Text),
+				EventTypes:      eventTypes,
+				NoProgressTexts: noProgressTexts,
+			}
 			if ev.Result.Usage != nil {
 				res.Input = ev.Result.Usage.InputTokens
 				res.Output = ev.Result.Usage.OutputTokens
@@ -839,12 +1082,21 @@ const promptLiveProviderSm = "Reply with exactly the single word: ok. Do not cal
 // the parent for all kubectl/kind/ko commands so a suite abort tears them down.
 func ginkgoSuiteCtx() context.Context { return suiteCtx }
 
+func boundedCommandOutput(ctx context.Context, limit int, name string, args ...string) ([]byte, error) {
+	captured := &boundedDrainWriter{limit: limit}
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Stdout = captured
+	cmd.Stderr = captured
+	err := cmd.Run()
+	return []byte(captured.String()), err
+}
+
 // runCmd runs a command under the suite context and fails the spec on a non-zero
 // exit, attaching combined output. It is the loud variant for commands whose
 // failure is fatal to the spec.
 func runCmd(ctx context.Context, name string, args ...string) string {
 	ginkgo.GinkgoHelper()
-	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+	out, err := boundedCommandOutput(ctx, 1<<20, name, args...)
 	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred(),
 		"%s %s failed\n--- output ---\n%s", name, strings.Join(args, " "), out)
 	return string(out)
@@ -854,7 +1106,7 @@ func runCmd(ctx context.Context, name string, args ...string) string {
 // a non-zero exit. It is the probe variant — used in Eventually loops where a
 // transient failure (pod not yet ready) is expected and retried.
 func runCmdQuiet(name string, args ...string) string {
-	out, _ := exec.CommandContext(ginkgoSuiteCtx(), name, args...).CombinedOutput()
+	out, _ := boundedCommandOutput(ginkgoSuiteCtx(), 1<<20, name, args...)
 	return string(out)
 }
 
