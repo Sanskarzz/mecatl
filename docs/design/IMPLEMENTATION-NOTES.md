@@ -703,7 +703,11 @@ URLs, headers, and credentials never enter emitted fields.
 
 The three provider modules attach only safe facts exposed by their wire protocols:
 `provider/openai/stream.go`, `provider/openaichat/openaichat.go`, and
-`provider/anthropic/anthropic.go`. ToolHive is composed over the same OpenAI Responses
+`provider/anthropic/anthropic.go`. For an HTTP API rejection, each keeps the typed
+SDK error unwrap-visible for classification but projects only its structured type or
+code plus message to terminal `Result.error` (`type-or-code: message`); raw response
+bodies, request URLs, and request/correlation IDs remain undisplayed. In-band SSE
+errors retain their existing rich presentation. ToolHive is composed over the same OpenAI Responses
 adapter in `internal/app/registry.go` (`newGatewayEntry`), so it can report only what
 the gateway and adapter expose. Missing metadata stays missing; no text parsing or
 fabrication fills it in.
