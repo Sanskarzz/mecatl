@@ -2,6 +2,7 @@
 sidebar_position: 2
 title: Get started with mecatui
 sidebar_label: Get started
+description: Build and launch mecatui for an offline demo or an embedded local agent session.
 ---
 
 # Get started with mecatui

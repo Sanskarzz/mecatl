@@ -2,6 +2,7 @@
 sidebar_position: 5
 title: Work in the TUI
 sidebar_label: Use the TUI
+description: Work in the mecatui terminal interface, steer runs, review tools, and approve actions.
 ---
 
 # Work in the TUI
