@@ -301,7 +301,7 @@ func TestAskReviewerE2EHeadlessTeamAllow(t *testing.T) {
 		eng := agent.NewEngine(childEngineDepsForProvider(cfg, "member:lead", memberLLM, "m", func() int { return defaultContextWindowTokens }, cat, promptConfig(cfg, ""), nil))
 		return agent.MemberBuild{Engine: eng, IsolateReadOnly: true}
 	}
-	teamTool := agent.NewTeamTool(memberFactory, agent.WithTeamToolReadOnlyForker(appFakeForker{}))
+	teamTool := agent.NewTeamTool(memberFactory, agent.WithTeamToolReadOnlyForker(appFakeForker{}), agent.WithTeamToolReadLedgerFactory(testReadLedger))
 
 	parentLLM := mockllm.New(
 		mockllm.ToolCallTurn(session.NewToolCall("p1", "Team",

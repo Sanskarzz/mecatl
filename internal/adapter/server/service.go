@@ -20,6 +20,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+	"github.com/stacklok/mecatl/engine/adapter/memledger"
 	"github.com/stacklok/mecatl/engine/adapter/nofs"
 	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/learning"
@@ -539,7 +540,7 @@ type Config struct {
 	// threaded to agent.WithTeamSharedBaseWorkspace). The composition root wires it
 	// whenever the Workspaces factory may return a relaxed workspace (auto/yolo).
 	// Optional; nil keeps the historical verbatim base share.
-	SharedBaseWorkspace func(root string) tool.Workspace
+	SharedBaseWorkspace func(tool.Workspace) tool.Workspace
 	// TeamHooks fires the team lifecycle hooks (TeammateIdle) and is passed to
 	// member coordination tools for the TaskCreated / TaskCompleted gates.
 	// Optional.
@@ -3840,7 +3841,7 @@ func (s *Service) LoadSessionWithMCP(ctx context.Context, id session.SessionID, 
 		// under the same lock (the create-time discipline), so StartRun never
 		// consults the shared factory with the empty root. It is a complete
 		// shell-less Environment with an honest nofs ref.
-		s.sessionEnvironments[id] = tool.MustEnvironment(sess.EnvironmentRef, nofs.New(), nil)
+		s.sessionEnvironments[id] = tool.MustEnvironment(sess.EnvironmentRef, nofs.New(), memledger.New(), nil)
 	}
 	s.mu.Unlock()
 	return sess, nil
@@ -4802,7 +4803,7 @@ func (s *Service) buildAndRegisterSessionEngine(ctx context.Context, sess *sessi
 		// empty root. It is a complete shell-less Environment with an honest nofs ref.
 		// A selector session with a real workspace needs no override: the run-entry
 		// seam builds its environment from the shared factory as usual.
-		s.sessionEnvironments[id] = tool.MustEnvironment(sess.EnvironmentRef, nofs.New(), nil)
+		s.sessionEnvironments[id] = tool.MustEnvironment(sess.EnvironmentRef, nofs.New(), memledger.New(), nil)
 	}
 	s.mu.Unlock()
 	// On a clean replace, free the displaced prior engine's MCP manager OUTSIDE the lock

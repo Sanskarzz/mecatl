@@ -212,22 +212,20 @@ func hasDotDot(p string) bool {
 	return false
 }
 
-// Workspace is the in-memory session-scoped seam. It composes a FileSystem,
-// performs Grep over in-memory contents, and carries the Edit read-ledger.
-// Command execution is not part of the Workspace; use CommandRunner for that.
+// Workspace is the in-memory session-scoped content seam. Command execution
+// and read-before-write evidence are carried separately by tool.Environment.
 type Workspace struct {
 	fs *FileSystem
-
-	mu     sync.Mutex
-	ledger map[string]tool.FileVersion // path -> recorded version
 }
 
 // NewWorkspace returns an empty in-memory Workspace with the given logical root.
 func NewWorkspace(root string) *Workspace {
-	return &Workspace{
-		fs:     NewFileSystem(root),
-		ledger: make(map[string]tool.FileVersion),
-	}
+	return NewWorkspaceOverFileSystem(NewFileSystem(root))
+}
+
+// NewWorkspaceOverFileSystem returns a Workspace over the given content backend.
+func NewWorkspaceOverFileSystem(backend *FileSystem) *Workspace {
+	return &Workspace{fs: backend}
 }
 
 // Compile-time assertions that Workspace satisfies the filesystem and authority seams.
@@ -441,35 +439,4 @@ func (r *CommandRunner) Run(ctx context.Context, _ string) (tool.CommandResult, 
 		return tool.CommandResult{}, nil
 	}
 	return *res, nil
-}
-
-// RecordRead stores the EXACT authoritative version for path under the session
-// ledger. It performs NO I/O: it stores the FileVersion the caller supplies (the
-// one ReadVersion minted), so a later RecordedVersion lookup compares against the
-// recorded token without re-reading the file. The ledger key is the clean
-// session-relative path (see cleanPath).
-func (w *Workspace) RecordRead(p string, version tool.FileVersion) {
-	key, err := cleanPath(p)
-	if err != nil {
-		// An uncleanable path cannot be recorded; leave it unrecorded (fail-safe:
-		// a later mutation refuses as "not read").
-		return
-	}
-	w.mu.Lock()
-	w.ledger[key] = version
-	w.mu.Unlock()
-}
-
-// RecordedVersion returns the version previously recorded for path via RecordRead,
-// performing NO I/O. ok is false if path was never recorded. The lookup uses the
-// same clean key as RecordRead.
-func (w *Workspace) RecordedVersion(p string) (tool.FileVersion, bool) {
-	key, err := cleanPath(p)
-	if err != nil {
-		return tool.FileVersion{}, false
-	}
-	w.mu.Lock()
-	version, ok := w.ledger[key]
-	w.mu.Unlock()
-	return version, ok
 }

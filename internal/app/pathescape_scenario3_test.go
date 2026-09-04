@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stacklok/mecatl/engine/adapter/memledger"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
 	"github.com/stacklok/mecatl/engine/adapter/permstore"
@@ -370,7 +371,7 @@ func TestPathEscapePosture_Scenario3_EditLedgerOutOfRoot(t *testing.T) {
 		entered:   make(chan struct{}),
 		release:   make(chan struct{}),
 	}
-	env, err := tool.NewEnvironment(sess.EnvironmentRef, gate, nil)
+	env, err := tool.NewEnvironment(sess.EnvironmentRef, gate, memledger.New(), nil)
 	if err != nil {
 		t.Fatalf("NewEnvironment: %v", err)
 	}
@@ -539,7 +540,7 @@ func TestPathEscapePosture_Scenario3_WriteEscapeMutateSerial(t *testing.T) {
 	// overlap unmissable.
 	var inflight, maxSeen atomic.Int32
 	env, err := tool.NewEnvironment(sess.EnvironmentRef,
-		newSerialProbeWorkspace(t, f.workspace, &inflight, &maxSeen, 50*time.Millisecond), nil)
+		newSerialProbeWorkspace(t, f.workspace, &inflight, &maxSeen, 50*time.Millisecond), memledger.New(), nil)
 	if err != nil {
 		t.Fatalf("NewEnvironment: %v", err)
 	}

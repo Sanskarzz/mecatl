@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/stacklok/mecatl/engine/adapter/memfs"
+	"github.com/stacklok/mecatl/engine/adapter/memledger"
 	"github.com/stacklok/mecatl/engine/adapter/memstore"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/adapter/nofs"
@@ -64,14 +65,14 @@ func (p *placementProviderSpy) Bind(_ context.Context, req PlacementBindRequest)
 			return PlacementBinding{}, ErrPlacementUnavailable
 		}
 		ref := session.EnvironmentRef{Kind: session.EnvKindLocal, ID: choice.Path, Revision: choice.Head}
-		return PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, memfs.NewWorkspace(choice.Path), nil)}, nil
+		return PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, memfs.NewWorkspace(choice.Path), memledger.New(), nil)}, nil
 	}
 	if req.Selector.Kind == PlacementSelectorNoFS {
 		ref := session.EnvironmentRef{Kind: session.EnvKindNoFS, ID: "none", Revision: "v1"}
-		return PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, nofs.New(), nil)}, nil
+		return PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, nofs.New(), memledger.New(), nil)}, nil
 	}
 	ref := session.EnvironmentRef{Kind: session.EnvKindLocal, ID: "/repo", Revision: "base-head"}
-	return PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, memfs.NewWorkspace(ref.ID), nil)}, nil
+	return PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, memfs.NewWorkspace(ref.ID), memledger.New(), nil)}, nil
 }
 
 func (p *placementProviderSpy) Reattach(_ context.Context, req PlacementReattachRequest) (PlacementBinding, error) {
@@ -80,9 +81,9 @@ func (p *placementProviderSpy) Reattach(_ context.Context, req PlacementReattach
 	p.reattachRef = req.Ref
 	p.mu.Unlock()
 	if req.Ref.Kind == session.EnvKindNoFS {
-		return PlacementBinding{Ref: req.Ref, Environment: tool.MustEnvironment(req.Ref, nofs.New(), nil)}, nil
+		return PlacementBinding{Ref: req.Ref, Environment: tool.MustEnvironment(req.Ref, nofs.New(), memledger.New(), nil)}, nil
 	}
-	return PlacementBinding{Ref: req.Ref, Environment: tool.MustEnvironment(req.Ref, memfs.NewWorkspace(req.Ref.ID), nil)}, nil
+	return PlacementBinding{Ref: req.Ref, Environment: tool.MustEnvironment(req.Ref, memfs.NewWorkspace(req.Ref.ID), memledger.New(), nil)}, nil
 }
 
 func (p *placementProviderSpy) ListWorktrees(ctx context.Context, req PlacementDiscoveryRequest) ([]ScopedWorktree, error) {

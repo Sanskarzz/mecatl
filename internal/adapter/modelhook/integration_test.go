@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/stacklok/mecatl/engine/adapter/memfs"
+	"github.com/stacklok/mecatl/engine/adapter/memledger"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
 	"github.com/stacklok/mecatl/engine/agent"
@@ -127,7 +128,7 @@ func TestBashDefaultRuleModelSeesLocalWriteSafeRubric(t *testing.T) {
 	cat.MustRegister(bt)
 	e := newEngine(agent.Deps{LLM: llm, Catalog: cat, Hooks: hooks})
 	ws := memfs.NewWorkspace("/ws")
-	env := tool.MustEnvironment(session.EnvironmentRef{Kind: session.EnvKindMem, ID: "/ws", Revision: "v1"}, ws, nil)
+	env := tool.MustEnvironment(session.EnvironmentRef{Kind: session.EnvKindMem, ID: "/ws", Revision: "v1"}, ws, memledger.New(), nil)
 	drain(e.Run(context.Background(), session.New("s1", session.ModeDefault, session.EnvironmentRef{Kind: session.EnvKindMem, ID: "/ws", Revision: "v1"}, session.Limits{}, time.Unix(0, 0)), env, agent.RunRequest{Text: "go"}))
 
 	if chk.prompt == "" {
@@ -216,7 +217,7 @@ func runBashGuardrail(t *testing.T, chk modelhook.VerdictChecker, rule modelhook
 	deps.Hooks = hooks
 	e := newEngine(deps)
 	ws := memfs.NewWorkspace("/ws")
-	env := tool.MustEnvironment(session.EnvironmentRef{Kind: session.EnvKindMem, ID: "/ws", Revision: "v1"}, ws, nil)
+	env := tool.MustEnvironment(session.EnvironmentRef{Kind: session.EnvKindMem, ID: "/ws", Revision: "v1"}, ws, memledger.New(), nil)
 	evs := drain(e.Run(context.Background(), session.New("s1", session.ModeDefault, session.EnvironmentRef{Kind: session.EnvKindMem, ID: "/ws", Revision: "v1"}, session.Limits{}, time.Unix(0, 0)), env, agent.RunRequest{Text: "go"}))
 	return ran, evs
 }
@@ -280,7 +281,7 @@ func TestGuardrailBashCheckerErrorFailsOpen(t *testing.T) {
 	cat.MustRegister(bt)
 	e := newEngine(agent.Deps{LLM: llm, Catalog: cat, Hooks: hooks})
 	ws := memfs.NewWorkspace("/ws")
-	env := tool.MustEnvironment(session.EnvironmentRef{Kind: session.EnvKindMem, ID: "/ws", Revision: "v1"}, ws, nil)
+	env := tool.MustEnvironment(session.EnvironmentRef{Kind: session.EnvKindMem, ID: "/ws", Revision: "v1"}, ws, memledger.New(), nil)
 	drain(e.Run(context.Background(), session.New("s1", session.ModeDefault, session.EnvironmentRef{Kind: session.EnvKindMem, ID: "/ws", Revision: "v1"}, session.Limits{}, time.Unix(0, 0)), env, agent.RunRequest{Text: "go"}))
 	if !ran {
 		t.Fatal("fail-open: a checker error must NOT block (the tool runs)")
@@ -347,7 +348,7 @@ func TestGuardrailPreBlockReachesLoop(t *testing.T) {
 	cat.MustRegister(wf)
 	e := newEngine(agent.Deps{LLM: llm, Catalog: cat, Hooks: hooks})
 	ws := memfs.NewWorkspace("/ws")
-	env := tool.MustEnvironment(session.EnvironmentRef{Kind: session.EnvKindMem, ID: "/ws", Revision: "v1"}, ws, nil)
+	env := tool.MustEnvironment(session.EnvironmentRef{Kind: session.EnvKindMem, ID: "/ws", Revision: "v1"}, ws, memledger.New(), nil)
 	evs := drain(e.Run(context.Background(), session.New("s1", session.ModeDefault, session.EnvironmentRef{Kind: session.EnvKindMem, ID: "/ws", Revision: "v1"}, session.Limits{}, time.Unix(0, 0)), env, agent.RunRequest{Text: "go"}))
 
 	if executed {
@@ -384,7 +385,7 @@ func TestGuardrailPostBlockRewritesResultInLoop(t *testing.T) {
 	cat.MustRegister(wf)
 	e := newEngine(agent.Deps{LLM: llm, Catalog: cat, Hooks: hooks})
 	ws := memfs.NewWorkspace("/ws")
-	env := tool.MustEnvironment(session.EnvironmentRef{Kind: session.EnvKindMem, ID: "/ws", Revision: "v1"}, ws, nil)
+	env := tool.MustEnvironment(session.EnvironmentRef{Kind: session.EnvKindMem, ID: "/ws", Revision: "v1"}, ws, memledger.New(), nil)
 	evs := drain(e.Run(context.Background(), session.New("s1", session.ModeDefault, session.EnvironmentRef{Kind: session.EnvKindMem, ID: "/ws", Revision: "v1"}, session.Limits{}, time.Unix(0, 0)), env, agent.RunRequest{Text: "go"}))
 
 	// The result the CLIENT sees (EvToolResult) must be the rewritten error, NOT the
@@ -427,7 +428,7 @@ func TestGuardrailSafeContentUnchanged(t *testing.T) {
 	cat.MustRegister(wf)
 	e := newEngine(agent.Deps{LLM: llm, Catalog: cat, Hooks: hooks})
 	ws := memfs.NewWorkspace("/ws")
-	env := tool.MustEnvironment(session.EnvironmentRef{Kind: session.EnvKindMem, ID: "/ws", Revision: "v1"}, ws, nil)
+	env := tool.MustEnvironment(session.EnvironmentRef{Kind: session.EnvKindMem, ID: "/ws", Revision: "v1"}, ws, memledger.New(), nil)
 	evs := drain(e.Run(context.Background(), session.New("s1", session.ModeDefault, session.EnvironmentRef{Kind: session.EnvKindMem, ID: "/ws", Revision: "v1"}, session.Limits{}, time.Unix(0, 0)), env, agent.RunRequest{Text: "go"}))
 
 	for _, ev := range evs {
@@ -459,7 +460,7 @@ func runBashGuardrailInteractive(t *testing.T, waiver *modelhook.WaiverHolder, d
 	cat.MustRegister(bt)
 	e := newEngine(agent.Deps{LLM: llm, Catalog: cat, Hooks: hooks, Interactive: true})
 	ws := memfs.NewWorkspace("/ws")
-	env := tool.MustEnvironment(session.EnvironmentRef{Kind: session.EnvKindMem, ID: "/ws", Revision: "v1"}, ws, nil)
+	env := tool.MustEnvironment(session.EnvironmentRef{Kind: session.EnvKindMem, ID: "/ws", Revision: "v1"}, ws, memledger.New(), nil)
 	r := e.Run(context.Background(), session.New(session.SessionID(sessionID), session.ModeDefault, session.EnvironmentRef{Kind: session.EnvKindMem, ID: "/ws", Revision: "v1"}, session.Limits{}, time.Unix(0, 0)), env, agent.RunRequest{Text: "go"})
 	for ev := range r.Events() {
 		evs = append(evs, ev)

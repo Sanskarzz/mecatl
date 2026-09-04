@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stacklok/mecatl/engine/adapter/memfs"
+	"github.com/stacklok/mecatl/engine/adapter/memledger"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/tool"
 )
@@ -35,7 +36,7 @@ func (r affinityRunner) BoundWorkspaceRoot() string { return r.root }
 func TestInvariant_persisted_placement_reattaches_exactly(t *testing.T) {
 	ref := session.EnvironmentRef{Kind: "remote", ID: "private-7", Revision: "r3"}
 	ws := memfs.NewWorkspace("/exact")
-	env := tool.MustEnvironment(ref, ws, affinityRunner{root: ws.Root()})
+	env := tool.MustEnvironment(ref, ws, memledger.New(), affinityRunner{root: ws.Root()})
 	provider := &exactPlacementProvider{binding: PlacementBinding{Environment: env, Ref: ref}}
 	binder, err := NewPlacementBinder(provider)
 	if err != nil {
@@ -56,7 +57,7 @@ func TestInvariant_persisted_placement_reattaches_exactly(t *testing.T) {
 	if _, err := binder.Reattach(context.Background(), PlacementReattachRequest{Ref: ref, Scope: "tenant"}); !errors.Is(err, ErrInvalidPlacementBinding) {
 		t.Fatalf("revision mismatch = %v, want ErrInvalidPlacementBinding", err)
 	}
-	provider.binding = PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, ws, affinityRunner{root: "/wrong"})}
+	provider.binding = PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, ws, memledger.New(), affinityRunner{root: "/wrong"})}
 	if _, err := binder.Reattach(context.Background(), PlacementReattachRequest{Ref: ref, Scope: "tenant"}); !errors.Is(err, ErrInvalidPlacementBinding) {
 		t.Fatalf("runner/workspace mismatch = %v, want ErrInvalidPlacementBinding", err)
 	}

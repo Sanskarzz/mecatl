@@ -20,6 +20,8 @@
     ifacemethod func (MemoryStore).RememberEntry(ctx context.Context, e MemoryEntry) error
     ifacemethod func (MemoryStore).Search(ctx context.Context, query string, k int) ([]MemoryEntry, error)
     ifacemethod func (PlanOnly).PlanOnlyTool()
+    ifacemethod func (ReadLedger).RecordRead(ctx context.Context, key string, version FileVersion) error
+    ifacemethod func (ReadLedger).RecordedVersion(ctx context.Context, key string) (version FileVersion, ok bool, err error)
     ifacemethod func (SearchProvider).Search(ctx context.Context, q SearchQuery) ([]SearchResult, error)
     ifacemethod func (SkillSource).ListSkillAssets(ctx context.Context, name string) ([]SkillAsset, error)
     ifacemethod func (SkillSource).ListSkills(ctx context.Context) ([]SkillMeta, error)
@@ -32,8 +34,6 @@
     ifacemethod func (Workspace).Glob(ctx context.Context, pattern string) ([]string, error)
     ifacemethod func (Workspace).Grep(ctx context.Context, pattern string, pathGlob string) ([]GrepMatch, error)
     ifacemethod func (Workspace).ReadVersion(ctx context.Context, path string) ([]byte, FileVersion, error)
-    ifacemethod func (Workspace).RecordRead(path string, version FileVersion)
-    ifacemethod func (Workspace).RecordedVersion(path string) (version FileVersion, ok bool)
     ifacemethod func (Workspace).ReplaceFile(ctx context.Context, path string, old FileVersion, data []byte) (FileVersion, error)
     ifacemethod func (WorkspaceReader).Read(ctx context.Context, path string) ([]byte, error)
     ifacemethod func (WorkspaceReader).Root() string
@@ -52,10 +52,10 @@
     method func (*VersionMismatchError).Error() string
     method func (AgentMCPServer).IsReference() bool
     method func (Environment).CommandRunner() CommandRunner
+    method func (Environment).ReadLedger() ReadLedger
     method func (Environment).Ref() session.EnvironmentRef
     method func (Environment).Workspace() Workspace
     method func (FileVersion).Equal(o FileVersion) bool
-    method func (FileVersion).Token() (token string, ok bool)
 const AgentOriginDriver AgentOrigin = "driver"
 const AgentOriginExplicit AgentOrigin = "explicit"
 const AgentOriginProject AgentOrigin = "project"
@@ -80,12 +80,14 @@ const SkillOriginProject SkillOrigin = "project"
 const SkillOriginUser SkillOrigin = "user"
 const ToolSearchName untyped string = "ToolSearch"
 func CanonicalMemoryText(value string) string
+func DecodeFileVersion(encoded string) FileVersion
 func DirectiveShapedUserMemory(value string) bool
+func EncodeFileVersion(f FileVersion) (string, error)
 func LedgerKey(root string, path string) string
 func MemoryAttributionFromContext(ctx context.Context) (MemoryAttribution, bool)
-func MustEnvironment(ref session.EnvironmentRef, ws Workspace, runner CommandRunner) Environment
+func MustEnvironment(ref session.EnvironmentRef, ws Workspace, ledger ReadLedger, runner CommandRunner) Environment
 func NewCatalog() *Catalog
-func NewEnvironment(ref session.EnvironmentRef, ws Workspace, runner CommandRunner) (Environment, error)
+func NewEnvironment(ref session.EnvironmentRef, ws Workspace, ledger ReadLedger, runner CommandRunner) (Environment, error)
 func NewFileVersion(token string) FileVersion
 func NewToolSearch(cat *Catalog) *Search
 func SecretShapedMemoryValue(key string, value string) bool
@@ -130,6 +132,7 @@ type MemoryVersion string
 type MemoryVersionConflictError struct{Key string; Expected MemoryVersion; Actual MemoryVersion}
 type MemoryWriter string
 type PlanOnly interface{PlanOnlyTool(); Tool}
+type ReadLedger interface{RecordRead(ctx context.Context, key string, version FileVersion) error; RecordedVersion(ctx context.Context, key string) (version FileVersion, ok bool, err error)}
 type Search struct{}
 type SearchProvider interface{Search(ctx context.Context, q SearchQuery) ([]SearchResult, error)}
 type SearchQuery struct{Query string; Limit int; Site string; Freshness string}
@@ -141,12 +144,15 @@ type SkillSource interface{ListSkillAssets(ctx context.Context, name string) ([]
 type Tool interface{Execute(ctx context.Context, in session.ToolCall, env Environment) (session.ToolResult, error); ReadOnly() bool; Spec() ToolSpec}
 type ToolSpec struct{Name string; Description string; Schema json.RawMessage}
 type VersionMismatchError struct{Path string}
-type Workspace interface{CreateFile(ctx context.Context, path string, data []byte) (FileVersion, error); Glob(ctx context.Context, pattern string) ([]string, error); Grep(ctx context.Context, pattern string, pathGlob string) ([]GrepMatch, error); ReadVersion(ctx context.Context, path string) ([]byte, FileVersion, error); RecordRead(path string, version FileVersion); RecordedVersion(path string) (version FileVersion, ok bool); ReplaceFile(ctx context.Context, path string, old FileVersion, data []byte) (FileVersion, error); WorkspaceReader}
+type Workspace interface{CreateFile(ctx context.Context, path string, data []byte) (FileVersion, error); Glob(ctx context.Context, pattern string) ([]string, error); Grep(ctx context.Context, pattern string, pathGlob string) ([]GrepMatch, error); ReadVersion(ctx context.Context, path string) ([]byte, FileVersion, error); ReplaceFile(ctx context.Context, path string, old FileVersion, data []byte) (FileVersion, error); WorkspaceReader}
 type WorkspaceReader interface{Read(ctx context.Context, path string) ([]byte, error); Root() string; Stat(ctx context.Context, path string) (FileInfo, error)}
 var ErrDuplicateTool error
+var ErrEnvironmentNoReadLedger error
 var ErrEnvironmentNoWorkspace error
 var ErrInstructionMemory error
+var ErrInvalidFileVersion error
 var ErrInvalidMemoryKey error
+var ErrLedgerUnavailable error
 var ErrMemoryNotFound error
 var ErrNoShell error
 var ErrSearchBackendDown error

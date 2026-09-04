@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/stacklok/mecatl/engine/adapter/memfs"
+	"github.com/stacklok/mecatl/engine/adapter/memledger"
 	"github.com/stacklok/mecatl/engine/adapter/memstore"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/agent"
@@ -33,7 +34,7 @@ func TestInvariant_delegation_cannot_escalate_placement(t *testing.T) {
 	store := memstore.New()
 	ref := session.EnvironmentRef{Kind: "remote", ID: "opaque-placement", Revision: "revision-9"}
 	privateRoot := "/private/provider/root"
-	env := tool.MustEnvironment(ref, memfs.NewWorkspace(privateRoot), nil)
+	env := tool.MustEnvironment(ref, memfs.NewWorkspace(privateRoot), memledger.New(), nil)
 	provider := delegationPlacementProvider{binding: server.PlacementBinding{Environment: env, Ref: ref}}
 	memberEngine := func(*team.Team, agent.MemberSpec, string) agent.MemberBuild {
 		return agent.MemberBuild{Engine: agent.NewEngine(agent.Deps{LLM: mockllm.New(mockllm.TextTurn("done")), Catalog: tool.NewCatalog()})}

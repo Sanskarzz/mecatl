@@ -14,6 +14,7 @@ import (
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
 	"github.com/stacklok/mecatl/engine/adapter/memfs"
+	"github.com/stacklok/mecatl/engine/adapter/memledger"
 	"github.com/stacklok/mecatl/engine/adapter/memstore"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/adapter/nofs"
@@ -31,7 +32,7 @@ type adrPlacementProvider struct{ selectors *WorktreeSelectorIssuer }
 func (p adrPlacementProvider) Bind(_ context.Context, req PlacementBindRequest) (PlacementBinding, error) {
 	if req.Selector.Kind == PlacementSelectorNoFS {
 		ref := session.EnvironmentRef{Kind: session.EnvKindNoFS, ID: "none", Revision: "v1"}
-		return PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, nofs.New(), nil), Metadata: PlacementMetadata{Label: "No filesystem"}}, nil
+		return PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, nofs.New(), memledger.New(), nil), Metadata: PlacementMetadata{Label: "No filesystem"}}, nil
 	}
 	if req.Selector.IsWorktree() {
 		current, _ := (adrWorktrees{}).List(context.Background(), req.Selector.SourceRef.ID)
@@ -40,7 +41,7 @@ func (p adrPlacementProvider) Bind(_ context.Context, req PlacementBindRequest) 
 			return PlacementBinding{}, err
 		}
 		ref := session.EnvironmentRef{Kind: session.EnvKindLocal, ID: choice.Path, Revision: choice.Head}
-		return PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, memfs.NewWorkspace(choice.Path), nil), Metadata: PlacementMetadata{Label: choice.Branch, Branch: choice.Branch, Revision: choice.Head}}, nil
+		return PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, memfs.NewWorkspace(choice.Path), memledger.New(), nil), Metadata: PlacementMetadata{Label: choice.Branch, Branch: choice.Branch, Revision: choice.Head}}, nil
 	}
 	return adrPlacementBinding(), nil
 }
@@ -51,14 +52,14 @@ func (adrPlacementProvider) Reattach(_ context.Context, req PlacementReattachReq
 		return adrPlacementProvider{}.Bind(context.Background(), PlacementBindRequest{Selector: NoFSPlacement()})
 	}
 	binding.Ref = req.Ref
-	binding.Environment = tool.MustEnvironment(req.Ref, memfs.NewWorkspace(adrPrivateRoot), nil)
+	binding.Environment = tool.MustEnvironment(req.Ref, memfs.NewWorkspace(adrPrivateRoot), memledger.New(), nil)
 	return binding, nil
 }
 
 func adrPlacementBinding() PlacementBinding {
 	ref := session.EnvironmentRef{Kind: session.EnvKindLocal, ID: adrPrivateRoot, Revision: "rev-private"}
 	return PlacementBinding{
-		Ref: ref, Environment: tool.MustEnvironment(ref, memfs.NewWorkspace(adrPrivateRoot), nil),
+		Ref: ref, Environment: tool.MustEnvironment(ref, memfs.NewWorkspace(adrPrivateRoot), memledger.New(), nil),
 		Metadata: PlacementMetadata{Label: "Primary repository", Branch: "main", Revision: "display-rev"},
 	}
 }

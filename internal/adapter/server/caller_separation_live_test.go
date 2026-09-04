@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/stacklok/mecatl/engine/adapter/memfs"
+	"github.com/stacklok/mecatl/engine/adapter/memledger"
 	"github.com/stacklok/mecatl/engine/adapter/memstore"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
@@ -22,7 +23,7 @@ import (
 // callerSeparationTestEnv wraps a throwaway memfs Workspace into an Environment
 // for these tests' non-FS tools (InspectSubagent/InspectMember/Ask).
 func callerSeparationTestEnv() tool.Environment {
-	return tool.MustEnvironment(session.EnvironmentRef{Kind: session.EnvKindMem, ID: "/ws"}, memfs.NewWorkspace("/ws"), nil)
+	return tool.MustEnvironment(session.EnvironmentRef{Kind: session.EnvKindMem, ID: "/ws"}, memfs.NewWorkspace("/ws"), memledger.New(), nil)
 }
 
 type callerSeparationAskTool struct{}

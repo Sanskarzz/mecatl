@@ -17,6 +17,7 @@ import (
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
 	"github.com/stacklok/mecatl/engine/adapter/memfs"
+	"github.com/stacklok/mecatl/engine/adapter/memledger"
 	"github.com/stacklok/mecatl/engine/adapter/memstore"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/agent"
@@ -43,7 +44,7 @@ func (p *repairPlacementProvider) Reattach(_ context.Context, req PlacementReatt
 	}
 	binding := p.binding
 	binding.Ref = req.Ref
-	binding.Environment = tool.MustEnvironment(req.Ref, memfs.NewWorkspace("/fresh"), nil)
+	binding.Environment = tool.MustEnvironment(req.Ref, memfs.NewWorkspace("/fresh"), memledger.New(), nil)
 	return binding, nil
 }
 
@@ -60,7 +61,7 @@ func TestInvariant_placement_binder_required_for_service_construction(t *testing
 
 func TestInvariant_ordinary_placement_bindings_are_not_environment_overrides(t *testing.T) {
 	ref := session.EnvironmentRef{Kind: session.EnvKindMem, ID: "placement", Revision: "v1"}
-	provider := &repairPlacementProvider{binding: PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, memfs.NewWorkspace("/bound"), nil)}}
+	provider := &repairPlacementProvider{binding: PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, memfs.NewWorkspace("/bound"), memledger.New(), nil)}}
 	svc, err := NewService(Config{Engine: repairEngine(), Store: memstore.New(), PlacementProvider: provider, PlacementScope: "test", SharedEngineRoot: "/bound", NewID: func() session.SessionID { return "created" }, Now: func() time.Time { return time.Unix(1, 0) }})
 	if err != nil {
 		t.Fatal(err)
@@ -116,7 +117,7 @@ func (p leaseLossPlacementProvider) Reattach(ctx context.Context, req PlacementR
 	<-ctx.Done()
 	binding := p.binding
 	binding.Ref = req.Ref
-	binding.Environment = tool.MustEnvironment(req.Ref, memfs.NewWorkspace("/provisional"), nil)
+	binding.Environment = tool.MustEnvironment(req.Ref, memfs.NewWorkspace("/provisional"), memledger.New(), nil)
 	binding.Close = func() error { p.closed.Add(1); return nil }
 	return binding, nil
 }
@@ -134,7 +135,7 @@ func (immediateLeaseLoss) Release(context.Context, port.Lease) error { return ni
 func TestInvariant_successor_lease_loss_cleans_provisional_binding(t *testing.T) {
 	ref := session.EnvironmentRef{Kind: session.EnvKindMem, ID: "placement", Revision: "v1"}
 	closed := &atomic.Int32{}
-	provider := leaseLossPlacementProvider{binding: PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, memfs.NewWorkspace("/source"), nil)}, closed: closed}
+	provider := leaseLossPlacementProvider{binding: PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, memfs.NewWorkspace("/source"), memledger.New(), nil)}, closed: closed}
 	store := memstore.New()
 	source := session.New("source", session.ModeDefault, ref, session.Limits{}, time.Unix(1, 0))
 	if err := store.Save(context.Background(), source); err != nil {
@@ -169,7 +170,7 @@ func (l errorCommandLister) List(context.Context, string) ([]Command, error) { r
 func TestInvariant_command_discovery_errors_are_content_free(t *testing.T) {
 	private := "/srv/private/tenant/commands.yaml"
 	ref := session.EnvironmentRef{Kind: session.EnvKindMem, ID: "placement", Revision: "v1"}
-	provider := &repairPlacementProvider{binding: PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, memfs.NewWorkspace("/bound"), nil)}}
+	provider := &repairPlacementProvider{binding: PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, memfs.NewWorkspace("/bound"), memledger.New(), nil)}}
 	store := memstore.New()
 	source := session.New("source", session.ModeDefault, ref, session.Limits{}, time.Unix(1, 0))
 	if err := store.Save(context.Background(), source); err != nil {
@@ -202,7 +203,7 @@ func TestInvariant_placement_storage_errors_are_content_free(t *testing.T) {
 	ref := session.EnvironmentRef{Kind: session.EnvKindMem, ID: "placement", Revision: "v1"}
 	svc, err := NewService(Config{
 		Engine: repairEngine(), Store: failingPlacementStore{Store: memstore.New(), err: errors.New("write " + private + ": denied")},
-		PlacementProvider: &repairPlacementProvider{binding: PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, memfs.NewWorkspace("/bound"), nil)}}, PlacementScope: "test", SharedEngineRoot: "/bound", Diagnostics: diag,
+		PlacementProvider: &repairPlacementProvider{binding: PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, memfs.NewWorkspace("/bound"), memledger.New(), nil)}}, PlacementScope: "test", SharedEngineRoot: "/bound", Diagnostics: diag,
 	})
 	if err != nil {
 		t.Fatal(err)

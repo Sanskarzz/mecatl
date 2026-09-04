@@ -118,7 +118,7 @@ func (r *UserModelReviewer) reviewMessages(ctx context.Context, sessionID, works
 	// A FRESH, single-shot child session — its own id, own conversation. This is
 	// the whole point of R10: the user session stays terminal; we run a NEW session.
 	childID := session.SessionID(fmt.Sprintf("%s-%s", r.idPrefix, sessionID))
-	reviewEnv := tool.MustEnvironment(session.EnvironmentRef{Kind: session.EnvKindMem, ID: "usermodel", Revision: "in-tree-v1"}, noopWorkspace{root: workspace}, nil)
+	reviewEnv := tool.MustEnvironment(session.EnvironmentRef{Kind: session.EnvKindMem, ID: "usermodel", Revision: "in-tree-v1"}, noopWorkspace{root: workspace}, emptyReadLedger{}, nil)
 	child := session.New(
 		childID,
 		session.ModeDefault,

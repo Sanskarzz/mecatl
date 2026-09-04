@@ -11,13 +11,6 @@ The covered surface is the eight core packages (`session`, `governance`, `learni
 
 ## [Unreleased]
 
-### Changed
-
-- **`learning.AutomaticAdmissionLedger.Retain` create fencing** ([ADR 0259](../docs/adr/0259-cloud-native-learning.md)) — breaking (pre-v1 minor): callers now consume reservation authority by retaining under the current backend fence before `AttemptRepository.Create`. A reclaimed reservation fences out a late creator; a retained reservation remains conservatively charged when create fails or its response is lost, and the same deterministic identity may retry creation.
-- **`learning.AttemptRepository` backend-authoritative time** ([ADR 0259](../docs/adr/0259-cloud-native-learning.md)) — breaking (pre-v1 minor): discovery, lifecycle mutations, claim expiry, and retention now use each repository backend's clock. Clients request bounded claim and retention durations and provide opaque versions/fences, but cannot supply `now` or absolute authoritative expiry.
-- **`learning.AutomaticAdmissionLedger` reservation discovery and quotas** ([ADR 0259](../docs/adr/0259-cloud-native-learning.md)) — breaking (pre-v1 minor): implementations now provide bounded backend-authoritative discovery that atomically re-fences expired held reservations for automatic cross-Build retain-or-reclaim reconciliation. Added constants fix the global and per-principal durable record bounds; unresolved saturation fails closed rather than evicting held work.
-- **`learning.AutomaticAdmissionLedger` policy/time authority** ([ADR 0259](../docs/adr/0259-cloud-native-learning.md)) — breaking (pre-v1 minor): reservation requests now carry only identity, charge demand, and an expected derived policy revision; reservations persist that revision; and `Reassign`, `Retain`, and `Reclaim` no longer accept caller timestamps. Ledger backends own immutable configured policy and clock authority, preventing clients or skewed replicas from enlarging limits or prematurely expiring charges and fences.
-
 ### Added
 
 - **Session placement authority repair** — removes the orphan exported `session.PlacementSelector` protocol, adds persisted display-only `session.PlacementMetadata`, requires a valid `EnvironmentRef` at aggregate construction, and rejects direct engine runs whose live environment does not match the session identity. Changed (breaking, pre-v1 minor).
@@ -27,8 +20,6 @@ The covered surface is the eight core packages (`session`, `governance`, `learni
 - **Unified environment and placement identity** — adds `Revision` and `Valid` to `session.EnvironmentRef`, makes that exact `{Kind, ID, Revision}` value the runtime and durable placement identity, and removes the short-lived duplicate `session.PlacementRef`/`PlacementKind` types. Engine-created Subagent, Parallel, and Team child sessions now persist the identity carried by their `tool.Environment`; `port.ScheduleSpec` and `port.SessionDiscoveryMeta` replace workspace paths with the exact private environment identity, with schedules also retaining their trusted placement scope. Changed (breaking, pre-v1 minor).
 
 - **`agent.Run.RetractPermissionAsk`** ([ADR 0294](../docs/adr/0294-session-correlation-and-affinity.md)) — lets a lease-owning host atomically withdraw one still-pending local permission ask without resolving it, emitting the matching retraction before cancellation while leaving an already-durable awaiting snapshot untouched for successor handoff. Added (minor).
-
-- **Partition-bounded durable learning attempts** ([ADR 0259](../docs/adr/0259-cloud-native-learning.md)) — adds `learning.MaxAttemptsPerPartition` and `learning.ErrAttemptQuotaExceeded` to the `AttemptRepository` contract. Each caller partition retains at most 256 records: create evicts only its oldest terminal record, or returns the closed quota error without deleting queued/running work. The remote driver preserves the same safe error. Added (minor).
 
 - **`port.CursorEventLog`, `port.Cursor`, `port.EncodeCursor`/`DecodeCursor`, `port.LogRecord`/`LogRecordKind`, `port.ReadOptions`, `port.ErrCursorMalformed`/`ErrCursorExpired`** (issue #821, [ADR 0250](../docs/adr/0250-durable-cursors-and-watch.md)) — durable positions over the event log: an append reports WHERE the record landed, and a read resumes from a position rather than always from the start.
 
@@ -78,16 +69,6 @@ The covered surface is the eight core packages (`session`, `governance`, `learni
   without widening the minimal `SessionStore` or loading transcript content.
   Added (minor).
 
-- **Storage-neutral automatic admission ledger contract** ([ADR 0259](../docs/adr/0259-cloud-native-learning.md)) — `learning.AutomaticAdmissionLedger` defines deterministic attempt-linked reservations, opaque CAS/fencing, global and per-principal count/token windows, weighted cooldown and deduplication, and retained/reclaimed charge reconciliation without introducing a second work queue. Added (minor).
-
-- **Authoritative learned-skill catalog generations** ([ADR 0259](../docs/adr/0259-cloud-native-learning.md)) — `learning.SkillGeneration` and generation-aware `skillfs.AtomicCatalog` publication/invalidation methods let derived per-partition caches reject delayed older updates while retaining external-skill precedence and path-free bundles. Added (minor).
-
-- **Restart-safe canonical evidence reflection** ([ADR 0259](../docs/adr/0259-cloud-native-learning.md)) — `agent.EvidenceReflector.ReflectProjection` accepts only a bounded canonical `learning.Projection`, revalidates its content-addressed evidence metadata, and applies the canonical governance untrusted fence before the provider boundary. Added (minor).
-
-- **Storage-neutral durable learning attempt repository contract** ([ADR 0259](../docs/adr/0259-cloud-native-learning.md)) — `learning.AttemptRepository` defines idempotent create, opaque-version CAS, a closed lifecycle transition table, expiring generation-fenced claim acquire/renew/release, monotonic reconciliation checkpoints, terminal finalization, retry/abandon, bounded partitioned listing, retention, deletion, and typed conflicts. Added (minor).
-
-- **Content-free learning attempt values** ([ADR 0259](../docs/adr/0259-cloud-native-learning.md)) — `learning.AttemptRecord`, `AttemptProjection`, `AdmissionProvenance`, exact source/current-prompt bindings, deterministic caller-partitioned IDs, closed lifecycle/outcome/failure vocabularies, fenced claim generations, bounds, and validation establish the storage-neutral domain contract for durable learning attempts. Added (minor).
-
 - **`agent.Run.RunID()`** (issue #821, [ADR 0249](../docs/adr/0249-durable-run-identity.md)) — reports the run's host-minted identity, or `""` when none was supplied.
 
   It exists so a caller holding a `*Run` can ASK which run it holds instead of inferring it from the session aggregate, and that distinction is load-bearing for stale-control refusal: a control addressed at a specific run must be compared against the run it would ACTUALLY affect, and the aggregate names the session's CURRENT run — which, after a terminal race, is precisely the run the caller did NOT mean.
@@ -104,19 +85,27 @@ The covered surface is the eight core packages (`session`, `governance`, `learni
 
   All four additions are **Added = minor**. `Event` and `RunRequest` gain a field, which breaks external UNKEYED struct literals — but both are already routinely constructed keyed, and `Event` is a wide event-payload struct nobody builds positionally.
 
+- **`tool.ReadLedger`, `tool.ErrLedgerUnavailable`** ([ADR 0298](../docs/adr/0298-persistent-read-before-write-ledgers.md)) — the storage-independent, context-aware read-before-write evidence capability selected independently of file content and carried by `tool.Environment`. `RecordRead(ctx, key, version) error` and `RecordedVersion(ctx, key) (version, ok, err)` distinguish a valid recorded token, ordinary absence, and an unavailable/corrupt lookup (`err != nil`). `engine/adapter/memledger` is the in-memory reference implementation; `engine/adapter/ledgerconformance` is the shared behavioral suite every implementation runs. Both additions are **Added = minor**.
+
+- **`tool.EncodeFileVersion`, `tool.DecodeFileVersion`, `tool.ErrInvalidFileVersion`** ([ADR 0298](../docs/adr/0298-persistent-read-before-write-ledgers.md), repair-wave task 05) — a narrow persistence/transport codec for opaque `FileVersion` values. It round-trips valid empty and non-empty tokens byte-exactly while rejecting the invalid zero value. **Added = minor**.
+
+- **`agent.WithSubagentReadLedgerFactory`, `agent.WithTeamReadLedgerFactory`, `agent.WithTeamToolReadLedgerFactory`** (repair-wave task 05) — inject factories that mint a fresh ledger for every child environment without importing a concrete adapter into `engine/agent`. **Added = minor**.
+
 ### Changed
 
 - **`learning.AttemptRepository.DiscoverWork`, `learning.AttemptWork{List,Page,Cursor}`, and `learning.MaxAttemptWorkBatch`** ([ADR 0259](../docs/adr/0259-cloud-native-learning.md)) — adds bounded, cursor-paged, storage-neutral discovery of queued attempts and running attempts with expired claims across opaque owner partitions. The cursor is only a disposable scan position and grants no workflow authority. This makes the repository, including a remote driver, the sole worker authority for work admitted after startup and claim-expiry reassignment. Extending the interface is Changed/breaking (pre-v1 a minor bump).
+
+- **`tool.Workspace` loses `RecordRead`/`RecordedVersion`; `tool.Environment` gains a mandatory `ReadLedger()`; `tool.NewEnvironment`/`MustEnvironment` take a new required `ledger ReadLedger` parameter** ([ADR 0298](../docs/adr/0298-persistent-read-before-write-ledgers.md), repair-wave task 05) — completes the read-ledger/content-backend separation the prior entry started: `Workspace` is now a pure content/search/versioned-mutation seam with no read-evidence capability of its own, and the read ledger is instead an independently-selected, mandatory second capability carried on `Environment` alongside `Workspace`. `NewEnvironment(ref, ws, ledger, runner)` / `MustEnvironment(ref, ws, ledger, runner)` replace the three-argument forms (`ledger` inserted before `runner`); a nil `ledger` is rejected with the new `ErrEnvironmentNoReadLedger`, mirroring the existing nil-`Workspace` rejection. The built-in Read/Edit/Write tools now record/consult evidence via `env.ReadLedger()` (keyed with the existing I/O-free `tool.LedgerKey(ws.Root(), path)`), not through the Workspace. Changed/breaking (pre-v1 a minor bump). Every in-tree `Workspace` implementation (osfs, memfs, nofs, the ACP fs-delegation workspace, remoteenv) drops its ledger methods; every `Environment` construction site now supplies an explicit ledger (a fresh `memledger.New()` for a session's default environment; a forked/direct-write child environment gets its OWN fresh ledger over the SAME content backend it was handed, never the parent's).
+
+- **`FileVersion.Token`** ([ADR 0298](../docs/adr/0298-persistent-read-before-write-ledgers.md), repair-wave task 05) — removed because it exposed an interpretation API for an opaque token. Persistence callers migrate to the added `tool.EncodeFileVersion`/`DecodeFileVersion` codec above. Changed/breaking (pre-v1 a minor bump).
+
+- **Child workspace-view options** (repair-wave task 05) — `agent.WithSharedChildWorkspace`, `agent.WithTeamSharedBaseWorkspace`, and `agent.WithTeamToolSharedBaseWorkspace` now accept `func(tool.Workspace) tool.Workspace` rather than a root-to-Workspace factory. Base-sharing/direct-write children therefore retain the exact parent content backend through a potentially stricter authority view instead of reconstructing storage from `Workspace.Root()`; composition uses that view to preserve child path-escape containment while the independent read-ledger factory supplies fresh evidence. Changed/breaking (pre-v1 a minor bump).
 
 - **`agent.Deps.EnableDurableEvidence`** — adds the explicit opt-in gate for
   debugger-only request-manifest construction/emission and sanitized network-attempt capture. The zero value preserves the allocation-sensitive
   default loop; composition enables it only alongside durable EventLog retention. Adding a field
   to an exported struct breaks external unkeyed literals, so this is Changed/breaking (pre-v1 a
   minor bump).
-
-- **`learning.SkillRepository.Generation` and `learning.SkillPage.Generation`** ([ADR 0259](../docs/adr/0259-cloud-native-learning.md)) — repositories now expose the durable per-caller/project-partition monotonic generation used to publish, hydrate, and invalidate derived catalogs. Extending the interface and exported page struct is Changed/breaking (pre-v1 a minor bump).
-
-- **`learning.Trajectory.RunID`** ([ADR 0259](../docs/adr/0259-cloud-native-learning.md)) — binds a completed trajectory to the persisted ADR-0249 run identity that durable learning admission verifies before creating an attempt. Adding a field to an exported struct breaks external unkeyed literals, so this is Changed/breaking (pre-v1 a minor bump).
 
 - **`agent.Run.EnqueueSteer`** (issue #861, [ADR 0251](../docs/adr/0251-multimodal-steer.md)) — changes from `EnqueueSteer(text string)` to `EnqueueSteer(text string, parts []session.Content)`, making one canonical text, media, or mixed steer entry point. Changed/breaking (pre-v1 a minor bump).
 

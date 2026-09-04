@@ -37,6 +37,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+	"github.com/stacklok/mecatl/engine/adapter/memledger"
 	"github.com/stacklok/mecatl/engine/adapter/memorypromotion"
 	"github.com/stacklok/mecatl/engine/adapter/memstore"
 	"github.com/stacklok/mecatl/engine/adapter/nofs"
@@ -6792,34 +6793,13 @@ func buildSubagentTool(ctx context.Context, cfg Config, provReg *providerRegistr
 			}))
 		opts = append(opts, agent.WithChildForker(taskForker))
 	}
-	// PATH-ESCAPE POSTURE (Scenario 5, AC5.1b): a BASE-SHARING child must never
-	// inherit the main session's relaxed workspace. Two child paths share the
-	// parent base verbatim: the SHELL-LESS read-only explorer (no sandboxed
-	// runner ⇒ no forker wired above — forkChildEnvironment returns the parent ws
-	// unchanged) and the mode:"read-write" direct-write child (ADR 0041 — it
-	// runs against the REAL parent tree by design). At auto/yolo the main
-	// session's workspace is relaxed (WithRelaxedReads/WithRelaxedWrites), so a
-	// verbatim share would hand the child the main session's out-of-root reach.
-	// Re-view the shared base through the NON-relaxed construction — the SAME
-	// root, the SAME per-skill read-only roots, NO relaxed options (the exact
-	// constructor newForkWorkspace uses) — so the child keeps the main
-	// session's containment posture without its escape reach. The FORKED child
-	// (childForker wired) never consults this — its worktree already comes from
-	// the non-relaxed newForkWorkspace. The main session's own relaxed
-	// workspace is untouched. Inert below auto (the parent ws is never relaxed
-	// there, so the re-view is a no-op). A root the constructor cannot open
-	// yields nil and the child falls back to the parent ws (fail-open to the
-	// historical shape — the constructor only fails on an unreadable root,
-	// which the parent workspace construction already surfaced).
-	if cfg.Posture >= PostureAuto {
-		opts = append(opts, agent.WithSharedChildWorkspace(func(root string) tool.Workspace {
-			ws, err := newForkWorkspace()(root)
-			if err != nil {
-				return nil
-			}
-			return ws
-		}))
-	}
+	// Base-sharing children retain the parent content backend but receive a
+	// child-specific authority view and fresh evidence. childWorkspaceView strips
+	// main-session path relaxation without reopening Workspace.Root() as osfs.
+	opts = append(opts,
+		agent.WithSharedChildWorkspace(childWorkspaceView),
+		agent.WithSubagentReadLedgerFactory(func() tool.ReadLedger { return memledger.New() }),
+	)
 	// Per-call model override factory: mint an explorer child engine for a requested
 	// model through the SAME contamination-safe per-provider path (newChildEngineFor
 	// Provider re-derives Compactor/TokenCounter/Env.Model/ContextWindow for the
@@ -6924,6 +6904,7 @@ func buildNoFSSubagentTool(ctx context.Context, cfg Config, provReg *providerReg
 		agent.WithSubagentStore(store),
 		agent.WithSubagentOwnershipEnforced(cfg.OwnershipEnforced),
 		agent.WithSubagentNoFSNote(),
+		agent.WithSubagentReadLedgerFactory(func() tool.ReadLedger { return memledger.New() }),
 		agent.WithSubagentEngineFactory(func(overrideModel string) (*agent.Engine, bool) {
 			overrideModel = strings.TrimSpace(overrideModel)
 			if overrideModel == "" {
@@ -7176,7 +7157,7 @@ func buildAgentWritableEngineFactory(ctx context.Context, cfg Config, provReg *p
 // both are filesystem acts), NO shell runners, and every member gets the no-FS
 // child surface (see buildMemberEngine's noFS branch). `a` carries the catalog
 // assets the no-FS member surface registers over; it is read only when noFS.
-func buildTeamWiring(_ context.Context, cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, mainMgr *mcp.Manager, agentReg *agents.Registry, skillIdx skillIndex, a catalogAssets, noFS bool) (server.MemberEngineFactory, tool.EnvironmentForker, tool.EnvironmentForker, func(string) tool.Workspace, port.HookRunner) {
+func buildTeamWiring(_ context.Context, cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, mainMgr *mcp.Manager, agentReg *agents.Registry, skillIdx skillIndex, a catalogAssets, noFS bool) (server.MemberEngineFactory, tool.EnvironmentForker, tool.EnvironmentForker, func(tool.Workspace) tool.Workspace, port.HookRunner) {
 	// A single hooks runner shared by the supervisor and the member coordination
 	// tools. hookexec.New(nil) matches buildEngine's default: the configured-hook map
 	// is not yet wired from cfg anywhere, so this is an inert (no-op) runner today,
@@ -7234,33 +7215,7 @@ func buildTeamWiring(_ context.Context, cfg Config, provReg *providerRegistry, p
 	mutatingRunner := buildForceCopyRunner(cfg)
 	roIsolationAvailable := memberRunner != nil && roFk != nil
 	factory := buildMemberEngine(cfg, provReg, provider, parentProviderID, parentModel, teamHooks, agentReg, skillIdx, memberRunner, mutatingRunner, roIsolationAvailable, mainMgr, a, false)
-	// PATH-ESCAPE POSTURE (Scenario 5, AC5.1d): a BASE-SHARING (shell-less)
-	// read-only member must never inherit the main session's relaxed workspace.
-	// The supervisor's base-share fallback otherwise hands the member the team
-	// base VERBATIM — and at auto/yolo that base is the escapeWorkspace-wrapped
-	// relaxed osfs (WithRelaxedReads/WithRelaxedWrites), giving the shell-less
-	// member the main session's out-of-root reach (the same leak task 05 closed
-	// for the Subagent nil-forker path). Re-view the shared base through the
-	// NON-relaxed construction — the SAME root, the SAME per-skill read-only
-	// roots, NO relaxed options (the exact constructor newForkWorkspace uses) —
-	// so the member keeps the main session's containment posture without its
-	// escape reach. The two FORKED tiers (Mutating force-copy, read-only
-	// worktree) never consult this — their forks already come from the
-	// non-relaxed newForkWorkspace. The main session's own relaxed workspace is
-	// untouched. Inert below auto (the base is never relaxed there). A root the
-	// constructor cannot open yields nil and the supervisor falls back to the
-	// verbatim base (fail-open to the historical shape).
-	var sharedBaseWS func(string) tool.Workspace
-	if cfg.Posture >= PostureAuto {
-		sharedBaseWS = func(root string) tool.Workspace {
-			ws, err := newForkWorkspace()(root)
-			if err != nil {
-				return nil
-			}
-			return ws
-		}
-	}
-	return factory, fk, roFk, sharedBaseWS, teamHooks
+	return factory, fk, roFk, childWorkspaceView, teamHooks
 }
 
 // applyTeamConfig wires the opt-in agent-teams capability into the server.Config.
@@ -7282,11 +7237,11 @@ func applyTeamConfig(svcCfg *server.Config, cfg Config, reg *providerRegistry, p
 	// agentReg is the ONE registry Build resolved (resolveAgentSeam).
 	// The gRPC CreateTeam path is always the DEFAULT (filesystem) profile — a
 	// no-FS team exists only inside a no-fs session's in-catalog Team tool.
-	factory, fk, roFk, sharedBaseWS, teamHooks := buildTeamWiring(context.Background(), cfg, reg, provider, reg.Default(), cfg.Model, mainMgr, agentReg, skillIdx, a, false)
+	factory, fk, roFk, sharedBaseWorkspace, teamHooks := buildTeamWiring(context.Background(), cfg, reg, provider, reg.Default(), cfg.Model, mainMgr, agentReg, skillIdx, a, false)
 	svcCfg.MemberEngine = factory
 	svcCfg.Forker = fk
 	svcCfg.ReadOnlyForker = roFk
-	svcCfg.SharedBaseWorkspace = sharedBaseWS
+	svcCfg.SharedBaseWorkspace = sharedBaseWorkspace
 	svcCfg.TeamHooks = teamHooks
 	svcCfg.TeamTokenBudget = cfg.MaxTeamTokens
 	cfg.diag().Log(context.Background(), port.LevelInfo, "agent teams ENABLED (experimental; CreateTeam/SpawnTeammate/RunTeam + Team tool)")
@@ -8657,9 +8612,7 @@ func parseWorktreePorcelain(out string) []server.Worktree {
 	return wts
 }
 
-// newForkWorkspace returns the ONE workspace constructor every fork family
-// (Subagent worktree, team member force-copy/worktree, Parallel branch) uses, so
-// their isolated workspaces cannot drift in construction semantics.
+// newForkWorkspace returns the ONE content-workspace constructor every fork family uses.
 func newForkWorkspace() func(string) (tool.Workspace, error) {
 	return func(root string) (tool.Workspace, error) {
 		return osfs.NewWorkspace(root)

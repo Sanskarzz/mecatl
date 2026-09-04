@@ -5,6 +5,7 @@ import (
 	"sync/atomic"
 
 	"github.com/stacklok/mecatl/engine/adapter/memfs"
+	"github.com/stacklok/mecatl/engine/adapter/memledger"
 	"github.com/stacklok/mecatl/engine/adapter/nofs"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/tool"
@@ -64,7 +65,7 @@ func (p testPlacementProvider) workspace(root string) tool.Workspace {
 func (p testPlacementProvider) Bind(_ context.Context, req server.PlacementBindRequest) (server.PlacementBinding, error) {
 	if req.Selector.Kind == server.PlacementSelectorNoFS {
 		ref := session.EnvironmentRef{Kind: session.EnvKindNoFS, ID: "none", Revision: "in-tree-v1"}
-		return server.PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, nofs.New(), nil)}, nil
+		return server.PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, nofs.New(), memledger.New(), nil)}, nil
 	}
 	root := p.root
 	if root == "" {
@@ -80,7 +81,7 @@ func (p testPlacementProvider) Bind(_ context.Context, req server.PlacementBindR
 	if ws == nil {
 		return server.PlacementBinding{}, server.ErrPlacementUnavailable
 	}
-	return server.PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, ws, nil)}, nil
+	return server.PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, ws, memledger.New(), nil)}, nil
 }
 
 func (testPlacementProvider) ListWorktrees(context.Context, server.PlacementDiscoveryRequest) ([]server.ScopedWorktree, error) {
@@ -89,11 +90,11 @@ func (testPlacementProvider) ListWorktrees(context.Context, server.PlacementDisc
 
 func (p testPlacementProvider) Reattach(_ context.Context, req server.PlacementReattachRequest) (server.PlacementBinding, error) {
 	if req.Ref.Kind == session.EnvKindNoFS {
-		return server.PlacementBinding{Ref: req.Ref, Environment: tool.MustEnvironment(req.Ref, nofs.New(), nil)}, nil
+		return server.PlacementBinding{Ref: req.Ref, Environment: tool.MustEnvironment(req.Ref, nofs.New(), memledger.New(), nil)}, nil
 	}
 	ws := p.workspace(req.Ref.ID)
 	if ws == nil {
 		return server.PlacementBinding{}, server.ErrPlacementUnavailable
 	}
-	return server.PlacementBinding{Ref: req.Ref, Environment: tool.MustEnvironment(req.Ref, ws, nil)}, nil
+	return server.PlacementBinding{Ref: req.Ref, Environment: tool.MustEnvironment(req.Ref, ws, memledger.New(), nil)}, nil
 }

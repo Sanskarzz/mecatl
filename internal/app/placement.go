@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 
+	"github.com/stacklok/mecatl/engine/adapter/memledger"
 	"github.com/stacklok/mecatl/engine/adapter/nofs"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/tool"
@@ -155,7 +156,7 @@ func (p *localPlacementProvider) bindWorktree(choice server.Worktree) (server.Pl
 	if p.runnerForRoot != nil {
 		runner = p.runnerForRoot(ws.Root())
 	}
-	env, err := tool.NewEnvironment(ref, ws, runner)
+	env, err := tool.NewEnvironment(ref, ws, memledger.New(), runner)
 	if err != nil {
 		return server.PlacementBinding{}, server.ErrPlacementUnavailable
 	}
@@ -183,7 +184,7 @@ func (p *localPlacementProvider) bindLocal() (server.PlacementBinding, error) {
 	if p.runnerForRoot != nil {
 		runner = p.runnerForRoot(ws.Root())
 	}
-	env, err := tool.NewEnvironment(ref, ws, runner)
+	env, err := tool.NewEnvironment(ref, ws, memledger.New(), runner)
 	if err != nil {
 		return server.PlacementBinding{}, server.ErrPlacementUnavailable
 	}
@@ -199,7 +200,7 @@ func (*localPlacementProvider) bindNoFS() (server.PlacementBinding, error) {
 		Kind: session.EnvKindNoFS, ID: noFSPlacementID,
 		Revision: noFSPlacementRevision,
 	}
-	env, err := tool.NewEnvironment(ref, nofs.New(), nil)
+	env, err := tool.NewEnvironment(ref, nofs.New(), memledger.New(), nil)
 	if err != nil {
 		return server.PlacementBinding{}, server.ErrPlacementUnavailable
 	}

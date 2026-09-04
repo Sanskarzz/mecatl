@@ -225,18 +225,23 @@ func NewFileVersion(token string) FileVersion {
 	return FileVersion{token: token, valid: true}
 }
 
-// Token returns the adapter-private opaque token this FileVersion carries, and
-// ok reports whether the version is valid (a non-zero FileVersion). The zero
-// value returns ("", false) — it is never an "any version" sentinel — so a
-// caller can distinguish "no version recorded" from "an adapter minted the
-// empty-string token". It is the serializer hook for a planned remote backend
-// that must round-trip an adapter-minted version over the wire: the backend
-// stores the token verbatim and reconstructs the FileVersion with
-// NewFileVersion(token) on the way back. Callers MUST treat the token as
-// opaque (compare with Equal, never inspect its bytes); only a serializer
-// owned by the SAME adapter that minted the version ever reads it.
-func (f FileVersion) Token() (token string, ok bool) {
-	return f.token, f.valid
+// ErrInvalidFileVersion reports an attempt to persist the unusable zero value.
+var ErrInvalidFileVersion = errors.New("tool: invalid zero FileVersion")
+
+// EncodeFileVersion returns the byte-exact transport representation of a valid
+// opaque version. It rejects the zero value; callers must not interpret the
+// returned string.
+func EncodeFileVersion(f FileVersion) (string, error) {
+	if !f.valid {
+		return "", ErrInvalidFileVersion
+	}
+	return f.token, nil
+}
+
+// DecodeFileVersion reconstructs a valid opaque version from its byte-exact
+// transport representation. An empty representation is a valid opaque token.
+func DecodeFileVersion(encoded string) FileVersion {
+	return NewFileVersion(encoded)
 }
 
 // WorkspaceReader is the READ-ONLY subset of Workspace: a rooted, path-scoped
@@ -280,9 +285,9 @@ type AuthorityResourceResolver interface {
 
 // Workspace is the session-scoped seam every Tool executes against. It scopes
 // all paths to a single session root (rejecting escapes such as "../"), exposes
-// the read/search operations the 7 core tools need, and carries the per-session
-// read-ledger + the explicit, unambiguous mutation operations the built-in
-// Edit/Write tools enforce their invariants through (ADR 0208).
+// the read/search operations the core file tools need, and carries the explicit,
+// unambiguous versioned mutation operations the built-in Edit/Write tools use
+// with the Environment's independently selected ReadLedger (ADR 0208, ADR 0281).
 //
 // All paths are relative to the session root unless documented otherwise;
 // adapters must reject any path that resolves outside the root.
@@ -293,8 +298,10 @@ type AuthorityResourceResolver interface {
 //
 //   - ReadVersion returns the content AND the authoritative FileVersion the
 //     adapter currently holds for path. The built-in Read tool records that
-//     version via RecordRead (a pure in-memory store, NO I/O) so a later
-//     Edit/Write can assert read-before-mutate-and-unchanged.
+//     version in the Environment's ReadLedger under LedgerKey(ws.Root(), path)
+//     (ADR 0281: fresh in-memory by default, or explicitly injected durable
+//     storage; the ledger performs NO file-content I/O), so a
+//     later Edit/Write can assert read-before-mutate-and-unchanged.
 //   - Existing-file Write and Edit: require a recorded version, ReadVersion
 //     again to get the CURRENT version, compare the recorded version with the
 //     current version (unchanged-since), and finish with ReplaceFile against
@@ -323,8 +330,8 @@ type Workspace interface {
 
 	// ReadVersion returns the contents of the file at path AND the authoritative
 	// FileVersion the adapter currently holds for it. It is the version-bearing
-	// read the built-in Read tool uses (recording the returned version via
-	// RecordRead). It reads the SAME backing store as the plain Read; the only
+	// read the built-in Read tool uses; that tool records the returned version in
+	// its Environment's separate ReadLedger. It reads the SAME backing store as the
 	// difference is it also mints and returns a FileVersion.
 	ReadVersion(ctx context.Context, path string) ([]byte, FileVersion, error)
 
@@ -354,27 +361,6 @@ type Workspace interface {
 	// Grep returns the matches of a regular expression across files selected by
 	// an optional path glob. Results are capped/shaped by the adapter.
 	Grep(ctx context.Context, pattern, pathGlob string) ([]GrepMatch, error)
-
-	// RecordRead records that path was read at the authoritative version. It is
-	// a PURE IN-MEMORY store: it performs NO I/O and stores the EXACT version
-	// passed (the caller supplies the FileVersion its ReadVersion returned). A
-	// later RecordedVersion lookup compares against this stored token. The
-	// built-in Read tool calls it with the version ReadVersion minted; the
-	// built-in Edit/Write tools call it after a successful CreateFile/ReplaceFile
-	// so a subsequent same-turn Edit stays valid. Ledger-key normalization must
-	// also perform NO I/O: ordinary absolute <root>/<rel> and relative <rel>
-	// forms should converge lexically, while physical symlink aliases may
-	// conservatively miss and force another Read.
-	RecordRead(path string, version FileVersion)
-
-	// RecordedVersion returns the version previously recorded for path via
-	// RecordRead, performing NO I/O. ok is false if path was never recorded or
-	// the live Workspace/ledger was rebuilt. It is the I/O-free
-	// read-before-mutate lookup: the agent-facing Edit/Write tools call it to
-	// assert the file was read this session; they then separately ReadVersion
-	// for the CURRENT version and compare, so a file that changed since the
-	// recorded read is caught by the version comparison, not by this lookup.
-	RecordedVersion(path string) (version FileVersion, ok bool)
 }
 
 // VersionMismatchError is the error ReplaceFile returns when the file's current

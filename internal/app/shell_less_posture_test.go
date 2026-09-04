@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/stacklok/mecatl/engine/adapter/memfs"
+	"github.com/stacklok/mecatl/engine/adapter/memledger"
 	"github.com/stacklok/mecatl/engine/adapter/memstore"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/adapter/nofs"
@@ -96,7 +97,7 @@ func TestACPShellLessEnvironmentDropsBashAndDocumentsPosture(t *testing.T) {
 	// Run against a SHELL-LESS Environment (nil runner) — the ACP override shape.
 	sess := session.New("acp", session.ModeDefault, session.EnvironmentRef{Kind: session.EnvKindLocal, ID: cfg.Workspace, Revision: "in-tree-v1"}, session.Limits{MaxTurns: 1}, time.Now())
 	shellLessEnv := tool.MustEnvironment(session.EnvironmentRef{Kind: session.EnvKindLocal, ID: cfg.Workspace, Revision: "in-tree-v1"},
-		memfs.NewWorkspace(cfg.Workspace), nil)
+		memfs.NewWorkspace(cfg.Workspace), memledger.New(), nil)
 	run := eng.Run(context.Background(), sess, shellLessEnv, agent.RunRequest{Text: "run a build"})
 	for range run.Events() {
 	}
@@ -150,7 +151,7 @@ func TestACPShellLessEnvironmentStaleBashCallIsHonestToolError(t *testing.T) {
 	}
 	sess := session.New("acp2", session.ModeDefault, session.EnvironmentRef{Kind: session.EnvKindLocal, ID: cfg.Workspace, Revision: "in-tree-v1"}, session.Limits{MaxTurns: 3}, time.Now())
 	shellLessEnv := tool.MustEnvironment(session.EnvironmentRef{Kind: session.EnvKindLocal, ID: cfg.Workspace, Revision: "in-tree-v1"},
-		memfs.NewWorkspace(cfg.Workspace), nil)
+		memfs.NewWorkspace(cfg.Workspace), memledger.New(), nil)
 	run := eng.Run(context.Background(), sess, shellLessEnv, agent.RunRequest{Text: "run echo hi"})
 	var sawNoShell bool
 	for ev := range run.Events() {
@@ -190,7 +191,7 @@ func TestShellBearingEnvironmentAdvertisesBashAndLacksNote(t *testing.T) {
 		t.Fatal("precondition: buildCommandRunner must return a non-nil runner for a shell-bearing cfg")
 	}
 	shellEnv := tool.MustEnvironment(session.EnvironmentRef{Kind: session.EnvKindLocal, ID: cfg.Workspace, Revision: "in-tree-v1"},
-		memfs.NewWorkspace(cfg.Workspace), runner)
+		memfs.NewWorkspace(cfg.Workspace), memledger.New(), runner)
 	sess := session.New("sh", session.ModeDefault, session.EnvironmentRef{Kind: session.EnvKindLocal, ID: cfg.Workspace, Revision: "in-tree-v1"}, session.Limits{MaxTurns: 1}, time.Now())
 	run := eng.Run(context.Background(), sess, shellEnv, agent.RunRequest{Text: "hello"})
 	for range run.Events() {
@@ -271,7 +272,7 @@ func TestNoFSProfileDoesNotDuplicateShellLessClause(t *testing.T) {
 	// service installs (buildSessionEnvironment / SetSessionEnvironment). This is
 	// the capability truth buildRequest reads: env.Ref().Kind == EnvKindNoFS ⇒
 	// the shell-less clause is WITHHELD even though env.CommandRunner() == nil.
-	noFSEnv := tool.MustEnvironment(session.EnvironmentRef{Kind: session.EnvKindNoFS, ID: "none", Revision: "in-tree-v1"}, nofs.New(), nil)
+	noFSEnv := tool.MustEnvironment(session.EnvironmentRef{Kind: session.EnvKindNoFS, ID: "none", Revision: "in-tree-v1"}, nofs.New(), memledger.New(), nil)
 	sess := session.New("nofs", session.ModeDefault, noFSEnv.Ref(), session.Limits{MaxTurns: 1}, time.Now())
 	run := res.Engine.Run(ctx, sess, noFSEnv, agent.RunRequest{Text: "hello"})
 	for range run.Events() {

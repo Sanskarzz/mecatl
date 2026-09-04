@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/stacklok/mecatl/engine/adapter/memfs"
+	"github.com/stacklok/mecatl/engine/adapter/memledger"
 	"github.com/stacklok/mecatl/engine/adapter/memstore"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
@@ -14,6 +15,16 @@ import (
 	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/server"
 )
+
+func newServerTestSubagent(engine *agent.Engine, opts ...agent.SubagentOption) tool.Tool {
+	opts = append(opts, agent.WithSubagentReadLedgerFactory(func() tool.ReadLedger { return memledger.New() }))
+	return agent.NewSubagentTool(engine, opts...)
+}
+
+func newServerTestTeamTool(factory agent.TeamMemberEngineFactory, opts ...agent.TeamOption) tool.Tool {
+	opts = append(opts, agent.WithTeamToolReadLedgerFactory(func() tool.ReadLedger { return memledger.New() }))
+	return agent.NewTeamTool(factory, opts...)
+}
 
 // TestSetSessionEnvironmentOverrideIsUsedVerbatim pins issue #462 phase-2
 // finding #2: a per-session Environment override registered via
@@ -50,7 +61,7 @@ func TestSetSessionEnvironmentOverrideIsUsedVerbatim(t *testing.T) {
 	// must use this verbatim: ref Kind local, ID the workspace root, no runner.
 	ws := memfs.NewWorkspace(sess.EnvironmentRef.ID)
 	wantRef := sess.EnvironmentRef
-	override := tool.MustEnvironment(wantRef, ws, nil)
+	override := tool.MustEnvironment(wantRef, ws, memledger.New(), nil)
 	svc.SetSessionEnvironment(sess.ID, override)
 
 	run, err := svc.StartRun(context.Background(), sess.ID, "hi")

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/stacklok/mecatl/engine/adapter/memfs"
+	"github.com/stacklok/mecatl/engine/adapter/memledger"
 	"github.com/stacklok/mecatl/engine/adapter/memstore"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
@@ -342,7 +343,7 @@ func TestScheduleTool_MutatingCreateGatedByPlanMode(t *testing.T) {
 	if err := jstore.Save(ctx, sess); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	runEnv := tool.MustEnvironment(ref, memfs.NewWorkspace(workspace), nil)
+	runEnv := tool.MustEnvironment(ref, memfs.NewWorkspace(workspace), memledger.New(), nil)
 	run := res.Engine.Run(ctx, sess, runEnv, agent.RunRequest{Text: "schedule the work", Parts: nil})
 	var results []session.ToolResult
 	for ev := range run.Events() {
@@ -445,7 +446,7 @@ func TestScheduleTool_Scenario4_FullInChatFlow(t *testing.T) {
 	if err := jstore.Save(ctx, sess); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	runEnv := tool.MustEnvironment(ref, memfs.NewWorkspace(workspace), nil)
+	runEnv := tool.MustEnvironment(ref, memfs.NewWorkspace(workspace), memledger.New(), nil)
 	run := res.Engine.Run(ctx, sess, runEnv, agent.RunRequest{Text: "schedule a nightly ci check and fire it once", Parts: nil})
 	var results []session.ToolResult
 	var stop session.StopReason

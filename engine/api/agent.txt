@@ -168,10 +168,11 @@ func WithPinnedAgents(names []string) SubagentOption
 func WithReadOnlyForker(f tool.EnvironmentForker) SupervisorOption
 func WithRootAuthority(authority session.Authority) SupervisorOption
 func WithRoutableAgents(names []string) SubagentOption
-func WithSharedChildWorkspace(f func(root string) tool.Workspace) SubagentOption
+func WithSharedChildWorkspace(view func(tool.Workspace) tool.Workspace) SubagentOption
 func WithSubagentEngineFactory(f func(model string) (*Engine, bool)) SubagentOption
 func WithSubagentNoFSNote() SubagentOption
 func WithSubagentOwnershipEnforced(ownershipEnforced bool) SubagentOption
+func WithSubagentReadLedgerFactory(factory func() tool.ReadLedger) SubagentOption
 func WithSubagentShellDisabledNote(reason string) SubagentOption
 func WithSubagentStopHook(h port.HookRunner) SubagentOption
 func WithSubagentStore(store port.SessionStore) SubagentOption
@@ -181,12 +182,14 @@ func WithTeamHooks(h port.HookRunner) SupervisorOption
 func WithTeamLimits(l session.Limits) SupervisorOption
 func WithTeamMode(m session.PermissionMode) SupervisorOption
 func WithTeamOwner(owner *session.Principal) SupervisorOption
-func WithTeamSharedBaseWorkspace(f func(root string) tool.Workspace) SupervisorOption
+func WithTeamReadLedgerFactory(factory func() tool.ReadLedger) SupervisorOption
+func WithTeamSharedBaseWorkspace(view func(tool.Workspace) tool.Workspace) SupervisorOption
 func WithTeamTokenBudget(n int) SupervisorOption
 func WithTeamToolForker(f tool.EnvironmentForker) TeamOption
 func WithTeamToolHooks(h port.HookRunner) TeamOption
+func WithTeamToolReadLedgerFactory(factory func() tool.ReadLedger) TeamOption
 func WithTeamToolReadOnlyForker(f tool.EnvironmentForker) TeamOption
-func WithTeamToolSharedBaseWorkspace(f func(root string) tool.Workspace) TeamOption
+func WithTeamToolSharedBaseWorkspace(view func(tool.Workspace) tool.Workspace) TeamOption
 func WithTeamToolStore(s port.SessionStore) TeamOption
 func WithTeamToolTokenBudget(n int) TeamOption
 func WithUntrustedGoal(untrusted bool) SupervisorOption

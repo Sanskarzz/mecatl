@@ -14,6 +14,7 @@ import (
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
 	"github.com/stacklok/mecatl/engine/adapter/memfs"
+	"github.com/stacklok/mecatl/engine/adapter/memledger"
 	"github.com/stacklok/mecatl/engine/adapter/memstore"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/tool"
@@ -60,7 +61,7 @@ type revisionPlacementProvider struct{ binds int }
 
 func (*revisionPlacementProvider) binding(revision string) PlacementBinding {
 	ref := session.EnvironmentRef{Kind: session.EnvKindMem, ID: "/same-root", Revision: revision}
-	return PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, memfs.NewWorkspace("/same-root"), nil)}
+	return PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, memfs.NewWorkspace("/same-root"), memledger.New(), nil)}
 }
 
 func (p *revisionPlacementProvider) Bind(context.Context, PlacementBindRequest) (PlacementBinding, error) {
@@ -69,7 +70,7 @@ func (p *revisionPlacementProvider) Bind(context.Context, PlacementBindRequest) 
 }
 
 func (*revisionPlacementProvider) Reattach(_ context.Context, req PlacementReattachRequest) (PlacementBinding, error) {
-	return PlacementBinding{Ref: req.Ref, Environment: tool.MustEnvironment(req.Ref, memfs.NewWorkspace("/same-root"), nil)}, nil
+	return PlacementBinding{Ref: req.Ref, Environment: tool.MustEnvironment(req.Ref, memfs.NewWorkspace("/same-root"), memledger.New(), nil)}, nil
 }
 
 func (*revisionPlacementProvider) ListWorktrees(context.Context, PlacementDiscoveryRequest) ([]ScopedWorktree, error) {
@@ -125,7 +126,7 @@ func TestInvariant_create_session_rejects_only_legacy_unknown_placement_fields(t
 
 func TestInvariant_filesystem_placement_root_selects_policy_engine_for_every_kind(t *testing.T) {
 	ref := session.EnvironmentRef{Kind: "custom-fs", ID: "opaque", Revision: "r1"}
-	provider := &repairPlacementProvider{binding: PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, memfs.NewWorkspace("/root-b"), nil)}}
+	provider := &repairPlacementProvider{binding: PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, memfs.NewWorkspace("/root-b"), memledger.New(), nil)}}
 	factoryCalls := 0
 	svc, err := NewService(Config{
 		Engine: repairEngine(), Store: memstore.New(), PlacementProvider: provider, PlacementScope: "test", SharedEngineRoot: "/root-a",
@@ -150,7 +151,7 @@ func TestInvariant_filesystem_placement_root_selects_policy_engine_for_every_kin
 
 func TestInvariant_environment_override_is_reauthorized_at_every_run_entry(t *testing.T) {
 	ref := session.EnvironmentRef{Kind: "custom-fs", ID: "opaque", Revision: "r1"}
-	provider := &repairPlacementProvider{binding: PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, memfs.NewWorkspace("/fresh"), nil)}}
+	provider := &repairPlacementProvider{binding: PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, memfs.NewWorkspace("/fresh"), memledger.New(), nil)}}
 	store := memstore.New()
 	svc, err := NewService(Config{Engine: repairEngine(), Store: store, PlacementProvider: provider, PlacementScope: "test", SharedEngineRoot: "/fresh"})
 	if err != nil {
@@ -162,7 +163,7 @@ func TestInvariant_environment_override_is_reauthorized_at_every_run_entry(t *te
 		if err != nil {
 			t.Fatal(err)
 		}
-		svc.SetSessionEnvironment(created.ID, tool.MustEnvironment(ref, memfs.NewWorkspace("/fresh"), nil))
+		svc.SetSessionEnvironment(created.ID, tool.MustEnvironment(ref, memfs.NewWorkspace("/fresh"), memledger.New(), nil))
 		run, err := svc.StartRun(context.Background(), created.ID, "go")
 		if err != nil {
 			t.Fatal(err)
@@ -177,7 +178,7 @@ func TestInvariant_environment_override_is_reauthorized_at_every_run_entry(t *te
 
 func TestInvariant_worktree_capability_comes_only_from_placement_provider(t *testing.T) {
 	ref := session.EnvironmentRef{Kind: session.EnvKindMem, ID: "/root", Revision: "r1"}
-	without := &repairPlacementProvider{binding: PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, memfs.NewWorkspace("/root"), nil)}}
+	without := &repairPlacementProvider{binding: PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, memfs.NewWorkspace("/root"), memledger.New(), nil)}}
 	svc, err := NewService(Config{Engine: repairEngine(), Store: memstore.New(), PlacementProvider: without, PlacementScope: "test", SharedEngineRoot: "/root"})
 	if err != nil {
 		t.Fatal(err)

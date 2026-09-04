@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/stacklok/mecatl/engine/adapter/memfs"
+	"github.com/stacklok/mecatl/engine/adapter/memledger"
 	"github.com/stacklok/mecatl/engine/adapter/memschedulestore"
 	"github.com/stacklok/mecatl/engine/adapter/memstore"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
@@ -59,10 +60,10 @@ type systemTestPlacementProvider struct{}
 
 func (systemTestPlacementProvider) Bind(context.Context, server.PlacementBindRequest) (server.PlacementBinding, error) {
 	ref := session.EnvironmentRef{Kind: session.EnvKindMem, ID: "/ws", Revision: "test-v1"}
-	return server.PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, memfs.NewWorkspace("/ws"), nil)}, nil
+	return server.PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, memfs.NewWorkspace("/ws"), memledger.New(), nil)}, nil
 }
 func (systemTestPlacementProvider) Reattach(_ context.Context, req server.PlacementReattachRequest) (server.PlacementBinding, error) {
-	return server.PlacementBinding{Ref: req.Ref, Environment: tool.MustEnvironment(req.Ref, memfs.NewWorkspace("/ws"), nil)}, nil
+	return server.PlacementBinding{Ref: req.Ref, Environment: tool.MustEnvironment(req.Ref, memfs.NewWorkspace("/ws"), memledger.New(), nil)}, nil
 }
 
 func TestCallerIdentity_Scenario2_InternalGoroutinesRunAsSystem(t *testing.T) {

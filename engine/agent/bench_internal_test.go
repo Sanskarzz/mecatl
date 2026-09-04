@@ -60,9 +60,10 @@ func BenchmarkBuildRequest(b *testing.B) {
 
 	ctx := context.Background()
 	ws := memfs.NewWorkspace("/ws")
+	env := testEnvironment(ws, nil)
 	b.ReportAllocs()
 	for b.Loop() {
-		sinkRequest = e.buildRequest(ctx, r, sess, testEnvironment(ws, nil))
+		sinkRequest = e.buildRequest(ctx, r, sess, env)
 	}
 }
 

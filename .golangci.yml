@@ -199,10 +199,33 @@ linters:
           allow:
             - $gostd
             - github.com/stacklok/mecatl/engine/tool
+            - github.com/stacklok/mecatl/engine/adapter/memledger
             - github.com/bmatcuk/doublestar/v4
           deny:
             - pkg: os
               desc: 'memfs is the in-memory FileSystem fake; it must not touch the real OS'
+        engine-adapter-memledger:
+          list-mode: strict
+          files:
+            - '**/engine/adapter/memledger/**.go'
+            - '!$test'
+          allow:
+            - $gostd
+            - github.com/stacklok/mecatl/engine/tool
+          deny:
+            - pkg: os
+              desc: 'memledger is the in-memory reference tool.ReadLedger; it must not touch the real OS'
+        engine-adapter-ledgerconformance:
+          list-mode: strict
+          files:
+            - '**/engine/adapter/ledgerconformance/**.go'
+            - '!$test'
+          allow:
+            - $gostd
+            - github.com/stacklok/mecatl/engine/tool
+          deny:
+            - pkg: os
+              desc: 'ledgerconformance drives the abstract ReadLedger contract; it must not touch the real OS'
         engine-adapter-memmemory:
           list-mode: strict
           files:
@@ -915,6 +938,13 @@ linters:
           - goconst
           - unparam
         path: engine/adapter/fsconformance/
+      - linters:
+          - gocyclo
+          - errcheck
+          - gosec
+          - goconst
+          - unparam
+        path: engine/adapter/ledgerconformance/
       - linters:
           - gocyclo
           - errcheck

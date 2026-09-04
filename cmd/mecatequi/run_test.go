@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/stacklok/mecatl/engine/adapter/memfs"
+	"github.com/stacklok/mecatl/engine/adapter/memledger"
 	"github.com/stacklok/mecatl/engine/adapter/memstore"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
@@ -21,6 +22,7 @@ import (
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/tool"
+	"github.com/stacklok/mecatl/internal/adapter/mcp"
 	"github.com/stacklok/mecatl/internal/adapter/osfs"
 	"github.com/stacklok/mecatl/internal/adapter/server"
 	"github.com/stacklok/mecatl/internal/adapter/tools"
@@ -231,10 +233,10 @@ type scriptedPlacementProvider struct {
 func (p scriptedPlacementProvider) Bind(_ context.Context, _ server.PlacementBindRequest) (server.PlacementBinding, error) {
 	workspace := p.workspaces(p.root)
 	ref := session.EnvironmentRef{Kind: session.EnvKindLocal, ID: p.root, Revision: "test-v1"}
-	return server.PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, workspace, nil)}, nil
+	return server.PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, workspace, memledger.New(), nil)}, nil
 }
 func (p scriptedPlacementProvider) Reattach(_ context.Context, req server.PlacementReattachRequest) (server.PlacementBinding, error) {
-	return server.PlacementBinding{Ref: req.Ref, Environment: tool.MustEnvironment(req.Ref, p.workspaces(req.Ref.ID), nil)}, nil
+	return server.PlacementBinding{Ref: req.Ref, Environment: tool.MustEnvironment(req.Ref, p.workspaces(req.Ref.ID), memledger.New(), nil)}, nil
 }
 
 // scriptedService builds a real server.Service over a SCRIPTED mockllm provider — the
@@ -271,6 +273,9 @@ func scriptedServiceAtRoot(t *testing.T, root string, extraTools []tool.Tool, wo
 		SharedEngineRoot:    root,
 		Now:                 func() time.Time { return time.Unix(0, 0) },
 		DefaultCapabilities: llm.Capabilities(),
+		SessionEngine: func(context.Context, server.ProviderSelector, []mcp.ServerConfig, server.SessionProfile, string, session.PermissionMode) (server.SessionEngineResult, error) {
+			return server.SessionEngineResult{Engine: engine, Capabilities: llm.Capabilities(), Close: func() error { return nil }}, nil
+		},
 	})
 	if err != nil {
 		t.Fatalf("new service: %v", err)

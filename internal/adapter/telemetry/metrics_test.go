@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/stacklok/mecatl/engine/adapter/memfs"
+	"github.com/stacklok/mecatl/engine/adapter/memledger"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
 	"github.com/stacklok/mecatl/engine/agent"
@@ -232,7 +233,7 @@ func TestFailedStepRetryRunBalancesActiveRunMetric(t *testing.T) {
 	if err := sess.PrepareFailedStepRetry(); err != nil {
 		t.Fatal(err)
 	}
-	env := tool.MustEnvironment(sess.EnvironmentRef, memfs.NewWorkspace("/ws"), nil)
+	env := tool.MustEnvironment(sess.EnvironmentRef, memfs.NewWorkspace("/ws"), memledger.New(), nil)
 	run := eng.RetryFailedStep(context.Background(), sess, env)
 	for range run.Events() {
 	}

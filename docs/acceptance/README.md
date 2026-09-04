@@ -50,6 +50,9 @@ when the code that satisfies the plan has landed.
 
 ## Plans
 
+- [Persistent read-before-write ledgers](persistent-read-before-write-ledgers.md) —
+  storage-independent, session-scoped read evidence with an in-memory default,
+  a durable Redis contract proof, and fail-closed file-tool behavior. Status: draft.
 - [Local mecak8s Kind fixture](mecak8s-kind-fixture.md) — cleanly separates an
   operator-run mock/real-provider mecak8s fixture, optional Keycloak caller
   identity, and the deferred ToolHive/vMCP delegation extension. Status: draft.

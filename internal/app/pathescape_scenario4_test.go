@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stacklok/mecatl/engine/adapter/memledger"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
 	"github.com/stacklok/mecatl/engine/governance"
@@ -53,7 +54,7 @@ func installRelaxedWorkspace(t *testing.T, built *Built, sessID session.SessionI
 		t.Fatalf("GetSession: %v", err)
 	}
 	env, err := tool.NewEnvironment(sess.EnvironmentRef,
-		newEscapeWorkspace(base, clf), nil)
+		newEscapeWorkspace(base, clf), memledger.New(), nil)
 	if err != nil {
 		t.Fatalf("NewEnvironment: %v", err)
 	}

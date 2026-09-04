@@ -254,7 +254,7 @@ func driveSubagentWithRoleMetrics(t *testing.T) []*dto.MetricFamily {
 		),
 	)
 	childEng := buildChildEngine(cfg, nil, childProvider, "", cfg.Model, nil)
-	task := agent.NewSubagentTool(childEng)
+	task := newTestSubagentTool(childEng)
 
 	// The parent calls Subagent once and ends with its OWN distinct usage, so the
 	// no-double-count assertion can separate main from child token counts.

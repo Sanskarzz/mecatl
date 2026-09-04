@@ -45,7 +45,7 @@ func newInteractiveSubagentService(t *testing.T) (*server.Service, *scriptTool) 
 		Policy:  permpolicy.NewPolicy(allowRules(), nil),
 		Model:   "child-model",
 	})
-	task := agent.NewSubagentTool(childEngine)
+	task := newServerTestSubagent(childEngine)
 
 	parentCat := tool.NewCatalog()
 	parentCat.MustRegister(task)
@@ -286,7 +286,7 @@ func newTeamConverseService(t *testing.T) (*server.Service, *parkTool) {
 			Model:   "member-model",
 		})}
 	}
-	teamTool := agent.NewTeamTool(factory)
+	teamTool := newServerTestTeamTool(factory)
 
 	parentCat := tool.NewCatalog()
 	parentCat.MustRegister(teamTool)

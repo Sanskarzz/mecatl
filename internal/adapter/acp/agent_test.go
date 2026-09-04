@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stacklok/mecatl/engine/adapter/memledger"
 	"github.com/stacklok/mecatl/engine/adapter/memstore"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
@@ -60,7 +61,7 @@ func (p acpPlacementProvider) binding() server.PlacementBinding {
 	if err != nil {
 		panic(err)
 	}
-	env := tool.MustEnvironment(p.ref, ws, nil)
+	env := tool.MustEnvironment(p.ref, ws, memledger.New(), nil)
 	return server.PlacementBinding{Environment: env, Ref: p.ref}
 }
 
@@ -130,6 +131,9 @@ func newServiceCfg(t *testing.T, llm *mockllm.Provider, rules []governance.Rule,
 		// computed), not the engine. In these tests there is no catalog/selector, so the
 		// intersection is the bare adapter caps — source them from the wired provider.
 		DefaultCapabilities: llm.Capabilities(),
+		SessionEngine: func(context.Context, server.ProviderSelector, []mcp.ServerConfig, server.SessionProfile, string, session.PermissionMode) (server.SessionEngineResult, error) {
+			return server.SessionEngineResult{Engine: engine, Capabilities: llm.Capabilities(), Close: func() error { return nil }}, nil
+		},
 	}
 	if configFn != nil {
 		configFn(&cfg)

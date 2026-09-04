@@ -5,20 +5,35 @@ import (
 	"testing"
 
 	"github.com/stacklok/mecatl/engine/adapter/memfs"
+	"github.com/stacklok/mecatl/engine/adapter/memledger"
 	"github.com/stacklok/mecatl/engine/adapter/nofs"
+	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/session"
+	"github.com/stacklok/mecatl/engine/team"
 	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/mcp"
 	"github.com/stacklok/mecatl/internal/adapter/osfs"
 	"github.com/stacklok/mecatl/internal/adapter/server"
 )
 
+func testReadLedger() tool.ReadLedger { return memledger.New() }
+
+func newTestSubagentTool(engine *agent.Engine, opts ...agent.SubagentOption) tool.Tool {
+	opts = append(opts, agent.WithSubagentReadLedgerFactory(testReadLedger))
+	return agent.NewSubagentTool(engine, opts...)
+}
+
+func newTestSupervisor(tm *team.Team, base tool.Environment, factory agent.MemberEngine, opts ...agent.SupervisorOption) *agent.Supervisor {
+	opts = append(opts, agent.WithTeamReadLedgerFactory(testReadLedger))
+	return agent.NewSupervisor(tm, base, factory, opts...)
+}
+
 func testEnvironment(ws tool.Workspace, runner tool.CommandRunner) tool.Environment {
 	ref := session.EnvironmentRef{Kind: session.EnvKindLocal, ID: ws.Root(), Revision: "in-tree-v1"}
 	if ws.Root() == "" {
 		ref = session.EnvironmentRef{Kind: session.EnvKindNoFS, ID: "none", Revision: "in-tree-v1"}
 	}
-	return tool.MustEnvironment(ref, ws, runner)
+	return tool.MustEnvironment(ref, ws, memledger.New(), runner)
 }
 
 type appTestPlacementProvider struct {
@@ -29,11 +44,11 @@ type appTestPlacementProvider struct {
 func (p appTestPlacementProvider) Bind(_ context.Context, req server.PlacementBindRequest) (server.PlacementBinding, error) {
 	if req.Selector.IsNoFS() {
 		ref := session.EnvironmentRef{Kind: session.EnvKindNoFS, ID: "none", Revision: "test-v1"}
-		return server.PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, nofs.New(), nil)}, nil
+		return server.PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, nofs.New(), memledger.New(), nil)}, nil
 	}
 	root := p.root
 	ref := session.EnvironmentRef{Kind: session.EnvKindMem, ID: root, Revision: "test-v1"}
-	return server.PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, memfs.NewWorkspace(root), nil)}, nil
+	return server.PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, memfs.NewWorkspace(root), memledger.New(), nil)}, nil
 }
 func (appTestPlacementProvider) ListWorktrees(context.Context, server.PlacementDiscoveryRequest) ([]server.ScopedWorktree, error) {
 	return nil, nil
@@ -45,9 +60,9 @@ func (p appTestPlacementProvider) Reattach(_ context.Context, req server.Placeme
 	}
 	root := req.Ref.ID
 	if req.Ref.Kind == session.EnvKindNoFS {
-		return server.PlacementBinding{Ref: req.Ref, Environment: tool.MustEnvironment(req.Ref, nofs.New(), nil)}, nil
+		return server.PlacementBinding{Ref: req.Ref, Environment: tool.MustEnvironment(req.Ref, nofs.New(), memledger.New(), nil)}, nil
 	}
-	return server.PlacementBinding{Ref: req.Ref, Environment: tool.MustEnvironment(req.Ref, memfs.NewWorkspace(root), nil)}, nil
+	return server.PlacementBinding{Ref: req.Ref, Environment: tool.MustEnvironment(req.Ref, memfs.NewWorkspace(root), memledger.New(), nil)}, nil
 }
 
 func newTestServerService(cfg server.Config) (*server.Service, error) {
@@ -82,5 +97,5 @@ func osfsEnvironment(t *testing.T, dir string, runner tool.CommandRunner) tool.E
 	if err != nil {
 		t.Fatalf("osfs workspace %q: %v", dir, err)
 	}
-	return tool.MustEnvironment(session.EnvironmentRef{Kind: session.EnvKindLocal, ID: dir, Revision: "in-tree-v1"}, ws, runner)
+	return tool.MustEnvironment(session.EnvironmentRef{Kind: session.EnvKindLocal, ID: dir, Revision: "in-tree-v1"}, ws, memledger.New(), runner)
 }

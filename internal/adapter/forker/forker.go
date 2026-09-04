@@ -102,6 +102,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/stacklok/mecatl/engine/adapter/memledger"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/envscrub"
@@ -351,7 +352,7 @@ func (f *Forker) childEnv(base tool.Environment, ws tool.Workspace) (tool.Enviro
 		runner = f.newRunner(root)
 	}
 	ref := session.EnvironmentRef{Kind: base.Ref().Kind, ID: root, Revision: base.Ref().Revision}
-	return tool.NewEnvironment(ref, ws, runner)
+	return tool.NewEnvironment(ref, ws, memledger.New(), runner)
 }
 
 // childDir reserves (creates) a uniquely-named, empty directory for a child fork,

@@ -25,6 +25,7 @@ import (
 	"context"
 	"strings"
 
+	"github.com/stacklok/mecatl/engine/adapter/memledger"
 	coreskillfs "github.com/stacklok/mecatl/engine/adapter/skillfs"
 	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/learning"
@@ -468,12 +469,13 @@ func registerTeamTools(ctx context.Context, cfg Config, cat *tool.Catalog, reg *
 		}
 		return
 	}
-	factory, fk, roFk, sharedBaseWS, teamHooks := buildTeamWiring(ctx, cfg, reg, s.provider, s.providerID, s.model, refMgr, a.agentReg, a.skillIndex, a, s.noFS)
+	factory, fk, roFk, sharedBaseWorkspace, teamHooks := buildTeamWiring(ctx, cfg, reg, s.provider, s.providerID, s.model, refMgr, a.agentReg, a.skillIndex, a, s.noFS)
 	cat.MustRegister(agent.NewTeamTool(
 		agent.TeamMemberEngineFactory(factory),
 		agent.WithTeamToolForker(fk),
 		agent.WithTeamToolReadOnlyForker(roFk),
-		agent.WithTeamToolSharedBaseWorkspace(sharedBaseWS),
+		agent.WithTeamToolSharedBaseWorkspace(sharedBaseWorkspace),
+		agent.WithTeamToolReadLedgerFactory(func() tool.ReadLedger { return memledger.New() }),
 		agent.WithTeamToolHooks(teamHooks),
 		agent.WithTeamToolStore(store),
 		agent.WithTeamToolTokenBudget(cfg.MaxTeamTokens),

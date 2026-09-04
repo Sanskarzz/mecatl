@@ -216,8 +216,8 @@ func TestRemoteSkillSourceDefaultAndNoFSLogicalAssetWiring(t *testing.T) {
 		tl   tool.Tool
 		env  tool.Environment
 	}{
-		{"default", defaultSkill, tool.MustEnvironment(session.EnvironmentRef{Kind: session.EnvKindMem, ID: "default"}, memfs.NewWorkspace("/workspace"), nil)},
-		{"no-fs", noFSSkill, tool.MustEnvironment(session.EnvironmentRef{Kind: session.EnvKindNoFS, ID: "no-fs"}, nofs.New(), nil)},
+		{"default", defaultSkill, tool.MustEnvironment(session.EnvironmentRef{Kind: session.EnvKindMem, ID: "default"}, memfs.NewWorkspace("/workspace"), testReadLedger(), nil)},
+		{"no-fs", noFSSkill, tool.MustEnvironment(session.EnvironmentRef{Kind: session.EnvKindNoFS, ID: "no-fs"}, nofs.New(), testReadLedger(), nil)},
 	}
 	for _, profile := range profiles {
 		t.Run(profile.name, func(t *testing.T) {

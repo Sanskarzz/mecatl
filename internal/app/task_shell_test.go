@@ -521,14 +521,16 @@ func newSubagentToolForTestOpts(t *testing.T, cfg Config, childProvider *mockllm
 	// worktree so the forked subagent's Bash observes its OWN namespace. The
 	// builder applies the SAME trust-gated hardening buildSandboxedCommandRunner
 	// does (runner != nil above already proves the gate passed at build time).
-	roFk := forker.New(func(root string) (tool.Workspace, error) { return osfs.NewWorkspace(root) },
+	roFk := forker.New(func(root string) (tool.Workspace, error) {
+		return osfs.NewWorkspace(root)
+	},
 		append(opts, forker.WithRunner(func(childRoot string) tool.CommandRunner {
 			if cfg.NoBash || cfg.Shell == "" || !cfg.TrustProject {
 				return nil
 			}
 			return newHardenedRunnerForRoot(cfg, childRoot)
 		}))...)
-	return agent.NewSubagentTool(childEng, agent.WithChildForker(roFk))
+	return agent.NewSubagentTool(childEng, agent.WithChildForker(roFk), agent.WithSubagentReadLedgerFactory(testReadLedger))
 }
 
 // osfsWSForTest builds an osfs workspace rooted at dir, failing the test on error.

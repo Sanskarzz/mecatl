@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/stacklok/mecatl/engine/adapter/memfs"
+	"github.com/stacklok/mecatl/engine/adapter/memledger"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/server"
@@ -133,7 +134,7 @@ func TestADR_0291_CompositionConfiguresProviderOwnedPlacements(t *testing.T) {
 			Ref: ref,
 			Environment: tool.MustEnvironment(
 				ref,
-				memfs.NewWorkspace("/private-context-root"), nil,
+				memfs.NewWorkspace("/private-context-root"), memledger.New(), nil,
 			),
 		}}
 		ctx := context.WithValue(context.Background(), placementContextKey{}, "build-context")
@@ -181,7 +182,7 @@ func TestADR_0291_CompositionConfiguresProviderOwnedPlacements(t *testing.T) {
 				Ref: ref,
 				Environment: tool.MustEnvironment(
 					ref,
-					memfs.NewWorkspace("/private-provider-root"), nil,
+					memfs.NewWorkspace("/private-provider-root"), memledger.New(), nil,
 				),
 				Metadata: server.PlacementMetadata{Label: "Provider placement"},
 			}}

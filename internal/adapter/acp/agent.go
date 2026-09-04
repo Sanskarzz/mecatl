@@ -286,7 +286,7 @@ func (a *Agent) handleSessionNew(ctx context.Context, params json.RawMessage) (a
 			if err != nil {
 				return tool.Environment{}, err
 			}
-			return tool.NewEnvironment(base.Ref(), ws, nil)
+			return tool.NewEnvironment(base.Ref(), ws, base.ReadLedger(), nil)
 		}
 	}
 	sess, err := a.svc.CreateACPSession(ctx, req.Cwd, session.ModeDefault, session.Limits{}, specs, overlay)
@@ -398,7 +398,7 @@ func (a *Agent) handleSessionLoad(ctx context.Context, params json.RawMessage) (
 			if err != nil {
 				return tool.Environment{}, err
 			}
-			return tool.NewEnvironment(base.Ref(), ws, nil)
+			return tool.NewEnvironment(base.Ref(), ws, base.ReadLedger(), nil)
 		}
 	}
 	sess, err := a.svc.LoadACPSession(ctx, session.SessionID(req.SessionID), req.Cwd, specs, overlay)

@@ -39,6 +39,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/stacklok/mecatl/engine/adapter/memledger"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/tool"
 )
@@ -133,7 +134,7 @@ func (b *Backend) NewEnvironment(label string) (tool.Environment, error) {
 	ns := b.createNamespace(id)
 	ws := &workspace{ns: ns}
 	runner := &runner{ns: ns}
-	return tool.NewEnvironment(session.EnvironmentRef{Kind: Kind, ID: id, Revision: revision}, ws, runner)
+	return tool.NewEnvironment(session.EnvironmentRef{Kind: Kind, ID: id, Revision: revision}, ws, memledger.New(), runner)
 }
 
 // Resolve reattaches a LIVE Environment to the namespace named by ref.ID,
@@ -151,7 +152,7 @@ func (b *Backend) Resolve(_ context.Context, ref session.EnvironmentRef) (tool.E
 	}
 	ws := &workspace{ns: ns}
 	runner := &runner{ns: ns}
-	return tool.NewEnvironment(ref, ws, runner)
+	return tool.NewEnvironment(ref, ws, memledger.New(), runner)
 }
 
 // mintID mints a fresh opaque namespace id. The label is folded in for

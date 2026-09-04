@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/stacklok/mecatl/engine/adapter/memledger"
 	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/session"
@@ -195,6 +196,7 @@ func (s *Service) createTeamInEnvironment(ctx context.Context, base tool.Environ
 	if s.cfg.ReadOnlyForker != nil {
 		opts = append(opts, agent.WithReadOnlyForker(s.cfg.ReadOnlyForker))
 	}
+	opts = append(opts, agent.WithTeamReadLedgerFactory(func() tool.ReadLedger { return memledger.New() }))
 	if s.cfg.SharedBaseWorkspace != nil {
 		opts = append(opts, agent.WithTeamSharedBaseWorkspace(s.cfg.SharedBaseWorkspace))
 	}

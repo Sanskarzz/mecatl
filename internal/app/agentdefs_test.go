@@ -334,7 +334,7 @@ func TestBuildAgentSubagentEnginesResolvedModelOnRequest(t *testing.T) {
 
 	// Run the named engine via Subagent and assert the recorded request model.
 	defaultEngine := agent.NewEngine(agent.Deps{LLM: mockllm.New(), Catalog: tool.NewCatalog(), Model: "parent-model"})
-	task := agent.NewSubagentTool(defaultEngine, agent.WithAgentEngines(engines, meta))
+	task := newTestSubagentTool(defaultEngine, agent.WithAgentEngines(engines, meta))
 
 	parentCat := tool.NewCatalog()
 	parentCat.MustRegister(task)

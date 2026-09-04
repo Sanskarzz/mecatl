@@ -18,6 +18,7 @@ import (
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
 	"github.com/stacklok/mecatl/engine/adapter/memfs"
+	"github.com/stacklok/mecatl/engine/adapter/memledger"
 	"github.com/stacklok/mecatl/engine/adapter/memstore"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
@@ -42,12 +43,12 @@ type offlinePlacementProvider struct{}
 
 func (offlinePlacementProvider) Bind(context.Context, server.PlacementBindRequest) (server.PlacementBinding, error) {
 	ref := session.EnvironmentRef{Kind: session.EnvKindMem, ID: "offline", Revision: "v1"}
-	return server.PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, memfs.NewWorkspace("/ws"), nil)}, nil
+	return server.PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, memfs.NewWorkspace("/ws"), memledger.New(), nil)}, nil
 }
 
 func (offlinePlacementProvider) Reattach(context.Context, server.PlacementReattachRequest) (server.PlacementBinding, error) {
 	ref := session.EnvironmentRef{Kind: session.EnvKindMem, ID: "offline", Revision: "v1"}
-	return server.PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, memfs.NewWorkspace("/ws"), nil)}, nil
+	return server.PlacementBinding{Ref: ref, Environment: tool.MustEnvironment(ref, memfs.NewWorkspace("/ws"), memledger.New(), nil)}, nil
 }
 
 // newOfflineService builds a *server.Service over the offline reference adapters

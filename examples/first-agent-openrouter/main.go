@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/stacklok/mecatl/engine/adapter/memfs"
+	"github.com/stacklok/mecatl/engine/adapter/memledger"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
 	"github.com/stacklok/mecatl/engine/adapter/permstore"
 	"github.com/stacklok/mecatl/engine/agent"
@@ -28,7 +29,7 @@ func main() {
 		Model:   model,
 	})
 	ws := memfs.NewWorkspace("/workspace")
-	env := tool.MustEnvironment(session.EnvironmentRef{}, ws, nil)
+	env := tool.MustEnvironment(session.EnvironmentRef{}, ws, memledger.New(), nil)
 	sess := session.New("first-agent-openrouter", session.ModeDefault, session.EnvironmentRef{Kind: session.EnvKindLocal, ID: "/workspace", Revision: "in-tree-v1"}, session.Limits{}, time.Now())
 	run := engine.Run(context.Background(), sess, env, agent.RunRequest{Text: "Reply with exactly: Hello from OpenRouter."})
 	for event := range run.Events() {

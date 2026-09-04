@@ -48,7 +48,7 @@ func TestEventLogRecordsSubagentFailureCause(t *testing.T) {
 		Model:   "child-model",
 	})
 	cat := tool.NewCatalog()
-	cat.MustRegister(agent.NewSubagentTool(childEngine))
+	cat.MustRegister(newServerTestSubagent(childEngine))
 	parentLLM := mockllm.New(
 		mockllm.ToolCallTurn(call("p1", "Subagent", `{"prompt":"investigate"}`)),
 		mockllm.TextTurn("parent done"),

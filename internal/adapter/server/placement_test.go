@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/stacklok/mecatl/engine/adapter/memfs"
+	"github.com/stacklok/mecatl/engine/adapter/memledger"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/tool"
 )
@@ -15,6 +16,7 @@ func placementTestEnvironment(ref session.EnvironmentRef) tool.Environment {
 	return tool.MustEnvironment(
 		ref,
 		memfs.NewWorkspace("/placement"),
+		memledger.New(),
 		nil,
 	)
 }

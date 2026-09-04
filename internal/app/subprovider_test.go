@@ -419,7 +419,7 @@ func writeFile(t *testing.T, dir, name, content string) {
 func runSubagentAgent(t *testing.T, _ *mockllm.Provider, engines map[string]*agent.Engine, meta []agent.AgentMeta, name string) string {
 	t.Helper()
 	defaultEngine := agent.NewEngine(agent.Deps{LLM: mockllm.New(), Catalog: tool.NewCatalog(), Model: "gpt-5"})
-	task := agent.NewSubagentTool(defaultEngine, agent.WithAgentEngines(engines, meta))
+	task := newTestSubagentTool(defaultEngine, agent.WithAgentEngines(engines, meta))
 	parentCat := tool.NewCatalog()
 	parentCat.MustRegister(task)
 

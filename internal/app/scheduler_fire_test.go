@@ -14,6 +14,7 @@ import (
 
 	"github.com/stacklok/mecatl/engine/adapter/memfs"
 	"github.com/stacklok/mecatl/engine/adapter/memlease"
+	"github.com/stacklok/mecatl/engine/adapter/memledger"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
 	"github.com/stacklok/mecatl/engine/adapter/wallclock"
@@ -221,7 +222,7 @@ func TestInvariant_scheduled_placement_is_reauthorized_at_fire(t *testing.T) {
 	ref := session.EnvironmentRef{Kind: "remote", ID: "opaque-schedule-placement", Revision: "inventory-r9"}
 	provider := &compositionPlacementProvider{binding: server.PlacementBinding{
 		Ref:         ref,
-		Environment: tool.MustEnvironment(ref, memfs.NewWorkspace("/private/scheduled-root"), nil),
+		Environment: tool.MustEnvironment(ref, memfs.NewWorkspace("/private/scheduled-root"), memledger.New(), nil),
 	}}
 	storeDir := t.TempDir()
 	built, err := Build(context.Background(), Config{
