@@ -447,9 +447,13 @@ type Config struct {
 	UserModel UserModelLister
 
 	// ReflectSession enables explicit completed-session reflection independently of
-	// automatic learning mode. Proposals and the mutation callbacks expose the
-	// bounded, caller-partitioned staged-learning review surface.
+	// automatic learning mode. Attempts expose only content-free lifecycle
+	// projections from the verified caller's private partition. Proposals and the
+	// mutation callbacks expose the bounded, caller-partitioned staged-learning
+	// review surface.
 	ReflectSession          ExplicitReflector
+	Attempts                learning.AttemptRepository
+	AttemptPrincipal        func(*session.Principal) string
 	Proposals               learning.ProposalRepository
 	ProposalPrincipal       func(*session.Principal) string
 	PromoteProposal         ProposalPromoter
@@ -468,8 +472,7 @@ type Config struct {
 	// publisher atomically refreshes the shared live Skill catalog after mutations.
 	LearnedSkills             learning.SkillRepository
 	PublishLearnedSkills      func(context.Context, learning.SkillPartition) error
-	BeginSkillPublication     func() func()
-	RevokeLearnedSkill        func(learning.SkillPartition, string)
+	BeginSkillPublication     func(learning.SkillPartition) func()
 	LiveSkillGeneration       func(learning.SkillPartition) uint64
 	SkillActionAvailable      func(learning.SkillPartition, string) (bool, string)
 	LearnedSkillNameAvailable func(string) bool
@@ -2114,8 +2117,7 @@ func (s *Service) createSession(ctx context.Context, mode session.PermissionMode
 		owner = srcOwner
 	}
 
-	needPerSession := s.sessionNeedsPerFactory(sel, specs, profile, workspace) ||
-		s.cfg.LearnedSkills != nil && session.PrincipalFromContext(ctx) != nil
+	needPerSession := s.sessionNeedsPerFactory(sel, specs, profile, workspace) || s.cfg.LearnedSkills != nil
 	if !needPerSession {
 		// Shared-engine fast path (today's behaviour, byte-identical). The labels are
 		// the empty pair + default profile here (the empty-selector default profile is
@@ -4625,7 +4627,7 @@ func (s *Service) sessionNeedsPerFactory(sel ProviderSelector, specs []mcp.Serve
 // then separately compares the verified live root with SharedEngineRoot to decide whether
 // placement affinity needs a per-session engine.
 func (s *Service) needsRehydration(sess *session.Session) bool {
-	return s.cfg.LearnedSkills != nil && sess.Owner != nil && sess.Owner.Issuer != "" && sess.Owner.Subject != "" ||
+	return s.cfg.LearnedSkills != nil ||
 		sess.Kind == session.SessionKindDebug ||
 		sess.Profile == string(ProfileNoFS) ||
 		sess.ProviderID != "" || sess.ModelID != "" ||
@@ -6693,16 +6695,15 @@ func (s *Service) ListAgents(_ context.Context) []*mecatlv1.AgentInfo {
 
 // ListSkills returns the current skills inventory (possibly empty).
 func (s *Service) ListSkills(ctx context.Context) []*mecatlv1.SkillInfo {
-	if s.cfg.BeginSkillPublication != nil {
-		unlock := s.cfg.BeginSkillPublication()
+	partition, partitionErr := s.skillPartition(ctx, "")
+	if s.cfg.BeginSkillPublication != nil && partitionErr == nil {
+		unlock := s.cfg.BeginSkillPublication(partition)
 		defer unlock()
 	}
-	if s.cfg.PublishLearnedSkills != nil {
-		if partition, err := s.skillPartition(ctx, ""); err == nil {
-			publishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), skillPublicationTimeout)
-			_ = s.cfg.PublishLearnedSkills(publishCtx, partition)
-			cancel()
-		}
+	if s.cfg.PublishLearnedSkills != nil && partitionErr == nil {
+		publishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), skillPublicationTimeout)
+		_ = s.cfg.PublishLearnedSkills(publishCtx, partition)
+		cancel()
 	}
 	if s.cfg.LiveSkills != nil {
 		return s.cfg.LiveSkills(ctx)

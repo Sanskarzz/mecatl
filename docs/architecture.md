@@ -145,7 +145,8 @@ adapters (`engine/adapter/*`: `mockllm`, `memfs`, `nofs`, `memstore`, `sessnap`,
 `webfetch` (bounded public HTTP(S) text retrieval with DNS-pinned dialing and `x/net/html` extraction),
 `fstools` (the FS tool bodies), `agentfs` (the filesystem agent-def discovery adapter), `skillfs` (the read-only skills discovery core + Skill tool body), `rulesfs` (the `.claude/rules` discovery adapter, issue #329 — the pattern-2 turn-0 context instance), plus
 the conformance-as-contract suites `fsconformance`, `memconformance`,
-`storeconformance`, `sourceconformance`, `eventlogconformance`) live
+`storeconformance`, `sourceconformance`, `eventlogconformance`,
+`attemptconformance`, and `automaticconformance`) live
 under `engine/` — the
 importable core, fully self-contained (tests included: nothing under `engine/`
 imports `internal/...`) and intended to be importable as a library by external
@@ -1216,8 +1217,8 @@ memory-promotion policy rejects unsafe/transient facts, never overwrites conflic
 revisions, routes procedure candidates into the evaluated learned-skill pipeline, and uses per-candidate presence-and-version CAS. Memory revisions carry
 an optional proposal id, allowing a crashed promoting claim to reconcile without a duplicate write.
 Batches may partially promote by design because each candidate is its own atomic convergence unit.
-Standard composition applies `learning.ThresholdPolicy` before one bounded Build-owned
-coordinator ([ADR 0114](adr/0114-configurable-learning-trigger-policy.md)). Standard weights are
+Standard composition applies `learning.ThresholdPolicy` before durable admission
+([ADR 0114](adr/0114-configurable-learning-trigger-policy.md)). Standard weights are
 5/5/4/3/2 for repeated correction, trusted host contradiction, failure recovery, repeated stable
 tool sequence, and substantial success; modifiers never admit alone. Conservative/balanced/eager
 thresholds are 6/4/3. Detection is scoped to a verified current-run message span. Weighted work is
@@ -1226,22 +1227,97 @@ or learn-procedure intent is hard admission on the bounded clean-limit stops too
 failed/cancelled/awaiting, plan, no-progress, timeout, structured-output, and unverifiable compacted
 spans fail closed before a provider call.
 
-A process-owned controller adds a ten-minute weighted per-principal cooldown, one-hour sliding
-process/principal count and reserved-token windows, trajectory-digest in-flight joins, and a
-24-hour/1024-entry completed-digest LRU. Reservation uses the selected provider/model token counter
-for bounded canonical input plus a 4096-token output cap. It happens after queue capacity succeeds
-and before provider work; failure, timeout, and abstention still consume it. Queue-full does not.
-The controller, coordinator queues, and caches reset on restart; durable proposals remain
-idempotent. Shutdown rejects admission, cancels active jobs, joins workers, and performs no catch-up.
-Budgets are process-local, so multiple replicas multiply aggregate capacity.
+A durable admitted attempt is the workflow authority for admitted learning, not the
+coordinator queue, its receipt cache, or `EventLog` ([ADR 0259](adr/0259-cloud-native-learning.md)).
+Before reporting `queued`, composition reloads the source session, requires its exact non-empty
+ADR-0249 `RunID`, binds the verified current principal prompt and canonical digest into
+content-free immutable provenance, and idempotently creates the deterministic caller/session/run
+attempt. One Build-owned, cancellation-aware worker continuously performs bounded repository
+`DiscoverWork` reads across opaque partitions, so it sees attempts admitted after startup as well as
+running attempts whose claims expired. Every durable hard or weighted attempt executes through this
+repository discovery path; admission retains no `learning.Input` and no coordinator callback can
+execute it. The worker requests only a bounded claim duration: the repository backend mints and
+compares all acquisition, renewal, transition, retention, and discovery times. It renews the fenced
+claim throughout evidence, model, and publication work, cancels that work if renewal is lost, and is
+cancelled and joined before borrowed Build resources close. The same contract is available through
+the remote AttemptRepository driver. Every repository partition retains at most 256 records; creation at
+that boundary evicts the oldest terminal record only, and returns a content-free quota error when
+queued/running work fills the partition. Capacity checks and terminal cleanup happen inside the same
+partition-authoritative lock/CAS boundary, so one caller cannot consume another caller's quota or
+force deletion of its claimed work. The legacy process-local coordinator is not used for admitted
+durable attempts: both hard and weighted admission create or converge the repository record directly,
+and `DiscoverWork` is their only execution queue. Skipped or non-admitted completions
+remain immediate content-free activity and create no attempt history.
+
+The attempt references source evidence; it never copies a transcript. A worker rechecks owner,
+`RunID`, append ordering (first target event `Seq==1`, then strictly increasing; recorder-coalesced
+records may legitimately have numeric gaps), and canonical digest, reconstructs only the existing bounded secret-safe
+projection, and applies the governance untrusted fence at every restarted or remote model boundary.
+Raw prompt, transcript, archive, tool, event, provider-error, path, identity, credential,
+diagnostic, and metric content is absent from attempt storage and APIs. Missing, gap-marked,
+unauthorized, compacted-without-archive, or mismatched evidence fails with a closed
+`evidence_unavailable`-class outcome before proposal or skill mutation. Abstention is a distinct
+successful terminal outcome.
+
+Explicit authority lands first: only a verified current principal-authored main-session imperative
+on the exact clean hard-stop set can hard-admit procedure learning; negation, capability questions,
+history, and model/tool/repository text fail closed. This hard admission uses the same durable
+attempt lifecycle as weighted work and does not activate a direct `SkillDraft`. Authenticated
+host-requested reflection remains a separate explicit operation outside automatic accounting.
+
+A durable automatic-admission ledger applies the ten-minute weighted per-principal cooldown,
+one-hour global/principal count and reserved-token windows, trajectory-digest deduplication, and a
+24-hour dedupe window atomically across cooperating processes. The ledger backend owns an immutable
+policy and its derived revision plus the clock used for every reservation, expiry, reassignment,
+retain, and reclaim decision. Clients carry only identity, charge demand, and the expected policy
+revision; they cannot enlarge limits or age out a charge/fence by submitting policy or wall time.
+Reservation uses the selected
+provider/model token counter for bounded canonical input plus a 4096-token output cap. The ledger
+reserves by deterministic attempt identity, then consumes the current backend fence by durably retaining the charge before `AttemptRepository.Create`. A reclaimer that wins before retention fences the stale creator out; once retention wins, create failure or response loss leaves a conservative charge until backend window/retention expiry, and only the same deterministic identity may finish creation. A Build-owned cancellation-aware worker repeatedly
+asks the selected local or remote ledger to atomically discover and re-fence a bounded batch of
+expired held reservations, then reads `AttemptRepository`: an existing linked attempt retains the
+charge, while absence reclaims it. `Built.Close` cancels and joins this worker before repository
+resources close. The local ledger additionally caps durable records at 512 globally and 128 per
+opaque principal partition; resolved entries age out after deduplication retention, while saturation
+by unresolved records fails closed instead of growing the 16 MiB document without bound.
+Failures, timeouts, and abstentions after create
+retain the charge. Hard current-principal intent bypasses cooldown only; authenticated explicit
+reflection remains outside automatic accounting.
+
+Weighted work then enters the same durable attempt worker as explicit work: claim fencing,
+source evidence validation/reconstruction, reflection, proposal/skill convergence, terminal state,
+and restart recovery all remain repository-authoritative. No process-local queue or receipt controls
+admitted work. Because attempt admission precedes relay persistence of the terminal `EvResult`, an
+otherwise valid source run whose terminal event has not arrived yet is not misclassified as corrupt:
+the worker keeps its running claim as a backend-timed persisted exponential-backoff marker. A
+replacement process rediscovers it after expiry; the third failed setup/evidence-not-ready claim
+terminally records only `retry_exhausted`, so an undeliverable source cannot cycle on the one-second
+discovery interval forever. Malformed, gap-marked, unauthorized, or mismatched evidence still fails
+closed immediately. Local composition uses the
+flock-backed automatic ledger beside the attempt store; a configured learning driver must
+positively advertise and serve the automatic ledger whenever automatic learning is enabled, with
+no local fallback.
+
+The current raw Attempt/Proposal/Skill driver RPCs are trusted-infrastructure-only: callers select
+repository partitions, and no ADR-0213 workload-authentication middleware, private durable owner
+registry, or separately authenticated maintenance surface exists yet. Consequently,
+`--learning-store-url` fails closed whenever application ownership enforcement is enabled, regardless
+of a driver's self-advertised `enforced` or RPC-separation capability. In an explicitly trusted
+single-tenant deployment, a driver declaring `trusted` may be composed; the reserved `enforced`
+value is treated no stronger than `trusted` until its claim is cryptographically bound to the missing
+ADR-0213 mechanisms. Missing negotiation, an unspecified posture, or any false Attempt/Proposal/Skill
+member remains a startup error with no local fallback. The clients share the Build-owned driver
+connection cache and its once-guarded close. Composition hashes principal and project partition
+components before Proposal/Skill RPCs and restores only the caller's in-process partition view, so
+raw workspace paths and identity strings do not cross this repository transport.
 
 Review and auto share admission; only downstream staging/promotion differs. Auto promotes operator
 facts only from explicit principal-authored current-prompt evidence and project facts only at the
 exact trusted configured root. Tool/assistant/repository/history-only evidence stages for review.
 Authenticated explicit reflection carries host-requested provenance and bypasses automatic policy,
 cooldown, budgets, and completed cache while retaining provider, queue, timeout, ownership, and
-stage/promotion controls. In off mode there is no automatic observer, controller, coordinator worker,
-or provider call; persistence initializes lazily for explicit operations. The gRPC and HTTP surfaces expose explicit completed-session
+stage/promotion controls. With no configured remote learning store, off mode has no automatic observer, attempt repository, coordinator worker,
+or recovery worker; explicit reflection uses the pre-existing synchronous lazy proposal path and creates no durable attempt. An explicit `--learning-store-url` is different: even in off mode composition dials, probes, and composes the remote repositories, publishes their learned-skill view, and may run recovery for attempts already admitted elsewhere. That opt-in does not make ordinary off-mode completions automatically admit attempts, and `/reflect` remains the explicit synchronous operation. When the durable repository is wired, authenticated gRPC `GetLearningAttempt` / `ListLearningAttempts` / `RetryLearningAttempt` / `AbandonLearningAttempt` and HTTP `GET /v1/learning/attempts[/{id}]` plus `POST /v1/learning/attempts/{id}/{retry,abandon}` expose bounded, caller-partitioned attempt state and opaque-version controls. The Service derives the private one-way owner partition before repository access; foreign and missing IDs return the same absence response, and system principals cannot bypass the owner binding. Retry and non-compensating abandon mutate only the AttemptRepository under CAS; abandon does not promise downstream rollback. Projections contain only closed lifecycle metadata, timestamps, opaque versions/cursors, and proposal/skill IDs already linked inside that partition—never source evidence, transcript/tool/provider text, principal values, paths, diagnostics, metrics, or EventLog/watch data. There is deliberately no attempt-watch endpoint, cursor, envelope, or process-local substitute: ADR-0250 session `EventLog` watch is not an attempt feed. A future attempt-change feed requires a separate decision, and its notifications can only advise clients to re-read `AttemptRepository` under caller authority. The gRPC and HTTP surfaces also expose explicit completed-session
 reflection, bounded caller-partitioned list/detail, CAS approve/reject, and compensating undo;
 capability bits keep older/unconfigured servers honest. Source-session ownership and proposal
 principal are verified, project partitions remain reviewable but project promotion is root/trust-gated, and evidence detail reports only
