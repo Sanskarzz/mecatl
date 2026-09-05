@@ -14,6 +14,30 @@ type statusLineChangedMsg struct {
 	line statusline.Result
 }
 
+type statusContextMsg struct {
+	sessionID string
+	root      string
+}
+
+func (m Model) refreshStatusContextCmd() tea.Cmd {
+	if m.deps.StatusSource == nil || m.sessionID == "" {
+		return nil
+	}
+	id := m.sessionID
+	statusline.ClearCommandCWD(m.deps.StatusSource)
+	if m.deps.LocalSessionContext == nil {
+		return nil
+	}
+	getter, ctx := m.deps.LocalSessionContext, m.deps.Ctx
+	return func() tea.Msg {
+		root, err := getter.GetLocalSessionContext(ctx, id)
+		if err != nil {
+			return statusContextMsg{sessionID: id}
+		}
+		return statusContextMsg{sessionID: id, root: root}
+	}
+}
+
 // statusLineWaitCmd is the UI's sole source listener.
 func (m Model) statusLineWaitCmd() tea.Cmd {
 	if m.deps.StatusSource == nil {
@@ -141,7 +165,10 @@ func (m Model) statusLineInput(now time.Time) statusline.Input {
 		if m.deps.ConnectionMode == "connect" {
 			workspace.Location = "remote"
 		}
-		workspace.Basename = m.activePlacement.Label
+		workspace.Name = m.activePlacement.Label
+	}
+	if workspace.Location == "local" && m.deps.ConnectionMode != "connect" && m.statusContextRoot != "" {
+		workspace.Path = m.statusContextRoot
 	}
 	state, activity, approval := "idle", "", "none"
 	mode := m.activeMode

@@ -27,11 +27,18 @@ mandatory safety/navigation and activity lanes, then clips and aligns the result
 A configuration selects exactly one source: responsive `templates` or a
 `command` with an absolute `executable` and literal `args`. Templates receive an
 automatically StatusML-escaped projection; a command receives the same raw input
-as JSON on stdin. Input protocol v2 exposes the ordinary fixed handle as `Session.Handle`;
-it replaces v1's `Session.Digest`, and no digest compatibility alias is emitted. It is run
-directly (there is no shell or source configuration
-form); `/bin/sh` is available only when explicitly selected as the executable with
-literal arguments. It uses a fixed safe baseline environment; the optional
+as JSON on stdin. Input protocol v3 exposes the ordinary fixed handle as `Session.Handle` and
+provider-supplied workspace display metadata as `Workspace.Name`; it replaces v1's
+`Session.Digest` and v2's misleading `Workspace.Basename`, with no compatibility
+aliases. A direct command receives the raw input as JSON on stdin. The optional
+local session-context service is resolved asynchronously for each active session.
+When it returns an eligible root, that root is supplied to the direct command as
+`Workspace.Path` and as its process CWD (including after a worktree switch), and to
+templates through their StatusML-escaped projection. It is never included in
+arguments, environment, or universal Harness/HTTP/event/placement projections. A stale reply
+is discarded; unavailable context uses the configured helper executable's cleaned
+absolute parent directory, then the launch-directory fallback only when that parent
+cannot be determined. the optional
 `passthrough_env` list may add explicitly named user-global variables but never
 ambient environment values; reserved baseline and source-owned terminal-dimension names
 are rejected during settings validation. It uses local-only CWD selection, a one-second deadline, and a combined

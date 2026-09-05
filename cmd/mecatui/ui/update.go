@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/colorprofile"
 
 	"github.com/stacklok/mecatl/cmd/mecatui/client"
+	statusline "github.com/stacklok/mecatl/cmd/mecatui/statusline"
 	"github.com/stacklok/mecatl/cmd/mecatui/theme"
 	"github.com/stacklok/mecatl/cmd/mecatui/ui/welcome"
 )
@@ -429,6 +430,7 @@ func (m Model) applySessionReady(msg client.SessionReadyMsg) (tea.Model, tea.Cmd
 	m.failedStepRetryTried = false
 	m.browsingStartupSessions = false
 	m.closeModal()
+	m.statusContextRoot = ""
 	m.caps = msg.Capabilities // stored for Phase B; unrendered this phase
 	// The EFFECTIVE provider+model the server resolved this session to (echoed
 	// verbatim). The header shows it from turn zero. The model is FIXED per session,
@@ -457,6 +459,9 @@ func (m Model) applySessionReady(msg client.SessionReadyMsg) (tea.Model, tea.Cmd
 	// sibling return operand leaves the copy order UNSPECIFIED (see markDirty's
 	// doc) — the cmd is taken first so the returned model carries the mutation.
 	cmd := (&m).maybeKittyTransmit()
+	if contextCmd := m.refreshStatusContextCmd(); contextCmd != nil {
+		cmd = tea.Batch(cmd, contextCmd)
+	}
 	// Self-heal the terminal window title on the carryover/fork/adopt paths where
 	// the server already set a title this client never saw: if we have NO local
 	// title yet AND a session is bound, fire a GetSession refetch so
@@ -580,6 +585,13 @@ func (m Model) updateLifecycle(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		focusCmd := m.prompt.Focus()
 		m.refreshView()
 		return m, tea.Batch(focusCmd, (&m).armLiveFeed()), true
+	case statusContextMsg:
+		if msg.sessionID == m.sessionID {
+			m.statusContextRoot = msg.root
+			statusline.SetCommandCWD(m.deps.StatusSource, msg.root)
+			m.submitStatusLine()
+		}
+		return m, nil, true
 	case client.SessionReadyMsg:
 		return m.applySessionReady(msg)
 	case client.SessionCompactedMsg:

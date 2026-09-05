@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/stacklok/mecatl/internal/adapter/procgroup"
@@ -47,6 +48,56 @@ type Command struct {
 	// RefreshInterval optionally refreshes an otherwise idle command. Values below
 	// one second are disabled; input changes still use the command debounce.
 	RefreshInterval time.Duration
+	cwd             *commandCWDState
+}
+
+type commandCWDState struct {
+	mu  sync.RWMutex
+	cwd string
+}
+
+func (s *commandCWDState) get(launchDir string) string {
+	if s == nil {
+		return launchDir
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.cwd != "" {
+		return s.cwd
+	}
+	return launchDir
+}
+
+func (s *commandCWDState) set(cwd string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cwd = cwd
+}
+
+func (s *commandCWDState) clear() { s.set("") }
+
+type commandSource struct {
+	Source
+	cwd *commandCWDState
+}
+
+func (s commandSource) setCommandCWD(cwd string) { s.cwd.set(cwd) }
+func (s commandSource) clearCommandCWD()         { s.cwd.clear() }
+
+// SetCommandCWD updates the private process working directory for a direct
+// command source. The directory is never part of Input or status rendering.
+func SetCommandCWD(source Source, cwd string) {
+	if command, ok := source.(commandSource); ok {
+		command.setCommandCWD(cwd)
+	}
+}
+
+// ClearCommandCWD clears the direct command's local-session CWD so it falls
+// back to the configured helper directory until a lookup supplies a new root.
+func ClearCommandCWD(source Source) {
+	if command, ok := source.(commandSource); ok {
+		command.clearCommandCWD()
+	}
 }
 
 // Valid reports whether command specifies an absolute executable and literal args.
@@ -109,6 +160,7 @@ func validCommandPart(value string) bool {
 // raw Input JSON on stdin and never exposes command failures or captured output
 // to the generated status line.
 func NewCommandSource(command Command) Source {
+	command.cwd = &commandCWDState{}
 	header := compileVariants(SurfaceTemplates{}, defaultHeaderTemplates())
 	footer := compileVariants(SurfaceTemplates{}, defaultFooterTemplates())
 	var ticks <-chan time.Time
@@ -142,7 +194,7 @@ func NewCommandSource(command Command) Source {
 	if ticker != nil {
 		source.stopTicker = ticker.Stop
 	}
-	return source
+	return commandSource{Source: source, cwd: command.cwd}
 }
 
 func runCommand(ctx context.Context, command Command, input Input) ([]byte, error) {
@@ -171,11 +223,14 @@ func runCommand(ctx context.Context, command Command, input Input) ([]byte, erro
 	return output.bytes(), nil
 }
 
-func commandCWD(command Command, input Input) string {
-	if input.Workspace.Location == "local" && input.Workspace.Path != "" {
-		return input.Workspace.Path
+func commandCWD(command Command, _ Input) string {
+	fallback := command.LaunchDir
+	if filepath.IsAbs(command.Path) {
+		if parent := filepath.Dir(filepath.Clean(command.Path)); parent != "" {
+			fallback = parent
+		}
 	}
-	return command.LaunchDir
+	return command.cwd.get(fallback)
 }
 
 func commandEnv(command Command, input Input) []string {

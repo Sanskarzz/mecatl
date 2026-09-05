@@ -80,7 +80,7 @@ are zero, and `Clock.Now` is the zero time until the source refreshes it.
 
 | JSON path | Type | Meaning |
 | --- | --- | --- |
-| `Version` | integer | Status input protocol version (currently `2`). |
+| `Version` | integer | Status input protocol version (currently `3`). |
 | `Server.DisplayTarget` | string | Credential-free target shown by the client. |
 | `Server.ConnectionMode` | string | `embedded`, `connect`, or empty while unknown. |
 | `Session.Title` | string | Optional display title. |
@@ -94,7 +94,8 @@ are zero, and `Clock.Now` is the zero time until the source refreshes it.
 | `Context.{Used,Window}.{Raw,Human}` | integer, string | Current context use and capacity as exact and display-ready values. |
 | `Context.Percent` | integer | `Used.Raw / Window.Raw` as an integer percentage, or `0` when unknown. |
 | `Workspace.Location` | string | `local`, `remote`, or `unknown`. |
-| `Workspace.Path`, `Workspace.Basename` | strings | Local-session path and basename only. They are empty for remote or unknown workspaces. |
+| `Workspace.Name` | string | Provider-supplied workspace display metadata. It is not a directory basename or a usable path. |
+| `Workspace.Path` | string | Exact local root returned by the privileged local-context RPC. It is available to status templates through their StatusML-escaped projection and to a configured direct local status command. It is empty for remote, untrusted, no-FS, unavailable, and otherwise ineligible sessions. |
 | `Terminal.Rows`, `Terminal.Cols` | integers | Measured terminal dimensions. |
 | `Terminal.HeaderAvailCols`, `Terminal.FooterAvailCols` | integers | Columns remaining after mecatui reserves mandatory header and footer lanes. |
 | `MainAgent.State` | string | `connecting`, `idle`, `thinking`, `running_tool`, `awaiting_approval`, `completed`, `failed`, or `cancelled`. |
@@ -106,9 +107,14 @@ are zero, and `Clock.Now` is the zero time until the source refreshes it.
 | `Clock.Now` | RFC 3339 time | Source-owned current time; an interval refreshes it. |
 
 The input deliberately excludes prompts, transcript and tool content, credentials,
-authentication metadata, diagnostics, command output, and the local launch
-directory. The source privately uses the local launch directory only as a command
-working-directory fallback.
+authentication metadata, diagnostics, and command output. `Workspace.Path` is the
+single privileged exception: status templates receive it through their StatusML-escaped
+projection and a configured local direct executable receives it in raw input when the
+embedded local-context RPC successfully resolves the active eligible local session.
+Without that root, the command uses the configured helper executable's cleaned absolute
+parent directory, falling
+back to its launch directory only if the parent cannot be determined; it never
+implicitly selects `HOME`.
 
 ## StatusML
 
@@ -156,7 +162,7 @@ For example, a command written in Python can safely include a dynamic label:
 ```python
 from html import escape
 
-label = status["Workspace"]["Basename"]
+label = status["Workspace"]["Name"]
 print(f"<footer><text>{escape(label, quote=False)}</text></footer>")
 ```
 
@@ -275,9 +281,15 @@ trailing newline from the Python `print` example above while preserving whitespa
 inside markup text. A supplied header or footer replaces that surface;
 an omitted surface continues to use its shipped default.
 
-Mecatui runs the executable in the known local session workspace. If that workspace
-is remote or unknown, it uses the local directory from which mecatui was launched;
-a remote path is never used as a local CWD. The process receives a fixed safe
+Mecatui runs the executable in the eligible local root of the active session when
+its opt-in local session-context service can resolve one. It refreshes that private
+lookup after a session is created, adopted, cleared, forked, or switched, and
+ignores an older response after a newer session becomes active. The root is used
+only as `Workspace.Path` in raw command JSON and as the process CWD; templates
+receive it through their StatusML-escaped projection. If context is unavailable or
+ineligible, `Workspace.Path` is empty and mecatui uses the configured helper executable's cleaned absolute parent directory;
+the local launch directory is retained only when that parent cannot be determined.
+A remote path is never used as a local CWD. The process receives a fixed safe
 baseline: `HOME`, `PATH`, `TERM`, `LANG`, `LC_ALL`, `COLUMNS`, and `LINES` when
 available. `COLUMNS` and `LINES` come from the submitted terminal dimensions.
 
