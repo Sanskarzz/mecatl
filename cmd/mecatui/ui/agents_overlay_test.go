@@ -564,8 +564,8 @@ func TestSubagentOverlayBoundsChildContent(t *testing.T) {
 	if strings.Contains(focus, strings.Repeat("z", maxTraceDetailLen*3)) {
 		t.Errorf("an unbounded preview leaked into the focus pane (past maxTraceDetailLen):\n%q", focus)
 	}
-	if !strings.Contains(focus, strings.Repeat("z", maxTraceDetailLen-1)) {
-		t.Errorf("the bounded preview should render (truncated), got:\n%q", focus)
+	if got := strings.Count(focus, "z"); got < maxTraceDetailLen-1 {
+		t.Errorf("the bounded preview should retain its truncated source text, got %d z runes:\n%q", got, focus)
 	}
 	// The sanitized tool name renders as inert text (the OSC payload stripped).
 	if !strings.Contains(focus, "]0;"+sentinel+"Grep") {
@@ -687,6 +687,58 @@ func TestSubagentRosterWindowed(t *testing.T) {
 	}
 	if !strings.Contains(out, "enter focus") {
 		t.Errorf("footer hint clipped by the window, got %q", out)
+	}
+}
+
+// TestSubagentRosterFooterSentinel stays a single fitting row when a live rebound
+// key label is unusually long. The footer is dynamic card chrome, not a roster row:
+// it must truncate rather than wrap and accidentally widen the centred overlay.
+func TestSubagentRosterFooterSentinel(t *testing.T) {
+	const viewportWidth = 32
+	th, hk := aztec(), defaultHelpKeys()
+	hk.navUp = "rebound-key-label-with-an-unusually-long-live-value\nand-another-line"
+
+	_, _, bodyWidth := agentsCardLayout(th, viewportWidth)
+	out := stripANSIstr(renderSubagentRoster(th, subagentState{}, []subagentLane{{childID: "child", goal: "inspect"}}, hk, 0, bodyWidth))
+	footer := out[strings.LastIndex(out, "\n")+1:]
+	if strings.ContainsRune(footer, '\n') {
+		t.Fatalf("footer rendered more than one row: %q", footer)
+	}
+	if got := lipgloss.Width(footer); got > focusCardTextWidth(viewportWidth) {
+		t.Fatalf("footer width = %d, want <= %d: %q", got, focusCardTextWidth(viewportWidth), footer)
+	}
+	if !strings.Contains(footer, "...") {
+		t.Fatalf("footer did not use the literal ellipsis sentinel: %q", footer)
+	}
+	if strings.Contains(footer, "\x1b") || strings.Contains(footer, "\nand-another") {
+		t.Fatalf("footer retained unsafe or multi-row key content: %q", footer)
+	}
+}
+
+// TestSubagentRosterFooterSentinelNormalWidth preserves the established default
+// footer when its live key markings fit the available card body.
+func TestSubagentRosterFooterSentinelNormalWidth(t *testing.T) {
+	th, hk := aztec(), defaultHelpKeys()
+	out := stripANSIstr(renderSubagentRoster(th, subagentState{}, []subagentLane{{childID: "child", goal: "inspect"}}, hk, 0, 160))
+	footer := out[strings.LastIndex(out, "\n")+1:]
+	want := "↑/↓ select · pgup/pgdn · home/end · enter focus · x cancel · tab switch · esc close"
+	if footer != want {
+		t.Fatalf("normal-width footer = %q, want existing output %q", footer, want)
+	}
+}
+
+// TestDynamicCardChromeLine reserves its prefix and sanitizes before it truncates
+// the raw dynamic text into exactly one display row.
+func TestDynamicCardChromeLine(t *testing.T) {
+	got := stripANSIstr(renderDynamicCardChromeLine(aztec().Style("muted"), "› ", "first\nsecond\x1b[2J", 12))
+	if strings.ContainsRune(got, '\n') || strings.Contains(got, "\x1b") {
+		t.Fatalf("chrome line retained a row break or terminal escape: %q", got)
+	}
+	if !strings.HasPrefix(got, "› ") || !strings.Contains(got, "...") {
+		t.Fatalf("chrome line did not preserve prefix or ellipsis: %q", got)
+	}
+	if width := lipgloss.Width(got); width > 12 {
+		t.Fatalf("chrome line width = %d, want <= 12: %q", width, got)
 	}
 }
 
@@ -1080,6 +1132,98 @@ func TestSubagentFocusBackgroundGolden(t *testing.T) {
 	compareGolden(t, "subagent_focus_background.golden", got)
 }
 
+// TestSubagentFocusBoundedPreviewsNoteHangsInFinalCard guards the nested explanatory
+// note at the golden fixture's real width: its continuation must not return to the
+// parent detail lane.
+func TestSubagentFocusBoundedPreviewsNoteHangsInFinalCard(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = goldenBackgroundFleet(m)
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = mm.(Model)
+
+	out := stripANSIstr(m.View().Content)
+	lines := strings.Split(out, "\n")
+	parent := -1
+	for i, line := range lines {
+		if strings.Contains(line, "bounded previews") {
+			parent = i
+			break
+		}
+	}
+	if parent < 0 || parent+1 >= len(lines) {
+		t.Fatalf("missing wrapped bounded-previews note:\n%s", out)
+	}
+	cardIndent := func(line string) int {
+		t.Helper()
+		content, ok := strings.CutPrefix(strings.TrimLeft(line, " "), "┃")
+		if !ok {
+			t.Fatalf("expected card row, got %q", line)
+		}
+		return len(content) - len(strings.TrimLeft(content, " "))
+	}
+	parentIndent := cardIndent(lines[parent])
+	continuationIndent := cardIndent(lines[parent+1])
+	if continuationIndent <= parentIndent {
+		t.Errorf("bounded-previews continuation indent = %d, want > parent indent %d:\n%s", continuationIndent, parentIndent, out)
+	}
+}
+
+// TestSubagentFocusBackgroundNoteHangsInFinalCard verifies the delivery note wraps in
+// the final centred card with continuation rows deeper than its parent lane.
+func TestSubagentFocusBackgroundNoteHangsInFinalCard(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = goldenBackgroundFleet(m)
+	m = applyAll(m, tea.WindowSizeMsg{Width: 52, Height: 30})
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = mm.(Model)
+
+	out := stripANSIstr(m.View().Content)
+	assertFitsViewport(t, []byte(out), m.width)
+	lines := strings.Split(out, "\n")
+	parent := -1
+	for i, line := range lines {
+		if strings.Contains(line, "background: runs detached") {
+			parent = i
+			break
+		}
+	}
+	if parent < 0 || parent+1 >= len(lines) {
+		t.Fatalf("missing wrapped background note:\n%s", out)
+	}
+	var noteLines, noteRows []string
+	for _, line := range lines[parent:] {
+		content, ok := strings.CutPrefix(strings.TrimLeft(line, " "), "┃")
+		content = strings.TrimSpace(strings.Trim(content, "┃ "))
+		if !ok || content == "" {
+			break
+		}
+		noteRows = append(noteRows, line)
+		noteLines = append(noteLines, content)
+	}
+	note := strings.Join(noteLines, " ")
+	if !strings.Contains(note, "background: runs detached; the agent collects its result via SubagentStatus") {
+		t.Fatalf("background note lost content: %q\n%s", note, out)
+	}
+	laneIndent := func(line string) int {
+		t.Helper()
+		content, ok := strings.CutPrefix(strings.TrimLeft(line, " "), "┃")
+		if !ok {
+			t.Fatalf("expected card row, got %q", line)
+		}
+		return len(content) - len(strings.TrimLeft(content, " "))
+	}
+	parentIndent := laneIndent(noteRows[0])
+	for i, row := range noteRows[1:] {
+		if continuationIndent := laneIndent(row); continuationIndent <= parentIndent {
+			t.Errorf("background continuation %d indent = %d, want > parent indent %d:\n%s", i+1, continuationIndent, parentIndent, out)
+		}
+	}
+}
+
 // TestAgentsTeamsTabGolden locks the Teams tab of the unified overlay (the tab bar +
 // the former team roster), reached by `tab` from the Subagents-default view.
 func TestAgentsTeamsTabGolden(t *testing.T) {
@@ -1133,7 +1277,48 @@ func TestParallelRosterGolden(t *testing.T) {
 		t.Fatalf("expected Parallel tab, got %v", m.agentsTab)
 	}
 	got := stripANSI([]byte(m.View().Content))
+	assertFitsViewport(t, got, m.width)
 	compareGolden(t, "parallel_roster.golden", got)
+}
+
+// TestParallelRosterFooterPacksSemanticSegmentsInFinalCard verifies the actual
+// golden viewport keeps complete high-priority actions on one footer row.
+func TestParallelRosterFooterPacksSemanticSegmentsInFinalCard(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = goldenParallel(m)
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	out := stripANSIstr(m.View().Content)
+	assertFitsViewport(t, []byte(out), m.width)
+	for _, want := range []string{"esc close", "↑/↓ select", "enter focus", "tab switch"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("parallel roster footer omitted high-priority segment %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "esc ...") {
+		t.Errorf("parallel roster footer split a semantic segment:\n%s", out)
+	}
+}
+
+// TestParallelRosterFooterLongReboundLabelsInFinalCard verifies the final card
+// omits whole lower-priority segments rather than splitting rebound labels.
+func TestParallelRosterFooterLongReboundLabelsInFinalCard(t *testing.T) {
+	const width = 48
+	long := strings.Repeat("rebound-key-label-", 8)
+	hk := defaultHelpKeys()
+	hk.closeOnly, hk.navUp, hk.navDown = long+"close", long+"up", long+"down"
+	hk.choose, hk.nextTab = long+"focus", long+"switch"
+	hk.scroll, hk.jumpTopFull, hk.jumpEndFull = long+"page", long+"first", long+"last"
+	out := stripANSIstr(renderAgentsOverlay(aztec(), tabParallel, subagentState{}, parallelState{}, teamState{view: teamRoster}, nil, nil, []parallelGroup{{parentCallID: "p1", branchCount: 1}}, hk, width, 20))
+	assertFitsViewport(t, []byte(out), width)
+	if !strings.Contains(out, "...") {
+		t.Fatalf("long rebound footer should signal omitted segments:\n%s", out)
+	}
+	for _, fragment := range []string{"rebound-key-label-...", "rebound-key-label-…"} {
+		if strings.Contains(out, fragment) {
+			t.Errorf("footer split rebound key/action label %q:\n%s", fragment, out)
+		}
+	}
 }
 
 // TestParallelGroupFocusGolden locks one Parallel group's focus pane (the branches inline,
