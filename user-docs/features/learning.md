@@ -97,6 +97,24 @@ material is rejected or remains staged. A procedure follows a separate learned-
 skill evaluation path; an unevaluated `SkillDraft` is never made active by a
 startup sweep.
 
+## Selected evidence and review safety
+
+A retained transcript or event history larger than the reflection request limit is
+not rejected only because of its raw size. After automatic admission—or immediately
+for explicit reflection—mecatl deterministically selects one bounded view. Connected
+tool turns are atomic: the assistant call and all corresponding tool results are
+included together or omitted together. The selected entries are returned in source
+order, and one selection produces at most one model request; mecatl does not chunk or
+merge multiple reflection passes.
+
+Each staged proposal retains a content-free manifest of the selected entries and their
+original coordinates and digests. Proposal lists remain metadata-only. Detail and
+approval re-read the source and verify that exact manifest instead of rerunning
+selection or substituting nearby content. If retained history was compacted, deleted,
+or changed, the proposal becomes non-approvable; mecatl does not expose a raw
+transcript or manifest dump to recover it. Evidence previews remain bounded and
+redacted.
+
 ## Budgets and safety
 
 Automatic reflection reserves count and tokens through the selected admission
@@ -144,7 +162,10 @@ Authenticated explicit reflection is separate from automatic admission. It runs
 synchronously, lazily initializes persistence, uses the completed session's
 persisted provider/model, and bypasses automatic cooldown and admission budgets.
 Without genuine current-prompt promotion provenance, its output remains staged
-rather than changing active memory.
+rather than changing active memory. If bounded selection finds no safe evidence,
+the call succeeds with a closed, content-free abstention reason instead; cancellation,
+source mismatch, capacity, timeout, provider, and persistence failures remain typed
+errors rather than being reported as abstentions.
 
 When durable learning is enabled, authenticated clients can inspect attempts over
 `GetLearningAttempt` / `ListLearningAttempts` or HTTP

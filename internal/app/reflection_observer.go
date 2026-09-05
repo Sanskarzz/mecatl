@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"iter"
 	"time"
 
 	"github.com/stacklok/mecatl/engine/adapter/memorypromotion"
@@ -36,6 +37,7 @@ type reflectionObserver struct {
 	sensitivity      learning.Sensitivity
 	metrics          func(learning.Activity)
 	procedure        func(context.Context, learning.ProposalRecord, learning.Mode) error
+	lifecycle        *materializationLifecycle
 }
 
 func reflectionPrincipal(p *session.Principal) string {
@@ -83,61 +85,22 @@ func (o *reflectionObserver) Observe(ctx context.Context, trajectory learning.Tr
 	if o == nil || o.mode == learning.Off {
 		return nil
 	}
-	_, err := o.submit(ctx, trajectory, nil, true, true)
+	_, err := o.submitWithEventSource(ctx, trajectory, nil, nil, true, true)
 	return err
 }
 
 // Reflect explicitly submits a completed session. Unlike Observe, it bypasses
 // automatic mode and cadence admission; off still stages proposals for review.
 func (o *reflectionObserver) Reflect(ctx context.Context, trajectory learning.Trajectory, async bool) (reflectionReceipt, error) {
-	return o.submit(ctx, trajectory, nil, async, false)
+	return o.submitWithEventSource(ctx, trajectory, nil, nil, async, false)
 }
 
 func (o *reflectionObserver) reflectWithEvents(ctx context.Context, trajectory learning.Trajectory, events []session.Event) (reflectionReceipt, error) {
 	return o.submit(ctx, trajectory, events, false, false)
 }
 
-func reflectionTrajectoryBytes(trajectory learning.Trajectory) int {
-	total := len(trajectory.Workspace) + len(trajectory.SessionID)
-	for _, message := range trajectory.Messages {
-		total += len(message.Text) + len(message.Reasoning) + len(message.ProviderPhase) + len(message.ReasoningItemID)
-		for _, call := range message.ToolCalls {
-			total += len(call.ID) + len(call.Name) + len(call.Args) + len(call.ItemID)
-		}
-		for _, part := range message.Parts {
-			total += len(part.Data) + len(part.Text) + len(part.URL) + len(part.Name) + len(part.Title) + len(part.Description)
-		}
-		if message.ToolResult != nil {
-			total += len(message.ToolResult.Content) + len(message.ToolResult.CallID)
-			for _, part := range message.ToolResult.Parts {
-				total += len(part.Data) + len(part.Text) + len(part.URL) + len(part.Name) + len(part.Title) + len(part.Description)
-			}
-		}
-		if total > defaultReflectionJobBytes {
-			return total
-		}
-	}
-	return total
-}
-
-func reflectionEventsBytes(events []session.Event, limit int) int {
-	total := 0
-	for _, event := range events {
-		total += len(event.Type) + len(event.Text)
-		if event.ToolCall != nil {
-			total += len(event.ToolCall.ID) + len(event.ToolCall.Name)
-		}
-		if event.ToolResult != nil {
-			total += len(event.ToolResult.CallID) + len(event.ToolResult.Content)
-			for _, part := range event.ToolResult.Parts {
-				total += len(part.Data) + len(part.Text) + len(part.Name) + len(part.Title) + len(part.Description) + len(part.MIMEType)
-			}
-		}
-		if total > limit {
-			return total
-		}
-	}
-	return total
+func (o *reflectionObserver) reflectWithEventSource(ctx context.Context, trajectory learning.Trajectory, events iter.Seq2[session.Event, error]) (reflectionReceipt, error) {
+	return o.submitWithEventSource(ctx, trajectory, nil, events, false, false)
 }
 
 func currentPromptBinding(input learning.Input, class learning.AdmissionClass) (learning.CurrentPromptBinding, error) {
@@ -292,13 +255,57 @@ func (o *reflectionObserver) createOrReserveAttempt(ctx context.Context, partiti
 	return record, found && existing.ID == record.ID, nil
 }
 
+func selectedCurrentSpan(manifest learning.MaterializationManifest, current learning.MessageSpan) learning.MessageSpan {
+	start, end := -1, -1
+	selected := 0
+	for _, entry := range manifest.Entries {
+		if entry.Locator != learning.EvidenceMessage || entry.OriginalMessage == nil {
+			continue
+		}
+		if current.Contains(*entry.OriginalMessage) {
+			if start < 0 {
+				start = selected
+			}
+			end = selected + 1
+		}
+		selected++
+	}
+	if start < 0 {
+		return learning.MessageSpan{}
+	}
+	return learning.MessageSpan{Start: start, End: end}
+}
+
+func boundedExisting(input learning.Input, existing []learning.ExistingFact) []learning.ExistingFact {
+	for _, fact := range existing {
+		candidate := append(input.Existing, fact)
+		input.Existing = candidate
+		if _, err := reflectionInputMaterial(input, defaultReflectionJobBytes); err != nil {
+			return candidate[:len(candidate)-1]
+		}
+	}
+	return input.Existing
+}
+
+func (o *reflectionObserver) submit(ctx context.Context, trajectory learning.Trajectory, events []session.Event, async, automatic bool) (reflectionReceipt, error) {
+	return o.submitWithEventSource(ctx, trajectory, events, nil, async, automatic)
+}
+
 //nolint:gocyclo // explicit/direct and automatic/queued paths share one bounded input and disposition funnel
-func (o *reflectionObserver) submit(ctx context.Context, trajectory learning.Trajectory, events []session.Event, _ bool, automatic bool) (reflectionReceipt, error) {
+func (o *reflectionObserver) submitWithEventSource(ctx context.Context, trajectory learning.Trajectory, events []session.Event, eventSource iter.Seq2[session.Event, error], _ bool, automatic bool) (reflectionReceipt, error) {
 	if o == nil || o.reflector == nil || o.repository == nil {
 		return reflectionReceipt{}, errors.New("reflection is not configured")
 	}
-	if size := reflectionTrajectoryBytes(trajectory) + reflectionEventsBytes(events, defaultReflectionJobBytes); size > defaultReflectionJobBytes {
-		return reflectionReceipt{}, fmt.Errorf("reflection input exceeds %d-byte job limit", defaultReflectionJobBytes)
+	if err := ctx.Err(); err != nil {
+		return reflectionReceipt{}, err
+	}
+	if automatic && o.lifecycle != nil {
+		operation, err := o.lifecycle.enter(ctx)
+		if err != nil {
+			return reflectionReceipt{}, err
+		}
+		defer operation.leave()
+		ctx = operation.Context()
 	}
 	owner := trajectory.Principal.Clone()
 	ctx = reflectionContext(ctx, owner)
@@ -311,22 +318,112 @@ func (o *reflectionObserver) submit(ctx context.Context, trajectory learning.Tra
 	if !automatic {
 		hostSignals = []learning.Signal{{Kind: learning.SignalHostRequested}}
 	}
-	input := learning.NewInput(trajectory, events, hostSignals, memoryExisting(ctx, stores...))
-	signals := append([]learning.Signal(nil), hostSignals...)
-	signals = append(signals, learning.DetectSignals(input)...)
-	decision := learning.AdmissionDecision{Admitted: true, Class: learning.AdmissionHostRequested, Reasons: []learning.AdmissionReason{learning.ReasonHostRequested}, Signals: signals}
+	var input learning.Input
+	var signals []learning.Signal
+	var selectedBytes int
+	decision := learning.AdmissionDecision{Admitted: true, Class: learning.AdmissionHostRequested, Reasons: []learning.AdmissionReason{learning.ReasonHostRequested}}
 	if automatic {
+		if err := ctx.Err(); err != nil {
+			return reflectionReceipt{}, err
+		}
+		// Admission borrows the completed trajectory directly. The policy scans the
+		// complete source/current span; only an admitted trajectory is copied into a
+		// bounded selected Input below.
 		policy := o.policy
 		if policy == nil {
 			policy = learning.ThresholdPolicy{Sensitivity: o.sensitivity}
 		}
-		decision = policy.Decide(learning.AdmissionRequest{Input: input})
+		var err error
+		decision, err = policy.Decide(ctx, learning.AdmissionRequest{Trajectory: trajectory})
+		if err != nil {
+			return reflectionReceipt{}, err
+		}
 		o.emitAdmission(decision)
 		if !decision.Admitted {
 			return reflectionReceipt{}, nil
 		}
-		signals = decision.Signals
+		if err := ctx.Err(); err != nil {
+			return reflectionReceipt{}, err
+		}
+		var materialized learning.Materialization
+		materialLimit := defaultReflectionJobBytes
+		for {
+			var err error
+			materialized, err = learning.MaterializeEvidence(ctx, learning.MaterializationRequest{
+				Trajectory:  trajectory,
+				Events:      events,
+				EventSource: eventSource,
+				Signals:     decision.Signals,
+				Mandatory:   trajectory.Current,
+				Limits:      learning.MaterializationLimits{MaxBytes: materialLimit},
+			})
+			if err != nil {
+				return reflectionReceipt{}, err
+			}
+			if materialized.Disposition != learning.MaterializationSelected {
+				return reflectionReceipt{}, nil
+			}
+			input = materialized.Input
+			input.Trajectory.Workspace = trajectory.Workspace
+			input.Trajectory.Principal = owner
+			input.Trajectory.Kind = trajectory.Kind
+			input.Trajectory.Counters = trajectory.Counters
+			input.Trajectory.Current = selectedCurrentSpan(materialized.Manifest, trajectory.Current)
+			signals = learning.DetectSignals(input)
+			input.Signals = signals
+			if _, err := reflectionInputMaterial(input, defaultReflectionJobBytes); err == nil {
+				break
+			}
+			materialLimit /= 2
+			if materialLimit == 0 {
+				return reflectionReceipt{}, nil
+			}
+		}
+		input.Existing = boundedExisting(input, memoryExisting(ctx, stores...))
+		if err := learning.ValidateInput(input); err != nil {
+			return reflectionReceipt{}, fmt.Errorf("validate automatic materialization: %w", err)
+		}
+		if err := ctx.Err(); err != nil {
+			return reflectionReceipt{}, err
+		}
+	} else {
+		materialized, err := learning.MaterializeEvidence(ctx, learning.MaterializationRequest{
+			Trajectory:  trajectory,
+			Events:      events,
+			EventSource: eventSource,
+			Signals:     append(hostSignals, learning.DetectSignals(learning.Input{Trajectory: trajectory})...),
+			Limits:      learning.MaterializationLimits{MaxBytes: defaultReflectionJobBytes},
+			Explicit:    true,
+		})
+		if err != nil {
+			return reflectionReceipt{}, err
+		}
+		if materialized.Disposition != learning.MaterializationSelected {
+			return reflectionReceipt{Disposition: reflectionCompleted, Abstained: true, Err: materialized.Reason.String()}, nil
+		}
+		input = materialized.Input
+		input.Trajectory.Workspace = trajectory.Workspace
+		input.Trajectory.Principal = owner
+		input.Trajectory.Kind = trajectory.Kind
+		input.Trajectory.Counters = trajectory.Counters
+		input.Trajectory.Current = selectedCurrentSpan(materialized.Manifest, trajectory.Current)
+		signals = append([]learning.Signal(nil), hostSignals...)
+		signals = append(signals, learning.DetectSignals(input)...)
+		input.Signals = signals
+		input.Existing = boundedExisting(input, memoryExisting(ctx, stores...))
+		if err := learning.ValidateInput(input); err != nil {
+			return reflectionReceipt{}, fmt.Errorf("validate explicit materialization: %w", err)
+		}
+		decision.Signals = signals
+		if err := ctx.Err(); err != nil {
+			return reflectionReceipt{}, err
+		}
 	}
+	requestMaterial, err := reflectionInputMaterial(input, defaultReflectionJobBytes)
+	if err != nil {
+		return reflectionReceipt{}, err
+	}
+	selectedBytes = len(requestMaterial)
 	reservationTokens := 0
 	if automatic {
 		estimator, ok := o.reflector.(interface {
@@ -348,16 +445,17 @@ func (o *reflectionObserver) submit(ctx context.Context, trajectory learning.Tra
 		if err != nil {
 			return reflectionReceipt{Disposition: reflectionFailed}, err
 		}
-		digest, err := reflectionInputDigest(input)
+		identity, digest, err := selectedEvidenceIdentity(input)
 		if err != nil {
 			return reflectionReceipt{Disposition: reflectionFailed}, err
 		}
-		receipt := reflectionReceipt{ID: reflectionJobID(reflectionPrincipal(owner) + "\x00" + string(input.Trajectory.SessionID) + "\x00" + digest), Disposition: reflectionCompleted}
+		receipt := reflectionReceipt{ID: reflectionJobID(reflectionPrincipal(owner) + "\x00" + identity), Disposition: reflectionCompleted}
 		if outcome.Kind == learning.OutcomeAbstained {
 			receipt.Abstained = true
+			receipt.Err = learning.MaterializationNoEligibleEvidence.String()
 			return receipt, nil
 		}
-		processed, err := o.job(input, signals, owner).process(jobCtx, digest, outcome)
+		processed, err := o.job(input, signals, owner, selectedBytes, nil, nil).process(jobCtx, digest, outcome)
 		processed.ID, processed.Disposition = receipt.ID, reflectionCompleted
 		return processed, err
 	}
@@ -366,7 +464,9 @@ func (o *reflectionObserver) submit(ctx context.Context, trajectory learning.Tra
 	if automatic && decision.Class == learning.AdmissionWeighted && o.admission != nil && !o.admission.admit() {
 		return reflectionReceipt{}, nil
 	}
-	partition, create, err := o.durableAttemptMaterial(ctx, input, owner, decision.Class)
+	attemptInput := input
+	attemptInput.Trajectory.RunID = trajectory.RunID
+	partition, create, err := o.durableAttemptMaterial(ctx, attemptInput, owner, decision.Class)
 	if err != nil {
 		return reflectionReceipt{Disposition: reflectionFailed}, err
 	}
@@ -375,7 +475,7 @@ func (o *reflectionObserver) submit(ctx context.Context, trajectory learning.Tra
 	if automatic {
 		attempt, existingAttempt, err = o.createOrReserveAttempt(ctx, partition, create, reservationTokens)
 	} else {
-		attempt, existingAttempt, err = o.createDurableAttempt(ctx, input, owner, decision.Class)
+		attempt, existingAttempt, err = o.createDurableAttempt(ctx, attemptInput, owner, decision.Class)
 	}
 	if err != nil {
 		if automatic && (errors.Is(err, learning.ErrAutomaticAdmissionLimit) || errors.Is(err, learning.ErrAutomaticAdmissionCooldown) || errors.Is(err, learning.ErrAutomaticAdmissionDuplicate)) {
@@ -406,6 +506,9 @@ func (o *reflectionObserver) submit(ctx context.Context, trajectory learning.Tra
 
 func (o *reflectionObserver) receiptForAttempt(ctx context.Context, attempt learning.AttemptRecord, input learning.Input, principal string) reflectionReceipt {
 	receipt := reflectionReceipt{ID: string(attempt.ID), Disposition: reflectionDuplicate, Abstained: attempt.Outcome == learning.AttemptOutcomeAbstained}
+	if receipt.Abstained {
+		receipt.Err = learning.MaterializationNoEligibleEvidence.String()
+	}
 	if attempt.Outcome == learning.AttemptOutcomeFailed {
 		receipt.Err = string(attempt.FailureCode)
 	}
@@ -471,12 +574,13 @@ func (o *reflectionObserver) emitAutomaticRefusal(err error) {
 	o.metrics(activity)
 }
 
-func (o *reflectionObserver) job(input learning.Input, signals []learning.Signal, owner *session.Principal) reflectionJob {
+func (o *reflectionObserver) job(input learning.Input, signals []learning.Signal, owner *session.Principal, selectedBytes int, reserve func() bool, complete func(reflectionReceipt)) reflectionJob {
 	principal := reflectionPrincipal(owner)
 	return reflectionJob{
-		principal: principal,
-		input:     input,
+		principal: principal, input: input, selectedBytes: selectedBytes,
 		reflector: o.reflector,
+		reserve:   reserve,
+		complete:  complete,
 		process: func(ctx context.Context, digest string, outcome learning.Outcome) (reflectionReceipt, error) {
 			return processReflectionOutcome(memoryadapter.WithWorkspace(reflectionContext(ctx, owner), input.Trajectory.Workspace), o.repository,
 				o.operatorMemory, o.projectMemory, principal, input,
@@ -600,7 +704,17 @@ func processReflectionOutcome(
 		if len(group.items) == 0 {
 			continue
 		}
-		records, err := repository.StageBatch(ctx, group.partition, digest, group.items, signals)
+		var records []learning.ProposalRecord
+		var err error
+		if input.Manifest != nil && input.Manifest.Protocol == learning.ReflectionEvidenceV1 {
+			manifestRepo, ok := repository.(proposalManifestRepository)
+			if !ok {
+				return receipt, learning.ErrInvalidProposal
+			}
+			records, err = manifestRepo.StageBatchManifest(ctx, group.partition, *input.Manifest, group.items, signals)
+		} else {
+			records, err = repository.StageBatch(ctx, group.partition, digest, group.items, signals)
+		}
 		if err != nil {
 			return receipt, err
 		}
@@ -694,6 +808,13 @@ func buildReflectionObserver(
 		return nil
 	}
 	return buildConfiguredReflectionObserver(cfg, provider, model, operatorMemory, projectMemory, repository, coordinator, admission, procedure...)
+}
+
+func bindMaterializationLifecycle(observer learning.Observer, lifecycle *materializationLifecycle) learning.Observer {
+	if reflection, ok := observer.(*reflectionObserver); ok {
+		reflection.lifecycle = lifecycle
+	}
+	return observer
 }
 
 func buildExplicitReflectionObserver(
