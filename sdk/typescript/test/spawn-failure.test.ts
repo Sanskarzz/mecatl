@@ -354,4 +354,85 @@ describe("spawn startup failure", () => {
     expect(remove).toBeGreaterThan(kill);
     expect(harness.isRunning()).toBe(false);
   });
+
+  it("a rejected spawn stops polling for the ready document", async () => {
+    // Promise.race does not cancel its loser: before the readiness poll took an
+    // AbortSignal, a child that exited immediately left real 20ms timers running
+    // for the rest of the readiness window, so a CLI that caught the failure sat
+    // there for 30 seconds before Node could exit.
+    let sleeps = 0;
+    const internal = {
+      clock: { now: () => 0 },
+      launcher: () => {
+        let resolveExit: ((status: ProcessExit) => void) | undefined;
+        const exit = new Promise<ProcessExit>((resolvePromise) => {
+          resolveExit = resolvePromise;
+        });
+        setImmediate(() => resolveExit?.({ code: 1, signal: null }));
+        return {
+          closeLifetime: () => undefined,
+          exit,
+          isRunning: () => false,
+          kill: () => undefined,
+          stderrTail: () => Buffer.from(""),
+        };
+      },
+      scheduler: {
+        sleep: (_ms: number, signal?: AbortSignal) => {
+          sleeps += 1;
+          return new Promise<void>((resolveWait, rejectWait) => {
+            if (signal?.aborted === true) {
+              rejectWait(new Error("aborted"));
+              return;
+            }
+            signal?.addEventListener("abort", () => rejectWait(new Error("aborted")), {
+              once: true,
+            });
+            setImmediate(resolveWait);
+          });
+        },
+      },
+      tempDirectory: testRoot,
+    };
+
+    await failure(spawnInternal({ binaryPath: process.execPath }, internal));
+    const settled = sleeps;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+
+    expect(sleeps).toBe(settled);
+  });
+
+  it("a clean close does not leave the stop grace timer armed", async () => {
+    // Same leak on the shutdown path: close() resolved in milliseconds while the
+    // SIGTERM grace timer held the event loop for its full duration, so an
+    // SDK-backed CLI could not exit for three seconds after its work was done.
+    const aborted: boolean[] = [];
+    const harness = launchHarness();
+    harness.internal.scheduler = {
+      // Short waits are the readiness poll and must progress. The 3s SIGTERM
+      // grace stays pending so the child's exit wins the race, which is exactly
+      // the case that used to leave its timer armed.
+      sleep: (ms: number, signal?: AbortSignal) =>
+        new Promise<void>((resolveWait, rejectWait) => {
+          if (ms < 3_000) {
+            setImmediate(resolveWait);
+            return;
+          }
+          signal?.addEventListener(
+            "abort",
+            () => {
+              aborted.push(true);
+              rejectWait(new Error("aborted"));
+            },
+            { once: true },
+          );
+        }),
+    };
+
+    const client = await spawnInternal({ binaryPath: process.execPath }, harness.internal);
+    await client.close();
+
+    expect(harness.killed).toEqual(["SIGTERM"]);
+    expect(aborted).toEqual([true]);
+  });
 });

@@ -110,6 +110,14 @@ parallel read batch, so set it only when the handler truly has no side effects. 
 require the default private-UDS, HTTP-disabled spawned-daemon topology; use a different
 `toolServerName` if the operator already owns the `sdk` MCP namespace.
 
+Callback tools currently need the daemon to run with `--authority-evaluator noop`. Under the
+default `local` evaluator the daemon mints its capability set from the process-wide tool catalog
+before a session's client tools are mounted, so the call is denied — after the permission ask has
+already been allowed — with `tool "mcp__sdk__…" denied by authority: tool is absent from the
+capability set`. Pass the flag through `spawn({ args: ["--authority-evaluator", "noop"] })` for now,
+and only where that relaxation is acceptable. Lifting this needs a server change so the capability
+set carries a session's client tool names.
+
 Calling `tool()` on a connected client is refused locally with typed `unsupported_feature` before
 any RPC. The same code is returned by a spawned daemon that does not advertise
 `mcp_servers_on_create` (including `http: true`), with the missing feature named in the message.
@@ -125,6 +133,11 @@ become MCP text, JSON values become structured content with a text mirror, and a
 to the model: it receives only a correlation id, while the full cause is sent to the optional
 `diagnostics` callback. Closing the client aborts active callbacks, drops queued work and releases
 the listener before stopping the daemon.
+
+The repository's offline SDK gate runs this public `spawn()` → callback → shutdown path on both
+Node 24 and Bun 1.4.1, including abrupt parent death through the lifetime descriptor. See the
+[full SDK lifecycle and protocol reference](https://github.com/stacklok/mecatl/blob/main/docs/architecture.md#typescript-sdk)
+for binary resolution, readiness, disposal, and the hand-written MCP subset.
 
 See the detailed gRPC and HTTP
 references for their request, response, privacy, and compatibility contracts.

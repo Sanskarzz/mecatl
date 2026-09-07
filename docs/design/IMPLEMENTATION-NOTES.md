@@ -8326,7 +8326,10 @@ closure. `Symbol.asyncDispose` delegates to the same promise.
 
 The spawned-daemon hook signals only its captured child handle. `SIGTERM` precedes lifetime-end
 release; a bounded grace precedes `SIGKILL`, and a second bound prevents an unresponsive kill from
-wedging disposal. Both stop and directory removal are individually idempotent, so a stop fault
+wedging disposal. Both bounds — and the readiness poll — race a timer against the child's exit, so
+each one aborts its scheduler sleep once the race settles: `Promise.race` does not cancel its loser,
+and a non-unref'd timer that outlives it keeps the host's event loop alive after the SDK's own work
+is done. Both stop and directory removal are individually idempotent, so a stop fault
 cannot skip removal. The ready document's pid stays display-only. The child's exit promise is also
 the post-start death detector: an exit outside close records one frozen `daemon_exited` diagnostic,
 aborts active client-side work, and makes `ClientImpl` retain a local `InvalidStateError` that every
@@ -8430,6 +8433,27 @@ exceptions are ignored. Deliberate `isError` results bypass this failure transla
 verbatim. `ClientImpl`'s pre-existing tool-host-before-transport disposal order calls `abort` and
 `stop`, which cancel the scheduler, destroy listener connections and join `Server.close` so the port
 is reusable before daemon teardown.
+
+Scenario 10's wire proof lives in `sdk/typescript/e2e/spawn.e2e.test.ts` and
+`sdk/typescript/e2e/tool.e2e.test.ts` and deliberately imports the product `spawn()` surface. Its
+strict mock scripts cover successful, throwing,
+read-only, mutating and schema-invalid callback turns. The event assertions read the real
+`tool.result`, rather than treating handler invocation as proof that the payload crossed back into
+the agent loop. The lifecycle half reads the published ready allowlist, makes real refused connects
+to the suppressed `127.0.0.1:8080` and `:8081` defaults, checks close-before-directory-removal, and
+kills Node and Bun helper parents. `sdk/typescript/e2e/fixtures/runtime-helper.mjs` imports the built
+package, so Bun exercises the published ESM shape rather than Vitest's TypeScript transform. The SDK
+CI job pins Bun 1.4.1 and the local `task sdk:e2e` gate requires a Bun executable (or an explicit
+`BUN_BIN`), keeping the runtime leg out of skip-only test metadata.
+
+The real-wire fixtures currently select the explicit `noop` authority evaluator. Client MCP tools
+are added to a per-session catalog after `internal/app/root_authority.go` (`mintRootAuthority`) has
+projected the process-wide root catalog, so the default local evaluator otherwise rejects the newly
+mounted exact tool name before the permission layer can ask. This keeps the M3 MCP/permission wire
+proof isolated, but the default-authority integration is a separate ship decision rather than a
+property these tests claim to cover. One fixture deliberately restores the default evaluator and
+asserts the denial verbatim, so the limitation is regression-covered and the eventual
+`RootAuthority` widening has a failing test to flip rather than a silent behaviour change.
 
 The M2 durable-watch base lives in `sdk/typescript/src/watch.ts`. Its client-authored `kind`
 turns the generated `{event, cursor, phase}` response into `event | boundary | gap | unknown`;
