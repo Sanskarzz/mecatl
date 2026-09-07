@@ -17,6 +17,20 @@ import (
 // msgs that don't originate from the stream. These are plain data — no proto,
 // no grpc — so ui can switch over them freely.
 
+// SessionTitleMsg carries the authoritative, source-free title lifecycle update.
+type SessionTitleMsg struct {
+	Title           string
+	Provenance      string
+	GenerationState string
+	LatestAttempt   TitleAttemptSummary
+}
+
+// TitleAttemptSummary is the latest durable title attempt projection.
+type TitleAttemptSummary struct {
+	ID      string
+	Outcome string
+}
+
 // SessionInitMsg marks the run stream as live (proto type "session.init").
 type SessionInitMsg struct{ Seq int64 }
 
@@ -1065,6 +1079,8 @@ func EventToMsg(ev *mecatlv1.Event) tea.Msg {
 	switch ev.GetType() {
 	case "session.init":
 		return SessionInitMsg{Seq: ev.GetSeq()}
+	case "session.title":
+		return sessionTitleMsg(ev.GetTitle())
 	case "turn.start":
 		return TurnStartMsg{Turn: ev.GetTurn()}
 	case "turn.end":
@@ -1134,6 +1150,17 @@ func EventToMsg(ev *mecatlv1.Event) tea.Msg {
 			return msg
 		}
 		return delegationEventToMsg(ev)
+	}
+}
+
+func sessionTitleMsg(title *mecatlv1.SessionTitle) SessionTitleMsg {
+	if title == nil {
+		return SessionTitleMsg{}
+	}
+	attempt := title.GetLatestAttempt()
+	return SessionTitleMsg{
+		Title: title.GetTitle(), Provenance: title.GetProvenance(), GenerationState: title.GetGenerationState(),
+		LatestAttempt: TitleAttemptSummary{ID: attempt.GetId(), Outcome: attempt.GetOutcome()},
 	}
 }
 

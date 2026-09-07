@@ -343,14 +343,16 @@ type Session struct {
 	Limits Limits
 	// Counters are the running totals for stop-condition evaluation.
 	Counters Counters
-	// Usage is the CUMULATIVE token accounting for the logical run. It is the value
-	// the MaxRunTokens budget brake (StopBudget) is evaluated against, so it is
-	// persisted into the snapshot and the brake reads it DIRECTLY (the loop keeps a
-	// separate zero-based per-run delta for the EvResult figure; there is no seed) —
-	// the budget therefore survives reopen/restart instead of re-granting a full
-	// fresh allowance every time the session continues. Mutate it through RecordUsage
-	// (accumulate) or ResetUsage (the explicit fresh-allowance reset). CRITICAL:
-	// unlike Counters, it is NOT cleared by resetToIdle (see the comment there).
+	// tokenUsage is the aggregate-owned canonical durable accounting ledger.
+	// TokenUsageSnapshot returns an owned external view.
+	tokenUsage map[UsageKind]TokenUsage
+	// usageAttribution is the normalized run-scoped provider/model attribution
+	// selected by composition. Empty means a restored or inert session has not
+	// yet lazily derived it from its durable labels.
+	usageAttribution string
+	// Usage is the deprecated lifetime main-token compatibility projection. It always
+	// mirrors TokenUsage[UsageKindMain].Total and is never reset. Unlike Counters,
+	// it is deliberately NOT cleared by resetToIdle.
 	Usage Usage
 	// EnvironmentRef is the sole durable identity of the execution environment.
 	// It is minted by the placement provider and must be valid before persistence
@@ -409,6 +411,18 @@ type Session struct {
 	// TitleProvenance records whether Title came from the first genuine prompt or
 	// an explicit operator rename. The zero value means legacy/unknown.
 	TitleProvenance TitleProvenance
+	// TitleGeneration is automatic title generation's durable lifecycle. New
+	// sessions default to disabled until composition explicitly enables it.
+	TitleGeneration TitleGenerationState
+	// TitleRevision advances once for each effective durable title metadata
+	// mutation. It is independent of event sequences, environment revisions, and
+	// event-log cursors; zero is the legacy value.
+	TitleRevision uint64
+	// titleSourcePrompts captures only the first three genuine non-empty principal
+	// text prompts at prompt ingress; it never derives candidates from history.
+	titleSourcePrompts []string
+	// titleAttempts records durable title-generation lifecycle attempts.
+	titleAttempts []TitleAttempt
 	// Owner is the verified caller this session is attributed to, or nil when the
 	// session is ownerless (a pre-ship snapshot, or a deployment with no identity
 	// verifier wired). It is a WRITE-ONCE label stamped through RestoreLabels —
@@ -514,15 +528,17 @@ func New(id SessionID, mode PermissionMode, ref EnvironmentRef, limits Limits, c
 		panic("session: New requires a valid environment ref")
 	}
 	return &Session{
-		ID:             id,
-		State:          StateIdle,
-		Mode:           mode,
-		Conversation:   &Conversation{},
-		Limits:         limits,
-		EnvironmentRef: ref,
-		Kind:           SessionKindMain,
-		CreatedAt:      createdAt,
-		incarnation:    NewIncarnationID(),
+		ID:              id,
+		State:           StateIdle,
+		Mode:            mode,
+		Conversation:    &Conversation{},
+		Limits:          limits,
+		tokenUsage:      make(map[UsageKind]TokenUsage),
+		EnvironmentRef:  ref,
+		Kind:            SessionKindMain,
+		TitleGeneration: TitleGenerationDisabled,
+		CreatedAt:       createdAt,
+		incarnation:     NewIncarnationID(),
 	}
 }
 
@@ -570,43 +586,29 @@ func (s *Session) RecordToolResults(results []ToolResult) error {
 	return nil
 }
 
+// SetUsageAttribution selects the normalized provider/model attribution for
+// subsequent main usage.
+func (s *Session) SetUsageAttribution(providerID, modelID string) {
+	s.usageAttribution = modelAttribution(providerID, modelID)
+}
+
 // RecordUsage accumulates the token usage of a model call onto the aggregate's
-// cumulative Usage. It is the intention-revealing seam the loop uses instead of
-// poking the public Usage field, mirroring RecordAssistant/RecordToolResults: it
-// is legal ONLY while running (a usage record belongs to an in-flight turn). The
-// loop calls it each turn (alongside its own zero-based per-run delta); the budget
-// brake reads this cumulative value, so the next Save persists the accumulated
-// spend. Unlike the Counters, Usage is deliberately NOT reset by resetToIdle so
-// the MaxRunTokens budget survives reopen/restart (see resetToIdle).
+// canonical main ledger and its deprecated lifetime compatibility mirror. It is
+// the intention-revealing seam the loop uses instead of poking the public Usage
+// field, mirroring RecordAssistant/RecordToolResults: it is legal ONLY while
+// running (a usage record belongs to an in-flight turn). Unlike Counters, Usage
+// is deliberately NOT reset by resetToIdle.
 func (s *Session) RecordUsage(u Usage) error {
 	if s.State != StateRunning {
 		return fmt.Errorf("%w: RecordUsage from %q", ErrIllegalTransition, s.State)
 	}
-	s.Usage = s.Usage.Add(u)
-	return nil
-}
-
-// ResetUsage zeroes the aggregate's cumulative Usage, granting a fresh
-// MaxRunTokens allowance for the next run. It is the EXPLICIT counterpart to the
-// deliberate non-reset in resetToIdle: because Usage survives Reopen/Interrupt/
-// Recover (so the budget brake bounds the whole logical run across restart), a
-// caller that genuinely wants a fresh budget for a NEW phase of work must say so
-// through this intention-revealing seam rather than poking the public Usage field
-// (the aggregate-mutation discipline RecordUsage established).
-//
-// It is legal from any NON-running state (idle, completed, or the other terminals)
-// — NOT while running, where it would discard an in-flight turn's spend mid-budget
-// and race the loop's own RecordUsage. The SOLE caller today is the team
-// supervisor's synthesise step (engine/agent/teamsupervisor.go): a lead whose
-// working run was stopped by its MaxRunTokens must still produce the team's
-// synthesis deliverable, so the supervisor resets the lead's accumulator between
-// the working drive and the synthesis drive (the synthesis spend is then folded
-// into the team outcome separately). Returns ErrIllegalTransition from running.
-func (s *Session) ResetUsage() error {
-	if s.State == StateRunning {
-		return fmt.Errorf("%w: ResetUsage from %q", ErrIllegalTransition, s.State)
+	attribution := s.usageAttribution
+	if attribution == "" {
+		attribution = modelAttribution(s.ProviderID, s.ModelID)
+		s.usageAttribution = attribution
 	}
-	s.Usage = Usage{}
+	s.recordTokenUsage(UsageKindMain, attribution, u)
+	s.Usage = s.tokenUsage[UsageKindMain].Total
 	return nil
 }
 
@@ -1209,6 +1211,7 @@ func (s *Session) SetTitle(text string) {
 	if s.Title == "" && strings.TrimSpace(text) != "" {
 		s.Title = ClampTitle(text)
 		s.TitleProvenance = TitleProvenanceFirstPrompt
+		s.bumpTitleRevision()
 	}
 }
 
@@ -1220,8 +1223,12 @@ func (s *Session) RenameTitle(text string) error {
 	if title == "" {
 		return fmt.Errorf("session: title must not be blank")
 	}
+	if s.Title == title && s.TitleProvenance == TitleProvenanceOperator {
+		return nil
+	}
 	s.Title = title
 	s.TitleProvenance = TitleProvenanceOperator
+	s.bumpTitleRevision()
 	return nil
 }
 

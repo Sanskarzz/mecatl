@@ -501,6 +501,18 @@ type Config struct {
 	LearnedSkillNameAvailable func(string) bool
 	LiveSkills                func(context.Context) []*mecatlv1.SkillInfo
 
+	// TitleGenerationEligible is the composition-resolved eligibility check for
+	// server-owned automatic title generation. Nil and false keep the durable
+	// lifecycle disabled; true persists pending at session creation. It receives
+	// only the neutral fixed session selector, never registry or credential access.
+	TitleGenerationEligible func(ProviderSelector) bool
+	// TitleGenerator is the optional Build-owned, server-private title call. When
+	// absent automatic work is unavailable; it never receives session authority.
+	TitleGenerator SessionTitleGenerator
+	// TitleGeneratorForSession resolves a title generator for the session's fixed
+	// provider selector. It takes precedence over TitleGenerator when present.
+	TitleGeneratorForSession func(ProviderSelector) SessionTitleGenerator
+
 	// SessionEngine builds a PER-SESSION engine over a non-default provider/model
 	// selector AND/OR client-provided streaming-HTTP MCP servers (the ACP
 	// session/new mcpServers). It is the seam that lets a session bind its OWN
@@ -1009,6 +1021,10 @@ type Service struct {
 	// explicitly via run.Cancel below). Kept as a one-time idempotent signal.
 	shutdownCancel context.CancelFunc
 
+	// titleCoordinator owns bounded asynchronous title work outside chat runs.
+	// It is nil when title generation is unavailable.
+	titleCoordinator *titleCoordinator
+
 	// schedMgr is the embedded store-shaped schedule manager (ADR 0076): the
 	// single truth the Service's nine port.ScheduleManager methods +
 	// EmitScheduleEvent + GetFire delegate to. Constructed in NewService from
@@ -1161,6 +1177,10 @@ type runState struct {
 	// run has settled. It must outlive the run-entry call itself.
 	runContextStop context.CancelFunc
 	awaiting       atomic.Bool
+	// titleRevision is the last title metadata revision successfully persisted and
+	// published for this run. It starts from the admitted durable snapshot so
+	// prompt-ingress changes publish only after their save succeeds.
+	titleRevision uint64
 	// persistMu makes admission of the durable awaiting save and drain's
 	// awaiting/non-awaiting decision one lifecycle transaction. Backend calls
 	// admitted before invalidation may still complete.
@@ -1320,6 +1340,7 @@ func NewServiceContext(ctx context.Context, cfg Config) (*Service, error) {
 		cleanupJobs:         make(map[string]cleanupJobRecord),
 		subscriptions:       make(map[session.SessionID]map[int64]chan session.Event),
 	}
+	svc.titleCoordinator = buildTitleCoordinator(svc, cfg)
 	// Narrow the durable log to the cursor seam once (ADR 0250). A backend that
 	// does not implement it leaves this nil, and the watch surface reports the
 	// feature unsupported rather than degrading to a full replay.
@@ -1821,6 +1842,12 @@ func setSessionLabels(sess *session.Session, sel ProviderSelector, profile Sessi
 	return sess.RestoreLabels(owner, authority)
 }
 
+func (s *Service) setTitleGenerationEligibility(sess *session.Session, sel ProviderSelector) {
+	if s.cfg.TitleGenerationEligible != nil && s.cfg.TitleGenerationEligible(sel) {
+		sess.SetTitleGeneration(session.TitleGenerationPending)
+	}
+}
+
 func (s *Service) setPerSessionLabels(sess *session.Session, sel ProviderSelector, profile SessionProfile, owner *session.Principal, opts createSessionOpts, res SessionEngineResult, carried session.Authority, carriedBound bool) error {
 	authority := s.rootAuthority(sess.Kind, carried, carriedBound)
 	if sess.Kind == session.SessionKindDebug {
@@ -1982,6 +2009,9 @@ func (s *Service) persistCreatedSession(ctx context.Context, sess *session.Sessi
 		}
 		s.logDiscoveryError(ctx, "persist session placement", err)
 		return nil, fmt.Errorf("%w: placement storage failed", ErrInternal)
+	}
+	if sess.TitleGeneration != session.TitleGenerationDisabled {
+		s.publishTitle(context.WithoutCancel(ctx), sess)
 	}
 	return sess, nil
 }
@@ -2166,6 +2196,7 @@ func (s *Service) createSession(ctx context.Context, mode session.PermissionMode
 		if err := setSessionLabels(sess, sel, profile, owner, s.rootAuthority(sess.Kind, carriedAuthority, carriedAuthorityBound)); err != nil {
 			return nil, err
 		}
+		s.setTitleGenerationEligibility(sess, sel)
 		if err := seedCarryover(sess, carrySnap); err != nil {
 			return nil, err
 		}
@@ -2262,6 +2293,7 @@ func (s *Service) createPerSessionEngine(ctx context.Context, mintID func() sess
 	if placement != nil {
 		sess.Placement = canonicalPlacementMetadata(*placement)
 	}
+	s.setTitleGenerationEligibility(sess, sel)
 	if err := seedCarryover(sess, carrySnap); err != nil {
 		if closeFn != nil {
 			_ = closeFn()
@@ -2630,6 +2662,11 @@ func (s *Service) EndSession(ctx context.Context, id session.SessionID) error {
 // shutdown hook so a process exit does not leak any per-session MCP connection.
 // It is safe to call multiple times.
 func (s *Service) Close() {
+	// Stop and join auxiliary title workers before tearing down their session
+	// dependencies. A cancelled in-flight provider call records interruption.
+	if s.titleCoordinator != nil {
+		s.titleCoordinator.Close()
+	}
 	// Signal shutdown so in-flight runs (scheduled fires and foreground turns)
 	// observe the cancellation and unwind. This fires BEFORE the scheduler stop
 	// and before engine-close so runs unblock promptly rather than waiting on
@@ -3174,6 +3211,7 @@ func (s *Service) RenameSession(ctx context.Context, id session.SessionID, title
 	if err := s.saveSession(ctx, sess); err != nil {
 		return nil, fmt.Errorf("%w: rename session: %v", ErrInternal, err)
 	}
+	s.publishTitle(context.WithoutCancel(ctx), sess)
 	return sess, nil
 }
 
@@ -4547,6 +4585,8 @@ func admitRunPurpose(sess *session.Session, purpose runPurpose) error {
 //     keeps the shared engine — BYTE-IDENTICAL to pre-Phase-3.
 func (s *Service) engineAndEnvironmentFor(ctx context.Context, sess *session.Session) (*agent.Engine, tool.Environment, error) { //nolint:gocyclo // the per-session engine/environment resolution is inherently branched
 	id := sess.ID
+	attribution := s.ResolvedModel(id)
+	sess.SetUsageAttribution(attribution.ProviderID, attribution.ModelID)
 	engine := s.cfg.Engine
 	s.mu.Lock()
 	se, hasEngine := s.sessionEngines[id]
@@ -5585,6 +5625,10 @@ func (s *Service) Persist(ctx context.Context, id session.SessionID) {
 	if !s.mutationLeaseHeld(id) {
 		return
 	}
+	s.persistRun(ctx, id, st)
+}
+
+func (s *Service) persistRun(ctx context.Context, id session.SessionID, st *runState) {
 	// Save FIRST, then mark awaiting on success (H1 ordering): the flag must be
 	// set only after the durable StateAwaiting snapshot has actually landed, so
 	// Close (which skips cancelling awaiting runs) never skips a run whose
@@ -5602,6 +5646,37 @@ func (s *Service) Persist(ctx context.Context, id session.SessionID) {
 	if st.sess.State == session.StateAwaiting {
 		st.awaiting.Store(true)
 	}
+	if st.sess.TitleRevision != st.titleRevision {
+		s.publishTitle(context.WithoutCancel(ctx), st.sess)
+		st.titleRevision = st.sess.TitleRevision
+	}
+	// Title work is submitted only after the completed chat snapshot (including
+	// the ingress-captured source) is durable. Submission is non-blocking.
+	if st.sess.State == session.StateCompleted && st.sess.TitleGeneration == session.TitleGenerationPending && len(st.sess.TitleSourcePrompts()) > 0 {
+		s.submitTitleGeneration(id)
+	}
+}
+
+// completeRelay persists a terminal run before the relay removes its registry
+// entry. It is deliberately internal: authorization occurred at run entry, while
+// this late completion must retain dead-client persistence without a request
+// principal.
+func (s *Service) completeRelay(ctx context.Context, id session.SessionID, run *agent.Run) {
+	s.mu.Lock()
+	st, ok := s.runs[id]
+	s.mu.Unlock()
+	if ok && st.run == run && (st.sess.State == session.StateCompleted || st.sess.State == session.StateCancelled || st.sess.State == session.StateFailed) {
+		st.persistMu.Lock()
+		defer st.persistMu.Unlock()
+		s.persistRun(ctx, id, st)
+	}
+}
+
+// finishRelayRun is the one terminal path for wire relays: persist first so a
+// disconnected client cannot lose the terminal snapshot, then release the run.
+func (s *Service) finishRelayRun(ctx context.Context, id session.SessionID, run *agent.Run) {
+	s.completeRelay(ctx, id, run)
+	s.deregister(id, run)
 }
 
 // appendEvent durably records one projected relay event to the configured
@@ -6444,7 +6519,7 @@ func (s *Service) cleanupRunAdmission(id session.SessionID, st *runState, promot
 // The caller holds runEntryMu for id.
 func (s *Service) beginRunAdmission(parent context.Context, id session.SessionID, sess *session.Session, resumeAdmission bool) (*runState, context.Context, error) {
 	ctx, cancel := context.WithCancel(parent)
-	st := &runState{sess: sess, admissionCancel: cancel, settled: make(chan struct{}), resumeAdmission: resumeAdmission}
+	st := &runState{sess: sess, admissionCancel: cancel, settled: make(chan struct{}), resumeAdmission: resumeAdmission, titleRevision: sess.TitleRevision}
 	s.mu.Lock()
 	if s.draining.Load() {
 		s.mu.Unlock()
@@ -6994,6 +7069,10 @@ type SessionSummary struct {
 	// TitleProvenance reports whether the title is prompt-derived, operator-authored,
 	// or legacy/unknown.
 	TitleProvenance session.TitleProvenance
+	// TitleMetadata is the bounded source-free title lifecycle projection.
+	TitleMetadata session.TitlePayload
+	// TokenUsage is the canonical durable accounting ledger for this row.
+	TokenUsage map[session.UsageKind]session.TokenUsage
 	// Placement is bounded display-only placement metadata.
 	Placement session.PlacementMetadata
 	// Owner is the verified caller the session is attributed to.
@@ -7413,6 +7492,8 @@ func (s *Service) ListSessions(ctx context.Context) ([]SessionSummary, error) {
 			}
 			summary.Title = DeriveTitle(sess)
 			summary.TitleProvenance = sess.TitleProvenance
+			summary.TitleMetadata = titlePayload(sess)
+			summary.TokenUsage = sess.TokenUsageSnapshot()
 			summary.Placement = sess.Placement
 			// Clone: the row must not carry a live pointer into the loaded
 			// session, or a consumer of the row can rewrite the recorded owner.

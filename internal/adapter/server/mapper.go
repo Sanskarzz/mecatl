@@ -134,6 +134,9 @@ func toProto(ev session.Event) *mecatlv1.Event {
 		Turn:  ClampInt32(ev.Turn),
 		Text:  valid(ev.Text),
 	}
+	if ev.Title != nil {
+		out.Title = toProtoSessionTitle(*ev.Title)
+	}
 	if ev.ToolCall != nil {
 		out.ToolCall = toProtoToolCall(*ev.ToolCall)
 	}
@@ -788,8 +791,24 @@ func toProtoUsage(u session.Usage) *mecatlv1.Usage {
 	}
 }
 
+func toProtoTokenUsage(in map[session.UsageKind]session.TokenUsage) map[string]*mecatlv1.TokenUsage {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]*mecatlv1.TokenUsage, len(in))
+	for kind, bucket := range in {
+		models := make(map[string]*mecatlv1.Usage, len(bucket.Models))
+		for model, usage := range bucket.Models {
+			models[valid(model)] = toProtoUsage(usage)
+		}
+		out[string(kind)] = &mecatlv1.TokenUsage{Total: toProtoUsage(bucket.Total), Models: models}
+	}
+	return out
+}
+
 // toProtoSession maps a session.Session aggregate to its proto snapshot.
 func toProtoSession(s *session.Session, rm ResolvedModel, caps *mecatlv1.ServerCapabilities) *mecatlv1.Session {
+	//nolint:staticcheck // title/provenance are intentionally dual-written compatibility fields.
 	return &mecatlv1.Session{
 		SessionId:       string(s.ID),
 		State:           string(s.State),
@@ -800,7 +819,9 @@ func toProtoSession(s *session.Session, rm ResolvedModel, caps *mecatlv1.ServerC
 		CreatedAtUnix:   s.CreatedAt.Unix(),
 		ResolvedModel:   resolvedModelToProto(rm),
 		Title:           valid(s.Title),
-		TitleProvenance: string(s.TitleProvenance),
+		TitleProvenance: valid(string(s.TitleProvenance)),
+		TitleMetadata:   toProtoSessionTitle(titlePayload(s)),
+		TokenUsage:      toProtoTokenUsage(s.TokenUsageSnapshot()),
 		Capabilities:    caps,
 		Kind:            string(s.Kind),
 		Relationship:    toProtoSessionRelationship(s.Relationship),
@@ -808,6 +829,39 @@ func toProtoSession(s *session.Session, rm ResolvedModel, caps *mecatlv1.ServerC
 		DebugMcpTools:   validStrings(s.DebugMCPTools),
 		Placement:       placementMetadataToProto(s.Placement),
 	}
+}
+
+func titlePayload(s *session.Session) session.TitlePayload {
+	payload := session.TitlePayload{
+		Title:           DeriveTitle(s),
+		Provenance:      s.TitleProvenance,
+		GenerationState: s.TitleGeneration,
+		Revision:        s.TitleRevision,
+	}
+	if s.Title == "" && payload.Title != "" {
+		payload.Provenance = session.TitleProvenanceFirstPrompt
+	}
+	if attempts := s.TitleAttempts(); len(attempts) > 0 {
+		payload.LatestAttempt = &attempts[len(attempts)-1]
+	}
+	return payload
+}
+
+// toProtoSessionTitle maps only the bounded, source-free title lifecycle
+// projection. Title source prompts and provider errors have no wire fields.
+func toProtoSessionTitle(p session.TitlePayload) *mecatlv1.SessionTitle {
+	out := &mecatlv1.SessionTitle{
+		Title:           valid(p.Title),
+		Provenance:      valid(string(p.Provenance)),
+		GenerationState: valid(string(p.GenerationState)),
+		Revision:        p.Revision,
+	}
+	if p.LatestAttempt != nil {
+		out.LatestAttempt = &mecatlv1.TitleAttemptSummary{
+			Id: valid(p.LatestAttempt.ID), Outcome: valid(string(p.LatestAttempt.Outcome)),
+		}
+	}
+	return out
 }
 
 // resolvedModelToProto maps the server-side ResolvedModel value to its proto form.
@@ -996,6 +1050,12 @@ func toProtoScopedWorktrees(wts []ScopedWorktree) []*mecatlv1.Worktree {
 // picker row, issue #245 Phase 1) to its proto form. It projects ONLY the
 // picker metadata — no conversation content.
 func toProtoSessionSummary(s SessionSummary) *mecatlv1.SessionSummary {
+	metadata := s.TitleMetadata
+	if metadata.Title == "" {
+		metadata.Title = s.Title
+		metadata.Provenance = s.TitleProvenance
+	}
+	//nolint:staticcheck // title/provenance are intentionally dual-written compatibility fields.
 	return &mecatlv1.SessionSummary{
 		SessionId:       s.SessionID,
 		ModifiedAtUnix:  s.ModifiedAtUnix,
@@ -1004,7 +1064,9 @@ func toProtoSessionSummary(s SessionSummary) *mecatlv1.SessionSummary {
 		ModelId:         s.ModelID,
 		CreatedAtUnix:   s.CreatedAtUnix,
 		Title:           valid(s.Title),
-		TitleProvenance: string(s.TitleProvenance),
+		TitleProvenance: valid(string(s.TitleProvenance)),
+		TitleMetadata:   toProtoSessionTitle(metadata),
+		TokenUsage:      toProtoTokenUsage(s.TokenUsage),
 		Placement:       placementMetadataToProto(s.Placement),
 		Owner:           toProtoPrincipal(s.Owner),
 		Kind:            string(s.Kind),

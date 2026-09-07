@@ -23,6 +23,7 @@ type SessionSnapshot struct {
 	ResolvedModel   ResolvedModel
 	Title           string
 	TitleProvenance string
+	TitleMetadata   SessionTitleMsg
 	// Capabilities is the server's feature-advertisement snapshot from the Session
 	// proto (the SAME value CreateSessionResponse carries). A client that reloads
 	// or switches to a persisted session (continue, /effort fork, /clear successor)
@@ -41,10 +42,27 @@ func snapshotFrom(s *mecatlv1.Session) SessionSnapshot {
 		Placement:       placementFrom(s.GetPlacement()),
 		CreatedAt:       s.GetCreatedAtUnix(),
 		ResolvedModel:   resolvedModelFrom(s.GetResolvedModel()),
-		Title:           s.GetTitle(),
-		TitleProvenance: s.GetTitleProvenance(),
+		Title:           titleFromProto(s),
+		TitleProvenance: titleProvenanceFromProto(s),
+		TitleMetadata:   sessionTitleMsg(s.GetTitleMetadata()),
 		Capabilities:    capabilitiesFrom(s.GetCapabilities()),
 	}
+}
+
+func titleFromProto(s *mecatlv1.Session) string {
+	if title := s.GetTitleMetadata().GetTitle(); title != "" {
+		return title
+	}
+	//nolint:staticcheck // compatibility fallback for a pre-SessionTitle server.
+	return s.GetTitle()
+}
+
+func titleProvenanceFromProto(s *mecatlv1.Session) string {
+	if provenance := s.GetTitleMetadata().GetProvenance(); provenance != "" {
+		return provenance
+	}
+	//nolint:staticcheck // compatibility fallback for a pre-SessionTitle server.
+	return s.GetTitleProvenance()
 }
 
 // GetSession looks up an existing session by id and returns the server-authored

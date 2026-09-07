@@ -76,7 +76,17 @@ type Snapshot struct {
 	// Profile), restored by direct assignment, NOT a state transition.
 	Title           string                  `json:"title,omitempty"`
 	TitleProvenance session.TitleProvenance `json:"title_provenance,omitempty"`
-	// Usage is the cumulative run-token accounting, a POINTER for true omitempty
+	// TitleRevision is the title-specific durable metadata revision. omitempty
+	// preserves the zero value for legacy snapshots.
+	TitleRevision uint64 `json:"title_revision,omitempty"`
+	// TitleGeneration metadata is distinct from main Usage and conversation.
+	TitleGeneration    session.TitleGenerationState `json:"title_generation,omitempty"`
+	TitleSourcePrompts []string                     `json:"title_source_prompts,omitempty"`
+	TitleAttempts      []session.TitleAttempt       `json:"title_attempts,omitempty"`
+	// TokenUsage is the canonical durable usage ledger. A missing map is legacy;
+	// restore derives honest unknown attribution from deprecated projections.
+	TokenUsage map[session.UsageKind]session.TokenUsage `json:"token_usage,omitempty"`
+	// Usage is the deprecated cumulative run-token accounting, a POINTER for true omitempty
 	// (matching the Pending precedent): a zero Usage marshals nothing and a v1
 	// snapshot with no "usage" key decodes to a nil pointer => the zero Usage on
 	// restore. It is what the MaxRunTokens budget brake is evaluated against, so
@@ -202,6 +212,11 @@ func Of(s *session.Session) (Snapshot, error) {
 		DebugTargetFingerprint: s.DebugTargetFingerprint,
 		Title:                  s.Title,
 		TitleProvenance:        s.TitleProvenance,
+		TitleRevision:          s.TitleRevision,
+		TitleGeneration:        s.TitleGeneration,
+		TitleSourcePrompts:     s.TitleSourcePrompts(),
+		TitleAttempts:          s.TitleAttempts(),
+		TokenUsage:             s.TokenUsageSnapshot(),
 		Kind:                   s.Kind,
 		Relationship:           relationship,
 		CreatedAt:              s.CreatedAt,
@@ -262,9 +277,8 @@ func (snap Snapshot) Restore() (*session.Session, error) {
 	for _, dto := range snap.Messages {
 		s.Conversation.Append(fromDTO(dto))
 	}
-	// Restore the inert creation labels by direct assignment — exported authoritative
-	// values, with no state transition. Profile / ProviderID / ModelID /
-	// ReasoningEffort / EnvironmentRef are opaque to the domain.
+	// Restore opaque creation labels by direct assignment. Title-specific metadata
+	// restores atomically through RestoreTitleMetadata below.
 	s.Profile = snap.Profile
 	s.ProviderID = snap.ProviderID
 	s.ModelID = snap.ModelID
@@ -277,8 +291,7 @@ func (snap Snapshot) Restore() (*session.Session, error) {
 	// inert stored label, not lifecycle state, so it does not belong in
 	// RestoreState's state-machine parameter list.
 	s.BeginRun(snap.RunID)
-	s.Title = snap.Title
-	s.TitleProvenance = snap.TitleProvenance
+	s.RestoreTitleMetadata(snap.Title, snap.TitleProvenance, snap.TitleRevision, snap.TitleGeneration, snap.TitleSourcePrompts, snap.TitleAttempts)
 	// The identity labels go through the WRITE-ONCE aggregate method rather than a
 	// field poke (Session is an aggregate) and rather than a RestoreState
 	// parameter (that widening is Changed/breaking; this stays Added/minor).
@@ -302,6 +315,15 @@ func (snap Snapshot) Restore() (*session.Session, error) {
 	// totals + cumulative usage. New() lands in StateIdle; RestoreState advances.
 	if err := RestoreState(s, snap.State, snap.StopReason, snap.Pending, snap.Counters, usage, snap.Permanent, snap.LastError); err != nil {
 		return nil, err
+	}
+	// Canonical token usage wins whenever it is present; legacy snapshots derive the
+	// main bucket from their deprecated compatibility projection.
+	if snap.TokenUsage != nil {
+		s.RestoreTokenUsage(snap.TokenUsage)
+	} else if usage != (session.Usage{}) {
+		s.RestoreTokenUsage(map[session.UsageKind]session.TokenUsage{
+			session.UsageKindMain: {Total: usage, Models: map[string]session.Usage{"unknown": usage}},
+		})
 	}
 	if snap.State == session.StateFailed {
 		disposition := snap.RetryDisposition

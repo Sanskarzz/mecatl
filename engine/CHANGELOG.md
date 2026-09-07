@@ -29,10 +29,30 @@ The covered surface is the eight core packages (`session`, `governance`, `learni
 - **Unified environment and placement identity** — adds `Revision` and `Valid` to `session.EnvironmentRef`, makes that exact `{Kind, ID, Revision}` value the runtime and durable placement identity, and removes the short-lived duplicate `session.PlacementRef`/`PlacementKind` types. Engine-created Subagent, Parallel, and Team child sessions now persist the identity carried by their `tool.Environment`; `port.ScheduleSpec` and `port.SessionDiscoveryMeta` replace workspace paths with the exact private environment identity, with schedules also retaining their trusted placement scope. Changed (breaking, pre-v1 minor).
 
 - **`agent.Run.RetractPermissionAsk`** ([ADR 0294](../docs/adr/0294-session-correlation-and-affinity.md)) — lets a lease-owning host atomically withdraw one still-pending local permission ask without resolving it, emitting the matching retraction before cancellation while leaving an already-durable awaiting snapshot untouched for successor handoff. Added (minor).
+- **Title metadata revisions** — adds `Session.TitleRevision` and
+  `TitlePayload.Revision`: a durable, title-specific monotonic revision that
+  advances only for effective title metadata mutations. Added (minor).
+- **Canonical token-usage buckets and title lifecycle projection** — adds
+  `session.UsageKind`/`TokenUsage` and `Session.TokenUsageSnapshot`, canonical
+  token usage kinds with opaque model attribution maps. Each total is normalized
+  to the sum of its model entries; legacy snapshots map unattributed usage to
+  `unknown`. The snapshot is an owned read view of the aggregate's private
+  canonical ledger. `Session.Usage` remains dual-written compatibility data.
+  `SessionTitle` is the source-free canonical title lifecycle projection; its
+  nested usage is removed. Added (minor); the retained wire title/provenance
+  fields are deprecated (pre-v1 breaking compatibility classification).
 
 - **`tool.TemporaryScope`, `tool.CommandTemporaryScopeRunner`, and `tool.CommandTemporaryScopeStreamer`** ([ADR 0281](../docs/adr/0281-managed-temporary-command-leases.md)) — optional bound-runner capabilities for the closed managed/system temporary-storage scope selection. The capability carries no path or environment value and preserves the existing `CommandRunner` fallback for runners that do not manage temporary storage. Added (minor).
 
 - **`tool.CommandEnvironmentOverlay`, `tool.CommandEnvironmentRunner`, and `tool.CommandEnvironmentStreamer`** ([ADR 0281](../docs/adr/0281-managed-temporary-command-leases.md)) — an optional, per-invocation command-environment overlay for host-owned runtime values such as managed temporary storage. The optional capability preserves the existing bound-runner API and namespace affinity: callers that require an overlay must decline honestly when a runner does not implement it, never interpolate environment values into shell text or fall back to an unoverlayed call. Added (minor).
+
+- **Session title-generation domain metadata and lifecycle event** — adds generated title provenance,
+  durable title-generation lifecycle/source/attempt records, canonical title-model
+  token usage, and the source-free `EvSessionTitle` / `TitlePayload` event
+  projection. Title lifecycle attempts retain only identity and outcome;
+  title usage is intentionally separate from `Session.Usage`, normal run budgets,
+  result usage, and conversation. Snapshot and event-source metadata round-trip
+  the title-specific state. Added (minor).
 
 - **`port.CursorEventLog`, `port.Cursor`, `port.EncodeCursor`/`DecodeCursor`, `port.LogRecord`/`LogRecordKind`, `port.ReadOptions`, `port.ErrCursorMalformed`/`ErrCursorExpired`** (issue #821, [ADR 0250](../docs/adr/0250-durable-cursors-and-watch.md)) — durable positions over the event log: an append reports WHERE the record landed, and a read resumes from a position rather than always from the start.
 
@@ -105,6 +125,29 @@ The covered surface is the eight core packages (`session`, `governance`, `learni
 - **`agent.WithSubagentReadLedgerFactory`, `agent.WithTeamReadLedgerFactory`, `agent.WithTeamToolReadLedgerFactory`** (repair-wave task 05) — inject factories that mint a fresh ledger for every child environment without importing a concrete adapter into `engine/agent`. **Added = minor**.
 
 ### Changed
+
+- **Durable main-usage budget baseline** — `Session.Usage` is now permanently the
+  deprecated lifetime mirror of `TokenUsage[UsageKindMain].Total`. `MaxRunTokens`
+  measures usage since an immutable internal run baseline; ordinary runs use zero, while
+  team-lead synthesis and exactly one `StopBudget` free-text Subagent cleanup capture
+  their current main total without mutating session accounting. Auxiliary usage remains
+  outside this budget and `EvResult.Usage`.
+
+- **Simplified title-model token accounting** — removes the title-specific
+  `session.AuxiliaryUsage`/`AuxiliaryOperation` API and its per-attempt ledger.
+  `Session.RecordTokenUsage` records canonical usage by kind and opaque selected-model
+  attribution, and `RestoreTitleMetadata` now atomically restores the complete durable
+  title metadata, including its revision. Removed APIs and the changed restore signature
+  are breaking; pre-v1 this is a minor compatibility classification.
+
+- **Title-attempt timestamps** — `session.TitleAttempt.CreatedAt` is removed.
+  Attempt identity and outcome remain sufficient for the lifecycle and UI failure
+  deduplication. Removed is breaking (pre-v1 minor) per COMPATIBILITY.md.
+
+- **`session.Session.ResetUsage`** — the externally callable accounting reset is
+  removed. It could discard durable lifetime usage to grant a synthesis allowance;
+  the internal run baseline now provides that allowance without a reset. Removed is
+  breaking (pre-v1 minor) per COMPATIBILITY.md.
 
 - **`learning.AttemptRepository.DiscoverWork`, `learning.AttemptWork{List,Page,Cursor}`, and `learning.MaxAttemptWorkBatch`** ([ADR 0259](../docs/adr/0259-cloud-native-learning.md)) — adds bounded, cursor-paged, storage-neutral discovery of queued attempts and running attempts with expired claims across opaque owner partitions. The cursor is only a disposable scan position and grants no workflow authority. This makes the repository, including a remote driver, the sole worker authority for work admitted after startup and claim-expiry reassignment. Extending the interface is Changed/breaking (pre-v1 a minor bump).
 
@@ -1064,9 +1107,8 @@ The covered surface is the eight core packages (`session`, `governance`, `learni
     exhaustion, not a fault/cancel), routed through the completed path so the
     session ends `completed` and stays Reopen-recoverable. A string passthrough on
     the wire (no proto enum). Added to `agent.isEmptyTerminalStop`'s allow-set
-    (a clean bounded terminal) following `StopBudget`'s classification; NOT in
-    the salvage ResetUsage arm (it is a wall-clock deadline, not a token
-    ceiling, so it follows `StopNoProgress` there).
+    (a clean bounded terminal); it remains subject to the carried token budget
+    during a salvage drive.
   - `port.ScheduleStore.RecordFireStart(ctx, name, fire)` — persists the IN-FLIGHT
     fire (id/SessionID/StartedAt/Deadline, Stop empty) and stamps
     `ScheduleState.LastFireSessionID` to the real session id +

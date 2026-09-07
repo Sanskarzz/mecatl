@@ -26,7 +26,11 @@ import (
 // listSessionsService but local to this file's title-focused tests.
 func titleService(t *testing.T, store port.SessionStore) *server.Service {
 	t.Helper()
-	llm := mockllm.New(mockllm.TextTurn("hi"))
+	llm := mockllm.New(mockllm.Turn{Chunks: []port.Chunk{
+		{Kind: port.ChunkText, Text: "hi"},
+		{Kind: port.ChunkUsage, Usage: &session.Usage{InputTokens: 2, OutputTokens: 1}},
+		{Kind: port.ChunkDone, Stop: session.StopEndTurn},
+	}})
 	eng := agent.NewEngine(agent.Deps{
 		LLM:     llm,
 		Catalog: tool.NewCatalog(),
@@ -78,6 +82,32 @@ func saveSessionWithPrompt(ctx context.Context, t *testing.T, st port.SessionSto
 		t.Fatalf("Save: %v", err)
 	}
 	return s
+}
+
+func TestDefaultSessionUsageUsesResolvedModelAttribution(t *testing.T) {
+	svc := titleService(t, memstore.New())
+	defer svc.Close()
+	sess, err := svc.CreateSession(context.Background(), session.ModeDefault, session.Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := svc.StartRun(context.Background(), sess.ID, "hi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range run.Events() {
+	}
+	loaded, err := svc.GetSession(context.Background(), sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage := loaded.TokenUsageSnapshot()[session.UsageKindMain]
+	if got := usage.Models["openai/test-model"]; got != usage.Total {
+		t.Fatalf("main usage attribution = %#v, want selected default model", usage.Models)
+	}
+	if _, ok := usage.Models["unknown"]; ok {
+		t.Fatalf("main usage used legacy unknown attribution: %#v", usage.Models)
+	}
 }
 
 func TestDeriveTitleFromFirstGenuine(t *testing.T) {
@@ -243,8 +273,8 @@ func TestListSessionsCarriesTitle(t *testing.T) {
 			t.Fatalf("sessions = %d, want 1", len(resp.GetSessions()))
 		}
 		row := resp.GetSessions()[0]
-		if row.GetTitle() != "List my sessions please" {
-			t.Errorf("gRPC row Title = %q, want %q", row.GetTitle(), "List my sessions please")
+		if row.GetTitleMetadata().GetTitle() != "List my sessions please" {
+			t.Errorf("gRPC row Title = %q, want %q", row.GetTitleMetadata().GetTitle(), "List my sessions please")
 		}
 	})
 	t.Run("HTTP", func(t *testing.T) {
@@ -257,7 +287,7 @@ func TestListSessionsCarriesTitle(t *testing.T) {
 		if len(resp.GetSessions()) != 1 {
 			t.Fatalf("sessions = %d, want 1", len(resp.GetSessions()))
 		}
-		if got := resp.GetSessions()[0].GetTitle(); got != "List my sessions please" {
+		if got := resp.GetSessions()[0].GetTitleMetadata().GetTitle(); got != "List my sessions please" {
 			t.Errorf("HTTP row Title = %q, want %q", got, "List my sessions please")
 		}
 	})
@@ -281,7 +311,7 @@ func TestGetSessionCarriesTitle(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetSession: %v", err)
 		}
-		if got := resp.GetSession().GetTitle(); got != "Seeded title prompt" {
+		if got := resp.GetSession().GetTitleMetadata().GetTitle(); got != "Seeded title prompt" {
 			t.Errorf("gRPC seeded Title = %q, want %q", got, "Seeded title prompt")
 		}
 	})
@@ -292,7 +322,7 @@ func TestGetSessionCarriesTitle(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetSession: %v", err)
 		}
-		if got := resp.GetSession().GetTitle(); got != "Lazy fallback prompt" {
+		if got := resp.GetSession().GetTitleMetadata().GetTitle(); got != "Lazy fallback prompt" {
 			t.Errorf("gRPC lazy Title = %q, want %q (derived fallback)", got, "Lazy fallback prompt")
 		}
 		// sess.Title must NOT have been mutated by the GetSession read.

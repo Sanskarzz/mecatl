@@ -399,6 +399,10 @@ type sessionResp struct {
 	// TitleProvenance records whether Title is prompt-derived, operator-authored,
 	// or legacy/unknown.
 	TitleProvenance string `json:"title_provenance,omitempty"`
+	// TitleMetadata is the bounded source-free title lifecycle projection.
+	TitleMetadata *sessionTitleJSON `json:"title_metadata,omitempty"`
+	// TokenUsage is the canonical durable accounting projection.
+	TokenUsage map[string]tokenUsageJSON `json:"token_usage,omitempty"`
 	// ResolvedModel mirrors the gRPC Session snapshot's resolved_model so the HTTP
 	// read surface is consistent with gRPC GetSession: the EFFECTIVE provider+model
 	// this session resolved to (from Service.ResolvedModel, the composition single
@@ -406,6 +410,40 @@ type sessionResp struct {
 	ResolvedModel *resolvedModelJSON            `json:"resolved_model,omitempty"`
 	Kind          string                        `json:"kind,omitempty"`
 	Relationship  *mecatlv1.SessionRelationship `json:"relationship,omitempty"`
+}
+
+type sessionTitleJSON struct {
+	Title           string                   `json:"title"`
+	Provenance      string                   `json:"provenance"`
+	GenerationState string                   `json:"generation_state"`
+	LatestAttempt   *titleAttemptSummaryJSON `json:"latest_attempt,omitempty"`
+	Revision        uint64                   `json:"revision"`
+}
+
+type titleAttemptSummaryJSON struct {
+	ID      string `json:"id"`
+	Outcome string `json:"outcome"`
+}
+
+type tokenUsageJSON struct {
+	Total  usageJSON            `json:"total"`
+	Models map[string]usageJSON `json:"models"`
+}
+
+type usageJSON struct {
+	InputTokens      int `json:"input_tokens"`
+	OutputTokens     int `json:"output_tokens"`
+	CacheReadTokens  int `json:"cache_read_tokens"`
+	CacheWriteTokens int `json:"cache_write_tokens"`
+	ReasoningTokens  int `json:"reasoning_tokens"`
+}
+
+func sessionTitleToJSON(p session.TitlePayload) *sessionTitleJSON {
+	out := &sessionTitleJSON{Title: valid(p.Title), Provenance: valid(string(p.Provenance)), GenerationState: valid(string(p.GenerationState)), Revision: p.Revision}
+	if p.LatestAttempt != nil {
+		out.LatestAttempt = &titleAttemptSummaryJSON{ID: valid(p.LatestAttempt.ID), Outcome: valid(string(p.LatestAttempt.Outcome))}
+	}
+	return out
 }
 
 type dreamGenerateBody struct {
@@ -698,12 +736,30 @@ func (h *HTTPHandler) writeSession(w http.ResponseWriter, status int, sess *sess
 		Placement:       placementMetadataToJSON(sess.Placement),
 		Turns:           sess.Counters.Turns,
 		ToolCalls:       sess.Counters.ToolCalls,
-		Title:           title,
-		TitleProvenance: string(sess.TitleProvenance),
+		Title:           valid(title),
+		TitleProvenance: valid(string(sess.TitleProvenance)),
+		TitleMetadata:   sessionTitleToJSON(titlePayload(sess)),
+		TokenUsage:      tokenUsageToJSON(sess.TokenUsageSnapshot()),
 		ResolvedModel:   resolvedModelToJSON(h.svc.ResolvedModel(sess.ID)),
 		Kind:            string(sess.Kind),
 		Relationship:    toProtoSessionRelationship(sess.Relationship),
 	})
+}
+
+func tokenUsageToJSON(in map[session.UsageKind]session.TokenUsage) map[string]tokenUsageJSON {
+	out := make(map[string]tokenUsageJSON, len(in))
+	for kind, bucket := range in {
+		models := make(map[string]usageJSON, len(bucket.Models))
+		for model, usage := range bucket.Models {
+			models[valid(model)] = usageToJSON(usage)
+		}
+		out[string(kind)] = tokenUsageJSON{Total: usageToJSON(bucket.Total), Models: models}
+	}
+	return out
+}
+
+func usageToJSON(usage session.Usage) usageJSON {
+	return usageJSON{InputTokens: usage.InputTokens, OutputTokens: usage.OutputTokens, CacheReadTokens: usage.CacheReadTokens, CacheWriteTokens: usage.CacheWriteTokens, ReasoningTokens: usage.ReasoningTokens}
 }
 
 // maxPromptBodyBytes bounds the POST /prompt request body so an oversized
@@ -754,7 +810,7 @@ func (h *HTTPHandler) prompt(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
-	h.relayRunSSE(w, r, id, run, flusher, h.svc.RecoverNotice(id), false)
+	h.relayRunSSE(w, r, id, run, flusher, h.svc.RecoverNotice(id))
 }
 
 // retry handles POST /v1/sessions/{id}/retry. It has no request body and streams
@@ -771,7 +827,7 @@ func (h *HTTPHandler) retry(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
-	h.relayRunSSE(w, r, id, run, flusher, "", true)
+	h.relayRunSSE(w, r, id, run, flusher, "")
 }
 
 // relayRunSSE streams run's Events to w as Server-Sent Events until the channel
@@ -785,12 +841,9 @@ func (h *HTTPHandler) retry(w http.ResponseWriter, r *http.Request) {
 // notice, when non-empty, is a pre-flight EvRecoverNotice message emitted BEFORE
 // the main event loop — the prompt run-entry path passes it; the approve handler
 // path passes "".
-func (h *HTTPHandler) relayRunSSE(w http.ResponseWriter, r *http.Request, id session.SessionID, run *agent.Run, flusher http.Flusher, notice string, persistAtEnd bool) {
+func (h *HTTPHandler) relayRunSSE(w http.ResponseWriter, r *http.Request, id session.SessionID, run *agent.Run, flusher http.Flusher, notice string) {
 	defer func() {
-		if persistAtEnd {
-			h.svc.Persist(context.WithoutCancel(r.Context()), id)
-		}
-		h.svc.deregister(id, run)
+		h.svc.finishRelayRun(context.WithoutCancel(r.Context()), id, run)
 	}()
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -920,12 +973,12 @@ func (h *HTTPHandler) approve(w http.ResponseWriter, r *http.Request) {
 			for ev := range run.Events() {
 				recorder.Observe(ev)
 			}
-			h.svc.deregister(id, run)
+			h.svc.finishRelayRun(context.WithoutCancel(r.Context()), id, run)
 		}()
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	h.relayRunSSE(w, r, id, run, flusher, "", false)
+	h.relayRunSSE(w, r, id, run, flusher, "")
 }
 
 // verdictFromHTTP maps the HTTP approve body's string verdict to the domain

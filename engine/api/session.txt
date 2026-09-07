@@ -4,6 +4,7 @@
     method func (*Principal).IdentityWellFramed() bool
     method func (*Principal).SameIdentity(other *Principal) bool
     method func (*Session).Abandon() error
+    method func (*Session).ApplyTitleGeneration(generation TitleGenerationState, attempts []TitleAttempt)
     method func (*Session).BeginRun(runID string)
     method func (*Session).BeginTurn() error
     method func (*Session).BindAuthority(authority Authority) error
@@ -25,6 +26,9 @@
     method func (*Session).RecordFailureMetadata(disposition RetryDisposition, progress StreamProgress) error
     method func (*Session).RecordFailurePermanence(permanent bool) error
     method func (*Session).RecordLastError(cause string) error
+    method func (*Session).RecordTitleAttempt(attempt TitleAttempt)
+    method func (*Session).RecordTitleSourcePrompt(text string)
+    method func (*Session).RecordTokenUsage(kind UsageKind, providerID string, modelID string, usage Usage)
     method func (*Session).RecordToolResults(results []ToolResult) error
     method func (*Session).RecordUsage(u Usage) error
     method func (*Session).RecordUserPrompt(text string, instructions []Message) error
@@ -36,18 +40,25 @@
     method func (*Session).Reopen() error
     method func (*Session).ReplaceHistory(messages []Message) error
     method func (*Session).ReplaceHistoryAtBoundary(messages []Message) error
-    method func (*Session).ResetUsage() error
     method func (*Session).RestoreFailedStepRetryPending(disposition RetryDisposition, progress StreamProgress) error
     method func (*Session).RestoreIncarnation(inc IncarnationID) error
     method func (*Session).RestoreLabels(owner *Principal, authority Authority) error
     method func (*Session).RestoreSessionMetadata(kind SessionKind, rel SessionRelationship) error
+    method func (*Session).RestoreTitleMetadata(title string, provenance TitleProvenance, revision uint64, generation TitleGenerationState, sources []string, attempts []TitleAttempt)
+    method func (*Session).RestoreTokenUsage(usage map[UsageKind]TokenUsage)
     method func (*Session).ResumeWith() (PendingAsk, error)
     method func (*Session).RunID() string
     method func (*Session).SeedHistory(messages []Message) error
+    method func (*Session).SetGeneratedTitle(text string) error
     method func (*Session).SetMode(mode PermissionMode) error
     method func (*Session).SetTitle(text string)
+    method func (*Session).SetTitleGeneration(state TitleGenerationState)
+    method func (*Session).SetUsageAttribution(providerID string, modelID string)
     method func (*Session).Stop(reason StopReason) error
     method func (*Session).StopReason() (StopReason, bool)
+    method func (*Session).TitleAttempts() []TitleAttempt
+    method func (*Session).TitleSourcePrompts() []string
+    method func (*Session).TokenUsageSnapshot() map[UsageKind]TokenUsage
     method func (Authority).Clone() Authority
     method func (Authority).Valid() bool
     method func (EnvironmentRef).Valid() bool
@@ -96,6 +107,7 @@ const EvScheduleFailed EventType = "schedule.failed"
 const EvScheduleFired EventType = "schedule.fired"
 const EvScheduleSkipped EventType = "schedule.skipped"
 const EvSessionInit EventType = "session.init"
+const EvSessionTitle EventType = "session.title"
 const EvSteer EventType = "steer"
 const EvSubagentEnd EventType = "subagent.end"
 const EvSubagentStart EventType = "subagent.start"
@@ -197,9 +209,20 @@ const StreamProgressPrecommit StreamProgress = 1
 const StreamProgressUnknown StreamProgress = 0
 const StreamProgressVisible StreamProgress = 2
 const Tier4SummaryMarker untyped string = "[earlier turns summarised]"
+const TitleAttemptDeferred TitleAttemptOutcome = "deferred"
+const TitleAttemptFailed TitleAttemptOutcome = "failed"
+const TitleAttemptInterrupted TitleAttemptOutcome = "interrupted"
+const TitleAttemptSucceeded TitleAttemptOutcome = "succeeded"
+const TitleGenerationDisabled TitleGenerationState = "disabled"
+const TitleGenerationExhausted TitleGenerationState = "exhausted"
+const TitleGenerationGenerated TitleGenerationState = "generated"
+const TitleGenerationPending TitleGenerationState = "pending"
 const TitleProvenanceFirstPrompt TitleProvenance = "first-prompt"
+const TitleProvenanceGenerated TitleProvenance = "generated"
 const TitleProvenanceOperator TitleProvenance = "operator"
 const TitleProvenanceUnknown TitleProvenance = ""
+const UsageKindMain UsageKind = "main"
+const UsageKindSessionTitle UsageKind = "session_title"
 const VerdictAllowAlways ApprovalVerdict = 2
 const VerdictAllowOnce ApprovalVerdict = 1
 const VerdictDeny ApprovalVerdict = 0
@@ -271,7 +294,7 @@ type Conversation struct{Messages []Message}
 type Counters struct{Turns int; ToolCalls int; ConsecutiveFailures int}
 type EnvironmentKind string
 type EnvironmentRef struct{Kind EnvironmentKind; ID string; Revision string}
-type Event struct{Type EventType; Seq int64; Turn int; Text string; ToolCall *ToolCall; ToolResult *ToolResult; Ask *PendingAsk; ModelRetry *ModelRetryPayload; RequestManifest *RequestManifestPayload; NetworkAttempt *NetworkAttemptPayload; Result *ResultPayload; TurnEnd *TurnEndPayload; Hook *HookPayload; Approval *ApprovalPayload; CompactionArchive *CompactionArchivePayload; UserPrompt *UserPromptPayload; Usage *Usage; Subagent *SubagentPayload; Team *TeamPayload; Parallel *ParallelPayload; RunID string; Actor *Principal; Schedule *SchedulePayload; Steer *SteerPayload}
+type Event struct{Type EventType; Seq int64; Turn int; Text string; Title *TitlePayload; ToolCall *ToolCall; ToolResult *ToolResult; Ask *PendingAsk; ModelRetry *ModelRetryPayload; RequestManifest *RequestManifestPayload; NetworkAttempt *NetworkAttemptPayload; Result *ResultPayload; TurnEnd *TurnEndPayload; Hook *HookPayload; Approval *ApprovalPayload; CompactionArchive *CompactionArchivePayload; UserPrompt *UserPromptPayload; Usage *Usage; Subagent *SubagentPayload; Team *TeamPayload; Parallel *ParallelPayload; RunID string; Actor *Principal; Schedule *SchedulePayload; Steer *SteerPayload}
 type EventType string
 type GrantType string
 type HookDecision string
@@ -295,7 +318,7 @@ type ResultPayload struct{Stop StopReason; Text string; Usage Usage; Error strin
 type RetryDisposition uint8
 type Role string
 type SchedulePayload struct{ScheduleName string; FireID string; SessionID SessionID; Kind string; Stop StopReason; Err string}
-type Session struct{ID SessionID; State State; Mode PermissionMode; Conversation *Conversation; Limits Limits; Counters Counters; Usage Usage; EnvironmentRef EnvironmentRef; Placement PlacementMetadata; Profile string; ProviderID string; ModelID string; ReasoningEffort string; DebugMCPServers []string; DebugMCPTools []string; DebugTargetFingerprint string; Title string; TitleProvenance TitleProvenance; Owner *Principal; Authority Authority; Kind SessionKind; Relationship SessionRelationship; CreatedAt time.Time}
+type Session struct{ID SessionID; State State; Mode PermissionMode; Conversation *Conversation; Limits Limits; Counters Counters; Usage Usage; EnvironmentRef EnvironmentRef; Placement PlacementMetadata; Profile string; ProviderID string; ModelID string; ReasoningEffort string; DebugMCPServers []string; DebugMCPTools []string; DebugTargetFingerprint string; Title string; TitleProvenance TitleProvenance; TitleGeneration TitleGenerationState; TitleRevision uint64; Owner *Principal; Authority Authority; Kind SessionKind; Relationship SessionRelationship; CreatedAt time.Time}
 type SessionID string
 type SessionKind string
 type SessionRelationship struct{ScheduleName string "json:\"schedule_name,omitempty\""; OriginSessionID SessionID "json:\"origin_session_id,omitempty\""; OriginIncarnation IncarnationID "json:\"origin_incarnation,omitempty\""; ParentSessionID SessionID "json:\"parent_session_id,omitempty\""; ParentIncarnation IncarnationID "json:\"parent_incarnation,omitempty\""; CallID ToolCallID "json:\"call_id,omitempty\""; BranchIndex *int "json:\"branch_index,omitempty\""; TeamID string "json:\"team_id,omitempty\""; MemberName string "json:\"member_name,omitempty\""; DebugTargetID SessionID "json:\"debug_target_id,omitempty\""; DebugTargetIncarnation IncarnationID "json:\"debug_target_incarnation,omitempty\""}
@@ -309,13 +332,19 @@ type TeamMemberDisposition struct{Name string; Disposition string; Reason string
 type TeamMemberSpec struct{Name string; Role string; Mutating bool; Lead bool; RoutedCategory string; RoutedModel string; RoutingReason string; Model string}
 type TeamPayload struct{ParentCallID string; TeamID string; Roster []TeamMemberSpec; Member string; MemberSessionID string; MemberIncarnation IncarnationID; InnerKind EventType; Text string; ToolName string; Detail string; IsError bool; Rounds int; Stop StopReason; Usage Usage; ContextUsed int64; ContextWindow int64; Tasks []TeamTaskSnapshot; Findings []TeamFindingSnapshot; Dispositions []TeamMemberDisposition; Cause string}
 type TeamTaskSnapshot struct{ID string; Description string; State string; Assignee string; Deps []string}
+type TitleAttempt struct{ID string; Outcome TitleAttemptOutcome}
+type TitleAttemptOutcome string
+type TitleGenerationState string
+type TitlePayload struct{Title string; Provenance TitleProvenance; GenerationState TitleGenerationState; LatestAttempt *TitleAttempt; Revision uint64}
 type TitleProvenance string
+type TokenUsage struct{Total Usage; Models map[string]Usage}
 type ToolCall struct{ID ToolCallID "json:\"ID\""; Name string "json:\"Name\""; Args json.RawMessage "json:\"Args\""; ItemID string "json:\"item_id,omitempty\""}
 type ToolCallID string
 type ToolResult struct{CallID ToolCallID; Content string; IsError bool; Parts []Content "json:\"Parts,omitempty\""}
 type Turn struct{Index int; Assistant Message; Results []ToolResult; Usage Usage}
 type TurnEndPayload struct{Usage Usage; Estimated bool; DurationMs int64; TTFTMs int64; InterTokenMeanMs int64; InterTokenMaxMs int64}
 type Usage struct{InputTokens int; OutputTokens int; CacheReadTokens int; CacheWriteTokens int; ReasoningTokens int}
+type UsageKind string
 type UserPromptPayload struct{Text string; Parts []Content}
 var ErrIllegalTransition error
 var ErrInvalidContent error
