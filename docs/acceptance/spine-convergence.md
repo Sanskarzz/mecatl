@@ -1,7 +1,9 @@
 # Spine convergence — acceptance plan
 
+**Contract:** human-reviewed/v1
 **Phase:** agentic development spine (process infrastructure)
 **Status:** draft, 2026-07-24. Converges the the internal sibling repos spine into mecatl.
+**Delivery:** Split. Historical plan that predates the Combined exception.
 **Accumulator branch:** `acc/spine-convergence` (off `main`).
 
 The smallest set of work that brings the spine (acceptance-plan →
@@ -11,6 +13,20 @@ repos already run.
 
 The doc is organized scenario-first because acceptance is about what a
 contributor (human or agent) can do in the repo, not which files exist.
+
+## Human decisions
+
+- [ ] Decide when `ac-trace-strict` becomes a mandatory CI gate.
+
+## Interface contract
+
+- **gRPC / protobuf:** None — historical repository process work; no wire contract changed.
+- **Exported Go APIs / interfaces:** None — no exported Go surface changed.
+- **Tool schemas:** None — no model-facing runtime tool schema changed.
+- **CLI / config:** None — no binary or operator configuration changed.
+- **Events / persistence:** None — no runtime event or persistence shape changed.
+- **Security / authority:** None — the historical plan introduced repository workflow checks, not a runtime authority boundary.
+- **Compatibility / migration:** The repository workflow contract is superseded where necessary by [ADR 0306](../adr/0306-human-reviewed-development-contracts.md); no runtime migration applies.
 
 ## Why these scope cuts
 
@@ -127,8 +143,6 @@ workflow in [`AGENTS.md`](../../AGENTS.md).
 
 ## Deferred decisions and known risks
 
-- **When to make `ac-trace-strict` a mandatory CI gate.** Once a second
-  plan lands `landed`, promote the strict task into the CI workflow.
 - **The orchestrate skill's worker-dispatch verb** is written for the
   mecatl harness (`Subagent mode:"read-write"`) with the Claude-Code
   `Agent`/`tdd-worker` dispatch noted as the equivalent — the contract is
