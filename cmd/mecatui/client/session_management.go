@@ -13,8 +13,10 @@ import (
 // protobuf types to the UI.
 type SessionRenamedMsg struct {
 	SessionID       string
+	RequestToken    uint64
 	Title           string
 	TitleProvenance string
+	TitleRevision   uint64
 	Err             error
 }
 
@@ -59,11 +61,11 @@ func (c *Client) DeleteSession(ctx context.Context, id string) error {
 	return nil
 }
 
-// RenameSessionCmd performs RenameSession off the reducer goroutine.
-func RenameSessionCmd(ctx context.Context, r SessionRenamer, id, title string) tea.Cmd {
+// RenameSessionCmdWithToken correlates an asynchronous rename with a UI request.
+func RenameSessionCmdWithToken(ctx context.Context, r SessionRenamer, id, title string, requestToken uint64) tea.Cmd {
 	return func() tea.Msg {
 		snapshot, err := r.RenameSession(ctx, id, title)
-		return SessionRenamedMsg{SessionID: id, Title: snapshot.Title, TitleProvenance: snapshot.TitleProvenance, Err: err}
+		return SessionRenamedMsg{SessionID: id, RequestToken: requestToken, Title: snapshot.Title, TitleProvenance: snapshot.TitleProvenance, TitleRevision: snapshot.TitleRevision, Err: err}
 	}
 }
 

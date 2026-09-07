@@ -211,6 +211,8 @@ func (sessionsStartupNewIntent) isSurfaceIntent() {}
 type sessionsActiveTitleIntent struct {
 	id            string
 	title         string
+	provenance    string
+	revision      uint64
 	successNotice string
 }
 
@@ -605,7 +607,7 @@ func (s *sessionsState) handleRenameKey(msg tea.KeyPressMsg) tea.Cmd {
 	}
 	if key.Matches(msg, s.deps.keys.Choose) {
 		s.renaming, s.actionLoading = false, true
-		return client.RenameSessionCmd(s.deps.ctx, s.manager, s.actionID, s.renameInput.Value())
+		return client.RenameSessionCmdWithToken(s.deps.ctx, s.manager, s.actionID, s.renameInput.Value(), 0)
 	}
 	var cmd tea.Cmd
 	s.renameInput, cmd = s.renameInput.Update(msg)
@@ -709,10 +711,11 @@ func (s *sessionsState) handleRenamed(msg client.SessionRenamedMsg) (tea.Cmd, bo
 		if s.sessions[i].ID == msg.SessionID {
 			s.sessions[i].Title = msg.Title
 			s.sessions[i].TitleProvenance = msg.TitleProvenance
+			s.sessions[i].TitleRevision = msg.TitleRevision
 		}
 	}
 	s.syncFilter()
-	s.intent = sessionsActiveTitleIntent{id: msg.SessionID, title: msg.Title, successNotice: "renamed session"}
+	s.intent = sessionsActiveTitleIntent{id: msg.SessionID, title: msg.Title, provenance: msg.TitleProvenance, revision: msg.TitleRevision, successNotice: "renamed session"}
 	if s.pager != nil {
 		return s.beginPage(""), true, false
 	}
@@ -750,7 +753,7 @@ func (s *sessionsState) handleForked(msg sessionForkedMsg) {
 		return
 	}
 	s.selected = client.SessionListItem{
-		ID: msg.newID, Title: msg.snapshot.Title, TitleProvenance: msg.snapshot.TitleProvenance,
+		ID: msg.newID, Title: msg.snapshot.Title, TitleProvenance: msg.snapshot.TitleProvenance, TitleRevision: msg.snapshot.TitleRevision,
 		State: msg.snapshot.State, Placement: msg.snapshot.Placement, CreatedAt: msg.snapshot.CreatedAt,
 		Kind: msg.transcript.Kind, Relationship: msg.transcript.Relationship,
 	}

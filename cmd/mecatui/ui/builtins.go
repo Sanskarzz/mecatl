@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -108,6 +109,14 @@ func builtinCommands(caps client.Capabilities, w wiredCollaborators) []builtin {
 			name: "quit",
 			desc: "quit mecatui",
 			run:  Model.runQuit,
+		},
+		{
+			name:        "title",
+			desc:        "show or rename the active session title",
+			acceptsArgs: true,
+			run: func(m Model) (tea.Model, tea.Cmd) {
+				return m.runTitle(), nil
+			},
 		},
 		{
 			name: "session",
@@ -581,7 +590,7 @@ func postureSummary(p string) string {
 	}
 	label := p
 	if label == "" {
-		label = "unknown"
+		label = unknownLabel
 	}
 	return "posture " + label +
 		" — allow-all " + onoff(allowAll) +
@@ -599,8 +608,7 @@ type builtinName struct {
 // builtinNameRegistry is the static registry identity and argument policy used
 // before a capability-gated builtin can be dispatched.
 var builtinNameRegistry = []builtinName{
-	{name: "clear", acceptsArgs: false}, {name: "help", acceptsArgs: false}, {name: "quit", acceptsArgs: false},
-	{name: "session", acceptsArgs: false},
+	{name: "clear", acceptsArgs: false}, {name: "help", acceptsArgs: false}, {name: "quit", acceptsArgs: false}, {name: "title", acceptsArgs: true}, {name: "session", acceptsArgs: false},
 	{name: "retry", acceptsArgs: false}, {name: "diagnostics", acceptsArgs: false}, {name: "compact", acceptsArgs: false},
 	{name: "mcp", acceptsArgs: false}, {name: "agents", acceptsArgs: false}, {name: "team", acceptsArgs: false},
 	{name: "skills", acceptsArgs: false}, {name: "soul", acceptsArgs: false}, {name: "usermodel", acceptsArgs: false},
@@ -637,11 +645,65 @@ func canonicalBuiltinName(name string) string {
 	return name
 }
 
+// titleCommand recognizes /title without treating arbitrary model-facing slash
+// commands as client commands. Only exactly /title is a title read; a whitespace
+// suffix is an invalid rename rather than a read.
+func titleCommand(text string) (title string, bare, blankArgs, ok bool) {
+	raw := strings.TrimLeftFunc(text, unicode.IsSpace)
+	if !strings.HasPrefix(strings.ToLower(raw), "/title") {
+		return "", false, false, false
+	}
+	if len(raw) > len("/title") && !unicode.IsSpace(rune(raw[len("/title")])) {
+		return "", false, false, false
+	}
+	suffix := raw[len("/title"):]
+	title = strings.TrimSpace(suffix)
+	return title, suffix == "", suffix != "" && title == "", true
+}
+
+// runTitle adds a local, nonpersistent title/provenance notice. It deliberately
+// does not send prompt content or open a stream.
+func (m Model) runTitle() tea.Model {
+	title := m.sessionTitle
+	if title == "" {
+		title = "(untitled)"
+	}
+	provenance := titleProvenanceLabel(m.sessionTitleProvenance)
+	m.conv.addNotice("Session title: " + title + " (" + provenance + ")")
+	m.refreshView()
+	return m
+}
+
+func (m Model) renameTitle(title string) (tea.Model, tea.Cmd) {
+	if m.sessionID == "" || m.deps.SessionManagement == nil {
+		m.statusMsg = m.deps.Theme.Style("warning").Render("title rename is unavailable")
+		return m, nil
+	}
+	m.titleRenameRequestToken++
+	m.sessionTitle = title
+	m.sessionTitleProvenance = "operator"
+	m.prompt.Reset()
+	return m, client.RenameSessionCmdWithToken(m.deps.Ctx, m.deps.SessionManagement, m.sessionID, title, m.titleRenameRequestToken)
+}
+
 // dispatchBareBuiltin checks whether raw text is a slash command after trimming
 // surrounding Unicode whitespace. A current bare built-in executes locally. A
 // recognized built-in that does not accept arguments keeps the input and shows a
 // local warning. Unknown slash commands remain model-facing.
 func (m Model) dispatchBareBuiltin(text string) (tea.Model, tea.Cmd, bool) {
+	if title, bare, blankArgs, ok := titleCommand(text); ok {
+		if blankArgs {
+			m.prompt.Reset()
+			m.statusMsg = m.deps.Theme.Style("warning").Render("/title requires non-whitespace text; use bare /title to view the current title")
+			return m, nil, true
+		}
+		if bare {
+			m.prompt.Reset()
+			return m.runTitle(), nil, true
+		}
+		mm, cmd := m.renameTitle(title)
+		return mm, cmd, true
+	}
 	trimmed := strings.TrimSpace(text)
 	fields := strings.Fields(trimmed)
 	if len(fields) > 1 {

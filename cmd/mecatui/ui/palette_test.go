@@ -106,9 +106,9 @@ func TestPaletteOpensOnSlash(t *testing.T) {
 	if !m.palette.open {
 		t.Fatalf("palette did not open on '/'")
 	}
-	// Merged set: 6 built-ins (clear, help, quit, session, retry, diagnostics) + 3 workspace rows.
-	if len(m.palette.filtered) != 9 {
-		t.Fatalf("filtered = %d, want 9 (6 built-ins + 3 workspace)", len(m.palette.filtered))
+	// Merged set: 7 built-ins (clear, help, quit, title, session, retry, diagnostics) + 3 workspace rows.
+	if len(m.palette.filtered) != 10 {
+		t.Fatalf("filtered = %d, want 10 (7 built-ins + 3 workspace)", len(m.palette.filtered))
 	}
 	view := m.View().Content
 	if !strings.Contains(view, "/fix") || !strings.Contains(view, "fix a failing test") {
@@ -141,9 +141,9 @@ func TestPaletteFetchesOnce(t *testing.T) {
 	if fc.gotWS != "sess-test-0001" {
 		t.Fatalf("fetch session = %q, want sess-test-0001", fc.gotWS)
 	}
-	// Merged: 6 built-ins + 3 fetched workspace rows = 9.
-	if !m.palette.open || len(m.palette.filtered) != 9 {
-		t.Fatalf("palette not populated from fetch: open=%v filtered=%d (want 9)", m.palette.open, len(m.palette.filtered))
+	// Merged: 7 built-ins + 3 fetched workspace rows = 10.
+	if !m.palette.open || len(m.palette.filtered) != 10 {
+		t.Fatalf("palette not populated from fetch: open=%v filtered=%d (want 10)", m.palette.open, len(m.palette.filtered))
 	}
 
 	// A second keystroke must NOT re-fetch (the latch holds).
@@ -234,22 +234,22 @@ func TestPalettePrefixFilters(t *testing.T) {
 }
 
 // TestPaletteNavigateAndComplete verifies ↓ moves the selection and enter
-// completes a WORKSPACE command into the input as "/<name> ", closing the
-// palette. The merged order is [clear, help, quit, session, retry, diagnostics, fix, review, refactor], so seven ↓
-// land on "review" (index 7, a workspace row → text-completed, not run).
+// completes a workspace command into the input as "/<name> ", closing the
+// palette. The merged order is [clear, help, quit, title, session, retry, diagnostics, fix, review, refactor], so eight ↓
+// land on "review" (index 8, a workspace row → text-completed, not run).
 func TestPaletteNavigateAndComplete(t *testing.T) {
 	m := newPaletteModel(t, sampleCommands())
 	m = typeRune(t, m, '/') // open with built-ins then workspace commands
 
-	for i := 0; i < 7; i++ {
+	for i := 0; i < 8; i++ {
 		mm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 		m = mm.(Model)
 	}
-	if m.palette.cursor != 7 {
-		t.Fatalf("cursor = %d, want 7 after 7×↓", m.palette.cursor)
+	if m.palette.cursor != 8 {
+		t.Fatalf("cursor = %d, want 8 after 8×↓", m.palette.cursor)
 	}
-	if m.palette.filtered[7].Name != "review" || m.palette.filtered[7].Builtin {
-		t.Fatalf("row 7 = %+v, want workspace 'review'", m.palette.filtered[7])
+	if m.palette.filtered[8].Name != "review" || m.palette.filtered[8].Builtin {
+		t.Fatalf("row 8 = %+v, want workspace 'review'", m.palette.filtered[8])
 	}
 
 	// enter completes the selected WORKSPACE command (text-completion).
@@ -265,11 +265,11 @@ func TestPaletteNavigateAndComplete(t *testing.T) {
 
 // TestPaletteCompleteWorkspaceWithTab verifies tab text-completes a WORKSPACE
 // row (not a built-in). With built-ins leading, the first workspace row "fix" is
-// at index 6.
+// at index 7.
 func TestPaletteCompleteWorkspaceWithTab(t *testing.T) {
 	m := newPaletteModel(t, sampleCommands())
 	m = typeRune(t, m, '/')
-	for i := 0; i < 6; i++ {
+	for i := 0; i < 7; i++ {
 		mm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 		m = mm.(Model)
 	}
@@ -285,6 +285,35 @@ func TestPaletteCompleteWorkspaceWithTab(t *testing.T) {
 	if m.palette.open {
 		t.Fatalf("palette stayed open after tab completion")
 	}
+}
+
+func TestPaletteCompleteTitleForArguments(t *testing.T) {
+	m := newPaletteModel(t, nil)
+	m = typeRune(t, m, '/')
+	for i, row := range m.palette.filtered {
+		if row.Name != "title" {
+			continue
+		}
+		m.palette.cursor = i
+		mm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+		m = mm.(Model)
+		if got := m.prompt.Value(); got != "/title " {
+			t.Fatalf("input = %q, want argument entry for /title", got)
+		}
+		if len(m.conv.blocks) != 0 {
+			t.Fatalf("selecting /title must not execute the bare read: %#v", m.conv.blocks)
+		}
+		mm, cmd := m.submitPrompt()
+		m = mm.(Model)
+		if cmd != nil || len(m.conv.blocks) != 0 || !strings.Contains(stripANSIstr(m.statusMsg), "requires non-whitespace text") {
+			t.Fatalf("enter after palette completion = blocks=%#v status=%q cmd=%v, want rejected blank title", m.conv.blocks, stripANSIstr(m.statusMsg), cmd != nil)
+		}
+		if got := m.prompt.Value(); got != "" {
+			t.Fatalf("input after title read = %q, want cleared", got)
+		}
+		return
+	}
+	t.Fatal("title is missing from the always-available palette")
 }
 
 // TestPaletteEscDismisses verifies esc closes the palette WITHOUT changing the
@@ -323,13 +352,13 @@ func TestPaletteEscDismisses(t *testing.T) {
 func TestPaletteUnknownPrefixShowsNote(t *testing.T) {
 	m := newPaletteModel(t, &fakeCommander{cmds: nil})
 
-	// Bare "/" opens: clear, help, quit, session, retry, and diagnostics are always present.
+	// Bare "/" opens: clear, help, quit, title, session, retry, and diagnostics are always present.
 	m = typeRune(t, m, '/')
 	if !m.palette.open {
 		t.Fatalf("bare '/' should open the palette (built-ins always exist)")
 	}
-	if len(m.palette.filtered) != 6 {
-		t.Fatalf("bare '/' filtered = %d, want 6 built-ins", len(m.palette.filtered))
+	if len(m.palette.filtered) != 7 {
+		t.Fatalf("bare '/' filtered = %d, want 7 built-ins", len(m.palette.filtered))
 	}
 
 	// Typing a prefix that matches no command closes the dropdown and the input
@@ -360,8 +389,8 @@ func TestPaletteNilCommanderShowsBuiltins(t *testing.T) {
 	if !m.palette.open {
 		t.Fatalf("palette should open with built-ins even with nil Commander")
 	}
-	if len(m.palette.filtered) != 6 {
-		t.Fatalf("filtered = %d, want 6 built-ins (clear, help, quit, session, retry, diagnostics)", len(m.palette.filtered))
+	if len(m.palette.filtered) != 7 {
+		t.Fatalf("filtered = %d, want 7 built-ins (clear, help, quit, title, session, retry, diagnostics)", len(m.palette.filtered))
 	}
 	// With no Commander, the fetch latch is never even consulted; assert the rows
 	// are the built-ins.

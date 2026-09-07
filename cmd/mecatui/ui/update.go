@@ -850,6 +850,11 @@ func (m Model) updateLifecycle(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 			return mm, tea.Batch(m.refreshCmd(), modeCmd, drainCmd, liveCmd), true
 		}
 		return m, nil, true
+	case client.SessionRenamedMsg:
+		mm, cmd := m.onTitleRenamed(msg)
+		return mm, cmd, true
+	case client.SessionTitleMsg:
+		return m.onSessionTitle(msg), nil, true
 	case client.CommandsMsg:
 		// Slash-command discovery landed: store the set (a failure degrades quietly
 		// to an empty palette) and re-sync so the palette reflects it immediately if
@@ -899,13 +904,9 @@ func (m Model) onResolvedModelMsg(msg client.ResolvedModelMsg) (Model, tea.Cmd, 
 	if msg.Capabilities != (client.Capabilities{}) {
 		m.caps = msg.Capabilities
 	}
-	// Window-title self-heal: adopt the session's stored title from the refetch
-	// ONLY when the local title is still empty (set-once — a title the user
-	// seeded by typing a prompt sticks; this only backfills carryover/fork/adopt
-	// where the server already had one).
-	if m.sessionTitle == "" && msg.Title != "" {
-		m.sessionTitle = msg.Title
-	}
+	// The snapshot is authoritative after reconnect/session adoption, so unlike the
+	// old first-prompt seed it may replace a local title.
+	m, _ = m.adoptTitle(msg.Title, msg.TitleProvenance, msg.TitleRevision)
 	// Mode update: apply when the refetch carries a mode (the plan-approval
 	// refresh path). On the footer-heal path Mode is the same as m.activeMode
 	// (or empty from an older server), so this is a benign no-op.
@@ -2176,7 +2177,7 @@ func (m Model) applySessionsSurfaceIntent(intent surfaceIntent) (model tea.Model
 		return m, m.createSessionCmd(), true, true
 	case sessionsActiveTitleIntent:
 		if intent.id == m.sessionID {
-			m.sessionTitle = intent.title
+			m, _ = m.adoptTitle(intent.title, intent.provenance, intent.revision)
 		}
 		m.statusMsg = m.deps.Theme.Style("success").Render(intent.successNotice)
 		return m, nil, true, false
@@ -3021,6 +3022,12 @@ func (m Model) dispatchSelectedBuiltin() (tea.Model, tea.Cmd, bool) {
 	if !row.Builtin {
 		return m, nil, false
 	}
+	// Argument-taking built-ins complete into the editor so the operator can
+	// supply their required input; dispatching /title here would incorrectly run
+	// its bare read action.
+	if b, ok := builtinByName(m.caps, m.wiredCollaborators(), row.Name); ok && b.acceptsArgs {
+		return m, nil, false
+	}
 	return m.dispatchBareBuiltin("/" + row.Name)
 }
 
@@ -3169,6 +3176,7 @@ func (m Model) submitPrompt() (tea.Model, tea.Cmd) {
 	// GetSession refetch on the carryover/fork/adopt paths (onResolvedModelMsg).
 	if m.sessionTitle == "" {
 		m.sessionTitle = text
+		m.sessionTitleProvenance = "first-prompt"
 	}
 	m.prompt.Reset()
 	// A fresh run clears any queue pause: whether this is the auto-drain (popAndSubmit
@@ -3400,6 +3408,9 @@ func (m Model) updateLiveMsg(sm liveMsg) (tea.Model, tea.Cmd) {
 		m.liveCh = nil
 		m.liveStop = nil
 		return m, (&m).startReconnect(nil)
+	case client.SessionTitleMsg:
+		mm := m.onSessionTitle(msg)
+		return mm, mm.waitLiveCmd()
 	default:
 		// A real event from the current reader proves the feed is healthy. Do not
 		// let replay/catch-up events or probe success reset this sequence.
@@ -3523,7 +3534,11 @@ func (m Model) updateReconnectMsg(rm reconnectMsg) (tea.Model, tea.Cmd) {
 		// stale reader.
 		(&m).disarmReconnect()
 		// Re-arm the live reader off a FRESH live channel.
-		return m, (&m).armLiveFeed()
+		liveCmd := (&m).armLiveFeed()
+		if m.deps.Session != nil && m.sessionID != "" {
+			return m, tea.Batch(liveCmd, client.RefreshResolvedModelCmd(m.deps.Ctx, m.deps.Session, m.sessionID))
+		}
+		return m, liveCmd
 	case client.StreamClosedMsg, client.StreamErrMsg:
 		// The reconnect channel closed without a LiveReconnectedMsg (ctx
 		// cancelled — session switch / TUI exit). Clear the degraded state; a
