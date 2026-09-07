@@ -43,9 +43,17 @@ cannot be determined. the optional
 ambient environment values; reserved baseline and source-owned terminal-dimension names
 are rejected during settings validation. It uses local-only CWD selection, a one-second deadline, and a combined
 4 KiB stdout/stderr limit. StatusML accepts semantic theme tokens and validated
-HTTP(S) link metadata, never raw ANSI or OSC. Before parsing, only leading and
-trailing ASCII whitespace is trimmed, allowing ordinary `print` output while
-preserving internal text.
+HTTP(S) link metadata, never raw ANSI or OSC. A `<link>` is a direct `header` or
+`footer` child with plain-text contents; it is not an HTML `<a>` element and cannot
+contain a semantic token or another link. Before parsing, only leading and trailing
+ASCII whitespace is trimmed, allowing ordinary `print` output while preserving
+internal text. A command failure (including timeout, excess combined output, or
+invalid StatusML) retains the last successful surface with `[stale]`, or uses the
+shipped default when none exists; the command receives no feedback and
+`/diagnostics` reports only the safe coarse command status: each header/footer is
+`default`, `custom`, or `stale`, and the error is a closed category; it never reports
+command output, arguments, paths, or raw failure text. The status-line guide describes
+the command-output and troubleshooting contract.
 
 See [Status line customization](https://github.com/stacklok/mecatl/blob/main/user-docs/mecatui/status-line.md)
 for the complete settings schema, input reference, StatusML grammar, safety limits,
