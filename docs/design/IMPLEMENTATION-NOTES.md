@@ -103,7 +103,29 @@ do not project to a principal, and owns an explicit `Close` for the background r
 `internal/cliconfig` adapts those errors to the unchanged server sentinels and retains
 the server-root system context and all existing flag behavior.
 
-### mecak8s projected credentials and Helm runtime contract
+### RFC 9728 protected-resource profile
+
+The optional profile is shared by `mecated` and `mecak8s`: `--oidc-resource`,
+`--oidc-client-id`, and CSV `--oidc-scopes` are parsed once in
+`internal/cliconfig` and projected by the HTTP metadata handler. RFC fields
+`resource`, `authorization_servers`, `bearer_methods_supported: ["header"]`, and
+optional `scopes_supported` are kept distinct from mecatl extensions for audience
+and client ID. Discovery is
+anonymous HTTPS bootstrap and transport-separated from authenticated gRPC; it
+never adopts private issuer trust settings. The discovery client uses its configured
+15-second `http.Client` timeout (rather than calling its transport directly), and
+root resources with or without a trailing slash derive the same metadata URL. A
+saved root-resource hostname and its full resource URL are aliases; legacy
+`host:port` targets remain supported and ambiguity fails closed. `scopes_supported`
+is a narrow operator-configured public-client request allowlist, not authorization
+policy: discovered login requests exactly the confirmed set or an explicit subset and
+never expands a saved enrollment from later metadata. API 401s on subordinate routes
+remain generic `Bearer`; only the direct configured well-known route serves metadata.
+Explicit `mecatui login --scopes` may select only a configured scope. Public-client
+token exchange and refresh use `client_id` parameters, never HTTP Basic. ToolHive/
+ToolHive-Core are recorded
+as implementation provenance for the client path, not imported by the engine.
+
 
 `internal/adapter/tlsreload` owns mecak8s server-certificate loading, complete-chain
 validation, atomic last-valid publication, projected-Secret watching, and a fixed periodic
