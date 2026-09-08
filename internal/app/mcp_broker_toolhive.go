@@ -7,6 +7,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/internal/adapter/mcpbroker"
 	"github.com/stacklok/mecatl/internal/adapter/permconfig"
 	"github.com/stacklok/mecatl/internal/adapter/redisstore"
@@ -49,7 +50,7 @@ func buildToolHiveAuthRedisClient(cfg Config) (redis.UniversalClient, func(), er
 
 // toolHiveBrokerConfig is the construction boundary: operator-schema values are
 // copied once into immutable adapter-owned values before ToolHive sees them.
-func toolHiveBrokerConfig(routes []permconfig.MCPServerProfile, callbackURL string, occupied []string, authRedisClient redis.UniversalClient) mcpbroker.ToolHiveConfig {
+func toolHiveBrokerConfig(routes []permconfig.MCPServerProfile, callbackURL string, occupied []string, authRedisClient redis.UniversalClient, diag port.Diagnostics) mcpbroker.ToolHiveConfig {
 	profiles := make([]mcpbroker.ToolHiveProfile, len(routes))
 	for i, route := range routes {
 		profile := mcpbroker.ToolHiveProfile{Name: route.Name, URL: route.URL, Auth: route.Auth.Mode}
@@ -68,6 +69,8 @@ func toolHiveBrokerConfig(routes []permconfig.MCPServerProfile, callbackURL stri
 				converted.ClientSecretEnv = oauth.Client.Preregistered.SecretEnv
 			} else if oauth.Client.CIMD != nil {
 				converted.ClientID = oauth.Client.CIMD.DocumentURL
+			} else if oauth.Client.DCR != nil {
+				converted.DCRDiscoveryURL = oauth.Client.DCR.DiscoveryURL
 			}
 			profile.OAuth = converted
 			profile.Static = make([]mcpbroker.StaticTool, len(oauth.Tools))
@@ -79,7 +82,7 @@ func toolHiveBrokerConfig(routes []permconfig.MCPServerProfile, callbackURL stri
 	}
 	return mcpbroker.ToolHiveConfig{
 		Profiles: profiles, CallbackURL: callbackURL, Occupied: append([]string(nil), occupied...),
-		AuthRedisClient: authRedisClient,
+		AuthRedisClient: authRedisClient, Diagnostics: diag,
 	}
 }
 

@@ -30,6 +30,7 @@ import (
 	vmcpsession "github.com/stacklok/toolhive/pkg/vmcp/session"
 	"golang.org/x/oauth2"
 
+	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/tool"
 	mcpadapter "github.com/stacklok/mecatl/internal/adapter/mcp"
@@ -66,11 +67,16 @@ type Process struct {
 	resources          []ownedResource
 	closeOnce          sync.Once
 	closeErr           error
+	// diag receives per-backend authenticated-discovery outcomes during
+	// workspace-enrollment catalogue freeze. Always non-nil (defaults to
+	// port.NopDiagnostics{} in newToolHiveProcess).
+	diag port.Diagnostics
 }
 
 type toolHiveProcessOptions struct {
-	runtimeOptions   []Option
-	brokerHTTPClient *http.Client
+	runtimeOptions                []Option
+	brokerHTTPClient              *http.Client
+	allowLoopbackUpstreamsForTest bool
 }
 
 // NewToolHiveProcess discovers anonymous upstreams, constructs one ordered
@@ -92,6 +98,14 @@ func newToolHiveProcess(ctx context.Context, config ToolHiveConfig, options tool
 	construction, err := compileToolHiveConstruction(config.Profiles, issuer)
 	if err != nil {
 		return nil, err
+	}
+	if options.allowLoopbackUpstreamsForTest {
+		for i := range construction.upstreams {
+			if oauth := construction.upstreams[i].OAuth2Config; oauth != nil {
+				oauth.AllowPrivateIPs = true
+				oauth.InsecureAllowHTTP = true
+			}
+		}
 	}
 	routes, err := discoverAnonymous(ctx, construction.anonymous, config.Occupied)
 	if err != nil {
@@ -137,7 +151,11 @@ func newToolHiveProcess(ctx context.Context, config ToolHiveConfig, options tool
 	}
 
 	processCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	process := &Process{Runtime: runtime, ctx: processCtx, cancel: cancel, construction: construction, protectedTarget: protectedTarget, occupied: append([]string(nil), config.Occupied...)}
+	diag := config.Diagnostics
+	if diag == nil {
+		diag = port.NopDiagnostics{}
+	}
+	process := &Process{Runtime: runtime, ctx: processCtx, cancel: cancel, construction: construction, protectedTarget: protectedTarget, occupied: append([]string(nil), config.Occupied...), diag: diag.With("component", "mcpbroker")}
 	runtime.process = process
 	process.resources = append(process.resources, ownedResource{name: "process-context", close: func() error { cancel(); return nil }})
 	rollback := func(cause error) (*Process, error) {
@@ -500,6 +518,17 @@ func (p *Process) closeResources() error {
 // to decide whether to advertise the enrollment capability.
 func (p *Process) WorkspaceEnrollmentRequired() bool {
 	return p != nil && len(p.construction.protectedBackends) > 0
+}
+
+// diagnostics returns p's Diagnostics sink, defaulting to port.NopDiagnostics{}
+// for a nil Process or a Process built without going through
+// newToolHiveProcess (e.g. a test fixture constructing &Process{} directly) —
+// every caller of this accessor stays nil-safe regardless of construction path.
+func (p *Process) diagnostics() port.Diagnostics {
+	if p == nil || p.diag == nil {
+		return port.NopDiagnostics{}
+	}
+	return p.diag
 }
 
 // Close first cancels process-owned work, then drains the neutral Runtime
