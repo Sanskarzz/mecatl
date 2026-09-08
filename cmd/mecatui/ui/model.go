@@ -160,6 +160,14 @@ type Deps struct {
 	// tests. nil disables the live bridge (the ui still renders deliveries via the
 	// replay on a session switch/reload, just not live). *Client satisfies it.
 	LiveStream client.LiveStreamer
+	// MCPAuthorization is the distinct browser authorization surface. It never
+	// shares the permission-approval stream or controls.
+	MCPAuthorization client.MCPAuthorizationController
+	// WorkspaceEnrollment is the distinct pre-prompt whole-bundle control.
+	WorkspaceEnrollment client.WorkspaceEnrollmentController
+	// OpenURL opens a presentation URL obtained only through MCPAuthorization.
+	// Composition owns the OS integration; nil leaves the action unavailable.
+	OpenURL func(context.Context, string) error
 	// SelectionStore persists the picked model (last-used). nil disables persistence
 	// (the pick still applies to the next create this run, just isn't remembered).
 	SelectionStore SelectionStore
@@ -426,6 +434,7 @@ const (
 	phaseIdle                          // ready for a prompt
 	phaseRunning                       // a Converse run is streaming
 	phaseAwaitingApproval              // a permission modal is open
+	phaseAuthorizing                   // an MCP browser authorization is pending
 	phaseFatal                         // connect/fatal error; input disabled
 	phaseReplay                        // a stored-session transcript replay is open (read-only; issue #245)
 )
@@ -438,6 +447,15 @@ const (
 // rendered by sessionsState; it does not depend on the Model spinner.
 func (m Model) spinnerVisible() bool {
 	return m.phase == phaseRunning || m.phase == phaseConnecting
+}
+
+// promptRecovery is a text-only prompt that can safely be restored after a run
+// transport outcome. It is tied to the source session and stream generation.
+type promptRecovery struct {
+	text       string
+	sessionID  string
+	streamGen  uint64
+	autoReplay bool
 }
 
 // Model is the root Elm model. It owns the conversation, the bubbles widgets, the
@@ -504,7 +522,15 @@ type Model struct {
 	conv conversation
 	vp   viewport.Model
 
-	// approval state is dynamic: the surface owns it only while an ask is open.
+	// authorization is separate from permission approval: MCP browser authorization
+	// has no allow/always/deny verdict and never carries tool arguments or a URL.
+	authorization mcpAuthorizationState
+	// enrollment is a separate pre-prompt bundle gate. It never enters the
+	// permission approval queue or per-tool authorization stream.
+	enrollment workspaceEnrollmentState
+	// authorizationEvents is the active recheck/cancel stream. It is distinct
+	// from the converse stream so browser controls cannot consume approval frames.
+	authorizationEvents <-chan tea.Msg
 	// debugAskCycle rotates the /debug-ask built-in (Deps.DebugAsk) through its
 	// canned long-args payloads so repeated invocations exercise the different
 	// wrap shapes (one long line, a compound pipeline, a heredoc).
@@ -759,6 +785,13 @@ type Model struct {
 	// re-fires. Empty = no seed (the default; today's behavior).
 	pendingInitialPrompt string
 
+	// promptRecovery retains a text-only prompt across a transport outcome. It is
+	// bound to the source session and stream generation so a stale failure cannot
+	// restore or replay text into a successor session. autoReplay is reserved for
+	// the authoritative workspace-enrollment pre-commit rejection; ordinary
+	// transport failures restore a draft and clear the record instead.
+	promptRecovery *promptRecovery
+
 	// Startup-adopted chats remain protected until their first prompt reaches the
 	// server stream. A pre-SessionInit failure restores the authoritative transcript
 	// as a read-only retry/back view; no fallback session is ever created.
@@ -928,6 +961,10 @@ type Model struct {
 	// ONCE per process even across repeated ModelsMsg landings (a re-open, a live
 	// refresh). Survives the dismissal of gatewayNotice (which only clears the text).
 	gatewayNoticeShown bool
+
+	// workspaceEnrollmentNotice persists while protected workspace services are
+	// unavailable; activity does not dismiss a fact that remains true.
+	workspaceEnrollmentNotice string
 }
 
 // New builds the root model from deps. It wires the widgets but does not connect;
@@ -1090,6 +1127,23 @@ func (m Model) resetSessionDerived() Model {
 	m.contextTokens = 0
 	m.activeTool = ""
 	m.toolProgress = ""
+	if m.authorization.controlCancel != nil {
+		m.authorization.controlCancel()
+	}
+	if m.authorization.presentationCancel != nil {
+		m.authorization.presentationCancel()
+	}
+	m.authorization = mcpAuthorizationState{}
+	m.authorizationEvents = nil
+	if m.enrollment.controlCancel != nil {
+		m.enrollment.controlCancel()
+	}
+	if m.enrollment.presentationCancel != nil {
+		m.enrollment.presentationCancel()
+	}
+	m.enrollment = workspaceEnrollmentState{}
+	m.workspaceEnrollmentNotice = ""
+	m.promptRecovery = nil
 	m.providerRoute = ""
 	m.statusContextRoot = ""
 	// Drop the session title: it is session-derived (seeded from the first prompt

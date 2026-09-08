@@ -11,7 +11,7 @@
 ┃    @                     attach a file: image/audio inlines as media (when supported), else inlines text                                          ┃
 ┃    ctrl+v                paste a clipboard image as an attachment (when supported), else paste text                                               ┃
 ┃    ctrl+g                select all prompt text                                                                                                   ┃
-┃    ctrl+shift+c          copy the active prompt or conversation selection                                                                         ┃
+┃    ctrl+y                copy the active prompt or conversation selection                                                                         ┃
 ┃    ctrl+u                clear the unsent prompt                                                                                                  ┃
 ┃    esc esc (physical)    enhanced key-event support required; first press is silent; key release then press within 500ms; repeats cannot confirm  ┃
 ┃                          clears staged attachments, large-paste content, and pending media; owners take precedence                                ┃

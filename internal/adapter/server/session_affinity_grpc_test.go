@@ -68,6 +68,8 @@ func TestADR_0294_NewSessionBoundRPCsRequireAffinityClassification(t *testing.T)
 		"ClearSession": true, "ListCommands": true, "ListWorktrees": true, "StreamSessionEvents": true,
 		"StreamSessionLive": true, "WatchSessionEvents": true, "ReflectSession": true,
 		"ApprovePlan": true, "CreateTeam": true,
+		"GetMcpAuthorizationPresentation": true, "RecheckMcpAuthorization": true, "CancelMcpAuthorization": true,
+		"ConnectWorkspaceServices": true, "RetryWorkspaceEnrollment": true, "CancelWorkspaceEnrollment": true,
 	}
 	service := mecatlv1.File_mecatl_v1_harness_proto.Services().ByName("HarnessService")
 	for i := range service.Methods().Len() {
@@ -168,6 +170,43 @@ func TestSessionAffinityAndHandoff_Scenario2_GRPCUnaryAndServerStreamMatrix(t *t
 			if err != nil {
 				return err
 			}
+			_, err = stream.Recv()
+			return err
+		}},
+		{"ConnectWorkspaceServices", func() error {
+			_, err := client.ConnectWorkspaceServices(ctx, &mecatlv1.WorkspaceEnrollmentConnectRequest{SessionId: requestID})
+			return err
+		}},
+		{"RetryWorkspaceEnrollment", func() error {
+			_, err := client.RetryWorkspaceEnrollment(ctx, &mecatlv1.WorkspaceEnrollmentControlRequest{SessionId: requestID})
+			return err
+		}},
+		{"CancelWorkspaceEnrollment", func() error {
+			_, err := client.CancelWorkspaceEnrollment(ctx, &mecatlv1.WorkspaceEnrollmentControlRequest{SessionId: requestID})
+			return err
+		}},
+		{"GetMcpAuthorizationPresentation", func() error {
+			_, err := client.GetMcpAuthorizationPresentation(ctx, &mecatlv1.GetMcpAuthorizationPresentationRequest{SessionId: requestID})
+			return err
+		}},
+		{"RecheckMcpAuthorization", func() error {
+			// Bidi: the affinity header rides the stream's metadata and is
+			// checked (twice — see grpc.go's two-phase pattern) independent of
+			// Send/Recv timing, but the RPC status itself surfaces only on Recv.
+			stream, err := client.RecheckMcpAuthorization(ctx)
+			if err != nil {
+				return err
+			}
+			_ = stream.Send(&mecatlv1.RecheckMcpAuthorizationRequest{SessionId: requestID, AuthorizationId: "authorization:1"})
+			_, err = stream.Recv()
+			return err
+		}},
+		{"CancelMcpAuthorization", func() error {
+			stream, err := client.CancelMcpAuthorization(ctx)
+			if err != nil {
+				return err
+			}
+			_ = stream.Send(&mecatlv1.CancelMcpAuthorizationRequest{SessionId: requestID, AuthorizationId: "authorization:1"})
 			_, err = stream.Recv()
 			return err
 		}},

@@ -8,6 +8,8 @@ import { getRawJson } from "./raw.js";
 /** Stable event kinds, kept in parity with the Go server vocabulary. @public */
 export const MECATL_EVENT_KINDS = [
   "approval",
+  "authorization.required",
+  "authorization.resolved",
   "compaction",
   "compaction.archive",
   "hook",
@@ -145,6 +147,15 @@ export interface ApprovalEventPayload {
   readonly callId: string;
   readonly tool: string;
   readonly verdict: string;
+}
+
+/** The safe correlation payload of an external-authorization lifecycle event. @public */
+export interface AuthorizationEventPayload {
+  readonly authorizationId: string;
+  readonly callId: string;
+  readonly displayName: string;
+  readonly expiresAt?: { readonly nanos: number; readonly seconds: bigint } | undefined;
+  readonly status: string;
 }
 
 /** One media part as represented on the protobuf event payloads. @public */
@@ -339,6 +350,8 @@ export interface EventCommon {
 /** Maps every known wire kind to its hand-crafted payload contract. @public */
 export interface EventPayloads {
   readonly approval: ApprovalEventPayload;
+  readonly "authorization.required": AuthorizationEventPayload;
+  readonly "authorization.resolved": AuthorizationEventPayload;
   readonly compaction: undefined;
   readonly "compaction.archive": CompactionArchiveEventPayload;
   readonly hook: HookEventPayload;
@@ -461,6 +474,9 @@ function payload(
   switch (kind) {
     case "approval":
       return required(event.approval, kind, transport);
+    case "authorization.required":
+    case "authorization.resolved":
+      return required(event.authorization, kind, transport);
     case "compaction.archive":
       return required(event.compactionArchive, kind, transport);
     case "hook":

@@ -293,6 +293,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case liveMsg:
 		return m.updateLiveMsg(msg)
 
+	case mcpAuthorizationPollTickMsg:
+		return m.applyMCPAuthorizationPollTick(msg)
+
 	case tea.WindowSizeMsg:
 		return m.onResize(msg)
 
@@ -441,6 +444,11 @@ func (m Model) finishStartupResume() (tea.Model, tea.Cmd) {
 	if liveCmd := (&m).armLiveFeed(); liveCmd != nil {
 		cmd = tea.Batch(cmd, liveCmd)
 	}
+	if m.caps.WorkspaceEnrollment {
+		m.enrollment = workspaceEnrollmentState{}
+		m.workspaceEnrollmentNotice = "workspace services not connected — /tools-connect to enable protected tools"
+		return m, cmd
+	}
 	if mm, submitCmd, ok := m.startInitialPrompt(); ok {
 		return mm, tea.Batch(cmd, submitCmd)
 	}
@@ -452,6 +460,9 @@ func (m Model) finishStartupResume() (tea.Model, tea.Cmd) {
 // server-rejected-selection fallback, issue #41) can reuse it before layering its
 // warning on top.
 func (m Model) applySessionReady(msg client.SessionReadyMsg) (tea.Model, tea.Cmd, bool) {
+	// A ready message establishes (or re-establishes) the authoritative session
+	// binding. A recovery from any prior binding must never cross it.
+	m.promptRecovery = nil
 	m = m.bindSessionID(msg.SessionID)
 	m = m.syncDebugTarget()
 	m.failedStepRetryTried = false
@@ -477,6 +488,10 @@ func (m Model) applySessionReady(msg client.SessionReadyMsg) (tea.Model, tea.Cmd
 		m.statusMsg = m.deps.Theme.Style("success").Render(note)
 	} else {
 		m.statusMsg = "connected"
+	}
+	if msg.Capabilities.WorkspaceEnrollment {
+		m.enrollment = workspaceEnrollmentState{}
+		m.workspaceEnrollmentNotice = "workspace services not connected — /tools-connect to enable protected tools"
 	}
 	// Now that we are idle + (still) empty, the welcome splash shows: transmit the
 	// Kitty mascot if the terminal supports it (no-op otherwise). The WindowSizeMsg
@@ -518,8 +533,11 @@ func (m Model) applySessionReady(msg client.SessionReadyMsg) (tea.Model, tea.Cmd
 	// session via resetSession and never reaches this seam).
 	// A "/"-prefixed seed (e.g. -p /clear) is dispatched by submitPrompt's
 	// builtin dispatcher — documented behavior.
-	if mm, submitCmd, ok := m.startInitialPrompt(); ok {
-		return mm, tea.Batch(cmd, submitCmd), true
+	// InitialPrompt remains queued until the complete frozen catalogue is admitted.
+	if !msg.Capabilities.WorkspaceEnrollment {
+		if mm, submitCmd, ok := m.startInitialPrompt(); ok {
+			return mm, tea.Batch(cmd, submitCmd), true
+		}
 	}
 	if m.deps.ConnectOpen {
 		m.connect.err = m.deps.ConnectError
@@ -621,6 +639,15 @@ func (m Model) updateLifecycle(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		return m, nil, true
 	case client.SessionReadyMsg:
 		return m.applySessionReady(msg)
+	case workspaceEnrollmentMsg:
+		mm, cmd := m.applyWorkspaceEnrollment(msg)
+		return mm, cmd, true
+	case workspaceEnrollmentPresentationMsg:
+		mm, cmd := m.applyWorkspaceEnrollmentPresentation(msg)
+		return mm, cmd, true
+	case workspaceEnrollmentPollTickMsg:
+		mm, cmd := m.applyWorkspaceEnrollmentPollTick(msg)
+		return mm, cmd, true
 	case client.SessionCompactedMsg:
 		if msg.RequestToken != m.compactRequestToken || msg.SessionID != m.sessionID || !m.compactPending {
 			return m, nil, true
@@ -804,9 +831,15 @@ func (m Model) updateLifecycle(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 			}
 			return m, tea.Batch(m.refreshCmd(), m.armLiveFeed()), true
 		}
-		// A transport error has no semantic commit fact. Always pause and preserve
-		// staged follow-ups, regardless of legacy transient-looking status text.
-		m.conv.addError("stream error: " + msg.Err.Error())
+		// A transport error has no semantic commit fact. Restore only an
+		// unmodified text-only draft; a server-confirmed enrollment rejection is
+		// the one case eligible for a later exact-once replay.
+		authoritative := isWorkspaceEnrollmentRejection(msg.Err.Error())
+		m.recoverPrompt(authoritative)
+		if authoritative && m.promptRecovery != nil {
+			m.promptRecovery.autoReplay = true
+		}
+		m.conv.addError("stream error: " + friendlyWorkspaceEnrollmentRejection(msg.Err.Error()))
 		m = m.endRun(stopError)
 		liveCmd := m.armLiveFeed()
 		mm, drainCmd := m.drainQueue(stopError)
@@ -843,11 +876,20 @@ func (m Model) updateLifecycle(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		// Clean close. If a run was still active (no terminal result seen),
 		// finalise it; otherwise it's the expected post-result close (no-op).
 		if m.phase == phaseRunning || m.phase == phaseAwaitingApproval {
+			m.recoverPrompt(false)
 			m = m.endRun("closed")
 			modeCmd := m.retryPendingModeCmd()
 			liveCmd := m.armLiveFeed()
 			mm, drainCmd := m.drainQueue("closed")
 			return mm, tea.Batch(m.refreshCmd(), modeCmd, drainCmd, liveCmd), true
+		}
+		if m.phase == phaseAuthorizing {
+			// A parked run's Converse stream closes before its authorization
+			// continuation is reattached. Invalidate that source so afterEvent cannot
+			// re-arm its closed channel into the resumed run.
+			m.stream = nil
+			m.streamCh = nil
+			m.streamGen++
 		}
 		return m, nil, true
 	case client.SessionRenamedMsg:
@@ -942,6 +984,18 @@ func (m Model) onRenderTick() (tea.Model, tea.Cmd) {
 		return m, m.renderTickCmd()
 	}
 	return m, nil
+}
+
+func mcpAuthorizationNotice(msg client.MCPAuthorizationMsg) string {
+	displayName := oneLine(sanitizeTerminal(msg.DisplayName))
+	target := ""
+	if displayName != "" {
+		target = " for " + displayName
+	}
+	if msg.Status == mcpAuthorizationStatusPending {
+		return "MCP authorization required" + target + ". Open Browser or Copy Link to start automatic checking, or Cancel."
+	}
+	return fmt.Sprintf("MCP authorization%s: %s.", target, oneLine(sanitizeTerminal(msg.Status)))
 }
 
 // updateStreamEvent reduces the per-event stream msgs into the conversation. It
@@ -1095,6 +1149,8 @@ func (m *Model) beginTurnEvent() {
 // only so neither dispatcher grows past the cyclomatic-complexity bound.
 func (m Model) updateStreamSecondary(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case client.MCPAuthorizationMsg:
+		return m.applyMCPAuthorization(msg)
 	case client.PermissionRetractMsg:
 		// An active approval surface consumes retractions through HandleMsg. A
 		// stale retraction after close is transport-only and needs no approval state.
@@ -1396,16 +1452,20 @@ func (m Model) settleFailedClearSource() (Model, tea.Cmd, bool) {
 // totals, surfaces a terminal error, ends the run, and drains any queued prompts.
 // Extracted from updateStreamEvent's switch to keep that dispatcher flat.
 func (m Model) applyResult(msg client.ResultMsg) (tea.Model, tea.Cmd) {
+	// A terminal result is a server-side run fact, so this prompt cannot be replayed
+	// by a later unrelated control response.
+	m.promptRecovery = nil
 	// ResultMsg.Usage is the run's CUMULATIVE total; fold it into the session
 	// total exactly once here. The per-turn TurnEndMsg feeds only the
 	// context-occupancy meter (m.contextTokens), never m.usage — adding both
 	// would double-count.
 	m.usage = sumUsage(m.usage, msg.Usage)
 	if msg.Stop == stopError && msg.Error != "" {
+		rejection := friendlyWorkspaceEnrollmentRejection(msg.Error)
 		if msg.Permanent {
-			m.conv.addPermanentError(msg.Error)
+			m.conv.addPermanentError(rejection)
 		} else {
-			m.conv.addError(msg.Error)
+			m.conv.addError(rejection)
 		}
 	}
 	if m.clearPending != nil {
@@ -1996,6 +2056,8 @@ func (m Model) dispatchPhaseKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch m.phase {
 	case phaseAwaitingApproval:
 		return m, nil
+	case phaseAuthorizing:
+		return m.onMCPAuthorizationKey(msg)
 	case phaseRunning:
 		return m.onRunningKey(msg)
 	case phaseIdle:
@@ -2586,9 +2648,15 @@ func (m Model) onRunningKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // composition state. ClearPrompt is the explicit action for dropping a draft.
 func (m Model) onRunningCancel() (tea.Model, tea.Cmd) {
 	stream := m.stream
+	authorizationStream := m.authorization.controlStream
+	if m.authorization.runningControlGen != m.authorization.controlGen {
+		authorizationStream = nil
+	}
 	m.statusMsg = "cancelling…"
 	return m, func() tea.Msg {
-		if stream != nil {
+		if authorizationStream != nil {
+			_ = authorizationStream.SendCancel()
+		} else if stream != nil {
 			_ = stream.SendCancel()
 		}
 		return nil
@@ -3112,6 +3180,24 @@ func (m Model) preparePromptContent(text string) (string, client.MediaResult, bo
 	return strings.TrimSpace(text), media, hadPastes, hadStaged, nil
 }
 
+// recoverPrompt restores a text-only prompt only while it still belongs to this
+// exact run. An existing draft is user-authored replacement state and wins.
+func (m *Model) recoverPrompt(authoritative bool) {
+	r := m.promptRecovery
+	if r == nil || r.sessionID != m.sessionID || r.streamGen != m.streamGen {
+		m.promptRecovery = nil
+		return
+	}
+	if m.prompt.Value() != "" {
+		m.promptRecovery = nil
+		return
+	}
+	m.prompt.Rewrite(r.text)
+	if !authoritative {
+		m.promptRecovery = nil
+	}
+}
+
 // submitPrompt opens a fresh Converse run for the textarea text, sends the
 // mandatory prompt frame, starts the reader goroutine, and arms WaitForMsg.
 func (m Model) submitPrompt() (tea.Model, tea.Cmd) {
@@ -3164,6 +3250,12 @@ func (m Model) submitPrompt() (tea.Model, tea.Cmd) {
 	// This is a genuine new user turn, so it starts a fresh one-retry budget.
 	// Automatic failed-step retry bypasses submitPrompt and therefore cannot re-arm itself.
 	m.failedStepRetryTried = false
+	m.promptRecovery = nil
+	// Only a plain text prompt is recoverable. Attachments, media, and staged file
+	// parts have one-shot lifecycle and must never be replayed implicitly.
+	if text != "" && len(media.Parts) == 0 && !hadPastes && !hadStaged {
+		m.promptRecovery = &promptRecovery{text: text, sessionID: m.sessionID, streamGen: m.streamGen + 1}
+	}
 	if len(media.Descriptors) > 0 {
 		m.conv.addUserWithMedia(text, media.Descriptors)
 	} else {
@@ -3259,6 +3351,8 @@ func (m Model) startFailedStepRetry() (Model, tea.Cmd) {
 // openRun owns the common one-Converse-run transport setup. firstFrame must send
 // exactly one Prompt or RetryStart before any control frame.
 func (m Model) openRun(retry bool, firstFrame func(*client.Stream) error) (Model, tea.Cmd) {
+	m.streamGen++ // reserve this generation before OpenConverse so open failures are correlated too
+	m.authorization.runningControlGen = 0
 	runCtx, cancel := context.WithCancel(m.deps.Ctx)
 	var stream *client.Stream
 	var err error
@@ -3274,12 +3368,12 @@ func (m Model) openRun(retry bool, firstFrame func(*client.Stream) error) (Model
 	m.stream = stream
 	m.streamCh = ch
 	m.cancelRun = cancel
-	m.streamGen++
 	go stream.ReadLoop(runCtx, ch)
 
+	gen := m.streamGen
 	send := func() tea.Msg {
 		if err := firstFrame(stream); err != nil {
-			return authStreamErr(m, err)
+			return streamMsg{gen: gen, msg: authStreamErr(m, err)}
 		}
 		return nil
 	}
@@ -3554,8 +3648,12 @@ func (m Model) updateReconnectMsg(rm reconnectMsg) (tea.Model, tea.Cmd) {
 		if _, ok := msg.(client.ResultMsg); ok {
 			return m, m.waitReconnectCmd()
 		}
-		// Delivery notes reduce through the normal event path and are deduped by FireID.
-		if _, isDelivery := msg.(client.DeliveryNoteMsg); !isDelivery {
+		// Delivery notes and pending authorization markers reduce through the normal
+		// event path. The latter restores the actionable card after reconnect; its
+		// durable payload contains correlation only, never a presentation URL.
+		switch msg.(type) {
+		case client.DeliveryNoteMsg, client.MCPAuthorizationMsg:
+		default:
 			return m, m.waitReconnectCmd()
 		}
 		mm, cmd := m.updateStreamEvent(msg)
@@ -4494,12 +4592,13 @@ func (m Model) handleOpenError(err error, cancel context.CancelFunc, retry bool)
 		mm, connectCmd := m.reduceLiveAuthRecovery(streamErr.AuthReason)
 		return mm.(Model), connectCmd
 	}
+	m.recoverPrompt(false)
 	m = m.endRun(stopError)
 	if retry {
 		m.failedStepRetryRun = false
 		m.statusMsg = m.deps.Theme.Style("warning").Render("retry transport failed: " + sanitizeTerminal(err.Error()) + " — use /retry to try again")
 	} else {
-		m.conv.addError("open run: " + err.Error())
+		m.conv.addError("open run: " + friendlyWorkspaceEnrollmentRejection(err.Error()))
 	}
 	if len(m.queued) > 0 {
 		m.queuePaused = stopError

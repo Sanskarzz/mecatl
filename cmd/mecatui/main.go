@@ -25,8 +25,10 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -43,6 +45,7 @@ import (
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/internal/adapter/clientauth"
 	"github.com/stacklok/mecatl/internal/adapter/credentialstore"
+	"github.com/stacklok/mecatl/internal/adapter/mcpauthority"
 	"github.com/stacklok/mecatl/internal/adapter/slogdiag"
 	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
 	"github.com/stacklok/mecatl/internal/app"
@@ -364,6 +367,9 @@ func runWithOptions(argv []string, options runOptions) error {
 	applyDebugConfig(cfg, &deps)
 	deps.ServerImpl = mecatuiServerImplementation
 	wireManualCompaction(&deps, cl)
+	deps.MCPAuthorization = cl
+	deps.WorkspaceEnrollment = cl
+	deps.OpenURL = openBrowserURL
 
 	// Apply keymap overrides (CLI for now).
 	if err := applyKeyOverridesToDeps(cfg, &deps); err != nil {
@@ -634,6 +640,22 @@ func emitDebugPrivacyWarning(w io.Writer, target string, servers ...string) {
 			_, _ = fmt.Fprintf(w, "mecatui: PRIVACY: selected reporting servers available to this debug session: %s\n", strings.Join(servers, ", "))
 		}
 	}
+}
+
+// openBrowserURL opens only a presentation URL obtained from the authenticated
+// server control surface. The URL is an argument, never a shell fragment.
+func openBrowserURL(_ context.Context, url string) error {
+	var name string
+	switch runtime.GOOS {
+	case "darwin":
+		name = "open"
+	case "windows":
+		name = "rundll32"
+		return exec.Command(name, "url.dll,FileProtocolHandler", url).Start()
+	default:
+		name = "xdg-open"
+	}
+	return exec.Command(name, url).Start()
 }
 
 // emitAuthFileWarning is the command-root's single warning emission seam.
@@ -1161,11 +1183,14 @@ func embeddedConfig(cfg config, diag port.Diagnostics) app.Config {
 	cfg.providerFlags.ApplyResolved(&out, keys)
 	out.UseOpenAI = keys.OpenAI != ""
 	cfg.toolhiveLLMFlags.Apply(&out)
-	// Operator-tier mcp.servers profiles (settings.yaml): the embedded server
-	// is a composition root like mecated, so it loads the operator MCP profiles
-	// over the same resolver the other binaries use. The legacy --mcp-server
-	// flag stays off (heavier opt-in), but operator settings are honored here.
+	// Operator-tier MCP profiles use the canonical authority resolver (global vs
+	// broker) rather than MCPProfileLoader.Load's global-mode-only path. The
+	// embedded server supports broker construction while retaining the existing
+	// profile loader for compatibility with consumers that use it directly.
 	out.MCPProfileLoader = cliconfig.NewMCPProfileResolver(nil, os.LookupEnv)
+	out.MCPAuthorityLoader = cliconfig.NewMCPProfileResolver(nil, os.LookupEnv)
+	out.MCPAuthorityDefault = mcpauthority.Global
+	out.MCPBrokerSupported = true
 	out.ProviderCredentialLoader = cliconfig.NewProviderCredentialResolver(cfg.providerFlags, keys)
 	out.ProviderOverrides = cfg.providerFlags.EndpointOverrides()
 	return out

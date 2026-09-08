@@ -19,9 +19,10 @@ a `coordination.k8s.io` Lease per session
 **storage-free**: no PVC, no `--store-dir`, no local state — every piece of state is a
 managed service the pod talks to over the network (Redis + the k8s API server). Global
 MCP profiles use the same operator settings loader as mecated/mecatequi. The intended
-OAuth posture is a read-only environment credential injected from a Kubernetes Secret;
-rotation requires an external provisioner and pod restart. `mecak8s` never launches a
-browser and cannot run `mecated mcp login`. A mutable local credential root is accepted
+OAuth posture is one browser/session enrollment through the process-local ToolHive broker;
+it can drive multiple configured protected upstreams sequentially, and a preregistered client
+secret is injected from a Kubernetes Secret when required.
+`mecak8s` never launches a browser and cannot run `mecated mcp login`. A mutable local credential root is accepted
 only when explicitly mounted/configured, but contradicts the normal storage-free posture
 and is not recommended. It drops
 `mecated`'s `skills promote` / `config` / `perf-mcp` subcommands, ACP, and the
@@ -56,7 +57,7 @@ $ go run ./cmd/mecak8s --redis-url redis:6379 --redis-allow-plaintext --session-
 | `--redis-filesystem` | `false` | Use a principal-scoped Redis virtual workspace. Same-owner sessions share files; different issuer/subject pairs are isolated; ownerless sessions share the anonymous namespace. Mutually exclusive with `--workspace`; shell and filesystem fork/merge remain disabled. |
 | `--redis-read-ledger` | `false` | Persist each session's read-before-write evidence in Redis independently of whether file contents use Redis or a mounted workspace. Session deletion removes this ledger, not principal-shared Redis files. |
 | `--redis-allow-plaintext` | `false` | Explicitly allow unauthenticated plaintext Redis; disposable local/Kind use only. Without it an address-only `--redis-url` is **rejected at `Build`**. Never set it for a production external Redis. |
-| `--redis-username-file` / `--redis-password-file` | `""` | Paths to optional Redis ACL credentials in a mounted Kubernetes Secret. A password without a username authenticates as Redis's default ACL user; a username requires a password. Credential values are never accepted as command arguments. Any credential requires verified TLS — `--redis-tls` or `--redis-tls-ca`. When either file is configured, mecak8s watches its lexical parent and transactionally hot-reloads the complete configured Redis file set after a bounded successful probe. |
+| `--redis-username-file` / `--redis-password-file` | `""` | Paths to optional Redis ACL credentials in a mounted Kubernetes Secret. A password without a username authenticates as Redis's default ACL user; a username requires a password. Credential values are never accepted as command arguments. Any credential requires verified TLS — `--redis-tls` or `--redis-tls-ca`. When either file is configured, mecak8s watches its lexical parent and transactionally hot-reloads the complete configured Redis file set after a bounded successful probe. **This hot-reload covers only the main session-store Redis client.** When broker mode (`mcp.broker`) is also configured, the bundled MCP broker's embedded OAuth authorization server opens its own separate Redis connection (`redisstore.NewClient`) using the same credential files, but reads them once at startup and does not watch or reload them — a credential/CA rotation requires restarting the pod for that connection specifically, even though `/readyz` (driven by the reload-aware session store) stays green. |
 | `--redis-tls` | `false` | Verify Redis TLS against the host system trust store. Use for a managed Redis whose certificate chains to a public CA (Azure Cache for Redis, ElastiCache in-transit encryption). |
 | `--redis-tls-ca` | `""` | Path to a PEM CA bundle from a mounted Secret used to verify Redis TLS, **replacing** the system trust store. Use for a private CA; takes precedence over `--redis-tls`. Either flag is mandatory whenever ACL credentials are configured. The file is included in the same automatic transactional reload as Redis credential files. Client-certificate (mTLS) authentication is not supported — see [ADR 0233](../adr/0233-secure-external-redis.md). |
 | `--session-lease-k8s-namespace` | `mecatl` | Kubernetes namespace for `coordination.k8s.io` Lease-backed session leasing (the in-cluster multi-replica single-writer path). Uses in-cluster config (or the default kubeconfig out-of-cluster). The ServiceAccount needs `get,create,update,delete` on `leases` in `coordination.k8s.io` for this namespace. Empty = no leasing. |
@@ -169,10 +170,22 @@ endpoint is runtime-valid. The authentication `mode` is a closed union:
 - `none` renders only `--mcp-server=<name>=<url>`;
 - `staticBearer` renders the same flag and projects its `secretKeyRef` into the
   runtime's `MCP_<UPPERCASE_NAME>_TOKEN` convention; and
-- `oauth` renders the existing strict operator MCP profile into a read-only,
-  chart-managed ConfigMap, projects only referenced Secret keys into generated
-  `MECATL_MCP_<UPPERCASE_NAME>_*` variables, and passes
-  `--permission-config=/etc/mecatl-mcp/settings.yaml`.
+- `oauth` selects the session-scoped ToolHive broker authority, renders all configured
+  protected upstream profiles into a read-only chart-managed ConfigMap, projects only
+  preregistered client-secret `secretKeyRef` values when needed, and passes
+  `--permission-config=/etc/mecatl-mcp/settings.yaml`. It requires
+  `mcp.broker.callbackURL`, ToolHive's final public HTTPS redirect to mecatl. Global OAuth
+  profiles support the strict exact-origin `network` policy. Helm values for broker
+  OAuth must use the explicit empty policy (`additionalOrigins: []`,
+  `privateOrigins: []`, `maxRedirects: 0`); the rendered operator profile is the
+  equivalent empty network policy. Non-default controls remain rejected until
+  ToolHive can enforce the policy equivalently. Broker session, grant, and
+  authorization-transaction state is process-local and unreplicated: the chart
+  schema requires `replicaCount: 1` whenever `mcp.broker.callbackURL` is set (no
+  high availability until that state is shared), and the Deployment renders
+  `strategy.type: Recreate` instead of the default rolling update, so a config or
+  image change fully retires the old pod before starting the new one — plan a
+  broker rollout as a brief maintenance window, not a zero-downtime deploy.
 
 For example, an unauthenticated public server and a static bearer server are:
 
@@ -200,21 +213,25 @@ enforce egress with NetworkPolicy or a mesh—the chart intentionally ships no
 general NetworkPolicy. OAuth always requires HTTPS and cannot use this escape
 hatch.
 
-OAuth supports either a preregistered confidential client or a CIMD client and
-only the runtime's read-only `environment` credential mode. The Secret's
-credential record must be the canonical padded-base64 export accepted by the
-runtime. A preregistered client additionally references its client-secret key:
+OAuth supports either a preregistered confidential client or a CIMD client. This
+Helm surface does **not** accept the global-mode `profile`, `principal`, or
+`credentials.environment` fields and does not project an OAuth credential record.
+The browser starts one opaque broker enrollment for the session. ToolHive drives every
+configured protected upstream in order, owns upstream callback state and refresh, and injects
+each provider token only into its configured backend; a preregistered client alone references
+its client-secret key:
 
 ```yaml
 mcp:
+  broker:
+    # Publicly reachable HTTPS callback routed by your ingress/gateway to mecak8s.
+    callbackURL: https://agent.example/mcp/authorization/callback
   servers:
     - name: corporate
       url: https://mcp.example/mcp
       auth:
         mode: oauth
         oauth:
-          profile: cluster
-          principal: service-account:mecak8s
           issuer: https://issuer.example
           client:
             mode: preregistered
@@ -223,29 +240,92 @@ mcp:
               secretKeyRef: {name: mecak8s-mcp-oauth, key: client-secret}
           scopes: [mcp.read]
           requestRefreshToken: true
-          credentials:
-            secretKeyRef: {name: mecak8s-mcp-oauth, key: credential-record}
-            allowProcessLocalRefresh: false
           network:
             additionalOrigins: []
             privateOrigins: []
             maxRedirects: 0
+# Required whenever mcp.broker.callbackURL is set — see the OAuth mode note above.
+replicaCount: 1
 ```
 
 For CIMD, set `client.mode: cimd` and replace `preregistered` with
-`cimd: {documentURL: https://client.example/mecatl.json}`; include that exact
-origin in `network.additionalOrigins` when it differs from the issuer and MCP
-resource origins. The chart exposes no literal-secret field, arbitrary headers,
-stdio/SSE transport, local writable credential store, or browser-login flow.
-Create/export OAuth credentials outside the pod and store the resulting record
-in the referenced Secret.
+`cimd: {documentURL: https://client.example/mecatl.json}`. The callback URL must
+be an absolute public HTTPS URL with no query or fragment. It is ToolHive's final redirect
+to mecatl; separately, upstream providers return through ToolHive's fixed
+`/v1/mcp/broker/oauth/callback` route. Your ingress or gateway must route the complete
+`/v1/mcp/broker/` prefix and the configured final callback path to the mecak8s HTTP listener.
+OAuth broker mode also requires `oidc.enabled: true` with its issuer and audience: OIDC is the
+chart-supported verified caller identity for broker authorization controls. The
+chart exposes no literal-secret field, arbitrary headers, stdio/SSE transport,
+local writable credential store, or browser credential. A client secret, when
+required, stays in the referenced Kubernetes Secret and is projected only as a
+`SecretKeyRef`. Never put it in values or the generated ConfigMap. With no
+`mcp.servers`, the chart deliberately renders `mcp.mode: global`; no broker is
+constructed. A no-auth or static-bearer-only list likewise keeps the established
+global routing.
+
+`issuer` assumes the upstream authorization server supports OIDC discovery.
+Some real-world OAuth Apps — GitHub's is the common case — have no discovery
+endpoint and only plain `authorization_endpoint`/`token_endpoint` URLs. Set
+`upstream: {mode: oauth2, oauth2: {authorizationEndpoint, tokenEndpoint}}` for
+those; `issuer` is then omitted (the two are mutually exclusive — the schema
+rejects either one being set alongside the wrong `upstream.mode`). An oauth
+server may also declare its protected tool catalogue statically via `tools`
+(each entry: `name`, `description`, `inputSchema`, optional `readOnly`). Those declarations,
+like live protected discovery, stay staged until the one enrollment completes. Mecatl then
+strictly discovers every configured protected backend, collision-checks the complete result,
+and freezes it as one catalogue; failure admits no partial protected tools. The model never
+receives backend OAuth material or a per-backend authorization control. For GitHub:
+
+```yaml
+mcp:
+  broker:
+    callbackURL: https://agent.example/mcp/authorization/callback
+  servers:
+    - name: github
+      url: https://api.githubcopilot.com/mcp/
+      auth:
+        mode: oauth
+        oauth:
+          upstream:
+            mode: oauth2
+            oauth2:
+              authorizationEndpoint: https://github.com/login/oauth/authorize
+              tokenEndpoint: https://github.com/login/oauth/access_token
+          client:
+            mode: preregistered
+            preregistered:
+              id: <your-github-oauth-app-client-id>
+              secretKeyRef: {name: mecak8s-github-mcp-oauth, key: client-secret}
+          scopes: [repo, read:org, read:user]
+          requestRefreshToken: true
+          network:
+            additionalOrigins: []
+            privateOrigins: []
+            maxRedirects: 0
+          tools:
+            - name: get_me
+              description: Get details of the authenticated GitHub user
+              inputSchema: {type: object, properties: {}}
+              readOnly: true
+# Required whenever mcp.broker.callbackURL is set — see the OAuth mode note above.
+replicaCount: 1
+```
+
+> **Broker replica limitation:** broker sessions, grants, and authorization state
+> are process-local. The chart schema enforces `replicaCount: 1` whenever
+> `mcp.broker.callbackURL` is set, and the Deployment renders `strategy.type:
+> Recreate` so a rollout fully retires the old pod before starting the new one —
+> there is no high availability or zero-downtime rollout for OAuth broker mode
+> until an affinity or durable-broker design is selected.
+
 
 Changing OAuth profile metadata changes the pod-template
 `checksum/mcp-profile` annotation, causing a Deployment rollout. Kubernetes
 environment variables do not update in a running process when a Secret changes,
-and static bearer/OAuth credentials are loaded at startup: after rotating any
-referenced Secret, explicitly restart or roll out the Deployment (or use a
-Secret controller configured to do so). Keep overlapping credentials valid
+and static bearer tokens and OAuth client secrets are loaded at startup: after
+rotating a referenced Secret, explicitly restart or roll out the Deployment (or
+use a Secret controller configured to do so). Keep overlapping credentials valid
 until all replicas are ready. `extraArgs` and `extraEnv` remain available, but
 `extraEnv` cannot reuse an authentication variable generated by `mcp.servers`.
 

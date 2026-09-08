@@ -234,21 +234,6 @@ session's read-before-write evidence; deleting a session deletes that ledger but
 not the principal's shared files. mecak8s sets no TTL on either representation.
 Redis durability, backups, capacity and eviction policy remain operator concerns.
 
-:::note[MCP OAuth credentials from Kubernetes Secrets]
-
-`mecak8s` wires the operator profile's explicit read-only credential Reader from one
-base64 environment value; it installs no browser presenter and no Kubernetes Secret writer.
-The selected name must use the `MECATL_` prefix and the strict uppercase
-`[A-Z_][A-Z0-9_]{0,127}` grammar — for example,
-`MECATL_MCP_OAUTH_CREDENTIAL` — so the credential is removed from every agent-facing
-shell environment. A Secret projected as an environment variable is immutable for the running
-pod. The Reader warm-restores a valid credential. Persistent rotation requires an external
-controller to update the Secret followed by a rolling pod restart, or a future Secret backend
-using Kubernetes `resourceVersion` compare-and-swap. In-memory refresh is explicit and
-process-local; the default fails before refresh network when no writer exists.
-
-:::
-
 ---
 
 ## State topology
@@ -362,18 +347,27 @@ Server cert/key and file-backed Redis CA/ACL Secret rotations are transactional 
 the last valid generation if projection is partial or validation fails. Keep old and new
 CAs together for an overlap period, then remove the old one after leaves have rotated.
 The server client-CA trust pool remains static and changing it requires a rolling restart.
+When broker mode is also configured, its embedded OAuth authorization server opens its
+own separate Redis connection using the same credential files but does not watch or
+reload them — a rotation requires restarting the pod for that connection to pick up the
+new credentials, even though readiness (driven by the main session store) stays healthy.
 
 The Redis Secret is mounted read-only with `defaultMode: 0440` and projects exactly the configured CA and ACL keys; unrelated Secret keys are not exposed. A password key alone uses Redis's default ACL user, while a username key requires a password key. `caKey` is optional: leaving it empty selects system-trust TLS, so an install against a publicly-rooted managed Redis with no ACL renders `--redis-tls` and no Secret volume at all. `credentialsSecret` is required exactly when some key needs reading. TLS-without-ACL external deployments are valid. The rendered command receives paths only, never Secret values. `values-kind.yaml` is deliberately the only profile that permits `ko.local` and plaintext Redis, and it passes `--redis-allow-plaintext` explicitly. It is not a production configuration.
 
 ### Connect global MCP servers
 
-Use `mcp.servers` for global Streamable HTTP MCP connections. The chart supports
+Use `mcp.servers` for global Streamable HTTP MCP connections. Global OAuth profiles
+support the strict exact-origin `network` policy. For mecak8s broker OAuth, Helm values
+must use the explicit empty policy (`additionalOrigins: []`, `privateOrigins: []`,
+`maxRedirects: 0`); the rendered operator profile is the equivalent empty network
+policy. Non-default controls remain rejected until ToolHive can enforce the policy
+equivalently. The chart supports
 no authentication, a bearer from a Kubernetes Secret, or the runtime's strict
 OAuth profile. Helm checks the values structure and Secret references; `mecak8s`
 is the authority for semantic URL, canonical-origin, and loopback validation and
 fails closed at startup. A successful chart render does not bypass those runtime
 checks. The chart does not expose inline credentials, arbitrary headers,
-stdio/SSE transports, browser login, or a writable credential store.
+stdio/SSE transports, browser credentials, or a writable credential store.
 
 ```yaml
 mcp:
@@ -390,11 +384,39 @@ mcp:
 ```
 
 The static token is projected as `MCP_GITHUB_TOKEN`; it never appears in Helm
-values, arguments, or a ConfigMap. OAuth similarly projects a preregistered
-client secret (when used) and an externally exported credential record from
-Secret keys into generated `MECATL_MCP_*` variables. Its non-secret profile is
-mounted from a read-only chart-managed ConfigMap and selected with
-`--permission-config`. See the [operator guide](https://github.com/stacklok/mecatl/blob/main/docs/usage/mecak8s.md#configuring-mcp-servers-with-helm)
+values, arguments, or a ConfigMap. `staticBearer` covers a personal access
+token; for a GitHub OAuth App's real browser consent flow, use `auth.mode:
+oauth` with `upstream: {mode: oauth2, oauth2: {authorizationEndpoint,
+tokenEndpoint}}` instead of `issuer` — GitHub has no OIDC discovery endpoint —
+and optionally a static `tools` catalogue. OAuth selects the session MCP broker instead
+of global routing. One session enrollment can cover multiple configured protected upstreams:
+ToolHive drives their sequential browser flow, owns callback state and refresh, and injects
+each upstream token only into its configured backend. Mecatl exposes one opaque enrollment,
+not per-backend controls or OAuth material.
+
+Set `mcp.broker.callbackURL` to ToolHive's final public HTTPS redirect to mecatl. Your ingress
+or gateway must also route the complete fixed `/v1/mcp/broker/` prefix, including ToolHive's
+upstream callback, to the mecak8s HTTP listener. Helm rejects an OAuth server without the final
+callback URL and the runtime rejects an invalid URL. Protected static declarations and live
+discovery stay hidden until enrollment succeeds; mecatl then strictly discovers every protected
+backend, collision-checks, and freezes the complete catalogue. A failed enrollment admits no
+partial protected tools. OAuth broker mode also requires the chart's OIDC caller identity
+(`oidc.enabled: true`, issuer, and audience), so broker authorization controls have verified
+callers. The broker profile and server metadata are non-secret ConfigMap data. A preregistered
+client secret remains a `SecretKeyRef` projection only—never a values field or ConfigMap entry;
+the browser authorizes the broker for that session rather than Helm accepting a credential-record
+value. With `mcp.servers: []`, Helm explicitly
+writes `mcp.mode: global`; a no-auth or static-bearer-only list keeps the existing
+global route behavior.
+
+:::caution Process-local broker limitation
+Broker sessions and OAuth state are process-local. The chart schema now enforces
+`replicaCount: 1` whenever `mcp.broker.callbackURL` is set, and renders a
+`Recreate` rollout strategy instead of the default rolling update — there is no
+high availability or zero-downtime rollout for OAuth broker mode until an
+affinity or durable-broker decision lands.
+:::
+See the [operator guide](https://github.com/stacklok/mecatl/blob/main/docs/usage/mecak8s.md#configuring-mcp-servers-with-helm)
 for the complete OAuth values shape.
 
 Keep MCP and OAuth endpoints on HTTPS and provide pod egress through your
@@ -406,8 +428,8 @@ makes startup fail. Use it only for a tightly isolated in-cluster endpoint.
 
 OAuth profile changes alter a pod-template checksum and trigger a rollout.
 Secret-backed environment variables do not rotate inside a running pod, so roll
-the Deployment after replacing a static bearer, OAuth client secret, or OAuth
-credential record. Keep old and new credentials valid during the rollout.
+the Deployment after replacing a static bearer or OAuth client secret. Keep old
+and new credentials valid during the rollout.
 `extraArgs` and `extraEnv` remain available, but `extraEnv` cannot collide with
 environment names generated by `mcp.servers`.
 

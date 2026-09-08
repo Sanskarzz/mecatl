@@ -4,23 +4,32 @@
     method func (*Principal).IdentityWellFramed() bool
     method func (*Principal).SameIdentity(other *Principal) bool
     method func (*Session).Abandon() error
+    method func (*Session).AbortAuthorization(reason string) ([]ToolResult, error)
+    method func (*Session).AbortWorkspaceEnrollment(id WorkspaceEnrollmentID) error
     method func (*Session).ApplyTitleGeneration(generation TitleGenerationState, attempts []TitleAttempt)
     method func (*Session).BeginRun(runID string)
     method func (*Session).BeginTurn() error
+    method func (*Session).BeginWorkspaceEnrollment(pending PendingWorkspaceEnrollment) error
     method func (*Session).BindAuthority(authority Authority) error
     method func (*Session).BoundAuthority() (Authority, bool)
     method func (*Session).Cancel() error
+    method func (*Session).ClaimAuthorization() (PendingAuthorization, error)
     method func (*Session).Complete() error
+    method func (*Session).CompleteWorkspaceEnrollment(pending PendingWorkspaceEnrollment, exactTools []string) error
     method func (*Session).Fail() error
     method func (*Session).FailedStepRetryPending() (RetryDisposition, StreamProgress, bool)
     method func (*Session).FailureMetadata() (RetryDisposition, StreamProgress)
     method func (*Session).FailurePermanence() bool
     method func (*Session).Incarnation() IncarnationID
     method func (*Session).Interrupt() error
+    method func (*Session).InterruptAuthorization() ([]ToolResult, error)
     method func (*Session).LastError() string
     method func (*Session).LimitTripped() (StopReason, bool)
     method func (*Session).PauseForApproval(ask PendingAsk) error
+    method func (*Session).PauseForAuthorization(pending PendingAuthorization) error
     method func (*Session).PendingAsk() (PendingAsk, bool)
+    method func (*Session).PendingAuthorization() (PendingAuthorization, bool)
+    method func (*Session).PendingWorkspaceEnrollment() (PendingWorkspaceEnrollment, bool)
     method func (*Session).PrepareFailedStepRetry() error
     method func (*Session).RecordAssistant(m Message) error
     method func (*Session).RecordFailureMetadata(disposition RetryDisposition, progress StreamProgress) error
@@ -40,6 +49,8 @@
     method func (*Session).Reopen() error
     method func (*Session).ReplaceHistory(messages []Message) error
     method func (*Session).ReplaceHistoryAtBoundary(messages []Message) error
+    method func (*Session).ResetUsage() error
+    method func (*Session).RestoreAuthorizationClaim(pending PendingAuthorization) error
     method func (*Session).RestoreFailedStepRetryPending(disposition RetryDisposition, progress StreamProgress) error
     method func (*Session).RestoreIncarnation(inc IncarnationID) error
     method func (*Session).RestoreLabels(owner *Principal, authority Authority) error
@@ -59,22 +70,36 @@
     method func (*Session).TitleAttempts() []TitleAttempt
     method func (*Session).TitleSourcePrompts() []string
     method func (*Session).TokenUsageSnapshot() map[UsageKind]TokenUsage
+    method func (*Session).ValidateAuthorizationState() error
     method func (Authority).Clone() Authority
     method func (Authority).Valid() bool
+    method func (AuthorizationPayload).Valid() bool
+    method func (AuthorizationResolution).Status() AuthorizationStatus
+    method func (AuthorizationResolution).Valid() bool
     method func (EnvironmentRef).Valid() bool
     method func (GrantType).Valid() bool
     method func (IncarnationID).Valid() bool
     method func (Limits).WithDefaults(d Limits) Limits
     method func (PendingAsk).Origin() AskOrigin
+    method func (PendingAuthorization).Clone() PendingAuthorization
     method func (RetryDisposition).Valid() bool
     method func (State).IsTerminal() bool
     method func (StreamProgress).Valid() bool
     method func (Usage).Add(other Usage) Usage
     method func (Usage).CacheHitRate() float64
     method func (Usage).TotalTokens() int
+    method func (WorkspaceEnrollmentID).Valid() bool
 const AskOriginHook AskOrigin = 1
 const AskOriginNone AskOrigin = 0
 const AskOriginPlan AskOrigin = 2
+const AuthorizationCancelled AuthorizationStatus = "cancelled"
+const AuthorizationClosed AuthorizationStatus = "closed"
+const AuthorizationDenied AuthorizationStatus = "denied"
+const AuthorizationExpired AuthorizationStatus = "expired"
+const AuthorizationFailed AuthorizationStatus = "failed"
+const AuthorizationGranted AuthorizationStatus = "granted"
+const AuthorizationInterrupted AuthorizationStatus = "interrupted"
+const AuthorizationPending AuthorizationStatus = "pending"
 const BlockAudio BlockKind = "audio"
 const BlockEmbeddedResource BlockKind = "embedded_resource"
 const BlockImage BlockKind = "image"
@@ -86,6 +111,8 @@ const EnvKindLocal EnvironmentKind = "local"
 const EnvKindMem EnvironmentKind = "mem"
 const EnvKindNoFS EnvironmentKind = "nofs"
 const EvApproval EventType = "approval"
+const EvAuthorizationRequired EventType = "authorization.required"
+const EvAuthorizationResolved EventType = "authorization.resolved"
 const EvCompaction EventType = "compaction"
 const EvCompactionArchive EventType = "compaction.archive"
 const EvHook EventType = "hook"
@@ -185,6 +212,7 @@ const SessionKindScheduled SessionKind = "scheduled"
 const SessionKindSubagent SessionKind = "subagent"
 const SessionKindTeamMember SessionKind = "team_member"
 const SessionKindUnknown SessionKind = "unknown"
+const StateAuthorizing State = "authorizing"
 const StateAwaiting State = "awaiting"
 const StateCancelled State = "cancelled"
 const StateCompleted State = "completed"
@@ -244,6 +272,7 @@ func New(id SessionID, mode PermissionMode, ref EnvironmentRef, limits Limits, c
 func NewAssistantMessage(text string, reasoning string, calls []ToolCall) Message
 func NewAudioContent(mime string, data []byte) (Content, error)
 func NewAudioURLContent(mime string, rawURL string) (Content, error)
+func NewAuthorizationResolution(status AuthorizationStatus) (AuthorizationResolution, error)
 func NewContent(kind MediaKind, mime string, data []byte, rawURL string) (Content, error)
 func NewDebug(id SessionID, mode PermissionMode, ref EnvironmentRef, limits Limits, createdAt time.Time, target SessionID, targetIncarnation IncarnationID) (*Session, error)
 func NewEmbeddedResourceBlock(uri string, mimeType string, text string, blob []byte, audience []string) (Content, error)
@@ -274,6 +303,8 @@ func RepairToolResult(r ToolResult) ToolResult
 func StripProviderState(messages []Message) []Message
 func ToValidUTF8(s string) string
 func ToolBlockText(b Content) string
+func ValidAuthorizationID(value string) bool
+func ValidWorkspaceEnrollmentToolNames(names []string) bool
 func ValidateJSON(schema json.RawMessage, payload json.RawMessage) error
 func ValidateMediaParts(parts []Content) error
 func ValidateMediaURL(raw string) error
@@ -287,6 +318,10 @@ type ApprovalPayload struct{AskID string; Verdict string; Tool string; Call Tool
 type ApprovalVerdict int
 type AskOrigin int
 type Authority struct{CapabilitySet governance.CapabilitySet "json:\"capability_set\""; Provenance string "json:\"provenance\""; DefinitionIdentity string "json:\"definition_identity,omitempty\""}
+type AuthorizationBinding string
+type AuthorizationPayload struct{AuthorizationID string; DisplayName string; Call ToolCallID; ExpiresAt time.Time; Status AuthorizationStatus}
+type AuthorizationResolution struct{}
+type AuthorizationStatus string
 type BlockKind string
 type CompactionArchivePayload struct{Replaced []Message}
 type Content struct{BlockKind BlockKind "json:\"block_kind,omitempty\""; Kind MediaKind; MIMEType string; Data []byte; URL string; Text string "json:\"Text,omitempty\""; Name string "json:\"Name,omitempty\""; Title string "json:\"Title,omitempty\""; Description string "json:\"Description,omitempty\""; Size int64 "json:\"Size,omitempty\""; Audience []string "json:\"Audience,omitempty\""; Priority float64 "json:\"Priority,omitempty\""; LastModified string "json:\"LastModified,omitempty\""}
@@ -294,8 +329,10 @@ type Conversation struct{Messages []Message}
 type Counters struct{Turns int; ToolCalls int; ConsecutiveFailures int}
 type EnvironmentKind string
 type EnvironmentRef struct{Kind EnvironmentKind; ID string; Revision string}
-type Event struct{Type EventType; Seq int64; Turn int; Text string; Title *TitlePayload; ToolCall *ToolCall; ToolResult *ToolResult; Ask *PendingAsk; ModelRetry *ModelRetryPayload; RequestManifest *RequestManifestPayload; NetworkAttempt *NetworkAttemptPayload; Result *ResultPayload; TurnEnd *TurnEndPayload; Hook *HookPayload; Approval *ApprovalPayload; CompactionArchive *CompactionArchivePayload; UserPrompt *UserPromptPayload; Usage *Usage; Subagent *SubagentPayload; Team *TeamPayload; Parallel *ParallelPayload; RunID string; Actor *Principal; Schedule *SchedulePayload; Steer *SteerPayload}
+type Event struct{Type EventType; Seq int64; Turn int; Text string; Title *TitlePayload; ToolCall *ToolCall; ToolResult *ToolResult; Ask *PendingAsk; ModelRetry *ModelRetryPayload; RequestManifest *RequestManifestPayload; NetworkAttempt *NetworkAttemptPayload; Authorization *AuthorizationPayload; Result *ResultPayload; TurnEnd *TurnEndPayload; Hook *HookPayload; Approval *ApprovalPayload; CompactionArchive *CompactionArchivePayload; UserPrompt *UserPromptPayload; Usage *Usage; Subagent *SubagentPayload; Team *TeamPayload; Parallel *ParallelPayload; RunID string; Actor *Principal; Schedule *SchedulePayload; Steer *SteerPayload}
 type EventType string
+type ExternalAuthorization struct{ID string; DisplayName string; Binding AuthorizationBinding; ExpiresAt time.Time}
+type ExternalBinding string
 type GrantType string
 type HookDecision string
 type HookPayload struct{Phase string; Tool string; Decision HookDecision; CallID ToolCallID}
@@ -308,6 +345,8 @@ type NetworkAttemptPayload struct{SessionID SessionID "json:\"session_id\""; Run
 type ParallelEventKind string
 type ParallelPayload struct{ParentCallID string; Kind ParallelEventKind; Join string; BranchCount int; BranchIndex int; ChildID string; ChildIncarnation IncarnationID; BranchLabel string; Goal string; RoutedCategory string; RoutedModel string; RoutingReason string; Model string; ToolName string; IsError bool; ToolCount int; Text string; Detail string; InnerKind EventType; Failed bool; Stop StopReason; Usage Usage; DurationMs int64; Winner int}
 type PendingAsk struct{AskID string; Tool string; Args json.RawMessage; Reason string; Call ToolCallID "json:\"call,omitempty\""; ConfiguredAsk bool; FlooredConfiguredAllow bool; HookOriginated bool "json:\"hook_originated,omitempty\""; PlanOriginated bool "json:\"plan_originated,omitempty\""}
+type PendingAuthorization struct{Authorization ExternalAuthorization; Call ToolCall; Deferred []ToolCall}
+type PendingWorkspaceEnrollment struct{ID WorkspaceEnrollmentID; RequiredServices uint32; ExpiresAt time.Time}
 type PermissionMode string
 type PlacementMetadata struct{Kind string "json:\"kind,omitempty\""; Label string "json:\"label,omitempty\""; Branch string "json:\"branch,omitempty\""; Revision string "json:\"revision,omitempty\""}
 type Principal struct{Issuer string; Subject string; GrantType GrantType; Name string}
@@ -318,7 +357,7 @@ type ResultPayload struct{Stop StopReason; Text string; Usage Usage; Error strin
 type RetryDisposition uint8
 type Role string
 type SchedulePayload struct{ScheduleName string; FireID string; SessionID SessionID; Kind string; Stop StopReason; Err string}
-type Session struct{ID SessionID; State State; Mode PermissionMode; Conversation *Conversation; Limits Limits; Counters Counters; Usage Usage; EnvironmentRef EnvironmentRef; Placement PlacementMetadata; Profile string; ProviderID string; ModelID string; ReasoningEffort string; DebugMCPServers []string; DebugMCPTools []string; DebugTargetFingerprint string; Title string; TitleProvenance TitleProvenance; TitleGeneration TitleGenerationState; TitleRevision uint64; Owner *Principal; Authority Authority; Kind SessionKind; Relationship SessionRelationship; CreatedAt time.Time}
+type Session struct{ID SessionID; State State; Mode PermissionMode; Conversation *Conversation; Limits Limits; Counters Counters; Usage Usage; EnvironmentRef EnvironmentRef; Placement PlacementMetadata; ExternalBinding ExternalBinding; Profile string; ProviderID string; ModelID string; ReasoningEffort string; DebugMCPServers []string; DebugMCPTools []string; DebugTargetFingerprint string; Title string; TitleProvenance TitleProvenance; TitleGeneration TitleGenerationState; TitleRevision uint64; Owner *Principal; Authority Authority; Kind SessionKind; Relationship SessionRelationship; CreatedAt time.Time}
 type SessionID string
 type SessionKind string
 type SessionRelationship struct{ScheduleName string "json:\"schedule_name,omitempty\""; OriginSessionID SessionID "json:\"origin_session_id,omitempty\""; OriginIncarnation IncarnationID "json:\"origin_incarnation,omitempty\""; ParentSessionID SessionID "json:\"parent_session_id,omitempty\""; ParentIncarnation IncarnationID "json:\"parent_incarnation,omitempty\""; CallID ToolCallID "json:\"call_id,omitempty\""; BranchIndex *int "json:\"branch_index,omitempty\""; TeamID string "json:\"team_id,omitempty\""; MemberName string "json:\"member_name,omitempty\""; DebugTargetID SessionID "json:\"debug_target_id,omitempty\""; DebugTargetIncarnation IncarnationID "json:\"debug_target_incarnation,omitempty\""}
@@ -346,9 +385,11 @@ type TurnEndPayload struct{Usage Usage; Estimated bool; DurationMs int64; TTFTMs
 type Usage struct{InputTokens int; OutputTokens int; CacheReadTokens int; CacheWriteTokens int; ReasoningTokens int}
 type UsageKind string
 type UserPromptPayload struct{Text string; Parts []Content}
+type WorkspaceEnrollmentID string
 var ErrIllegalTransition error
 var ErrInvalidContent error
 var ErrInvalidMediaURL error
 var ErrInvalidSessionMetadata error
 var ErrNoPendingAsk error
+var ErrNoPendingAuthorization error
 var ErrOwnerAlreadySet error

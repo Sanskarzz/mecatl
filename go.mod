@@ -36,7 +36,7 @@ require (
 	github.com/stacklok/mecatl/provider/anthropic v0.0.0-00010101000000-000000000000
 	github.com/stacklok/mecatl/provider/openai v0.0.0-00010101000000-000000000000
 	github.com/stacklok/mecatl/provider/openaichat v0.0.0-00010101000000-000000000000
-	github.com/stacklok/toolhive v0.46.0
+	github.com/stacklok/toolhive v0.45.0
 	github.com/stacklok/toolhive-core v0.0.43
 	github.com/tiktoken-go/tokenizer v0.8.0
 	go.opentelemetry.io/contrib/instrumentation/runtime v0.69.0
@@ -82,7 +82,6 @@ require (
 	github.com/go-git/gcfg v1.5.1-0.20230307220236-3a3c6141e376 // indirect
 	github.com/go-git/go-billy/v5 v5.9.0 // indirect
 	github.com/go-git/go-git/v5 v5.19.2 // indirect
-	github.com/go-openapi/testify/enable/yaml/v2 v2.6.1 // indirect
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
 	github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99 // indirect
 	github.com/kevinburke/ssh_config v1.6.0 // indirect
@@ -95,6 +94,7 @@ require (
 	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp v0.22.0 // indirect
 	go.opentelemetry.io/otel/log v0.22.0 // indirect
 	go.opentelemetry.io/otel/sdk/log v0.22.0 // indirect
+	go.starlark.net v0.0.0-20260630144053-529d8e869a14 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 )
 
@@ -233,7 +233,7 @@ require (
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/openzipkin/zipkin-go v0.4.2 // indirect
-	github.com/ory/fosite v0.49.0 // indirect
+	github.com/ory/fosite v0.49.0
 	github.com/ory/go-acc v0.2.9-0.20230103102148-6b1c9a70dbbe // indirect
 	github.com/ory/go-convenience v0.1.0 // indirect
 	github.com/ory/x v0.0.665 // indirect

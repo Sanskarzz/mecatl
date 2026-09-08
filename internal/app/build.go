@@ -67,6 +67,8 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/k8slease"
 	"github.com/stacklok/mecatl/internal/adapter/mcp"
 	mcpsource "github.com/stacklok/mecatl/internal/adapter/mcp/source"
+	"github.com/stacklok/mecatl/internal/adapter/mcpauthority"
+	"github.com/stacklok/mecatl/internal/adapter/mcpbroker"
 	"github.com/stacklok/mecatl/internal/adapter/memory"
 	"github.com/stacklok/mecatl/internal/adapter/modelhook"
 	"github.com/stacklok/mecatl/internal/adapter/openaicodex"
@@ -849,13 +851,33 @@ type Config struct {
 
 	// MCP: static servers, the resource meta-tools toggle, the prompt-expander
 	// toggle, and the live ToolHive workload source.
-	MCPServers []mcp.ServerConfig
+	MCPServers                []mcp.ServerConfig
+	MCPAuthority              *mcpauthority.Result
+	MCPBrokerDiscovered       []mcpbroker.ToolDefinition
+	MCPBrokerCaller           mcpbroker.Caller
+	MCPBrokerAuthorizedCaller mcpbroker.AuthorizedCaller
+	MCPBrokerOptions          []mcpbroker.Option
 	// MCPProfileLoader resolves operator-tier profiles with the same permission
 	// resolver Build already owns. Command roots install it so settings are not
 	// parsed a second time and secret lookup remains a runtime-only operation.
 	MCPProfileLoader interface {
 		Load(*permconfig.MCPSection) ([]mcp.ServerConfig, interface{ Close() error }, error)
 	}
+	// MCPAuthorityLoader resolves the operator mcp: section into exactly one
+	// mode-specific authority (global XOR broker) via the canonical authority
+	// resolver (internal/cliconfig.ResolveMCPAuthority), instead of
+	// MCPProfileLoader.Load's global-mode-only path — Load unconditionally
+	// requires OAuth credential configuration even when mcp.mode: broker
+	// deliberately carries none. A command root that supports broker mode
+	// installs THIS in addition to MCPProfileLoader; Build prefers it whenever
+	// both are set. MCPAuthorityDefault is the mode assumed when the operator
+	// config omits mcp.mode; MCPBrokerSupported gates whether broker mode is
+	// even offered by this root's transport.
+	MCPAuthorityLoader interface {
+		LoadAuthority(*permconfig.MCPSection, mcpauthority.Mode, bool) (*mcpauthority.Result, error)
+	}
+	MCPAuthorityDefault mcpauthority.Mode
+	MCPBrokerSupported  bool
 	// MCPProfileLifecycle owns credential stores/readers used by MCPServers.
 	// Build closes it after the global MCP manager/controllers and before other
 	// source lifecycles. It is nil for programmatic and legacy static configs.
@@ -1321,8 +1343,20 @@ type ProviderCredentials struct {
 // Built is the result of Build: the assembled server.Service plus a Close func
 // that tears down composition-owned resources. Close is always safe to call.
 type Built struct {
-	Service *server.Service
-	Close   func()
+	Service               *server.Service
+	MCPBroker             *mcpbroker.Runtime
+	MCPBrokerHandlers     mcpbroker.HandlerBundle
+	MCPBrokerCallbackPath string
+	Close                 func()
+}
+
+// MountMCPBrokerHandlers mounts the complete fixed broker bundle on a
+// process-owned HTTP mux. A build with no broker HTTP surface is a no-op.
+func (b *Built) MountMCPBrokerHandlers(mux *http.ServeMux) error {
+	if b.MCPBrokerHandlers.Empty() {
+		return nil
+	}
+	return b.MCPBrokerHandlers.Mount(mux, b.MCPBrokerCallbackPath)
 }
 
 // Build assembles the LLM provider, session store, tool catalog, agent engine,
@@ -1332,6 +1366,43 @@ type Built struct {
 // The returned Built.Close must be deferred by the caller to release the MCP
 // manager on shutdown. Build itself starts no listeners — serving is the caller's
 // responsibility (see cmd/mecated/serve and cmd/mecatui/embed).
+//
+// applyMCPAuthority folds a resolved *mcpauthority.Result onto cfg: broker mode
+// leaves cfg.MCPServers untouched (the broker vertical, wired further down in
+// Build, owns the OAuth-protected route set instead), global mode populates
+// cfg.MCPServers/MCPProfileLifecycle exactly as MCPProfileLoader.Load would
+// have. Centralised here so both the operator-config and no-config branches of
+// Build's authority resolution apply it identically.
+func applyMCPAuthority(cfg *Config, authority *mcpauthority.Result, profileLifecycle *interface{ Close() error }) error {
+	if authority == nil {
+		return fmt.Errorf("MCP authority loader returned nil authority")
+	}
+	cfg.MCPAuthority = authority
+	if authority.Mode() == mcpauthority.Broker {
+		return nil
+	}
+	servers, lifecycle, ok := authority.Global()
+	if !ok {
+		return fmt.Errorf("global MCP authority is incomplete")
+	}
+	cfg.MCPServers = servers
+	cfg.MCPProfileLifecycle = lifecycle
+	*profileLifecycle = lifecycle
+	return nil
+}
+
+// validateMCPAuthority rejects mutually exclusive MCP construction paths after
+// the effective authority, including any loader result, has been resolved.
+func validateMCPAuthority(cfg Config) error {
+	if cfg.MCPAuthority != nil && cfg.MCPAuthority.Mode() == mcpauthority.Broker && len(cfg.MCPServers) != 0 {
+		return fmt.Errorf("broker MCP authority cannot be combined with programmatic MCPServers")
+	}
+	return nil
+}
+
+// Build assembles the provider registry, catalog, policy, and engine into a
+// server.Service per the given Config. It is the single composition root every
+// cmd/ main calls.
 //
 //nolint:gocyclo // composition root: long sequential wiring with reverse-order teardown; inherent.
 func Build(ctx context.Context, cfg Config) (*Built, error) {
@@ -1486,14 +1557,21 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		return nil, learningErr
 	}
 	if resolver, ok := cfg.permResolver.(*permconfig.Resolver); ok {
-		if cfg.MCPProfileLoader == nil {
+		if cfg.MCPAuthorityLoader != nil {
+			authority, err := cfg.MCPAuthorityLoader.LoadAuthority(resolver.OperatorMCP(), cfg.MCPAuthorityDefault, cfg.MCPBrokerSupported)
+			if err != nil {
+				return nil, err
+			}
+			if err := applyMCPAuthority(&cfg, authority, &mcpProfileLifecycle); err != nil {
+				return nil, err
+			}
+		} else if cfg.MCPProfileLoader == nil {
 			if mcpCfg := resolver.OperatorMCP(); mcpCfg != nil && len(mcpCfg.Servers) > 0 {
 				cfg.diag().Log(ctx, port.LevelWarn,
 					"operator-tier mcp.servers configured but no MCP profile loader is wired; servers ignored",
 					"count", len(mcpCfg.Servers))
 			}
-		}
-		if cfg.MCPProfileLoader != nil {
+		} else {
 			profiles, lifecycle, err := cfg.MCPProfileLoader.Load(resolver.OperatorMCP())
 			if err != nil {
 				return nil, err
@@ -1505,6 +1583,14 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		if models := resolver.OperatorModelPolicy(); models != nil {
 			cfg.contextWindows = map[string]map[string]int(models.ContextWindows)
 		}
+	} else if cfg.MCPAuthorityLoader != nil {
+		authority, err := cfg.MCPAuthorityLoader.LoadAuthority(nil, cfg.MCPAuthorityDefault, cfg.MCPBrokerSupported)
+		if err != nil {
+			return nil, err
+		}
+		if err := applyMCPAuthority(&cfg, authority, &mcpProfileLifecycle); err != nil {
+			return nil, err
+		}
 	} else if cfg.MCPProfileLoader != nil {
 		profiles, lifecycle, err := cfg.MCPProfileLoader.Load(nil)
 		if err != nil {
@@ -1513,6 +1599,9 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		cfg.MCPServers = profiles
 		cfg.MCPProfileLifecycle = lifecycle
 		mcpProfileLifecycle = lifecycle
+	}
+	if err := validateMCPAuthority(cfg); err != nil {
+		return nil, err
 	}
 
 	definitions := cfg.ProviderDefinitions
@@ -1838,8 +1927,20 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	// complete after a declared loss.
 	engineStore := mutationCapability.GuardStore(store)
 	cfg.ToolCallRecorder = mutationCapability.GuardToolCallRecorder(cfg.ToolCallRecorder)
+	var brokerDeclaration mcpauthority.BrokerConfig
+	brokerSelected := false
+	if cfg.MCPAuthority != nil {
+		brokerDeclaration, brokerSelected = cfg.MCPAuthority.Broker()
+	}
+	if brokerSelected {
+		// Authority is exclusive: broker sessions receive only their explicit
+		// attachment wrappers, never the process-global MCP manager as a fallback.
+		cfg.MCPServers = nil
+		cfg.ToolHiveEnabled = false
+	}
 	engine, mainMgr, mcpProvider, mcpInventory, sessFactory, learned, policy, assets, scheduleMgr, mcpClose, err := buildEngine(ctx, cfg, reg, provider, store, engineStore, agentReg)
 	if err != nil {
+		childLiveness.Close()
 		agentClose()
 		storeClose()
 		commandConnClose()
@@ -1853,6 +1954,95 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		previousClose := mcpClose
 		mcpClose = func() { reservations.Close(); previousClose() }
 	}
+
+	var brokerRuntime *mcpbroker.Runtime
+	var brokerProcess *mcpbroker.Process
+	var brokerHandlers mcpbroker.HandlerBundle
+	var brokerCallbackPath string
+	brokerConfigured := len(brokerDeclaration.Routes) != 0 || cfg.MCPBrokerCaller != nil ||
+		cfg.MCPBrokerAuthorizedCaller != nil || len(cfg.MCPBrokerDiscovered) != 0 || len(cfg.MCPBrokerOptions) != 0
+	if brokerSelected && brokerConfigured {
+		occupied := make([]string, 0)
+		if assets.rootCatalog != nil {
+			for _, registered := range assets.rootCatalog.Tools() {
+				occupied = append(occupied, registered.Spec().Name)
+			}
+		}
+		if cfg.MCPBrokerCaller == nil && cfg.MCPBrokerAuthorizedCaller == nil && len(cfg.MCPBrokerDiscovered) == 0 && len(cfg.MCPBrokerOptions) == 0 {
+			authRedisClient, authStorageClose, err := buildToolHiveAuthRedisClient(cfg)
+			if err != nil {
+				childLiveness.Close()
+				mcpClose()
+				agentClose()
+				storeClose()
+				commandConnClose()
+				return nil, fmt.Errorf("build bundled MCP broker: %w", err)
+			}
+			brokerProcess, err = mcpbroker.NewToolHiveProcess(ctx, toolHiveBrokerConfig(brokerDeclaration.Routes, brokerDeclaration.CallbackURL, occupied, authRedisClient))
+			if err != nil {
+				authStorageClose()
+				childLiveness.Close()
+				mcpClose()
+				agentClose()
+				storeClose()
+				commandConnClose()
+				return nil, fmt.Errorf("build bundled MCP broker: %w", err)
+			}
+			brokerRuntime = brokerProcess.Runtime
+			brokerHandlers = brokerProcess.Handlers
+		} else {
+			catalogue, compileErr := mcpbroker.Compile(brokerDeclaration, cfg.MCPBrokerDiscovered, occupied)
+			if compileErr != nil {
+				childLiveness.Close()
+				mcpClose()
+				agentClose()
+				storeClose()
+				commandConnClose()
+				return nil, fmt.Errorf("build MCP broker catalogue: %w", compileErr)
+			}
+			options := append([]mcpbroker.Option(nil), cfg.MCPBrokerOptions...)
+			if cfg.MCPBrokerAuthorizedCaller != nil {
+				options = append(options, mcpbroker.WithAuthorizedCaller(cfg.MCPBrokerAuthorizedCaller))
+			}
+			brokerRuntime, err = mcpbroker.New(catalogue, cfg.MCPBrokerCaller, options...)
+			if err != nil {
+				childLiveness.Close()
+				mcpClose()
+				agentClose()
+				storeClose()
+				commandConnClose()
+				return nil, fmt.Errorf("build MCP broker: %w", err)
+			}
+		}
+		if brokerDeclaration.CallbackURL != "" {
+			if brokerProcess == nil {
+				brokerHandlers, brokerCallbackPath, err = brokerRuntime.Handlers(brokerDeclaration.CallbackURL)
+			} else {
+				brokerCallbackPath, err = mcpBrokerCallbackPath(brokerDeclaration.CallbackURL)
+			}
+			if err != nil {
+				if brokerProcess != nil {
+					_ = brokerProcess.Close()
+				} else {
+					_ = brokerRuntime.Close()
+				}
+				childLiveness.Close()
+				mcpClose()
+				agentClose()
+				storeClose()
+				commandConnClose()
+				return nil, fmt.Errorf("build MCP broker handlers: %w", err)
+			}
+		}
+	}
+	closeBroker := func() {
+		if brokerProcess != nil {
+			_ = brokerProcess.Close()
+		} else if brokerRuntime != nil {
+			_ = brokerRuntime.Close()
+		}
+	}
+
 	// Stash the resolved skill seam's command-bridge inputs onto the Build-scope
 	// cfg (the commandSource precedent) so buildCommandLister — which runs HERE,
 	// after buildEngine returned the assets — composes a SkillCommandSource over
@@ -2272,9 +2462,10 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		// Per-session client MCP (ACP session/new mcpServers): builds a scoped engine
 		// over the client's streaming-HTTP servers, mounted for that session only. Built
 		// in buildEngine so it shares the main engine's exact collaborators.
-		SessionEngine:      sessFactory,
-		DebugSessionEngine: debugSessionEngineFactory(cfg, reg, provider, store, eventLog, policy, assets.globalMgr),
-		DebugMCP:           assets.globalMgr != nil && len(assets.globalMgr.Tools()) > 0,
+		SessionEngine:          sessFactory,
+		SessionEngineWithTools: assets.sessionFactoryWithTools,
+		DebugSessionEngine:     debugSessionEngineFactory(cfg, reg, provider, store, eventLog, policy, assets.globalMgr),
+		DebugMCP:               assets.globalMgr != nil && len(assets.globalMgr.Tools()) > 0,
 		// ModeNeedsEngine (ADR 0030 Layer 3): tells the Service whether a session's
 		// PermissionMode would resolve a model DIFFERING from the shared engine's model
 		// (cfg.Model) — i.e. whether a plan slot is configured AND it resolves to a
@@ -2343,6 +2534,13 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		PlanModeAutoApprove: cfg.PlanModeAutoApprove,
 		Interactive:         cfg.Interactive,
 	}
+	if brokerRuntime != nil {
+		svcCfg.MCPBroker = brokerRuntime
+	}
+	// Workspace enrollment (pre-prompt authenticate-then-discover) applies only
+	// to the bundled ToolHive Process path: a plain Compile-based Runtime has no
+	// live discovery primitive and never satisfies the enrollment boundary.
+	svcCfg.WorkspaceEnrollment = brokerProcess.WorkspaceEnrollmentRequired()
 	if assets.reflectionRepository == nil || provider == nil {
 		svcCfg.ReflectSession = nil
 	}
@@ -2354,6 +2552,8 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 
 	svc, err := server.NewServiceContext(ctx, svcCfg)
 	if err != nil {
+		closeBroker()
+		childLiveness.Close()
 		mcpClose()
 		agentClose()
 		storeClose()
@@ -2396,6 +2596,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		refreshClose()
 		svc.Close()
 		childLiveness.Close()
+		closeBroker()
 		mcpClose()
 		agentClose()
 		storeClose()
@@ -2441,6 +2642,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 			assets.forkReaper.Close()
 		}
 		childLiveness.Close()
+		closeBroker()
 		mcpClose()
 		closeProfiles()
 		agentClose()
@@ -2450,7 +2652,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	})
 	profilesTransferred = true
 	managedTempTransferred = true
-	return &Built{Service: svc, Close: closeAll}, nil
+	return &Built{Service: svc, MCPBroker: brokerRuntime, MCPBrokerHandlers: brokerHandlers, MCPBrokerCallbackPath: brokerCallbackPath, Close: closeAll}, nil
 }
 
 // resolveAgentSeam resolves the agent-definition registry from cfg: the
@@ -2698,7 +2900,25 @@ func sessionEngineFactory(
 	assets catalogAssets,
 	guardrailWaiver *modelhook.WaiverHolder,
 ) server.SessionEngineFactory {
+	withTools := sessionEngineFactoryWithTools(cfg, reg, provider, store, policy, hooks, mcpProvider, instructions, assets, guardrailWaiver)
 	return func(ctx context.Context, sel server.ProviderSelector, specs []mcp.ServerConfig, profile server.SessionProfile, workspace string, mode session.PermissionMode) (server.SessionEngineResult, error) {
+		return withTools(ctx, sel, specs, profile, workspace, mode, nil)
+	}
+}
+
+func sessionEngineFactoryWithTools(
+	cfg Config,
+	reg *providerRegistry,
+	provider port.LLMProvider,
+	store port.SessionStore,
+	policy port.PermissionPolicy,
+	hooks port.HookRunner,
+	mcpProvider mcp.Provider,
+	instructions prompt.InstructionAssembler,
+	assets catalogAssets,
+	guardrailWaiver *modelhook.WaiverHolder,
+) server.SessionEngineWithToolsFactory {
+	return func(ctx context.Context, sel server.ProviderSelector, specs []mcp.ServerConfig, profile server.SessionProfile, workspace string, mode session.PermissionMode, sessionTools []tool.Tool) (server.SessionEngineResult, error) {
 		// Pin the CHILD permission resolver to THIS session's base root (issue
 		// #32): a per-session engine's subagents/members/branches must resolve
 		// project permission rules from the SESSION's pre-fork root — the
@@ -2890,6 +3110,7 @@ func sessionEngineFactory(
 			noFS:            noFS,
 			mode:            mode,
 			skillPartitions: skillPartitions,
+			sessionTools:    sessionTools,
 		})
 
 		// Identical to the main engine in every NON-provider Deps field except the
@@ -3854,6 +4075,7 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 	// catalog is assembled over the SAME collaborators as the shared one. It keeps
 	// the UNWRAPPED hooks: the Phase-2b reviewer fires once per MAIN-engine Stop,
 	// not per per-session stop (one of the two sanctioned per-session deltas).
+	assets.sessionFactoryWithTools = sessionEngineFactoryWithTools(cfg, reg, provider, engineStore, sharedPolicy, hooks, mcpProvider, instructions, assets, guardrailWaiver)
 	sessFactory := sessionEngineFactory(cfg, reg, provider, engineStore, sharedPolicy, hooks, mcpProvider, instructions, assets, guardrailWaiver)
 	// The build-once assets travel back to Build whole so every catalog assembly
 	// and service projection share the same resolved collaborators.

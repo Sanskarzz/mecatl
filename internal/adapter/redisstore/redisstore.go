@@ -216,6 +216,41 @@ func newWithConfig(cfg Config, deps storeDependencies) (*Store, error) {
 	return st, nil
 }
 
+// NewClient builds a standalone redis.UniversalClient using the SAME
+// connection policy (address, credential files, TLS) as NewWithConfig, minus
+// the session-store scaffolding (metadata index, reload lifecycle, client
+// generations). It is for a caller that needs its OWN Redis connection to the
+// SAME managed instance — e.g. the bundled MCP-broker's embedded OAuth
+// authorization server, which stores under a distinct key prefix — without
+// reaching into this Store's internal, rotation-managed client. The caller
+// owns the returned client's lifecycle (Close it when done).
+//
+// Credentials/CA material are read ONCE, here, at construction: unlike the
+// main session-store client (NewWithConfig with cfg.reloadEnabled()), this
+// client does NOT watch its credential/CA files and does NOT hot-reload after
+// an ACL or CA rotation — go-redis reconnects using the SAME static
+// Username/Password/TLS baked into tcredis.Config, which exposes no
+// credentials-provider or reload hook. After a rotation, this client's
+// reconnects fail with the stale material while /readyz (driven by the main
+// store's reload-aware client) stays green, masking the failure as broker-only
+// OAuth breakage. A rotation therefore requires restarting the process for
+// this specific client. Document this limitation at every call site's own
+// operator-facing docs rather than implying parity with NewWithConfig.
+func NewClient(cfg Config) (redis.UniversalClient, error) {
+	if err := validateAddr(cfg.Addr); err != nil {
+		return nil, err
+	}
+	conn, err := connectionConfigWithReader(cfg, defaultStoreDependencies().readFile)
+	if err != nil {
+		return nil, err
+	}
+	client, err := tcredis.NewClient(context.Background(), &conn)
+	if err != nil {
+		return nil, fmt.Errorf("redisstore: connect %q: %w", cfg.Addr, err)
+	}
+	return client, nil
+}
+
 // validateAddr enforces host:port on EVERY path, secure and plaintext alike.
 // Its errors never echo addr: an operator who passes a redis:// URL can embed a
 // password in the userinfo, and this error reaches the diagnostics log.
