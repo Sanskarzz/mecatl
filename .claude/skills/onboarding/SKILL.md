@@ -20,8 +20,9 @@ Substantive interface-bearing work uses two human checkpoints:
    machine-readable `## Human decisions` section.
    Unchecked decisions keep it `draft`; `proposed` means every human decision needed for
    implementation is resolved and recorded. It opens a **Plan / Interface** PR, then stops.
-2. **Human contract review** marks the plan `approved` and merges it. Approved means
-   reviewed, not shipped.
+2. **Human contract review** merges the plan PR. Merging is the approval event;
+   no separate status-line edit is required. `/plan-orchestrate` proves approval by git
+   ancestry and corrects a lagging `proposed` label on entry.
 3. **`/plan-orchestrate <slug>`** starts from the merged approved commit, uses run-local
    `.scratch/orchestrate/<slug>/` state and isolated TDD workers, gates and panel-reviews
    the implementation, then opens only the **Implementation** PR.
@@ -38,6 +39,14 @@ same PR. `/to-acceptance-plan` prepares
 the plan on the eventual combined branch and stops without opening a plan PR; only an
 explicit `/plan-orchestrate` invocation adds implementation and opens the sole Combined PR.
 Trivial/mechanical edits remain exempt. Every path preserves human merge authority.
+
+Two carve-outs put discretion with the human, never the agent: explicitly
+requested **exploratory/spike work** skips the plan and orchestration entirely — build it
+locally, never merge it to `main` as-is, and re-enter the spine normally if it's worth
+shipping. Separately, the directing human may **explicitly waive the spine** for a named
+piece of work; the waiver lifts only the plan/interface ceremony, not the layering rules, the
+AGENTS.md invariants, or the human-merge requirement. Do not infer either carve-out yourself
+or push the spine onto a request that already named one.
 
 Issue references on plan PRs are non-closing (`Relates to #N` or `Tracking: #N`). Only a
 final implementation PR that fully completes the issue uses `Closes #N` or `Fixes #N`.
