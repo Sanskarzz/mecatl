@@ -24,7 +24,8 @@ imagePullSecrets: []
 # default automatically — no --default-provider flag needed. The Secret
 # itself can come from anywhere (a `kubectl create secret` in Kind, an
 # ExternalSecret in a real cluster, ...); this values shape is identical
-# either way.
+# either way. MECATL_INSTALLATION_ID and chart-generated authentication
+# environment names are reserved; rendering fails if extraEnv collides with one.
 extraEnv: []
 
 # extraArgs appends command-line arguments to the mecak8s agent container.
@@ -100,6 +101,14 @@ defaultProvider: ""
 model: ""
 maxRunTokens: null
 maxTeamTokens: null
+
+# Stable, non-secret identity exported on mecak8s OTel resources. Empty is safe
+# only for live Helm install/upgrade: Helm creates a UUID on install and preserves
+# the live ConfigMap value on ordinary upgrades. Offline/template-based GitOps must
+# set a canonical UUID because lookup is unavailable and uuidv4 changes each render.
+# Set an explicit value for identity continuity across uninstall/reinstall too.
+telemetry:
+  installationID: ""
 
 # A real provider (mockProvider: false) requires OIDC and either pod TLS or an
 # explicitly asserted gateway TLS boundary. The unsafe bypass remains for local
