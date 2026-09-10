@@ -22,7 +22,8 @@ mecated --version
 ```
 
 `--version` prints the build identity and exits without starting a server or
-reading configuration, so it is a safe first check.
+reading configuration, so it is a safe first check. Homebrew and release-archive
+binaries report the release tag they were built from, such as `v0.1.0`.
 
 Upgrade, hold, and remove the formula with Homebrew's normal commands:
 
@@ -85,6 +86,9 @@ Kubernetes runtime, which is image-only and not part of the formula.
 
 ## Build from source
 
+A source build requires Go 1.26.6 or later and
+[Task](https://taskfile.dev/) v3. Run the build from the repository root.
+
 A checkout builds every supplied executable into `bin/`, including the ones the
 formula does not ship — `mecademo` (the offline demo), `mecatequi` (the
 single-shot CI runner), and `mecak8s`:
@@ -95,9 +99,8 @@ task build
 
 Run a source build with its path prefix, `bin/mecatui`, or put `mecated` and
 `mecatui` on your `PATH` with `task install`. The rest of this documentation
-writes the plain command name. The
-[prerequisites and build reference](https://github.com/stacklok/mecatl/blob/main/docs/usage/install.md)
-lists the required toolchain versions and the other build targets.
+writes the plain command name. Run `task --list` to see the development and
+validation targets available in the checkout.
 
 ## Next steps
 
