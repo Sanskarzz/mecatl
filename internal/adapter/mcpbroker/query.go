@@ -53,9 +53,10 @@ func (*attachmentQueryTool) target(call session.ToolCall) (session.ToolCall, str
 	return session.NewToolCall(call.ID, name, append(json.RawMessage(nil), remoteArgs...)), filter, nil
 }
 
-func (t *attachmentQueryTool) native(call session.ToolCall, filter string) (tool.Tool, error) {
+func (t *attachmentQueryTool) native(ctx context.Context, call session.ToolCall, filter string) (tool.Tool, error) {
 	route, ok := t.attachment.lookupRoute(call.Name)
 	if !ok {
+		t.attachment.runtime.logRouteUnavailable(ctx, t.attachment.logical.ref.SessionID(), diagnosticRouteSurfaceQuery)
 		return nil, errors.New("broker tool route is unavailable")
 	}
 	base := &sessionTool{attachment: t.attachment, route: route, queryFilter: filter}
@@ -73,7 +74,7 @@ func (t *attachmentQueryTool) RequestAuthorization(ctx context.Context, call ses
 	if err != nil {
 		return session.ExternalAuthorization{}, false, err
 	}
-	target, err := t.native(native, filter)
+	target, err := t.native(ctx, native, filter)
 	if err != nil {
 		return session.ExternalAuthorization{}, false, err
 	}
@@ -89,6 +90,20 @@ func (t *attachmentQueryTool) AbortAuthorization(ctx context.Context, authorizat
 	return err
 }
 
+func queryFailureReason(err error) string {
+	message := err.Error()
+	switch {
+	case strings.Contains(message, "query result could not be projected within limits"):
+		return diagnosticQueryReasonProjectionLimit
+	case strings.Contains(message, "query transport failed"), strings.Contains(message, "connect query target"):
+		return diagnosticQueryReasonTransport
+	case strings.Contains(message, "query target unavailable"):
+		return diagnosticQueryReasonTargetUnavailable
+	default:
+		return diagnosticQueryReasonExecutionUncertain
+	}
+}
+
 func (t *attachmentQueryTool) Execute(ctx context.Context, call session.ToolCall, env tool.Environment) (session.ToolResult, error) {
 	if err := ctx.Err(); err != nil {
 		return session.ToolResult{}, err
@@ -97,12 +112,13 @@ func (t *attachmentQueryTool) Execute(ctx context.Context, call session.ToolCall
 	if err != nil {
 		return session.NewToolError(call.ID, fmt.Sprintf("CallMcpWithQuery: %v", err)), nil
 	}
-	target, err := t.native(native, filter)
+	target, err := t.native(ctx, native, filter)
 	if err != nil {
 		return session.NewToolError(call.ID, fmt.Sprintf("CallMcpWithQuery: %v", err)), nil
 	}
 	result, err := target.Execute(ctx, native, env)
 	if err != nil {
+		t.attachment.runtime.logQueryFailure(ctx, queryFailureReason(err))
 		// The protected route claims before transport; never retry an uncertain call.
 		return session.NewToolError(call.ID, "CallMcpWithQuery: target may have succeeded; automatic replay refused after a query transport or projection failure"), nil
 	}
