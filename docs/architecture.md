@@ -233,7 +233,7 @@ consumers — while the heavy adapters and the composition layer stay under
 `internal/`. `engine/` **is its own Go module**
 (`github.com/stacklok/mecatl/engine`), kept in this repo as a monorepo via a
 committed `go.work`; its standalone dependency closure is just `doublestar` +
-`robfig/cron` + `github.com/goccy/go-yaml` + `x/net/html` + `x/sync` (+ test-only `goleak`), so an external consumer importing `engine/agent`
+`robfig/cron` + `github.com/goccy/go-yaml` + `mvdan.cc/sh/v3/syntax` + `x/net/html` + `x/sync` (+ test-only `goleak`), so an external consumer importing `engine/agent`
 pulls in that small set rather than mecatl's full require cone (see
 [ADR 0036](adr/0036-engine-module.md)). The exported identifiers of the **eight
 core packages** (`session`, `governance`, `learning`, `tool`, `prompt`, `port`, `team`,
@@ -602,7 +602,7 @@ flowchart LR
     oai["openai · mockllm"]
     fs["osfs (+CommandRunner) · memfs"]
     st["memstore · jsonlstore · redisstore · sessnap"]
-    tools["tools (Read/ListDir/Edit/Write/Copy/Move/Remove/Grep/Glob/WebFetch/WebSearch + optional Bash)"]
+    tools["tools (Read/ListDir/Edit/Write/Copy/Move/Remove/Grep/Glob/WebFetch/WebSearch + optional Shell)"]
     pp["permpolicy · hookexec · modelhook"]
     tel["telemetry (OTel metrics+spans · Prometheus exporter · OTLP)"]
     ext["mcp (streaming-HTTP)\nmemory · dream · soul · forker · tokenizer"]
@@ -648,9 +648,10 @@ per-package `doc.go` files and honoured by the code:
 | Package | May import |
 |---|---|
 | `session`, `governance`, `tool`, `prompt` (domain) | stdlib + other domain packages. Never `adapter`, `agent`, `contracts`, `os`, or any third-party library. |
+| `engine/internal/shellcompat` | stdlib + `mvdan.cc/sh/v3/syntax` only. It is an engine-internal Shell execution-compatibility helper, not a public domain or policy package. |
 | `port` | domain packages + stdlib (`context`, `io`, `iter`, `time`). |
-| `agent` (application) | domain + `port` + stdlib only. Never an adapter or `contracts`. (Tests may import adapters.) |
-| `engine/adapter/*` | domain + `port` + the one external library it adapts. Production files never import `agent`; `search`/`webfetch` import the domain leaf `governance` for canonical untrusted-content framing instead. This boundary is enforced by `engine/arch/layering_test.go` (`TestNoEngineAdapterImportsAgent`). |
+| `agent` (application) | domain + the internal `engine/internal/shellcompat` helper + `port` + stdlib only. Never an adapter or `contracts`. (Tests may import adapters.) |
+| `engine/adapter/*` | domain + `port` + the one external library it adapts. The sole Shell-compatibility exception is `engine/adapter/fstools` → `engine/internal/shellcompat`; production files otherwise never import `agent`. `search`/`webfetch` import the domain leaf `governance` for canonical untrusted-content framing instead. This boundary is enforced by `engine/arch/layering_test.go` (`TestNoEngineAdapterImportsAgent`). |
 | `internal/adapter/*` | host adapter dependencies are explicit rather than uniformly agent-free. `server` imports `agent` to drive and relay runs, `tokenizer` implements `agent.TokenCounter`/compaction seams, and `modelhook` imports `agent` only for the shared `StripLoneCodeFence` parser while importing `governance` for canonical fence policy. Other deliberate adapter→adapter carve-outs include: (1) `mcpperf` → `telemetry` for the `RuntimeSnapshot` DTO; (2) `soul`/`memory` → `skills` for `ScanForInjection`; (3) `permconfig`/`skills`/`agents`/`soul`/`memory` → the stdlib-only `xdgconfig` path-resolution leaf; and (4) `soul`/`memory` → `engine/prompt` only for compile-time source-port assertions. |
 | `contracts/gen` | generated; protobuf + gRPC runtime. |
 | `app` (composition) | the shared engine/service assembly (`app.Build`). MAY import adapters + `agent` + (via `server`) `contracts/gen`. Nothing imports it but the `cmd/` mains. |
@@ -1077,7 +1078,7 @@ Two deliberate cycle-breaks worth noting, documented in code:
   a `port↔tool` cycle. See the package note in `engine/tool/tool.go`.
   `Environment` bundles a `Workspace`, an optional bound `CommandRunner`, and an
   exact backend identity `EnvironmentRef{Kind, ID, Revision}`. FS tools obtain
-  `env.Workspace()`; Bash obtains `env.CommandRunner()`. Workspace content mutation remains
+  `env.Workspace()`; Shell obtains `env.CommandRunner()`. Workspace content mutation remains
   version-aware: Read records an opaque `FileVersion`, new-file Write is create-only,
   and Edit/existing-file Write conditionally replace. The optional additive
   `WorkspaceNamespace` capability supplies `ReadDir`, non-recursive `Remove`,
@@ -1129,7 +1130,7 @@ last-good snapshot, and never persists it into conversation history. The stable 
 is unchanged, and the legacy value-omitting `UserModelAssembler` remains the standard
 composition path for now.
 
-**Skills as slash commands.** The resolved, admitted skills inventory also exposes each skill as a `/<skill-name>` command. A syntactically valid name expands only when it is in that inventory; it then loads the instruction body and the same bounded logical asset inventory as the `Skill` tool. Asset names are appended after ordinary command parsing and placeholder substitution so metadata stays literal. A slash command does not fetch asset content: when the instructions need a textual asset, the model calls `Skill` with `{name, asset}`. It gains no base directory and makes no claim about `Read` or `Bash`. In the command chain, file-backed commands take precedence over skills, skills over driver commands, and driver commands over MCP prompts; the first matching source wins. See `engine/adapter/skillfs/commandsource.go`, `engine/adapter/skillfs/tool.go`, `engine/prompt/commandsource.go`, and `internal/app/build.go` (`buildCommandExpander`).
+**Skills as slash commands.** The resolved, admitted skills inventory also exposes each skill as a `/<skill-name>` command. A syntactically valid name expands only when it is in that inventory; it then loads the instruction body and the same bounded logical asset inventory as the `Skill` tool. Asset names are appended after ordinary command parsing and placeholder substitution so metadata stays literal. A slash command does not fetch asset content: when the instructions need a textual asset, the model calls `Skill` with `{name, asset}`. It gains no base directory and makes no claim about `Read` or `Shell`. In the command chain, file-backed commands take precedence over skills, skills over driver commands, and driver commands over MCP prompts; the first matching source wins. See `engine/adapter/skillfs/commandsource.go`, `engine/adapter/skillfs/tool.go`, `engine/prompt/commandsource.go`, and `internal/app/build.go` (`buildCommandExpander`).
 
 **Typed tool results.** A `session.ToolResult` may carry typed content blocks on
 `ToolResult.Parts` (`[]session.Content`, additive — a zero-value `Parts` is the
