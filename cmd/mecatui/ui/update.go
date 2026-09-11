@@ -1072,7 +1072,7 @@ func (m Model) updateStreamEvent(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// at call time (not on the result) so the header reflects intent the moment
 		// the mutation is announced; mutatedPath gates to Edit/Write + dedupes.
 		if p, ok := mutatedPath(msg.Name, msg.Args); ok {
-			m.recordFileChange(p)
+			m.conv.recordFileChange(p)
 		}
 		return m.afterEvent()
 	case client.ToolResultMsg:
@@ -1698,7 +1698,7 @@ func (m Model) onResize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	m.clampHelpScroll()
 	if widthChanged && m.vp.Height() == viewportHeight {
 		m.refreshView()
-		m.syncStuck()
+		m.conversationView.observe(m.vp)
 	}
 	// Open modal surfaces derive geometry at Render time; no resize fan-out is needed.
 	return m, m.maybeKittyTransmit()
@@ -1809,8 +1809,8 @@ func (m *Model) maybeKittyTransmit() tea.Cmd {
 // common case (no layout change) is a cheap chrome render + compare with no re-render.
 // When the height DID change it mirrors onResize's old
 // tail: SetHeight, refreshView (re-render the conversation into the resized viewport),
-// then syncStuck (SetHeight can clamp YOffset so AtBottom flips — re-derive
-// auto-follow, otherwise the "↑ NN%" cue would lie). Width is NOT touched here (it is
+// then observes the viewport (SetHeight can clamp YOffset so AtBottom flips —
+// re-derive auto-follow, otherwise the "↑ NN%" cue would lie). Width is NOT touched here (it is
 // an onResize concern). A pointer receiver: it mutates the viewport in place.
 func (m *Model) relayout() {
 	if m.width <= 0 || m.height <= 0 {
@@ -1826,7 +1826,7 @@ func (m *Model) relayout() {
 	}
 	m.vp.SetHeight(bodyHeight)
 	m.refreshView()
-	m.syncStuck()
+	m.conversationView.observe(m.vp)
 }
 
 // physicalEscape reports the non-remappable hardware gesture. Bubble Tea's
@@ -3123,6 +3123,7 @@ var errStartupRunEntry = &sessionTranscriptError{"the chat could not be attached
 
 func (m Model) failStartupRunEntry() Model {
 	m = m.endRun("")
+	m = m.resetDocumentProjection()
 	m.conv = conversationFromTranscript(m.deps.Resume.Transcript.Messages)
 	m.modal = &sessionsState{
 		selected:        m.deps.Resume.Row,
@@ -3832,7 +3833,7 @@ func (m Model) onMouseWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
 	// A wheel event changes the scroll offset: invalidate the vpView cache so the
 	// next View() renders the new position rather than the stale pre-wheel output.
 	m.rend.invalidateVPView()
-	m.syncStuck()
+	m.conversationView.observe(m.vp)
 	return m, cmd
 }
 
@@ -3996,7 +3997,7 @@ func (m Model) onMousePress(mo tea.Mouse) (tea.Model, tea.Cmd) {
 // because copySelection's signature is shared with the right-click and
 // release-on-drag paths (which carry no disarm) and must stay unchanged.
 func (m Model) clickCopy(disarm tea.Cmd) (tea.Model, tea.Cmd) {
-	mm, cmd := m.copyPayload(selectedText(m.vp.GetContent(), m.sel))
+	mm, cmd := m.copySelection()
 	return mm, tea.Batch(cmd, disarm)
 }
 
@@ -4128,7 +4129,7 @@ func (m Model) armAutoScroll(dir autoScrollDir, x int) (tea.Model, tea.Cmd) {
 	}
 	alreadyRunning := m.sel.autoScroll != scrollNone
 	m.sel.autoScroll = dir
-	m.syncStuck()
+	m.conversationView.observe(m.vp)
 	m.extendHeadToEdge(dir, x)
 	snapshotSelection(&m)
 	if alreadyRunning {
@@ -4159,7 +4160,7 @@ func (m Model) onAutoScroll() (tea.Model, tea.Cmd) {
 		snapshotSelection(&m)
 		return m, nil
 	}
-	m.syncStuck()
+	m.conversationView.observe(m.vp)
 	m.extendHeadToEdge(dir, m.sel.dragX)
 	snapshotSelection(&m)
 	return m, m.autoScrollCmd()
@@ -4230,14 +4231,19 @@ func (m Model) onMouseRelease(mo tea.Mouse) (tea.Model, tea.Cmd) {
 	if !m.sel.active {
 		return m, nil
 	}
+	wasAutoScroll := m.sel.autoScroll != scrollNone
 	m.sel.autoScroll = scrollNone // the drag is over: kill any pending autoscroll tick
 	m.sel.autoScrollRamp = 0      // self-reset acceleration so release is a true reset seam
-	if line, col, ok := screenToContent(m, mo.X, mo.Y); ok {
-		m.sel.headL = line
-		m.sel.headC = col
+	if !wasAutoScroll {
+		if line, col, ok := screenToContent(m, mo.X, mo.Y); ok {
+			m.sel.headL = line
+			m.sel.headC = col
+		}
 	}
-	if m.sel.empty() {
+	if m.sel.empty() && m.sel.copied == "" && !wasAutoScroll {
 		m.sel = selection{}
+		// Do not let the next press re-install this completed selection's old projection.
+		m.selBase = ""
 		m.refreshView() // repaint the now-UNSTYLED content (no native highlight to clear)
 		return m, nil
 	}
@@ -4253,7 +4259,10 @@ func (m Model) onMouseRelease(mo tea.Mouse) (tea.Model, tea.Cmd) {
 // (shellWriteCmd, batched). It sets a muted "copied N chars" status. An empty
 // payload is a no-op (defensive — release already clears empties).
 func (m Model) copySelection() (tea.Model, tea.Cmd) {
-	return m.copyPayload(selectedText(m.vp.GetContent(), m.sel))
+	if !m.sel.active {
+		return m.copyPayload("")
+	}
+	return m.copyPayload(m.sel.copied)
 }
 
 // snapshotSelection records the selection's identity anchor and RE-SPLICES the
@@ -4264,37 +4273,23 @@ func (m Model) copySelection() (tea.Model, tea.Cmd) {
 // SetHighlights/ClearHighlights and no YOffset save/restore to neutralise an
 // EnsureVisible scroll-jump — re-splicing the SAME-length content never moves YOffset.
 //
-// It works off m.selBase (the unstyled conversation render, captured when the
-// selection became active and refreshed by refreshView) rather than re-rendering the
-// whole conversation, so a gesture does not rebuild the transcript or disturb the
-// viewport's scroll/line geometry. The snapshot (selectedText against the unstyled
-// base) is the identity anchor refreshView compares against to drop the selection on a
+// It works off m.selBase (the unstyled currently displayed conversation render,
+// captured when the selection became active and refreshed by refreshView) rather
+// than re-rendering the whole conversation, so a gesture does not rebuild the
+// transcript or disturb the viewport's scroll/line geometry. A pending coalesced
+// delta remains hidden until its ordinary render tick: snapshot and copy both use
+// this displayed frame. The snapshot (selectedText against the unstyled base) is
+// the identity anchor refreshView compares against to drop the selection on a
 // reflow. A pointer receiver: it mutates m.vp in place.
 func snapshotSelection(m *Model) {
 	if !m.sel.active {
 		return
 	}
-	// A dirty gesture refreshes content before the coalesced render tick. Preserve the
-	// pre-gesture tail-follow state across that growth; SetContent otherwise retains
-	// the former YOffset and briefly shows an earlier part of the transcript.
-	followTail := m.viewDirty && m.stuck
 	// snapshotSelection calls vp.SetContent (re-splicing the highlight), so the
 	// vpView cache must be invalidated so the next View() reflects the new content.
 	m.rend.invalidateVPView()
 	base := m.selBase
-	// selBase is refreshed by refreshView, but a streamed delta only marks the view
-	// dirty (deferred to the frame-cadence tick) — it does NOT re-render. A gesture
-	// that lands in that dirty window (delta arrived, tick not yet fired) would
-	// otherwise re-splice the STALE base and SetContent it, reverting the viewport to
-	// the pre-delta conversation (a "flash back" to an earlier state). Re-capture the
-	// base from the LIVE conversation whenever it is dirty so the splice always starts
-	// from current content. This re-renders the conversation, but only on a gesture
-	// that races a pending delta — never on the streaming hot path (which has no
-	// active selection gesture between deltas).
-	if m.viewDirty {
-		base = m.rend.renderConversation(&m.conv, m.expandTools)
-		m.selBase = base
-	}
+	frame := m.conversationView.frame
 	if base == "" {
 		// Defensive: no base captured (e.g. a test that set raw viewport content then
 		// pointed a selection at it without a press). Adopt the current viewport content
@@ -4302,11 +4297,15 @@ func snapshotSelection(m *Model) {
 		base = m.vp.GetContent()
 		m.selBase = base
 	}
-	m.sel.snapshot = selectedText(base, m.sel)
-	m.vp.SetContent(styleSelection(base, m.sel, m.deps.Theme.Style("selection")))
-	if followTail {
-		m.vp.GotoBottom()
+	if !m.sel.snapshotLogical(frame, base) {
+		// Some derived rows have no canonical text provenance. Keep their existing
+		// gesture behaviour; a later replacement will still clear them rather than
+		// claiming logical survival.
+		m.sel.anchorPoint, m.sel.headPoint = selectionPoint{}, selectionPoint{}
+		m.sel.snapshot = selectedText(base, m.sel)
+		m.sel.copied = m.sel.snapshot
 	}
+	m.conversationView.replaceProjection(&m.vp, styleSelection(base, m.sel, m.deps.Theme.Style("selection")))
 }
 
 // clearSelection drops any active text selection (including a pending edge-
@@ -4362,20 +4361,9 @@ func (m Model) shellWriteCmd(payload string) tea.Cmd {
 	}
 }
 
-// syncStuck re-derives the auto-follow flag from the viewport's actual position:
-// stuck is true exactly when the viewport is at the bottom. Called after every
-// scroll/wheel/nav so a scroll-up unsticks (next streaming delta then re-renders
-// in place without yanking to bottom — see refreshView) and scrolling/jumping
-// back to the bottom re-sticks (auto-follow resumes).
-func (m *Model) syncStuck() {
-	m.stuck = m.vp.AtBottom()
-}
-
 // onScrollKey is the shared conversation-scroll handler used by both onIdleKey and
 // onRunningKey: pgup/pgdn delegate to the viewport (which does its own scroll
-// math), home/end jump to top/bottom, then syncStuck re-derives auto-follow. End
-// naturally re-sticks; home (and a partial pgup) unsticks so streaming no longer
-// yanks the view to the bottom. The caller has already matched one of these keys.
+// math), home/end jump to top/bottom, then conversationView observes the result.
 func (m Model) onScrollKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	switch {
@@ -4389,8 +4377,21 @@ func (m Model) onScrollKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Any scroll-key changes the scroll offset: invalidate the vpView cache so the
 	// next View() renders the new position rather than the stale pre-scroll output.
 	m.rend.invalidateVPView()
-	m.syncStuck()
+	m.conversationView.observe(m.vp)
 	return m, cmd
+}
+
+// conversationContent produces the complete current projection, including the expanded
+// changed-files appendix which is outside the conversation renderer's block rows.
+func (m *Model) conversationContent() string {
+	frame := m.rend.renderConversationFrame(&m.conv, m.expandTools)
+	content := strings.Join(frame.lines, "\n")
+	if m.expandTools {
+		if list := m.rend.renderChangedFiles(m.conv.filesChanged); list != "" {
+			content += "\n" + list
+		}
+	}
+	return content
 }
 
 // refreshView re-renders the conversation into the viewport, keeping the view
@@ -4399,26 +4400,20 @@ func (m Model) onScrollKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // settles the flag — making "rendered ⟺ not dirty" an invariant and force-flushing
 // the tail at every turn/tool/result/error boundary regardless of tick timing.
 //
-// It re-pins ONLY when m.stuck (auto-follow). A scroll-up sets stuck=false (via
-// syncStuck), so a streaming delta re-renders the growing content in place without
-// yanking the view back to the bottom — the user's scroll-up survives streaming.
-// Scrolling/jumping back to the bottom re-sets stuck, and auto-follow resumes.
+// It re-pins only in tail-follow mode. A scroll-up switches to anchored mode, so
+// a streaming delta re-renders the growing content in place without yanking the
+// view back to the bottom. Scrolling/jumping back to the bottom resumes tail follow.
 //
-// Cost shape: renderConversation re-renders only blocks whose rev/width/expand
-// changed since the last frame (the renderer's blockCache; in practice the live
-// tail block) — settled blocks join from cache — and memoizes the WHOLE joined
-// string (joinCache), so a frame that changed no block (a cursor move, scroll, or
-// the twice-per-message renderInput) reuses the join verbatim instead of rebuilding
-// it. The residual O(scrollback) per-frame cost is vp.SetContent's line
-// split/measure of the full content. On TOP of refreshView, View() memoizes the
-// vp.View() output (renderer.vpView) so a spinner-only frame that does NOT call
-// refreshView skips the lipgloss grapheme-width pad entirely (issue #139).
+// Cost shape: renderConversationFrame reuses cached block renders and the cached
+// settled prefix; content post-processing still joins the current frame when needed.
+// View() memoizes the viewport output for spinner-only frames.
 func (m *Model) refreshView() {
 	m.viewDirty = false
 	// Any refreshView call changes the viewport content, so the vpView cache must be
 	// invalidated — the caller may be a spinner-only frame that skips refreshView
 	// entirely, in which case the vpView cache correctly serves the prior content.
 	m.rend.invalidateVPView()
+	frame := m.rend.renderConversationFrame(&m.conv, m.expandTools)
 	// FAST PATH: the line-slice handoff. When no selection is active AND the
 	// changed-files footer is not in play (it renders only under the global expand
 	// toggle), feed vp.SetContentLines directly with the incrementally-joined line
@@ -4429,19 +4424,14 @@ func (m *Model) refreshView() {
 	// selection and footer paths both post-process the JOINED STRING, so they fall
 	// back to the byte-identical string path below.
 	if !m.sel.active && !m.expandTools {
-		m.vp.SetContentLines(m.rend.renderConversationLines(&m.conv, m.expandTools))
-		if m.stuck {
-			m.vp.GotoBottom()
-		}
+		m.conversationView.replace(&m.vp, frame)
 		return
 	}
-	content := m.rend.renderConversation(&m.conv, m.expandTools)
-	// When the global details toggle is on, fold the session's changed-files list
-	// in beneath the scrollback so the muted "Δ N files" header indicator has a
-	// discoverable, scannable expansion — without a dedicated key or overlay.
+	content := strings.Join(frame.lines, "\n")
 	if m.expandTools {
-		if list := m.rend.renderChangedFiles(m.filesChanged); list != "" {
+		if list := m.rend.renderChangedFiles(m.conv.filesChanged); list != "" {
 			content += "\n" + list
+			frame = frameWithAppendix(frame, content, m.conv.changedFilesAppendixID)
 		}
 	}
 	// An active text selection is now rendered by US (styleSelection splices the
@@ -4452,14 +4442,11 @@ func (m *Model) refreshView() {
 	// so it covers every refreshView caller — the highlight survives a streaming
 	// re-render (Req 2).
 	//
-	// Identity check FIRST, against the UNSTYLED content: the anchor/head are absolute
-	// line indices, so a reflow that changed the line count above/within the selection
-	// (ctrl+t expand/collapse, compaction) now re-points them at different text. If the
-	// text under the selection no longer matches what was selected, DROP it rather than
-	// highlight/copy the wrong runes. selectedText must read the UNSTYLED content, so it
-	// runs before the splice. A pure append below leaves the selected lines untouched, so
-	// this does NOT fire for streaming (Req 2 preserved).
-	if m.sel.active && selectedText(content, m.sel) != m.sel.snapshot {
+	// A selection survives only when both logical endpoint contexts resolve and the
+	// resulting ANSI-free copied text remains byte-identical. Reading anchors may
+	// fall back; selections deliberately may not.
+	if m.sel.active && ((m.sel.anchorPoint.blockID == 0 && selectedText(content, m.sel) != m.sel.snapshot) ||
+		(m.sel.anchorPoint.blockID != 0 && !m.sel.resolveLogical(frame))) {
 		*m = m.clearSelection()
 	}
 	if m.sel.active {
@@ -4469,10 +4456,7 @@ func (m *Model) refreshView() {
 		m.selBase = content
 		content = styleSelection(content, m.sel, m.deps.Theme.Style("selection"))
 	}
-	m.vp.SetContent(content)
-	if m.stuck {
-		m.vp.GotoBottom()
-	}
+	m.conversationView.replaceContent(&m.vp, content, frame)
 }
 
 // drainQueue MERGES staged follow-ups into ONE prompt only after a healthy

@@ -33,10 +33,10 @@ type sessionStateProjection struct {
 func sessionState(m Model) sessionStateProjection {
 	return sessionStateProjection{
 		convEmpty:     m.conv.isEmpty(),
-		stuck:         m.stuck,
-		filesChanged:  m.filesChanged,
-		filesSeenLen:  len(m.filesSeen),
-		filesSeenNil:  m.filesSeen == nil,
+		stuck:         m.conversationView.mode == followTail,
+		filesChanged:  m.conv.filesChanged,
+		filesSeenLen:  len(m.conv.filesSeen),
+		filesSeenNil:  m.conv.filesSeen == nil,
 		usage:         m.usage,
 		contextTokens: m.contextTokens,
 		activeTool:    m.activeTool,
@@ -416,14 +416,14 @@ func TestClearBuiltinCreatesThenBindsThenCloses(t *testing.T) {
 	// Seed state that must remain visible until the replacement exists.
 	m.conv.addUser("earlier prompt")
 	m.conv.addError("some error")
-	m.recordFileChange("note.txt")
+	m.conv.recordFileChange("note.txt")
 	m.usage = client.Usage{InputTokens: 1000, OutputTokens: 200}
 	m.contextTokens = 1200
 	m.activeTool = "Write"
 	m.toolProgress = "writing"
 	// Scrolled up (auto-follow off): /clear must re-arm it, since an empty
 	// conversation is at-bottom and the next run must tail its streaming deltas.
-	m.stuck = false
+	m.conversationView.mode = anchored
 	m.resolvedSessionModel = client.ResolvedModel{ProviderID: "effective-provider", ModelID: "effective-model", ReasoningEffort: "high"}
 	m.createModelSelection = client.ModelSelection{ProviderID: "stale-provider", ModelID: "stale-model", ReasoningEffort: "low"}
 	m.activePlacement = client.Placement{Kind: "local", Label: "current-worktree"}
@@ -500,7 +500,7 @@ func TestClearBuiltinCreateFailureKeepsOldSession(t *testing.T) {
 	conv := m.deps.Session.(*fakeConv)
 	conv.createErr = fmt.Errorf("create unavailable")
 	m.conv.addUser("earlier prompt")
-	m.recordFileChange("note.txt")
+	m.conv.recordFileChange("note.txt")
 	oldID := m.sessionID
 
 	mm, clearCmd := m.runClear()
@@ -516,7 +516,7 @@ func TestClearBuiltinCreateFailureKeepsOldSession(t *testing.T) {
 	if m.sessionID != oldID || m.conv.isEmpty() || m.phase != phaseIdle {
 		t.Errorf("failed /clear must retain old active state: id=%q empty=%v phase=%v", m.sessionID, m.conv.isEmpty(), m.phase)
 	}
-	if m.filesChanged == nil {
+	if m.conv.filesChanged == nil {
 		t.Error("failed /clear must retain old derived UI state")
 	}
 	if got := conv.closed(); len(got) != 0 {
