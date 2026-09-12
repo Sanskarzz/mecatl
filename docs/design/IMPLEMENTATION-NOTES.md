@@ -85,6 +85,46 @@ a future Kubernetes Secret `resourceVersion` CAS backend. See
 
 ---
 
+## Native LLM endpoint lifecycle
+
+`internal/cliconfig.NativeEndpointRuntime` is the host-owned lifecycle for an
+operator-configured native LLM endpoint. It resolves the canonical endpoint identity
+and independently configured issuer and gateway trust clients before it opens protected
+storage. The encrypted record is in `mecatl/provider-oidc/v1` beneath
+the explicit `llm.credential_home`. Shared operator-only `llm.credential_key` defaults to
+`source: keyring`; explicit `source: environment` requires a valid `MECATL_*` `key_env`
+reference containing canonical padded base64 for exactly 32 bytes, reusing the MCP OAuth
+local encrypted-store decoder. The environment source never opens a keyring; no fallback,
+key generation, record migration, or re-encryption is implicit. Source/reference are not
+record identity. Invalid key material fails before storage mutation or OAuth, and enrollment
+checks existing ciphertext before authorization. The record identity binds endpoint, canonical gateway,
+exact issuer and client, optional resource audience, normalized scopes, redirect, and both trust
+policy/CA digests. A configured audience remains part of the exact identity and is requested
+and matched; omission skips both. No plaintext, environment fallback, migration, discovery, or
+credential material is persisted in sessions/events or exposed over RPC.
+
+Only embedded local mecatui supplies the bounded browser/loopback presenter. Native login's
+closed callback profile is the ToolHive-compatible registered redirect
+`http://localhost:8666/callback`; it binds only that host, port, and path, while remote
+`mecatui login ADDRESS` retains `http://127.0.0.1:18473/oauth/callback`. Sharing the
+registered redirect does not share credentials: native storage remains isolated and no
+ToolHive credential is read or copied. Mecated's loader is browser-free and holds its opened source runtimes until Build close. Status
+uses existing local read-only state only, and logout makes exact local deletion
+authoritative before bounded best-effort revocation. The transaction locker is hashed,
+owner-only, context-aware, and holds the lifecycle through exchange and CAS commit; a
+crash after upstream rotation but before local commit may require login. The access
+token is the authorization-code exchange result only—not an ID token or a caller
+bearer—and gateway requests use one pre-stream 401 refresh/retry at most.
+
+The endpoint inventory is deployment-wide, not a caller entitlement. Mecated drops
+inbound caller bearers after verification and retains only the principal for ownership.
+All admitted callers share the configured gateway identity, quota, gateway-side
+audit/retention posture, and model availability; deploy a dedicated service identity
+and separate deployments for mutually untrusted/per-user upstream authorization until
+an explicit forwarded-token or RFC 8693 exchange contract exists. See [ADR 0329](../adr/0329-native-llm-endpoint-gateway-credentials.md).
+
+---
+
 ## Caller identity embedding and OIDC module boundary
 
 The engine accepts identity only after verification. `session.PrincipalFromClaims`

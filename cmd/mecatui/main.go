@@ -431,7 +431,9 @@ func runSpecialMode(res invocationResolution) (bool, error) {
 	// Login routes are intentionally separate from transport setup.
 	switch res.mode {
 	case modeLogin:
-		return true, runLogin(res.remaining)
+		return true, runLLMCommand(res)
+	case modeLLMConfig:
+		return true, runLLMConfigCommand(res, os.Stdout, os.Stderr)
 	case modeRemoteLogin:
 		return true, runRemoteLogin(res.address, res.remaining)
 	case modeRemoteLogout:
@@ -1004,6 +1006,7 @@ const mecatuiServerImplementation = "mecatui"
 func embeddedConfig(cfg config, diag port.Diagnostics) app.Config {
 	cmdDir, enableCmds := resolveCommands(cfg)
 	skillDirs, skillsConv := resolveSkills(cfg)
+	nativeEndpointLoader := &cliconfig.NativeEndpointLoader{}
 	out := app.Config{
 		Workspace:            cfg.workspace,
 		ServerImplementation: mecatuiServerImplementation,
@@ -1188,6 +1191,8 @@ func embeddedConfig(cfg config, diag port.Diagnostics) app.Config {
 	out.MCPAuthorityDefault = mcpauthority.Global
 	out.MCPBrokerSupported = true
 	out.ProviderCredentialLoader = cliconfig.NewProviderCredentialResolver(cfg.providerFlags, keys)
+	out.NativeEndpointCredentialLoader = nativeEndpointLoader
+	out.NativeEndpointCredentialLifecycle = nativeEndpointLoader
 	out.ProviderOverrides = cfg.providerFlags.EndpointOverrides()
 	return out
 }

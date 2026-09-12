@@ -144,6 +144,21 @@ wrong ownership. Its guarantee is cooperating-process, single-host, local-filesy
 only; same-UID attacks, authenticated rollback, crash-left encrypted temporary files,
 and non-local flock/rename behavior remain outside it. See [ADR 0218](adr/0218-credential-store.md).
 
+Native LLM endpoint OAuth records use the separate `mecatl/provider-oidc/v1`
+namespace and always remain encrypted. The shared operator-only `llm.credential_key`
+selects OS keyring custody by default or explicit `source: environment` with a `MECATL_*`
+`key_env` reference to canonical padded base64 encoding exactly 32 bytes. There is no
+fallback, implicit key generation in environment mode, or migration; source/reference do
+not enter record identity. Their authenticated identity includes the endpoint, canonical gateway,
+exact issuer and client, optional resource audience, normalized scopes, fixed redirect, and
+separate issuer/gateway trust-policy and loaded-CA digests. A configured audience stays
+part of the exact identity and is requested and matched; omission skips both. A hashed owner-only
+endpoint transaction flock surrounds load, refresh exchange, and record CAS; rotated
+refresh material is committed and ambiguous commits are exactly reread before a
+bearer is returned. This serializes cooperating processes but is not a provider/store
+transaction journal: a process crash after provider-side refresh-token rotation and
+before local CAS persistence can invalidate the saved token and require a new login.
+
 The session-scoped MCP broker is a process-wide in-process runtime owned by `app.Built`.
 Broker authority is exclusive of programmatic global `MCPServers`; `app.Build` rejects a
 mixed configuration after resolving the effective authority, including a loader result,

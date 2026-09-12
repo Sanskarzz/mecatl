@@ -65,6 +65,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/grpcdriver"
 	"github.com/stacklok/mecatl/internal/adapter/hookexec"
 	"github.com/stacklok/mecatl/internal/adapter/k8slease"
+	"github.com/stacklok/mecatl/internal/adapter/llmendpoint"
 	"github.com/stacklok/mecatl/internal/adapter/mcp"
 	mcpsource "github.com/stacklok/mecatl/internal/adapter/mcp/source"
 	"github.com/stacklok/mecatl/internal/adapter/mcpauthority"
@@ -259,6 +260,16 @@ type Config struct {
 		Load(permconfig.ProviderDefinitions) (ProviderCredentials, interface{ Close() error }, error)
 	}
 	ProviderCredentialLifecycle interface{ Close() error }
+	// NativeEndpointCredentialLoader resolves an existing deployment credential
+	// for each native definition. Missing credentials leave optional endpoints
+	// status-visible but unavailable; the loader must not start enrollment.
+	NativeEndpointCredentialLoader interface {
+		Load(context.Context, permconfig.ProviderDefinition) (llmendpoint.BearerSource, error)
+	}
+	// NativeEndpointCredentialLifecycle owns loader-opened keyring/store handles.
+	NativeEndpointCredentialLifecycle interface{ Close() error }
+	// nativeEndpointTransport is the hermetic transport seam used by tests.
+	nativeEndpointTransport http.RoundTripper
 	// ProviderOverrides is the effective built-in endpoint source. Command-root CLI
 	// overrides are merged over operator settings before registry construction.
 	ProviderOverrides permconfig.ProviderOverrides
@@ -1344,6 +1355,19 @@ type ProviderCredentials struct {
 	CustomProviderAPIKeys map[string]string
 }
 
+func legacyProviderDefinitions(definitions permconfig.ProviderDefinitions) permconfig.ProviderDefinitions {
+	if definitions == nil {
+		return nil
+	}
+	legacy := make(permconfig.ProviderDefinitions, len(definitions))
+	for id, definition := range definitions {
+		if definition.Native == nil {
+			legacy[id] = definition
+		}
+	}
+	return legacy
+}
+
 // Built is the result of Build: the assembled server.Service plus a Close func
 // that tears down composition-owned resources. Close is always safe to call.
 type Built struct {
@@ -1412,11 +1436,20 @@ func validateMCPAuthority(cfg Config) error {
 func Build(ctx context.Context, cfg Config) (*Built, error) {
 	mcpProfileLifecycle := cfg.MCPProfileLifecycle
 	providerCredentialLifecycle := cfg.ProviderCredentialLifecycle
+	nativeEndpointCredentialLifecycle := cfg.NativeEndpointCredentialLifecycle
+	if nativeEndpointCredentialLifecycle == nil {
+		if lifecycle, ok := cfg.NativeEndpointCredentialLoader.(interface{ Close() error }); ok {
+			nativeEndpointCredentialLifecycle = lifecycle
+		}
+	}
 	closeProfiles := sync.OnceFunc(func() {
 		cfg.MCPProfileLifecycle = mcpProfileLifecycle
 		closeMCPProfileLifecycle(ctx, cfg)
 		if providerCredentialLifecycle != nil {
 			_ = providerCredentialLifecycle.Close()
+		}
+		if nativeEndpointCredentialLifecycle != nil {
+			_ = nativeEndpointCredentialLifecycle.Close()
 		}
 	})
 	profilesTransferred := false
@@ -1620,7 +1653,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		cfg.ProviderOverrides = mergeProviderOverrides(settingsOverrides, cfg.ProviderOverrides)
 	}
 	if cfg.ProviderCredentialLoader != nil {
-		credentials, lifecycle, err := cfg.ProviderCredentialLoader.Load(definitions)
+		credentials, lifecycle, err := cfg.ProviderCredentialLoader.Load(legacyProviderDefinitions(definitions))
 		if err != nil {
 			return nil, err
 		}
@@ -2801,6 +2834,18 @@ func adoptHealedDefault(reg *providerRegistry, providerID string, fallbackProvid
 	return resolvedProvider, healed
 }
 
+func resolveProviderSelection(reg *providerRegistry, providerID string) (providerEntry, error) {
+	if entry, ok := reg.Lookup(providerID); ok {
+		return entry, nil
+	}
+	if reg != nil {
+		if _, ok := reg.unavailableNative[providerID]; ok {
+			return providerEntry{}, fmt.Errorf("%w: %w: endpoint %q; run `mecatui llm login %s`", server.ErrInvalidArgument, llmendpoint.ErrNotEnrolled, providerID, providerID)
+		}
+	}
+	return providerEntry{}, fmt.Errorf("%w: unknown or unavailable provider %q", server.ErrInvalidArgument, providerID)
+}
+
 func selectedProviderModel(reg *providerRegistry, providerID, model string) string {
 	if model != "" {
 		return model
@@ -2828,9 +2873,9 @@ func debugSessionEngineFactory(cfg Config, reg *providerRegistry, fallback port.
 			provider, model = adoptHealedDefault(reg, providerID, provider)
 		}
 		if sel.ProviderID != "" {
-			entry, ok := reg.Lookup(sel.ProviderID)
-			if !ok {
-				return server.SessionEngineResult{}, fmt.Errorf("%w: unknown or unavailable provider %q", server.ErrInvalidArgument, sel.ProviderID)
+			entry, err := resolveProviderSelection(reg, sel.ProviderID)
+			if err != nil {
+				return server.SessionEngineResult{}, err
 			}
 			provider, providerID = entry.provider, sel.ProviderID
 			model = selectedProviderModel(reg, providerID, sel.ModelID)
@@ -2957,9 +3002,9 @@ func sessionEngineFactoryWithTools(
 			resolvedProvider, resolvedModel = adoptHealedDefault(reg, resolvedProviderID, resolvedProvider)
 		}
 		if sel.ProviderID != "" {
-			entry, ok := reg.Lookup(sel.ProviderID)
-			if !ok {
-				return server.SessionEngineResult{}, fmt.Errorf("%w: unknown or unavailable provider %q", server.ErrInvalidArgument, sel.ProviderID)
+			entry, err := resolveProviderSelection(reg, sel.ProviderID)
+			if err != nil {
+				return server.SessionEngineResult{}, err
 			}
 			resolvedProvider = entry.provider
 			resolvedProviderID = sel.ProviderID
@@ -5035,7 +5080,7 @@ func validateToolhiveLLMMode(cfg Config) error {
 	}
 	if !toolhivellm.OIDCConfigured(path) {
 		return fmt.Errorf(
-			"--toolhive-llm-mode direct requires a ToolHive LLM gateway configured with the OIDC trio (gateway_url, oidc.issuer, oidc.client_id) — run `thv llm config set` and `thv llm setup` (or `mecatui login`), or use --toolhive-llm-mode auto/proxy")
+			"--toolhive-llm-mode direct requires a ToolHive LLM gateway configured with the OIDC trio (gateway_url, oidc.issuer, oidc.client_id) — run `thv llm config set` and `thv llm setup` (or `mecatui llm login toolhive`), or use --toolhive-llm-mode auto/proxy")
 	}
 	return nil
 }

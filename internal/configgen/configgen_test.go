@@ -46,6 +46,8 @@ func authoritativeKeys() []string {
 	collect("temporary_storage", permconfig.TemporaryStorageSection{})
 	collect("storage_management", permconfig.StorageManagementSection{})
 	collect("storage_management.principals", permconfig.StorageManagementPrincipal{})
+	collect("llm", permconfig.LLMSection{})
+	collect("llm.credential_key", permconfig.NativeCredentialKey{})
 	collect("models", permconfig.ModelsSection{})
 	collect("models.router", permconfig.RouterSection{})
 	collect("models.router.categories", permconfig.RouterCategory{})
@@ -307,6 +309,7 @@ func TestSubtreeTiersAreAsPinned(t *testing.T) {
 		"reasoning-effort":       configgen.TierOperator, // operator-only: a project cannot raise the model's reasoning spend (ADR 0055)
 		"plan-mode-auto-approve": configgen.TierOperator, // operator-only: a project cannot grant an autonomous approval capability (issue #206)
 		"providers":              configgen.TierOperator, // operator-only: a project cannot choose LLM endpoints or auth posture
+		"llm":                    configgen.TierOperator, // operator-only: native endpoint identity and credential home are host authority
 		"provider_overrides":     configgen.TierOperator, // operator-only: a project cannot redirect built-in provider traffic
 		"learning":               configgen.TierProject,  // project may tighten but never raise the operator ceiling
 		"retention":              configgen.TierOperator, // operator-only: project cannot enable destructive cleanup
