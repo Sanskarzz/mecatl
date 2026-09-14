@@ -31,8 +31,8 @@ export type AgentEvent = Exclude<KnownEvent, {
 
 // @public
 export interface Agents {
-    // Warning: (ae-forgotten-export) The symbol "ListAgentsRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "ListAgentsResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ListAgentsRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ListAgentsResponse" needs to be exported by the entry point deno.d.ts
     list(request: ListAgentsRequest, options?: RequestOptions): Promise<ListAgentsResponse>;
 }
 
@@ -95,9 +95,6 @@ export function audioPart(options: MediaPartOptions): AudioPromptPart;
 export function audioPartFromBlob(blob: Blob, mimeType?: string): Promise<AudioPromptPart>;
 
 // @public
-export function audioPartFromPath(path: string | URL, mimeType: string): Promise<AudioPromptPart>;
-
-// @public
 export interface AudioPromptPart {
     // (undocumented)
     readonly bytes?: Uint8Array;
@@ -112,21 +109,6 @@ export interface AudioPromptPart {
 // @public
 export class AuthenticationError extends MecatlError {
     constructor(message: string, options: Omit<MecatlErrorOptions, "code">);
-}
-
-// @public
-export type CallToolContent = Readonly<Record<string, ToolJsonValue>> & {
-    readonly type: string;
-};
-
-// @public
-export interface CallToolResult {
-    // (undocumented)
-    readonly content: readonly CallToolContent[];
-    // (undocumented)
-    readonly isError?: boolean;
-    // (undocumented)
-    readonly structuredContent?: ToolJsonValue;
 }
 
 // @public
@@ -178,8 +160,8 @@ export interface ClientDiagnosticsOptions {
 
 // @public
 export interface Commands {
-    // Warning: (ae-forgotten-export) The symbol "ListCommandsRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "ListCommandsResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ListCommandsRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ListCommandsResponse" needs to be exported by the entry point deno.d.ts
     list(request: ListCommandsRequest, options?: RequestOptions): Promise<ListCommandsResponse>;
 }
 
@@ -190,7 +172,7 @@ export interface CompactionArchiveEventPayload {
 }
 
 // @public
-export function connect(options: NodeConnectOptions): NodeClient;
+export function connect(options: DenoConnectOptions): Client;
 
 // @public
 export type ConnectionStatus = "connecting" | "online" | "reconnecting" | "offline" | "unauthorized" | "incompatible";
@@ -209,9 +191,6 @@ export type ConnectOptions = HttpTransportOptions | InjectedTransportOptions;
 
 // @public
 export function createHttpTransport(options: HttpTransportOptions): Transport;
-
-// @public
-export function createNodeTransport(options: NodeTransportOptions): Transport;
 
 // @public
 export function createRawClient(options: RawClientOptions): RawClient;
@@ -266,10 +245,13 @@ export class CursorScopeError extends MecatlError {
 export interface DaemonInfo {
     readonly apiMajor: number;
     readonly features: readonly string[];
+    readonly grpcAddress: string;
     readonly pid: number;
-    readonly socketPath: string;
-    readonly transport: "unix";
+    readonly transport: "grpc";
 }
+
+// @public
+export type DenoConnectOptions = (NodeTransportOptions | InjectedTransportOptions) & ClientDiagnosticsOptions;
 
 // @public
 export type DiagnosticFieldValue = boolean | number | string | null;
@@ -291,11 +273,11 @@ export type DiagnosticsSink = (record: DiagnosticRecord) => void;
 
 // @public
 export interface DreamPlans {
-    // Warning: (ae-forgotten-export) The symbol "DecideDreamPlanRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "DecideDreamPlanResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "DecideDreamPlanRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "DecideDreamPlanResponse" needs to be exported by the entry point deno.d.ts
     decide(request: DecideDreamPlanRequest, options?: RequestOptions): Promise<DecideDreamPlanResponse>;
-    // Warning: (ae-forgotten-export) The symbol "GenerateDreamPlanRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "GenerateDreamPlanResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "GenerateDreamPlanRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "GenerateDreamPlanResponse" needs to be exported by the entry point deno.d.ts
     generate(request: GenerateDreamPlanRequest, options?: RequestOptions): Promise<GenerateDreamPlanResponse>;
 }
 
@@ -367,7 +349,7 @@ export type EventOf<Kind extends KnownEventKind> = Extract<KnownEvent, {
 
 // @public
 export interface EventPayloads {
-    // Warning: (ae-forgotten-export) The symbol "AuthorizationEventPayload" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "AuthorizationEventPayload" needs to be exported by the entry point deno.d.ts
     //
     // (undocumented)
     readonly "authorization.required": AuthorizationEventPayload;
@@ -502,9 +484,6 @@ export function imagePart(options: MediaPartOptions): ImagePromptPart;
 export function imagePartFromBlob(blob: Blob, mimeType?: string): Promise<ImagePromptPart>;
 
 // @public
-export function imagePartFromPath(path: string | URL, mimeType: string): Promise<ImagePromptPart>;
-
-// @public
 export interface ImagePromptPart {
     // (undocumented)
     readonly bytes?: Uint8Array;
@@ -545,54 +524,54 @@ export type KnownEventKind = (typeof MECATL_EVENT_KINDS)[number];
 
 // @public
 export interface LearnedSkills {
-    // Warning: (ae-forgotten-export) The symbol "MutateLearnedSkillRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "MutateLearnedSkillResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "MutateLearnedSkillRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "MutateLearnedSkillResponse" needs to be exported by the entry point deno.d.ts
     activate(request: MutateLearnedSkillRequest, options?: RequestOptions): Promise<MutateLearnedSkillResponse>;
     archive(request: MutateLearnedSkillRequest, options?: RequestOptions): Promise<MutateLearnedSkillResponse>;
-    // Warning: (ae-forgotten-export) The symbol "DiffLearnedSkillVersionsRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "DiffLearnedSkillVersionsResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "DiffLearnedSkillVersionsRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "DiffLearnedSkillVersionsResponse" needs to be exported by the entry point deno.d.ts
     diffVersions(request: DiffLearnedSkillVersionsRequest, options?: RequestOptions): Promise<DiffLearnedSkillVersionsResponse>;
-    // Warning: (ae-forgotten-export) The symbol "GetLearnedSkillRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "GetLearnedSkillResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "GetLearnedSkillRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "GetLearnedSkillResponse" needs to be exported by the entry point deno.d.ts
     get(request: GetLearnedSkillRequest, options?: RequestOptions): Promise<GetLearnedSkillResponse>;
-    // Warning: (ae-forgotten-export) The symbol "ListLearnedSkillsRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "ListLearnedSkillsResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ListLearnedSkillsRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ListLearnedSkillsResponse" needs to be exported by the entry point deno.d.ts
     list(request: ListLearnedSkillsRequest, options?: RequestOptions): Promise<ListLearnedSkillsResponse>;
-    // Warning: (ae-forgotten-export) The symbol "ListSkillChangesRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "ListSkillChangesResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ListSkillChangesRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ListSkillChangesResponse" needs to be exported by the entry point deno.d.ts
     listChanges(request: ListSkillChangesRequest, options?: RequestOptions): Promise<ListSkillChangesResponse>;
     reject(request: MutateLearnedSkillRequest, options?: RequestOptions): Promise<MutateLearnedSkillResponse>;
-    // Warning: (ae-forgotten-export) The symbol "RollbackLearnedSkillRequest" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "RollbackLearnedSkillRequest" needs to be exported by the entry point deno.d.ts
     rollback(request: RollbackLearnedSkillRequest, options?: RequestOptions): Promise<MutateLearnedSkillResponse>;
 }
 
 // @public
 export interface LearningAttempts {
     abandon(request: MutateLearningAttemptRequest, options?: RequestOptions): Promise<MutateLearningAttemptResponse>;
-    // Warning: (ae-forgotten-export) The symbol "GetLearningAttemptRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "GetLearningAttemptResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "GetLearningAttemptRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "GetLearningAttemptResponse" needs to be exported by the entry point deno.d.ts
     get(request: GetLearningAttemptRequest, options?: RequestOptions): Promise<GetLearningAttemptResponse>;
-    // Warning: (ae-forgotten-export) The symbol "ListLearningAttemptsRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "ListLearningAttemptsResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ListLearningAttemptsRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ListLearningAttemptsResponse" needs to be exported by the entry point deno.d.ts
     list(request: ListLearningAttemptsRequest, options?: RequestOptions): Promise<ListLearningAttemptsResponse>;
-    // Warning: (ae-forgotten-export) The symbol "MutateLearningAttemptRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "MutateLearningAttemptResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "MutateLearningAttemptRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "MutateLearningAttemptResponse" needs to be exported by the entry point deno.d.ts
     retry(request: MutateLearningAttemptRequest, options?: RequestOptions): Promise<MutateLearningAttemptResponse>;
 }
 
 // @public
 export interface LearningProposals {
-    // Warning: (ae-forgotten-export) The symbol "DecideLearningProposalRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "DecideLearningProposalResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "DecideLearningProposalRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "DecideLearningProposalResponse" needs to be exported by the entry point deno.d.ts
     decide(request: DecideLearningProposalRequest, options?: RequestOptions): Promise<DecideLearningProposalResponse>;
-    // Warning: (ae-forgotten-export) The symbol "GetLearningProposalRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "GetLearningProposalResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "GetLearningProposalRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "GetLearningProposalResponse" needs to be exported by the entry point deno.d.ts
     get(request: GetLearningProposalRequest, options?: RequestOptions): Promise<GetLearningProposalResponse>;
-    // Warning: (ae-forgotten-export) The symbol "ListLearningProposalsRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "ListLearningProposalsResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ListLearningProposalsRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ListLearningProposalsResponse" needs to be exported by the entry point deno.d.ts
     list(request: ListLearningProposalsRequest, options?: RequestOptions): Promise<ListLearningProposalsResponse>;
-    // Warning: (ae-forgotten-export) The symbol "UndoLearningPromotionRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "UndoLearningPromotionResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "UndoLearningPromotionRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "UndoLearningPromotionResponse" needs to be exported by the entry point deno.d.ts
     undoPromotion(request: UndoLearningPromotionRequest, options?: RequestOptions): Promise<UndoLearningPromotionResponse>;
 }
 
@@ -607,23 +586,23 @@ export const MAX_PROMPT_MEDIA_PARTS = 16;
 
 // @public
 export interface McpInventory {
-    // Warning: (ae-forgotten-export) The symbol "GetMcpPromptRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "GetMcpPromptResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "GetMcpPromptRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "GetMcpPromptResponse" needs to be exported by the entry point deno.d.ts
     getPrompt(request: GetMcpPromptRequest, options?: RequestOptions): Promise<GetMcpPromptResponse>;
-    // Warning: (ae-forgotten-export) The symbol "ListMcpPromptsRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "ListMcpPromptsResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ListMcpPromptsRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ListMcpPromptsResponse" needs to be exported by the entry point deno.d.ts
     listPrompts(request: ListMcpPromptsRequest, options?: RequestOptions): Promise<ListMcpPromptsResponse>;
-    // Warning: (ae-forgotten-export) The symbol "ListMcpResourcesRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "ListMcpResourcesResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ListMcpResourcesRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ListMcpResourcesResponse" needs to be exported by the entry point deno.d.ts
     listResources(request: ListMcpResourcesRequest, options?: RequestOptions): Promise<ListMcpResourcesResponse>;
-    // Warning: (ae-forgotten-export) The symbol "ListMcpSourcesRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "ListMcpSourcesResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ListMcpSourcesRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ListMcpSourcesResponse" needs to be exported by the entry point deno.d.ts
     listSources(request: ListMcpSourcesRequest, options?: RequestOptions): Promise<ListMcpSourcesResponse>;
-    // Warning: (ae-forgotten-export) The symbol "ListToolHiveGroupsRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "ListToolHiveGroupsResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ListToolHiveGroupsRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ListToolHiveGroupsResponse" needs to be exported by the entry point deno.d.ts
     listToolHiveGroups(request: ListToolHiveGroupsRequest, options?: RequestOptions): Promise<ListToolHiveGroupsResponse>;
-    // Warning: (ae-forgotten-export) The symbol "ReadMcpResourceRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "ReadMcpResourceResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ReadMcpResourceRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ReadMcpResourceResponse" needs to be exported by the entry point deno.d.ts
     readResource(request: ReadMcpResourceRequest, options?: RequestOptions): Promise<ReadMcpResourceResponse>;
 }
 
@@ -686,18 +665,10 @@ export interface ModelRetryEventPayload {
 
 // @public
 export interface Models {
-    // Warning: (ae-forgotten-export) The symbol "ListModelsRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "ListModelsResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ListModelsRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ListModelsResponse" needs to be exported by the entry point deno.d.ts
     list(request: ListModelsRequest, options?: RequestOptions): Promise<ListModelsResponse>;
 }
-
-// @public
-export interface NodeClient extends Client {
-    tool(name: string, schema: ToolSchema, handler: ToolHandler, options?: ToolOptions): ToolDefinition;
-}
-
-// @public
-export type NodeConnectOptions = (NodeTransportOptions | InjectedTransportOptions) & ClientDiagnosticsOptions;
 
 // @public
 export interface NodeTransportCommonOptions extends CredentialOptions {
@@ -881,8 +852,8 @@ export interface RawClientOptions {
 
 // @public
 export interface Reflection {
-    // Warning: (ae-forgotten-export) The symbol "ReflectSessionRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "ReflectSessionResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ReflectSessionRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ReflectSessionResponse" needs to be exported by the entry point deno.d.ts
     reflect(request: ReflectSessionRequest, options?: RequestOptions): Promise<ReflectSessionResponse>;
 }
 
@@ -963,35 +934,35 @@ export interface ScheduleEventPayload {
 
 // @public
 export interface Schedules {
-    // Warning: (ae-forgotten-export) The symbol "CreateScheduleRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "CreateScheduleResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "CreateScheduleRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "CreateScheduleResponse" needs to be exported by the entry point deno.d.ts
     create(request: CreateScheduleRequest, options?: RequestOptions): Promise<CreateScheduleResponse>;
-    // Warning: (ae-forgotten-export) The symbol "DeleteScheduleRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "DeleteScheduleResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "DeleteScheduleRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "DeleteScheduleResponse" needs to be exported by the entry point deno.d.ts
     delete(request: DeleteScheduleRequest, options?: RequestOptions): Promise<DeleteScheduleResponse>;
-    // Warning: (ae-forgotten-export) The symbol "FireNowRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "FireNowResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "FireNowRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "FireNowResponse" needs to be exported by the entry point deno.d.ts
     fireNow(request: FireNowRequest, options?: RequestOptions): Promise<FireNowResponse>;
-    // Warning: (ae-forgotten-export) The symbol "GetScheduleRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "GetScheduleResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "GetScheduleRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "GetScheduleResponse" needs to be exported by the entry point deno.d.ts
     get(request: GetScheduleRequest, options?: RequestOptions): Promise<GetScheduleResponse>;
-    // Warning: (ae-forgotten-export) The symbol "GetFireRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "GetFireResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "GetFireRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "GetFireResponse" needs to be exported by the entry point deno.d.ts
     getFire(request: GetFireRequest, options?: RequestOptions): Promise<GetFireResponse>;
-    // Warning: (ae-forgotten-export) The symbol "ListSchedulesRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "ListSchedulesResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ListSchedulesRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ListSchedulesResponse" needs to be exported by the entry point deno.d.ts
     list(request: ListSchedulesRequest, options?: RequestOptions): Promise<ListSchedulesResponse>;
-    // Warning: (ae-forgotten-export) The symbol "ListFiresRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "ListFiresResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ListFiresRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ListFiresResponse" needs to be exported by the entry point deno.d.ts
     listFires(request: ListFiresRequest, options?: RequestOptions): Promise<ListFiresResponse>;
-    // Warning: (ae-forgotten-export) The symbol "PauseScheduleRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "PauseScheduleResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "PauseScheduleRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "PauseScheduleResponse" needs to be exported by the entry point deno.d.ts
     pause(request: PauseScheduleRequest, options?: RequestOptions): Promise<PauseScheduleResponse>;
-    // Warning: (ae-forgotten-export) The symbol "ResumeScheduleRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "ResumeScheduleResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ResumeScheduleRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ResumeScheduleResponse" needs to be exported by the entry point deno.d.ts
     resume(request: ResumeScheduleRequest, options?: RequestOptions): Promise<ResumeScheduleResponse>;
-    // Warning: (ae-forgotten-export) The symbol "UpdateScheduleRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "UpdateScheduleResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "UpdateScheduleRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "UpdateScheduleResponse" needs to be exported by the entry point deno.d.ts
     update(request: UpdateScheduleRequest, options?: RequestOptions): Promise<UpdateScheduleResponse>;
 }
 
@@ -1060,8 +1031,8 @@ export interface Sessions {
     create(options: CreateSessionOptions): Promise<Session>;
     fork(sourceSessionId: string, options?: ForkSessionOptions): Promise<Session>;
     get(sessionId: string): Promise<Session>;
-    // Warning: (ae-forgotten-export) The symbol "ListSessionsRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "ListSessionsResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ListSessionsRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ListSessionsResponse" needs to be exported by the entry point deno.d.ts
     list(request: ListSessionsRequest, options?: RequestOptions): Promise<ListSessionsResponse>;
 }
 
@@ -1081,15 +1052,15 @@ export interface SessionTitleEventPayload {
 
 // @public
 export interface Skills {
-    // Warning: (ae-forgotten-export) The symbol "ListSkillsRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "ListSkillsResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ListSkillsRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ListSkillsResponse" needs to be exported by the entry point deno.d.ts
     list(request: ListSkillsRequest, options?: RequestOptions): Promise<ListSkillsResponse>;
 }
 
 // @public
 export interface Soul {
-    // Warning: (ae-forgotten-export) The symbol "GetSoulRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "GetSoulResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "GetSoulRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "GetSoulResponse" needs to be exported by the entry point deno.d.ts
     get(request: GetSoulRequest, options?: RequestOptions): Promise<GetSoulResponse>;
 }
 
@@ -1097,7 +1068,7 @@ export interface Soul {
 export function spawn(options?: SpawnOptions): Promise<SpawnedClient>;
 
 // @public
-export interface SpawnedClient extends NodeClient {
+export interface SpawnedClient extends Client {
     readonly daemon: DaemonInfo;
 }
 
@@ -1105,11 +1076,9 @@ export interface SpawnedClient extends NodeClient {
 export interface SpawnOptions extends ClientDiagnosticsOptions {
     args?: readonly string[];
     binaryPath?: string;
-    env?: Readonly<NodeJS.ProcessEnv>;
-    http?: boolean;
-    lifetimePipe?: boolean;
+    env?: Readonly<Record<string, string>>;
     readinessTimeoutMs?: number;
-    toolServerName?: string;
+    tempDirectory?: string;
 }
 
 // @public
@@ -1136,30 +1105,30 @@ export interface SteerOutcomeEventPayload {
 
 // @public
 interface Storage_2 {
-    // Warning: (ae-forgotten-export) The symbol "ApplySessionCleanupRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "CleanupJob" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ApplySessionCleanupRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "CleanupJob" needs to be exported by the entry point deno.d.ts
     applyCleanup(request: ApplySessionCleanupRequest, options?: RequestOptions): Promise<CleanupJob>;
-    // Warning: (ae-forgotten-export) The symbol "ApplySessionMigrationRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "SessionMigrationJob" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ApplySessionMigrationRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "SessionMigrationJob" needs to be exported by the entry point deno.d.ts
     applyMigration(request: ApplySessionMigrationRequest, options?: RequestOptions): Promise<SessionMigrationJob>;
-    // Warning: (ae-forgotten-export) The symbol "CancelSessionCleanupRequest" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "CancelSessionCleanupRequest" needs to be exported by the entry point deno.d.ts
     cancelCleanup(request: CancelSessionCleanupRequest, options?: RequestOptions): Promise<CleanupJob>;
-    // Warning: (ae-forgotten-export) The symbol "CancelSessionMigrationRequest" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "CancelSessionMigrationRequest" needs to be exported by the entry point deno.d.ts
     cancelMigration(request: CancelSessionMigrationRequest, options?: RequestOptions): Promise<SessionMigrationJob>;
-    // Warning: (ae-forgotten-export) The symbol "GetSessionCleanupJobRequest" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "GetSessionCleanupJobRequest" needs to be exported by the entry point deno.d.ts
     getCleanupJob(request: GetSessionCleanupJobRequest, options?: RequestOptions): Promise<CleanupJob>;
-    // Warning: (ae-forgotten-export) The symbol "GetStorageHealthRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "GetStorageHealthResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "GetStorageHealthRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "GetStorageHealthResponse" needs to be exported by the entry point deno.d.ts
     getHealth(request: GetStorageHealthRequest, options?: RequestOptions): Promise<GetStorageHealthResponse>;
-    // Warning: (ae-forgotten-export) The symbol "GetSessionMigrationJobRequest" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "GetSessionMigrationJobRequest" needs to be exported by the entry point deno.d.ts
     getMigrationJob(request: GetSessionMigrationJobRequest, options?: RequestOptions): Promise<SessionMigrationJob>;
-    // Warning: (ae-forgotten-export) The symbol "PlanSessionCleanupRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "PlanSessionCleanupResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "PlanSessionCleanupRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "PlanSessionCleanupResponse" needs to be exported by the entry point deno.d.ts
     planCleanup(request: PlanSessionCleanupRequest, options?: RequestOptions): Promise<PlanSessionCleanupResponse>;
-    // Warning: (ae-forgotten-export) The symbol "PlanSessionMigrationRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "SessionMigrationPlan" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "PlanSessionMigrationRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "SessionMigrationPlan" needs to be exported by the entry point deno.d.ts
     planMigration(request: PlanSessionMigrationRequest, options?: RequestOptions): Promise<SessionMigrationPlan>;
-    // Warning: (ae-forgotten-export) The symbol "ResumeSessionMigrationRequest" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ResumeSessionMigrationRequest" needs to be exported by the entry point deno.d.ts
     resumeMigration(request: ResumeSessionMigrationRequest, options?: RequestOptions): Promise<SessionMigrationJob>;
 }
 export { Storage_2 as Storage }
@@ -1212,20 +1181,20 @@ export const SUPPORTED_API_MAJOR = 1;
 
 // @public
 export interface Team {
-    // Warning: (ae-forgotten-export) The symbol "CancelTeammateResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "CancelTeammateResponse" needs to be exported by the entry point deno.d.ts
     cancel(member: string, options?: RequestOptions): Promise<CancelTeammateResponse>;
-    // Warning: (ae-forgotten-export) The symbol "CleanupTeamResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "CleanupTeamResponse" needs to be exported by the entry point deno.d.ts
     cleanup(options?: RequestOptions): Promise<CleanupTeamResponse>;
     // (undocumented)
     readonly id: string;
-    // Warning: (ae-forgotten-export) The symbol "TeamMember" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "TeamMember" needs to be exported by the entry point deno.d.ts
     readonly initialMembers: readonly TeamMember[];
-    // Warning: (ae-forgotten-export) The symbol "ListTeamResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ListTeamResponse" needs to be exported by the entry point deno.d.ts
     list(options?: RequestOptions): Promise<ListTeamResponse>;
-    // Warning: (ae-forgotten-export) The symbol "SendTeammateMessageResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "SendTeammateMessageResponse" needs to be exported by the entry point deno.d.ts
     message(message: TeamMessageOptions, options?: RequestOptions): Promise<SendTeammateMessageResponse>;
     run(options?: RequestOptions): TeamRun;
-    // Warning: (ae-forgotten-export) The symbol "SpawnTeammateResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "SpawnTeammateResponse" needs to be exported by the entry point deno.d.ts
     spawn(member: TeamMemberOptions, options?: RequestOptions): Promise<SpawnTeammateResponse>;
 }
 
@@ -1341,7 +1310,7 @@ export interface TeamMessageOptions {
 export interface TeamOutcomeRunEvent {
     // (undocumented)
     readonly kind: "outcome";
-    // Warning: (ae-forgotten-export) The symbol "TeamOutcome" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "TeamOutcome" needs to be exported by the entry point deno.d.ts
     //
     // (undocumented)
     readonly outcome: TeamOutcome;
@@ -1406,43 +1375,6 @@ export interface ToolCallEventPayload {
 }
 
 // @public
-export interface ToolDefinition {
-    readonly concurrency: number | undefined;
-    readonly modelName: string;
-    readonly name: string;
-    readonly readOnly: boolean;
-    readonly schema: ToolSchema;
-}
-
-// @public
-export type ToolHandler = (arguments_: Readonly<Record<string, ToolJsonValue>>, context: ToolHandlerContext) => unknown | Promise<unknown>;
-
-// @public
-export interface ToolHandlerContext {
-    readonly signal: AbortSignal;
-}
-
-// @public
-export type ToolJsonValue = boolean | number | string | null | readonly ToolJsonValue[] | {
-    readonly [key: string]: ToolJsonValue;
-};
-
-// @public
-export interface ToolOptions {
-    concurrency?: number;
-    readOnly?: boolean;
-}
-
-// @public
-export class ToolRegistrationError extends MecatlError {
-    constructor(reason: ToolRegistrationReason, message: string, cause?: unknown);
-    readonly reason: ToolRegistrationReason;
-}
-
-// @public
-export type ToolRegistrationReason = "duplicate_name" | "invalid_options" | "invalid_schema" | "invalid_server_name" | "invalid_tool_name";
-
-// @public
 export interface ToolResultEventPayload {
     // (undocumented)
     readonly blocks: readonly EventContentBlock[];
@@ -1455,9 +1387,6 @@ export interface ToolResultEventPayload {
     // (undocumented)
     readonly structuredContent: string;
 }
-
-// @public
-export type ToolSchema = boolean | Readonly<Record<string, ToolJsonValue>>;
 
 export { Transport }
 
@@ -1523,8 +1452,8 @@ export class UnsupportedFeatureError extends MecatlError {
 
 // @public
 export interface UserModel {
-    // Warning: (ae-forgotten-export) The symbol "GetUserModelRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "GetUserModelResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "GetUserModelRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "GetUserModelResponse" needs to be exported by the entry point deno.d.ts
     get(request: GetUserModelRequest, options?: RequestOptions): Promise<GetUserModelResponse>;
 }
 
@@ -1574,8 +1503,8 @@ export function withSessionAffinity(sessionId: string, options?: CallOptions): C
 
 // @public
 export interface Worktrees {
-    // Warning: (ae-forgotten-export) The symbol "ListWorktreesRequest" needs to be exported by the entry point node.d.ts
-    // Warning: (ae-forgotten-export) The symbol "ListWorktreesResponse" needs to be exported by the entry point node.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ListWorktreesRequest" needs to be exported by the entry point deno.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ListWorktreesResponse" needs to be exported by the entry point deno.d.ts
     list(request: ListWorktreesRequest, options?: RequestOptions): Promise<ListWorktreesResponse>;
 }
 
