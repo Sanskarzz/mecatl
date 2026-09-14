@@ -8497,9 +8497,10 @@ npm-based website. The
 canonical published name is `@stacklok-oss/mecatl-sdk` on public npmjs
 (`sdk/typescript/v*` tags, `npm-publish` environment, staged trusted publishing,
 maintainer approval with 2FA, npm-native provenance). A manually dispatched
-release-App workflow advances `sdk/typescript/VERSION` and `package.json` in an
-exact two-file PR; its verified merge causes the App to push the matching tag
-and thereby trigger npm staging
+release-App workflow generates a package-scoped `sdk/typescript/CHANGELOG.md`
+entry and advances `sdk/typescript/VERSION` and `package.json` in an exact
+three-file PR. Its verified merge causes the App to push the matching tag and
+thereby trigger npm staging
 ([ADR 0328](../adr/0328-typescript-sdk-npmjs-stacklok-oss.md)).
 The post-build `scripts/add-deno-self-types.mjs` prepends every JavaScript module's stable
 `@ts-self-types` sibling declaration and one unmapped source-map line, because Deno does not infer
