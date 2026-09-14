@@ -302,7 +302,18 @@ type config struct {
 	otlpMetricsEndpoint string
 	otlpMetricsProtocol string
 	otlpShutdownTimeout time.Duration
-	installationID      string
+
+	// productMetrics reports anonymous product-adoption metrics to Stacklok.
+	// OPT-OUT: ON by default. See the --product-metrics flag help text.
+	productMetrics bool
+	// productMetricsSet records whether --product-metrics was explicitly passed,
+	// so ResolveProductMetricsEnabled can let CLI out-rank DO_NOT_TRACK/settings.
+	productMetricsSet bool
+	// productMetricsDryRun logs every would-be product-metrics observation
+	// via diag instead of exporting it over OTLP — an audit mode to verify
+	// the no-PII claim before trusting --product-metrics for real.
+	productMetricsDryRun bool
+	installationID       string
 }
 
 // stringList is a repeatable string flag.Value, preserving order across
@@ -481,6 +492,11 @@ func parseFlags(argv []string) (config, error) {
 	fs.DurationVar(&cfg.otlpShutdownTimeout, "otlp-shutdown-timeout", 5*time.Second, "bound on the telemetry flush at SIGTERM (so a dead collector cannot hang shutdown). 0 disables the bound")
 	fs.StringVar(&cfg.installationID, "telemetry-installation-id", os.Getenv("MECATL_INSTALLATION_ID"), "stable canonical UUID exported as the optional mecatl.installation.id OTel resource attribute (default: MECATL_INSTALLATION_ID; empty omits it)")
 
+	fs.BoolVar(&cfg.productMetrics, "product-metrics", true,
+		"report anonymous product-adoption metrics to Stacklok (version, OS/arch, enabled features, coarse session/run/tool-call counts — never a prompt, file path, tool name, or model id). ON by default; opt out with --product-metrics=false, MECATL_PRODUCT_METRICS=false, DO_NOT_TRACK=1, or telemetry.productMetrics.enabled: false in settings.yaml")
+	fs.BoolVar(&cfg.productMetricsDryRun, "product-metrics-dry-run", false,
+		"print every product-metrics observation to stderr instead of sending it — verify the no-PII claim yourself before enabling --product-metrics for real")
+
 	fs.Usage = func() {
 		_, _ = fmt.Fprint(fs.Output(), "Usage: mecak8s [flags]\n\n")
 		flaghelp.PrintDefaults(fs.Output(), fs)
@@ -513,6 +529,8 @@ func parseFlags(argv []string) (config, error) {
 			cfg.reasoningEffortFlagSet = true
 		case "subagent-model-router":
 			cfg.subagentModelRouterSet = true
+		case "product-metrics":
+			cfg.productMetricsSet = true
 		}
 		markRetentionCLIFlag(&cfg.retentionCLISet, fl.Name)
 		if fl.Name == "schedule-fire-retention" {
@@ -747,8 +765,11 @@ func appConfig(cfg config, diag port.Diagnostics, obs observability) app.Config 
 		Diagnostics: diag,
 		// Observability (issue #343, ADR 0098): OPT-IN. With no --otlp-* flags the
 		// handles are zero-valued (nil) — the byte-identical no-metrics posture.
-		Sink:                             obs.Sink,
-		ToolCallRecorder:                 obs.ToolCallRecorder,
+		// The opt-out product-metrics Sink/ToolCallRecorder are folded in
+		// alongside (nil-guarded fan-out): both nil reproduces the
+		// byte-identical no-telemetry posture exactly.
+		Sink:                             productMetricsSink(obs),
+		ToolCallRecorder:                 productMetricsRecorder(obs),
 		MetricsRoleScoper:                obs.MetricsRoleScoper,
 		SessionLoadFailureMetricsEmitter: obs.SessionLoadFailureMetricsEmitter,
 	}

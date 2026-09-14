@@ -43,7 +43,8 @@ vars:
       else
         git describe --tags --match 'v[0-9]*' --always --dirty 2>/dev/null || printf %s dev
       fi
-  BUILD_LDFLAGS: '-X github.com/stacklok/mecatl/internal/buildinfo.BuildID={{.BUILD_ID}}'
+  MECATL_METRICS_KEY: '{{.MECATL_METRICS_KEY | default ""}}'
+  BUILD_LDFLAGS: '-X github.com/stacklok/mecatl/internal/buildinfo.BuildID={{.BUILD_ID}} -X github.com/stacklok/mecatl/internal/adapter/productmetrics.bakedKey={{.MECATL_METRICS_KEY}}'
   # The GoReleaser BINARY version. Must stay in lockstep with the `version:`
   # pinned in .github/workflows/release.yml and .github/workflows/ci.yml.
   # .goreleaser.yaml is loaded STRICTLY, so a config field newer than this pin

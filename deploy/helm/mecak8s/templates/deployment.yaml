@@ -204,6 +204,16 @@ spec:
             - --permission-config=/etc/mecatl-mcp/settings.yaml
             {{- end }}
           env:
+            {{- /* The chart-provisioned, stable-per-release product-metrics
+                   install id. Always present: mecak8s is storage-free (ADR
+                   0048), so the local-file mechanism the other binaries use
+                   would mint a fresh id on every pod restart. See
+                   install-id-configmap.yaml. */}}
+            - name: MECATL_PRODUCT_METRICS_INSTALL_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "mecak8s.fullname" . }}-install-id
+                  key: installId
             - name: MECATL_INSTALLATION_ID
               valueFrom:
                 configMapKeyRef:
