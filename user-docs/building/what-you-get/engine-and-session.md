@@ -1,7 +1,8 @@
 ---
 sidebar_position: 0
 title: Engine & session model
-description: Understand the engine, session, and run objects that make up a Mecatl agent.
+description:
+  Understand the engine, session, and run objects that make up a Mecatl agent.
 ---
 
 # Engine & session model
@@ -39,7 +40,10 @@ required read ledger.
 
 ### `*session.Session`
 
-The session is the **conversation state**. It holds the message history, the current state-machine state (`idle → running → completed`, etc.), counters (turns, tool calls), and limits. It is the unit of persistence: save a session, restore it later, and the conversation picks up exactly where it left off.
+The session is the **conversation state**. It holds the message history, the
+current state-machine state (`idle → running → completed`, etc.), counters
+(turns, tool calls), and limits. It is the unit of persistence: save a session,
+restore it later, and the conversation picks up exactly where it left off.
 
 A session is created separately from the engine and passed in at run time:
 
@@ -53,7 +57,8 @@ sess := session.New(
 )
 ```
 
-The same engine can run different sessions. The same session can be reopened and run again (after it completes) by the same or a different engine.
+The same engine can run different sessions. The same session can be reopened and
+run again (after it completes) by the same or a different engine.
 
 Legacy snapshots with an unknown producer kind remain inspect-only. An
 authenticated server can adopt an eligible, owned snapshot as a new chat after
@@ -62,7 +67,8 @@ authoritative transcript and leaves the legacy snapshot unchanged.
 
 ### `*agent.Run`
 
-`engine.Run(...)` returns a `*Run` immediately. The loop starts in a background goroutine; the `Run` handle is your interface to it while it's live:
+`engine.Run(...)` returns a `*Run` immediately. The loop starts in a background
+goroutine; the `Run` handle is your interface to it while it's live:
 
 ```go
 for ev := range run.Events() {
@@ -74,32 +80,35 @@ for ev := range run.Events() {
 // channel closed = run is done
 ```
 
-`Run.Events()` is a read-only channel that carries every observable event, in order, closed exactly once when the run terminates. `Run.Approve(askID, verdict)` sends a permission verdict. `Run.Cancel()` cancels the run's context. That is the entire client surface.
+`Run.Events()` is a read-only channel that carries every observable event, in
+order, closed exactly once when the run terminates.
+`Run.Approve(askID, verdict)` sends a permission verdict. `Run.Cancel()` cancels
+the run's context. That is the entire client surface.
 
 ---
 
 ## The things you pass in
 
-| What | Type | What it does |
-|---|---|---|
-| **Environment** | `tool.Environment` | Binds the non-nil filesystem workspace, optional command runner, and environment identity for this run. |
-| **Catalog** | `*tool.Catalog` (on `Deps`) | The tool registry. Holds `Read`, `Write`, `Edit`, `Shell`, MCP servers, and any custom tools you register. The engine reads `Specs(mode)` to tell the model what it can do. |
-| **LLMProvider** | `port.LLMProvider` (on `Deps`) | The model backend. The engine calls `Stream(ctx, LLMRequest)` and receives a neutral chunk stream. The OpenAI and Anthropic adapters ship out of the box; implement this interface to bring your own. |
+|What|Type|What it does|
+|-|-|-|
+|**Environment**|`tool.Environment`|Binds the non-nil filesystem workspace, optional command runner, and environment identity for this run.|
+|**Catalog**|`*tool.Catalog` (on `Deps`)|The tool registry. Holds `Read`, `Write`, `Edit`, `Shell`, MCP servers, and any custom tools you register. The engine reads `Specs(mode)` to tell the model what it can do.|
+|**LLMProvider**|`port.LLMProvider` (on `Deps`)|The model backend. The engine calls `Stream(ctx, LLMRequest)` and receives a neutral chunk stream. The OpenAI and Anthropic adapters ship out of the box; implement this interface to bring your own.|
 
 ---
 
 ## What "subagent" and "team" mean
 
-Neither is a new object type. A **subagent** runs on a child `Engine` with its own
-tool catalog, permission policy, and optional model. A **team** is a `Supervisor`
-coordinating several member engines. Each child still performs its work through
-`Engine.Run(session)`.
+Neither is a new object type. A **subagent** runs on a child `Engine` with its
+own tool catalog, permission policy, and optional model. A **team** is a
+`Supervisor` coordinating several member engines. Each child still performs its
+work through `Engine.Run(session)`.
 
 ---
 
 ## How it fits together
 
-```
+```text
 agent.Deps{LLM, Catalog, Policy, Hooks, Store, ...}
           │
           ▼
@@ -119,12 +128,18 @@ agent.Deps{LLM, Catalog, Policy, Hooks, Store, ...}
   └── Usage                ← cumulative token spend
 ```
 
-The engine never owns the session. The session never owns the engine. Both are passed around explicitly, which is what makes the system testable with fakes (`mockllm`, `memfs`, `memstore`) and why the same session can be resumed by a process that had no part in starting it.
+The engine never owns the session. The session never owns the engine. Both are
+passed around explicitly, which is what makes the system testable with fakes
+(`mockllm`, `memfs`, `memstore`) and why the same session can be resumed by a
+process that had no part in starting it.
 
 ---
 
 ## What's next
 
-- [The agent loop](agent-loop.md) — turn structure, dispatch, compaction, and cancellation in detail.
-- [Permissions & guardrails](permissions.md) — how `Policy.Evaluate` decides what tools can run.
-- [Extension points](/building/extension-points/index.md) — implement a port interface to replace any capability without touching the loop.
+- [The agent loop](agent-loop.md) — turn structure, dispatch, compaction, and
+  cancellation in detail.
+- [Permissions & guardrails](permissions.md) — how `Policy.Evaluate` decides
+  what tools can run.
+- [Extension points](/building/extension-points/index.md) — implement a port
+  interface to replace any capability without touching the loop.
