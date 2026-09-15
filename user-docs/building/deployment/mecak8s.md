@@ -254,7 +254,9 @@ The production chart is published at
 Redis StatefulSet. Reference a Kubernetes Secret for Redis credentials. The
 chart's default image tag matches its application and chart versions, so it
 pulls the corresponding signed `ghcr.io/stacklok/mecatl/mecak8s` release. Set
-`image.digest` to pin an immutable image, or clear the tag to use
+`image.digest` to pin an immutable image. It accepts a canonical lowercase
+SHA-256 digest: `sha256:` followed by 64 lowercase hexadecimal characters. Set
+only one of `image.tag` and `image.digest`, or clear the tag to use
 `v<chart-version>`.
 
 A real-provider deployment (`mockProvider: false`) must choose one of these
