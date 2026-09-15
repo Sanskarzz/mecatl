@@ -170,6 +170,8 @@ const MediaImage MediaKind = "image"
 const ModeAccept PermissionMode = "acceptEdits"
 const ModeDefault PermissionMode = "default"
 const ModePlan PermissionMode = "plan"
+const NoProgressExtractiveNudgeText untyped string = "Stop investigating now and do not run any more commands or tools. Using only the information you have already gathered, write your best final answer to the original task as a direct message now, even if it is incomplete or uncertain — note any gaps briefly. Do not plan further steps; deliver what you have."
+const NoProgressNudgeText untyped string = "Please continue. Make concrete progress on the task using your tools, or — if you are blocked or believe the task is complete — say so explicitly in a short message."
 const ParallelBranchEnd ParallelEventKind = "branch_end"
 const ParallelBranchStart ParallelEventKind = "branch_start"
 const ParallelBranchTool ParallelEventKind = "branch_tool"
@@ -390,7 +392,7 @@ type Turn struct{Index int; Assistant Message; Results []ToolResult; Usage Usage
 type TurnEndPayload struct{Usage Usage; Estimated bool; DurationMs int64; TTFTMs int64; InterTokenMeanMs int64; InterTokenMaxMs int64}
 type Usage struct{InputTokens int; OutputTokens int; CacheReadTokens int; CacheWriteTokens int; ReasoningTokens int}
 type UsageKind string
-type UserPromptPayload struct{Text string; Parts []Content}
+type UserPromptPayload struct{Text string; Parts []Content; Synthetic bool}
 type WorkspaceEnrollmentID string
 var ErrIllegalTransition error
 var ErrInvalidContent error
