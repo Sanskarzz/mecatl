@@ -3193,7 +3193,7 @@ func sessionEngineFactoryWithTools(
 		// Skill tool. A failed authoritative read clears only these partitions.
 		skillPartitions := hydrateLearnedSkillPartitions(ctx, cfg, assets, workspace)
 
-		cat, closeFn := assembleCatalog(ctx, cfg, reg, store, hooks, &assets, catalogSession{
+		cat, closeFn, clientToolNames := assembleCatalog(ctx, cfg, reg, store, hooks, &assets, catalogSession{
 			provider:        resolvedProvider,
 			providerID:      resolvedProviderID,
 			model:           resolvedModel,
@@ -3314,8 +3314,9 @@ func sessionEngineFactoryWithTools(
 			// requested). The factory REPORTS; the Service decides whether a partial
 			// mount is acceptable, because its two callers disagree — see the
 			// best-effort comment on the NewManager error above.
-			MountedClientMCP: mountedClientMCP,
-			Close:            closeFn,
+			MountedClientMCP:      mountedClientMCP,
+			MountedClientMCPTools: clientToolNames,
+			Close:                 closeFn,
 		}, nil
 	}
 }
@@ -5668,7 +5669,9 @@ func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provid
 	}
 	// The build-time assembly: default provider + model, no client MCP, narrating
 	// the ENABLED/DISABLED composition facts exactly once.
-	cat, assembledClose := assembleCatalog(ctx, cfg, reg, store, hooks, &assets, catalogSession{
+	// No clientMgr on this build-time call, so the third return is always nil
+	// (no client MCP tools to name here) -- discarded.
+	cat, assembledClose, _ := assembleCatalog(ctx, cfg, reg, store, hooks, &assets, catalogSession{
 		provider:   provider,
 		providerID: reg.Default(),
 		model:      cfg.Model,
