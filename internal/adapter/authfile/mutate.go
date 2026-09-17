@@ -50,7 +50,14 @@ func validateAuthDocument(data []byte) error {
 //nolint:gocyclo // Schema validation and the one targeted mutation stay together to preserve the AST safely.
 func mutateAuth(data []byte, update APIKeyUpdate) ([]byte, bool, error) {
 	if len(bytes.TrimSpace(data)) == 0 {
-		data = []byte("providers: {}\n")
+		if update.APIKey == nil {
+			return data, true, nil
+		}
+		out := []byte("providers:\n  " + update.Provider + ":\n    api_key: " + quoteYAML(*update.APIKey) + "\n")
+		if err := validateUpdatedAuth(out); err != nil {
+			return nil, false, err
+		}
+		return out, false, nil
 	}
 	if err := validateAuthDocument(data); err != nil {
 		return nil, false, err
@@ -115,19 +122,21 @@ func mutateAuth(data []byte, update APIKeyUpdate) ([]byte, bool, error) {
 		}
 	}
 	if update.APIKey == nil {
-		if keyEntry == nil {
-			return data, true, nil
-		}
-		for i, entry := range mapping.Values {
-			if entry == keyEntry {
-				mapping.Values = append(mapping.Values[:i], mapping.Values[i+1:]...)
+		// Remove the empty credential record as well: leaving a custom ID behind
+		// makes strict loading fail after its provider definition is removed.
+		for i, entry := range providers.Values {
+			if entry == target {
+				providers.Values = append(providers.Values[:i], providers.Values[i+1:]...)
 				break
 			}
 		}
-		if len(mapping.Values) == 0 {
-			replacement := staticAuthEntry(update.Provider + ": {}\n")
-			if err := target.Replace(replacement.Value); err != nil {
-				return nil, false, errors.New("replace empty auth provider")
+		if len(providers.Values) == 0 {
+			for i, entry := range doc.Mapping().Values {
+				key, _ := authString(entry.Key)
+				if key == "providers" {
+					doc.Mapping().Values = append(doc.Mapping().Values[:i], doc.Mapping().Values[i+1:]...)
+					break
+				}
 			}
 		}
 	} else if keyEntry != nil {
@@ -149,6 +158,9 @@ func mutateAuth(data []byte, update APIKeyUpdate) ([]byte, bool, error) {
 		mapping.SetIsFlowStyle(false)
 		mapping.Values = append(mapping.Values, staticAuthEntry("api_key: "+quoteYAML(*update.APIKey)+"\n"))
 	}
+	if len(doc.Mapping().Values) == 0 {
+		return []byte{}, false, nil
+	}
 	out := []byte(doc.String())
 	if err := validateUpdatedAuth(out); err != nil {
 		return nil, false, err
@@ -157,6 +169,9 @@ func mutateAuth(data []byte, update APIKeyUpdate) ([]byte, bool, error) {
 }
 
 func validateUpdatedAuth(data []byte) error {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return nil
+	}
 	doc, err := yamldiag.ParseSettingsDocument(data)
 	if err != nil || doc.Mapping() == nil {
 		return errors.New("updated auth document is invalid")

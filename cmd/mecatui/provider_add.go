@@ -30,32 +30,23 @@ func defaultProviderSettingsPath() string {
 }
 
 func readProviderFieldFromTerminal(ctx context.Context, prompt string) (string, error) {
+	return readProviderField(ctx, bufio.NewReader(os.Stdin), prompt)
+}
+
+func readProviderField(ctx context.Context, input *bufio.Reader, prompt string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
 	if _, err := fmt.Fprint(os.Stderr, prompt+": "); err != nil {
-		return "", err
+		return "", providerTerminalError("could not write terminal prompt")
 	}
-	result := make(chan struct {
-		value string
-		err   error
-	}, 1)
-	go func() {
-		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
-		if errors.Is(err, io.EOF) && line == "" {
-			err = context.Canceled
-		}
-		result <- struct {
-			value string
-			err   error
-		}{strings.TrimSpace(line), err}
-	}()
-	select {
-	case <-ctx.Done():
-		return "", ctx.Err()
-	case got := <-result:
-		return got.value, got.err
+	value, err := input.ReadString('\n')
+	if errors.Is(err, io.EOF) {
+		err = context.Canceled
+	} else if err != nil {
+		err = providerTerminalError("could not read terminal input")
 	}
+	return strings.TrimSpace(value), err
 }
 
 func (c providerCommands) runAdd(ctx context.Context, res invocationResolution, stdout, stderr io.Writer) error {
@@ -65,7 +56,7 @@ func (c providerCommands) runAdd(ctx context.Context, res invocationResolution, 
 	if err := permconfig.ValidateProviderID(res.providerName); err != nil {
 		return fmt.Errorf("providers add: %w", err)
 	}
-	inspection, err := c.backend.inspect()
+	inspection, err := c.inspectForEnrollment()
 	if err != nil {
 		return fmt.Errorf("providers add: inspect configured providers: %w", err)
 	}
@@ -116,8 +107,9 @@ func (c providerCommands) runAdd(ctx context.Context, res invocationResolution, 
 
 func (c providerCommands) finishProviderAdd(ctx context.Context, provider string, definition permconfig.ProviderDefinition, insertedStore *permconfig.OIDCCredentialStore, inspection providerInspection, stdout, stderr io.Writer) error {
 	login := invocationResolution{mode: modeProviderCredential, providerAction: providerActionLogin, providerName: provider}
-	var loginOut, loginErr bytes.Buffer
-	err := c.runCredential(ctx, login, &loginOut, &loginErr)
+	var loginOut bytes.Buffer
+	c.deferCredentialCancellation = true
+	err := c.runCredential(ctx, login, &loginOut, stderr)
 	if errors.Is(err, errProviderCredentialCancelled) {
 		rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), providerRollbackMax)
 		defer cancel()
@@ -133,15 +125,18 @@ func (c providerCommands) finishProviderAdd(ctx context.Context, provider string
 		if rollbackErr != nil || rollbackState == authfile.CommitNotApplied {
 			return fmt.Errorf("providers add: login cancelled; provider definition %q may remain because rollback failed: %w", provider, errors.Join(rollbackErr, errors.New("definition retention is uncertain")))
 		}
+		if definition.Auth.Method == providerAuthOIDC {
+			if _, writeErr := fmt.Fprintln(stderr, "Provider definition restored; the OIDC state described above was not rolled back."); writeErr != nil {
+				return writeErr
+			}
+			return errProviderCredentialCancelled
+		}
 		return providerCredentialCancellation(stderr)
 	}
 	if _, writeErr := fmt.Fprintf(stdout, "Provider definition saved for %q\n", provider); writeErr != nil {
 		return writeErr
 	}
 	if _, writeErr := io.Copy(stdout, &loginOut); writeErr != nil {
-		return writeErr
-	}
-	if _, writeErr := io.Copy(stderr, &loginErr); writeErr != nil {
 		return writeErr
 	}
 	return err

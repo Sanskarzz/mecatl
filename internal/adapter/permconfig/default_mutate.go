@@ -12,7 +12,11 @@ import (
 
 func mutateDefaults(data []byte, update DefaultUpdate) ([]byte, bool, error) {
 	if len(bytes.TrimSpace(data)) == 0 {
-		data = []byte("{}\n")
+		out := []byte("models:\n  default_provider: " + defaultQuote(update.Provider) + "\n  default: " + defaultQuote(update.Model) + "\n")
+		if err := ValidateYAML(out); err != nil {
+			return nil, false, errors.New("updated settings document is invalid")
+		}
+		return out, false, nil
 	}
 	if err := ValidateYAML(data); err != nil {
 		return nil, false, errors.New("settings document is invalid")
@@ -28,6 +32,9 @@ func mutateDefaults(data []byte, update DefaultUpdate) ([]byte, bool, error) {
 	if modelsNode == nil {
 		entry := defaultStaticEntry("models:\n  default_provider: " + defaultQuote(update.Provider) + "\n  default: " + defaultQuote(update.Model) + "\n")
 		doc.Mapping().Values = append(doc.Mapping().Values, entry)
+		if doc.Mapping().IsFlowStyle {
+			doc.Mapping().SetIsFlowStyle(true)
+		}
 		out := []byte(doc.String())
 		if err := ValidateYAML(out); err != nil {
 			return nil, false, errors.New("updated settings document is invalid")

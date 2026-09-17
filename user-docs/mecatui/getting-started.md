@@ -18,19 +18,11 @@ start a separate service.
 You need:
 
 - macOS or Linux with [Homebrew](https://brew.sh/);
-- an API key with API access enabled from Anthropic, OpenAI, OpenRouter, or
-  OpenCode; and
+- an API key for Anthropic, OpenAI, or OpenRouter; and
 - a local project directory that you trust.
 
 The project is your **workspace**. Mecatl limits its file tools and commands to
 this directory.
-
-This guided path uses provider API credentials. A ChatGPT Plus or Pro
-subscription does not provide an OpenAI API key and cannot be used to sign in
-through this setup. Mecatl's OIDC options authenticate to an operator-configured
-gateway or remote Mecatl server, not to a consumer provider account. See
-[Provider authentication](/features/choose-models.md#authenticate-to-a-model-provider)
-for the supported paths.
 
 ## Install Mecatl
 
@@ -41,44 +33,48 @@ brew install stacklok/tap/mecatl
 mecatui --version
 ```
 
-The version command should print a release tag.
+The version command should print a release tag. For signed archives and source
+builds, see [Install Mecatl](/install.md).
 
-## Set up a provider
+## Start mecatui
 
-Use an API key for this tutorial. Run the interactive setup and select your
-provider:
+Mecatl detects the provider from its environment variable. Set one of
+`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `OPENROUTER_API_KEY` in the shell
+where you will run `mecatui`:
+
+```sh
+cd <PROJECT_DIRECTORY>
+export <PROVIDER_API_KEY>="<API_KEY>"
+mecatui --workspace "$PWD"
+```
+
+Replace `<PROVIDER_API_KEY>` with the variable for your provider.
+
+## Manage embedded providers
+
+`mecatui providers` shows local provider status without revealing credentials.
+Start with guided setup:
 
 ```sh
 mecatui providers setup
 ```
 
-Enter the API key when prompted. `mecatui` saves locally managed credentials
-without displaying them. Confirm that your provider reports `ready to use`:
+For a named custom provider, use direct commands when needed:
 
 ```sh
-mecatui providers status
+mecatui providers add example --no-login
+mecatui providers login example
+mecatui providers set-default example MODEL
 ```
 
-For a custom provider or gateway, follow
-[Configure a custom provider](/features/choose-models.md#configure-a-custom-provider).
-Custom provider IDs use lowercase letters, numbers, and hyphens.
+Setup does not launch a session; matching environment credentials take precedence
+over locally managed ones. Remote `mecatui connect ADDRESS` uses the remote
+server's provider configuration. For credential sources, secret safety, custom
+providers, and manual Codex support, see [local provider setup](/features/choose-models.md#set-up-a-local-provider).
 
-## Start mecatui
-
-```sh
-cd <PROJECT_DIRECTORY>
-mecatui
-```
-
-To submit the first prompt at startup while keeping the session interactive,
-pass `--prompt`:
-
-```sh
-mecatui --prompt "Summarize the failing tests in this repository"
-```
-
-The welcome screen shows your workspace and active model. Keep the default model
-until you complete the first request.
+The welcome screen shows your workspace and active model. To use a different
+model, enter `/models`, select one, and press `enter`. A small, low-cost model
+is enough for this tutorial.
 
 The header also shows `mode default`, identifying the active permission mode.
 With the default permission policy, read-only tools can run without approval and
@@ -101,18 +97,8 @@ and tool history that Mecatl keeps together. Exit with `ctrl+c` twice or
 `/quit`. To continue the newest stored session, run:
 
 ```sh
-mecatui --resume-latest
+mecatui --workspace "$PWD" --resume-latest
 ```
-
-## Try another model
-
-Enter `/models` to open the models reported by your configured provider. Select
-a model and press **Enter**. Model IDs and capabilities are provider-specific,
-so start with a model shown in this inventory. Changing models creates a peer
-session and carries over the visible conversation.
-
-If a listed model fails, see
-[Troubleshoot provider and model setup](./troubleshooting.md#provider-is-not-configured-or-credentials-are-unavailable).
 
 ## Add tools from local MCP servers (optional)
 
@@ -131,11 +117,3 @@ tools. Mecatl connects to those servers but does not start them.
 - [Work in the TUI](./using-the-tui.md) to steer runs, review tools, and approve
   actions.
 - [Manage sessions](./sessions.md) to resume, inspect, and fork conversations.
-
-## Troubleshooting
-
-If provider setup or the first model request fails, run
-`mecatui providers status` and use the recovery action shown for that provider.
-For custom gateways, verify the provider ID, API flavor, exact model ID, and
-gateway model access in
-[Troubleshoot mecatui](./troubleshooting.md#provider-is-not-configured-or-credentials-are-unavailable).
