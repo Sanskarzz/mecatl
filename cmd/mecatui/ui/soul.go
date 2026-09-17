@@ -166,19 +166,19 @@ func soulTrustLabel(s client.Soul) string {
 	case client.SoulProvenanceUser:
 		label := "user"
 		if s.Drifted {
-			label += " · DRIFTED"
+			label += " · changed since Mecatl last recorded it"
 		}
 		return label
 	case client.SoulProvenanceProject:
 		if !s.Present {
 			if !s.Trusted {
-				return "project (UNTRUSTED → not loaded; pass --trust-project)"
+				return "project · not loaded because this workspace is not trusted"
 			}
-			return "project (not loaded)"
+			return "project · not loaded"
 		}
-		label := "project (trusted)"
+		label := "project · trusted"
 		if s.Drifted {
-			label += " · DRIFTED"
+			label += " · changed since Mecatl last recorded it"
 		}
 		return label
 	default:
@@ -209,7 +209,7 @@ func renderSoulPanel(th theme.Theme, st soulState, caps client.Capabilities, hk 
 		if !caps.Soul {
 			b.WriteString(th.Style("muted").Render(soulDisabledNote) + "\n")
 		} else {
-			b.WriteString(th.Style("muted").Render("No soul is present (no ~/.config/mecatl/soul.md and no project soul).") + "\n")
+			b.WriteString(th.Style("muted").Render("No user or project soul is available.") + "\n")
 		}
 	default:
 		b.WriteString(th.Style("muted").Render(renderSoulMeta(st.soul)) + "\n\n")
@@ -219,8 +219,24 @@ func renderSoulPanel(th theme.Theme, st soulState, caps client.Capabilities, hk 
 	// The scroll pair (ScrollU/ScrollD) and the close chord (Close) read the LIVE
 	// keyMap markings (issue #457); with defaults the hint is byte-identical to the
 	// historical literal.
-	b.WriteString("\n" + th.Style("muted").Render("read-only persona · "+hk.scroll+" scroll · "+hk.closeOnly+" close"))
+	b.WriteString("\n" + th.Style("muted").Render(soulPanelFooter(st.soul, hk)))
 	return b.String()
+}
+
+// soulPanelFooter keeps the ownership guidance aligned with the server-projected
+// provenance. The soul is always read-only to the agent, but user and project
+// sources have different remedies.
+func soulPanelFooter(s client.Soul, hk helpKeys) string {
+	var ownership string
+	switch s.Provenance {
+	case client.SoulProvenanceUser:
+		ownership = "you control this soul · edit its source file to change it; the agent can suggest wording"
+	case client.SoulProvenanceProject:
+		ownership = "controlled by this project · change its soul file or ask a maintainer"
+	default:
+		ownership = "read-only persona"
+	}
+	return ownership + " · " + hk.scroll + " scroll · " + hk.closeOnly + " close"
 }
 
 // renderSoulMeta renders the dim metadata line: trust label · N bytes · sha (short).
@@ -247,7 +263,7 @@ func renderSoulMeta(s client.Soul) string {
 // when the content exceeds the window.
 func renderSoulBody(th theme.Theme, st soulState, budget int) string {
 	if st.soul.Content == "" {
-		return th.Style("muted").Render("(content not loaded)") + "\n"
+		return th.Style("muted").Render("(soul not loaded)") + "\n"
 	}
 	// Wrap each raw line to the budget so a long persona line cannot overflow the
 	// card; the scroll window then operates on the wrapped lines for honest paging.
