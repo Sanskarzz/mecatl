@@ -262,6 +262,7 @@ describe("SDK server discovery", () => {
     expect(ServerFeature).toEqual({
       HttpSteer: "http_steer",
       McpServersOnCreate: "mcp_servers_on_create",
+      PromptFreeControls: "prompt_free_controls",
       ServerInfo: "server_info",
       SessionActivityInventory: "session_activity_inventory",
       WatchSessionEvents: "watch_session_events",
@@ -922,6 +923,7 @@ describe("SDK server discovery", () => {
       expect(reportBlock(report, "const ServerFeature:")).toEqual([
         'readonly HttpSteer: "http_steer";',
         'readonly McpServersOnCreate: "mcp_servers_on_create";',
+        'readonly PromptFreeControls: "prompt_free_controls";',
         'readonly ServerInfo: "server_info";',
         'readonly SessionActivityInventory: "session_activity_inventory";',
         'readonly WatchSessionEvents: "watch_session_events";',

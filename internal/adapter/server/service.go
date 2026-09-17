@@ -1127,9 +1127,19 @@ type Service struct {
 	draining atomic.Bool
 
 	// shutdownCancel is called at the START of Close to signal shutdown; currently
-	// its only effect is to mark the closing state (in-flight runs are cancelled
-	// explicitly via run.Cancel below). Kept as a one-time idempotent signal.
+	// it also owns detached acknowledgement-only control relays. Kept as a
+	// one-time idempotent signal.
+	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
+
+	// detachedControlMu closes acknowledgement-only resumed-run admission before
+	// Close waits for detachedControlWG. Every accepted relay adds itself while
+	// holding this mutex BEFORE its run is published, so Add can never race a
+	// zero-count Wait and Close cannot return while an admitted relay still owns
+	// a run, recorder, or lease.
+	detachedControlMu     sync.Mutex
+	detachedControlWG     sync.WaitGroup
+	detachedControlClosed bool
 
 	// titleCoordinator owns bounded asynchronous title work outside chat runs.
 	// It is nil when title generation is unavailable.
@@ -1258,15 +1268,13 @@ type sessionEngine struct {
 //
 // awaiting is an atomic flag that Persist sets when the session is StateAwaiting
 // — i.e. the run is parked on a permission ask and a durable StateAwaiting
-// snapshot has been persisted (the relay's Persist-on-ask). It is read by Close to
-// EXCLUDE such runs from the shutdown cancel loop (cancelling them would
-// overwrite the resumable awaiting snapshot with cancelled). Reading the live
-// sess.State from Close would race the engine loop's mutation; the flag is the
+// snapshot has been persisted (the relay's Persist-on-ask). Close uses it to
+// protect that snapshot before cancelling the local run in memory; the terminal
+// relay must not overwrite the resumable handoff with cancelled. Reading the live
+// sess.State from Close would race the engine loop's mutation, so this flag is the
 // race-free signal (Persist reads sess.State only when the loop is parked/done —
-// see Persist's doc). A fire-driven run (no wire relay) never marks it, so it is
-// cancelled on shutdown like any mid-stream run — which is correct: the fire path
-// does not persist an awaiting snapshot, so there is no resumable state to
-// preserve.
+// see Persist's doc). A fire-driven run (no wire relay) never marks it and has no
+// durable awaiting snapshot to preserve.
 type runState struct {
 	run  *agent.Run
 	sess *session.Session
@@ -1441,10 +1449,11 @@ func NewServiceContext(ctx context.Context, cfg Config) (*Service, error) {
 	if _, err := rand.Read(cleanupTokenKey[:]); err != nil {
 		return nil, fmt.Errorf("server: initialize cleanup token signer: %w", err)
 	}
-	_, shutdownCancel := context.WithCancel(context.Background())
+	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	svc := &Service{
 		cfg:                 cfg,
 		placementBinder:     placementBinder,
+		shutdownCtx:         shutdownCtx,
 		shutdownCancel:      shutdownCancel,
 		runs:                make(map[session.SessionID]*runState),
 		teams:               make(map[string]*teamState),
@@ -2957,6 +2966,17 @@ func (s *Service) Close() {
 	if complete {
 		return
 	}
+	// Fence new acknowledgement-only resumptions before closing run admission.
+	// A relay that reserved ownership before this point is in detachedControlWG
+	// and will be joined below; a later request fails before publishing a run.
+	s.closeDetachedControlAdmission()
+	s.Drain()
+
+	// Cross the persistence barrier for every current lifecycle BEFORE
+	// shutdownCtx is cancelled. Awaiting snapshots become protected handoff
+	// points, and cancelSignaled closes strict controls before any engine observes
+	// shutdown cancellation.
+	runs, _ := s.snapshotDrainState()
 	// Stop and join auxiliary title workers before tearing down their session
 	// dependencies. A cancelled in-flight provider call records interruption.
 	if s.titleCoordinator != nil {
@@ -2970,46 +2990,27 @@ func (s *Service) Close() {
 
 	s.prepareAuthorizationClose()
 
-	// Cancel every in-flight run so an LLM/MCP call blocked on its context
-	// unwinds. Snapshot under s.mu, then cancel outside to avoid holding the
-	// lock across Cancel (which may block briefly on hardAbort).
-	//
-	// AWAITING runs are EXCLUDED: a run parked on a permission ask persists a
-	// durable StateAwaiting snapshot (the relay's Persist-on-ask) that is the
-	// cloud-native Phase 2 resume point — a restarted process (or a peer replica)
-	// re-enters the loop at the ask via ApproveRun/ApprovePlan (Engine.
-	// ResumeApproval). Cancelling such a run would transition awaiting→cancelled
-	// and persist the cancelled snapshot OVER the awaiting one, destroying the
-	// cross-process resume contract. The parked run's goroutine waits on
-	// askRegistry.await (ctx-gated, but we do NOT cancel it); it is goleak-ignored
-	// (leakmain_test.go), so leaving it parked across Close is leak-clean, and the
-	// durable awaiting snapshot survives the shutdown. The awaiting signal is the
-	// race-free runState.awaiting atomic that Persist sets when the session is
-	// StateAwaiting (the relay calls Persist on EvPermissionAsk; reading sess.State
-	// there races no concurrent loop write — the loop is parked). A fire-driven run
-	// (no relay) never marks the flag, so it is cancelled like any mid-stream run —
-	// correct, since the fire path persists no awaiting snapshot to preserve.
-	// Mid-stream (StateRunning) runs have no durable mid-flight snapshot, so they
-	// ARE cancelled to unwind blocked LLM/MCP calls (the Task #3 intent).
-	s.mu.Lock()
-	var runs []*runState
-	for _, rs := range s.runs {
-		runs = append(runs, rs)
-	}
-	s.mu.Unlock()
-	for _, rs := range runs {
-		rs.persistMu.Lock()
-		awaiting := rs.awaiting.Load()
-		rs.persistMu.Unlock()
-		if awaiting {
-			continue // resumable cross-process via the durable awaiting snapshot
+	// Cancel every in-flight run. Awaiting runs are cancelled in memory too, but
+	// snapshotDrainState marked preserveDurable before shutdownCtx fired, so the
+	// terminal relay cannot overwrite their resumable handoff point.
+	for id, rs := range runs {
+		s.mu.Lock()
+		current := s.runs[id] == rs
+		run, admissionCancel := rs.run, rs.admissionCancel
+		s.mu.Unlock()
+		if !current {
+			continue
 		}
-		if rs.run != nil {
-			rs.run.Cancel()
-		} else if rs.admissionCancel != nil {
-			rs.admissionCancel()
+		if rs.preserveDurable.Load() {
+			s.cfg.MutationCapability.Invalidate(id)
+		}
+		if run != nil {
+			run.Cancel()
+		} else if admissionCancel != nil {
+			admissionCancel()
 		}
 	}
+	s.waitDetachedControlRelays()
 
 	// Stop the scheduler FIRST so in-flight fires drain while the service is
 	// still alive to serve them (the FireFunc drives StartRunContent on this
@@ -3063,8 +3064,7 @@ func (s *Service) Close() {
 	// stuck engine close (e.g. a wedged MCP transport) cannot stall shutdown
 	// unboundedly. On timeout the goroutine is abandoned (best-effort) and a
 	// WARN is logged; the leases still release so the process can exit.
-	done := make(chan struct{})
-	go func() {
+	s.waitBounded(func() {
 		for _, se := range engines {
 			if se.close != nil {
 				if err := se.close(); err != nil {
@@ -3072,14 +3072,7 @@ func (s *Service) Close() {
 				}
 			}
 		}
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(engineCloseTimeout):
-		s.cfg.Diagnostics.Log(context.Background(), port.LevelWarn, "timed out waiting for per-session engine close; abandoning",
-			"timeout", engineCloseTimeout.String())
-	}
+	}, "timed out waiting for per-session engine close; abandoning")
 	attachmentCtx, cancelAttachments := context.WithTimeout(context.Background(), engineCloseTimeout)
 	var attachmentWG sync.WaitGroup
 	for _, attachment := range brokerAttachments {
@@ -3119,15 +3112,19 @@ func (s *Service) Drain() {
 	// after the drain gate wins.
 	s.mu.Lock()
 	s.draining.Store(true)
-	var provisional []context.CancelFunc
-	for _, st := range s.runs {
+	type provisionalRun struct {
+		id session.SessionID
+		st *runState
+	}
+	var provisional []provisionalRun
+	for id, st := range s.runs {
 		if st.run == nil && st.admissionCancel != nil {
-			provisional = append(provisional, st.admissionCancel)
+			provisional = append(provisional, provisionalRun{id: id, st: st})
 		}
 	}
 	s.mu.Unlock()
-	for _, cancel := range provisional {
-		cancel()
+	for _, pending := range provisional {
+		s.cancelRegisteredRunState(pending.id, pending.st, nil, true)
 	}
 	// Arm the scheduler's drain gate too so no NEW fires start mid-tick during
 	// shutdown (in-flight fires complete or are cancelled by Close's Stop).
@@ -3156,11 +3153,17 @@ func (s *Service) snapshotDrainState() (map[session.SessionID]*runState, []sessi
 
 	// Do not hold s.mu while taking persistMu: Persist takes them in the opposite
 	// order to revalidate registry identity after its potentially blocking save.
-	for _, st := range runs {
+	for id, st := range runs {
 		st.persistMu.Lock()
-		if st.awaiting.Load() {
-			st.preserveDurable.Store(true)
+		s.mu.Lock()
+		current := s.runs[id] == st
+		if current {
+			if st.awaiting.Load() {
+				st.preserveDurable.Store(true)
+			}
+			st.cancelSignaled = true
 		}
+		s.mu.Unlock()
 		st.persistMu.Unlock()
 	}
 	return runs, leaseOnly
@@ -4710,6 +4713,446 @@ func (s *Service) repairRunningSession(ctx context.Context, sess *session.Sessio
 	return nil
 }
 
+// RunAskAcknowledgement is the bounded correlation returned by ResolveRunAsk.
+type RunAskAcknowledgement struct {
+	RunID string
+	AskID string
+}
+
+// RunControlAcknowledgement is the bounded correlation returned by CancelRun.
+type RunControlAcknowledgement struct {
+	RunID string
+}
+
+// RunSteerAcknowledgement is the bounded correlation returned by strict steer
+// and retraction controls.
+type RunSteerAcknowledgement struct {
+	Outcome   agent.SteerOutcome
+	RunID     string
+	MessageID string
+}
+
+// ResolveRunAsk resolves exactly one ordinary ask on one exact run. A restored
+// awaiting run is accepted under the caller context, then driven and relayed by
+// the Service lifecycle independently of the unary request.
+func (s *Service) ResolveRunAsk(ctx context.Context, id session.SessionID, expectedRunID, askID string, verdict session.ApprovalVerdict) (RunAskAcknowledgement, error) {
+	if expectedRunID == "" || askID == "" {
+		return RunAskAcknowledgement{}, fmt.Errorf("%w: expected_run_id and ask_id are required", ErrInvalidArgument)
+	}
+	if !validRunAskVerdict(verdict) {
+		return RunAskAcknowledgement{}, fmt.Errorf("%w: verdict is invalid", ErrInvalidArgument)
+	}
+	if ctx.Err() != nil {
+		return RunAskAcknowledgement{}, ctx.Err()
+	}
+	if _, err := s.GetSession(ctx, id); err != nil {
+		return RunAskAcknowledgement{}, err
+	}
+	generation := s.captureRunEntryGeneration(id)
+	if s.draining.Load() {
+		return RunAskAcknowledgement{}, fmt.Errorf("%w: %q", ErrUnavailable, id)
+	}
+
+	s.mu.Lock()
+	st := s.runs[id]
+	s.mu.Unlock()
+	if st != nil && st.run != nil {
+		return s.resolveLiveRunAsk(ctx, id, st, expectedRunID, askID, verdict, generation)
+	}
+	return s.resolvePersistedRunAsk(ctx, id, expectedRunID, askID, verdict, generation)
+}
+
+func (s *Service) resolveLiveRunAsk(ctx context.Context, id session.SessionID, st *runState, expectedRunID, askID string, verdict session.ApprovalVerdict, generation runEntryGeneration) (RunAskAcknowledgement, error) {
+	st.persistMu.Lock()
+	defer st.persistMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ctx.Err() != nil {
+		return RunAskAcknowledgement{}, ctx.Err()
+	}
+	run, err := s.liveRunForControlLocked(id, st, expectedRunID, generation)
+	if err != nil {
+		return RunAskAcknowledgement{}, err
+	}
+	switch run.ResolveOrdinaryAsk(askID, verdict) {
+	case agent.AskResolutionResolved:
+		st.resolvedAskID = askID
+		return RunAskAcknowledgement{RunID: run.RunID(), AskID: askID}, nil
+	case agent.AskResolutionPlanOriginated:
+		return RunAskAcknowledgement{}, ErrPlanResolutionRequired
+	default:
+		return RunAskAcknowledgement{}, ErrAskNotPending
+	}
+}
+
+func validRunAskVerdict(verdict session.ApprovalVerdict) bool {
+	switch verdict {
+	case session.VerdictDeny, session.VerdictAllowOnce, session.VerdictAllowAlways:
+		return true
+	default:
+		return false
+	}
+}
+
+// validatePersistedRunAsk validates the complete restart-resume authority of an
+// exact ordinary ask. It is deliberately shared by the pre-lease and post-lease
+// snapshots: the first rejects cheap mismatches, while the second is the
+// authoritative decision after distributed ownership has been acquired.
+func (s *Service) validatePersistedRunAsk(sess *session.Session, expectedRunID, askID string) error {
+	if err := checkExpectedRun(expectedRunID, sess.RunID()); err != nil {
+		return err
+	}
+	if sess.State != session.StateAwaiting {
+		return checkExpectedRun(expectedRunID, "")
+	}
+	pending, ok := sess.PendingAsk()
+	if !ok || pending.AskID != askID {
+		return ErrAskNotPending
+	}
+	if pending.Origin() == session.AskOriginPlan {
+		return ErrPlanResolutionRequired
+	}
+	return s.validatePersistedWorkspace(sess)
+}
+
+//nolint:gocyclo // restart resolution keeps validation, admission, context transfer, and exact-once relay together.
+func (s *Service) resolvePersistedRunAsk(ctx context.Context, id session.SessionID, expectedRunID, askID string, verdict session.ApprovalVerdict, generation runEntryGeneration) (RunAskAcknowledgement, error) {
+	resumeUnlock := s.resumeMu.lock(id)
+	defer resumeUnlock()
+	entryUnlock := s.runEntryMu.lock(id)
+	defer entryUnlock()
+	if ctx.Err() != nil {
+		return RunAskAcknowledgement{}, ctx.Err()
+	}
+	if s.validateRunEntryGeneration(id, generation) != nil {
+		return RunAskAcknowledgement{}, checkExpectedRun(expectedRunID, "")
+	}
+
+	s.mu.Lock()
+	st := s.runs[id]
+	s.mu.Unlock()
+	if st != nil && st.run != nil {
+		return s.resolveLiveRunAsk(ctx, id, st, expectedRunID, askID, verdict, generation)
+	}
+
+	sess, err := s.GetSession(ctx, id)
+	if err != nil {
+		return RunAskAcknowledgement{}, err
+	}
+	if err := s.validatePersistedRunAsk(sess, expectedRunID, askID); err != nil {
+		return RunAskAcknowledgement{}, err
+	}
+
+	st, admissionCtx, err := s.beginRunAdmission(ctx, id, sess, true)
+	if err != nil {
+		return RunAskAcknowledgement{}, err
+	}
+	promoted := false
+	defer s.cleanupRunAdmission(id, st, &promoted)
+	if err := s.acquireLease(admissionCtx, id); err != nil {
+		return RunAskAcknowledgement{}, err
+	}
+	requestLeaseCtx, stopRequestLease, leaseHeld := s.mutationLeaseContext(admissionCtx, id)
+	defer func() {
+		if !promoted {
+			stopRequestLease()
+		}
+	}()
+	// The snapshot read before Acquire was only a preflight. Another owner may
+	// have advanced the session while this request waited for the distributed
+	// lease, so reload and repeat the full exact-run/ask/origin/placement proof
+	// before constructing an engine or applying an allow-once verdict.
+	sess, err = s.GetSession(requestLeaseCtx, id)
+	if err != nil {
+		return RunAskAcknowledgement{}, err
+	}
+	if err := s.validatePersistedRunAsk(sess, expectedRunID, askID); err != nil {
+		return RunAskAcknowledgement{}, err
+	}
+	st.persistMu.Lock()
+	s.mu.Lock()
+	if s.runs[id] != st || st.cancelling || st.cancelSignaled {
+		s.mu.Unlock()
+		st.persistMu.Unlock()
+		return RunAskAcknowledgement{}, checkExpectedRun(expectedRunID, "")
+	}
+	st.sess = sess
+	s.mu.Unlock()
+	st.persistMu.Unlock()
+	engine, env, err := s.engineAndEnvironmentFor(requestLeaseCtx, sess)
+	if err != nil {
+		return RunAskAcknowledgement{}, err
+	}
+	if err := s.awaitContextWindow(requestLeaseCtx, id); err != nil {
+		return RunAskAcknowledgement{}, err
+	}
+	if ctx.Err() != nil {
+		return RunAskAcknowledgement{}, ctx.Err()
+	}
+	if !leaseHeld() {
+		return RunAskAcknowledgement{}, fmt.Errorf("%w: %q", ErrSessionLeasedElsewhere, id)
+	}
+
+	ownedCtx, stopOwned := s.detachedControlContext(ctx)
+	ownedLeaseCtx, stopOwnedLease, _ := s.mutationLeaseContext(ownedCtx, id)
+	stopRun := func() {
+		stopOwnedLease()
+		stopOwned()
+		stopRequestLease()
+	}
+	if !s.reserveDetachedControlRelay() {
+		stopOwnedLease()
+		stopOwned()
+		return RunAskAcknowledgement{}, fmt.Errorf("%w: %q", ErrUnavailable, id)
+	}
+	relayReserved := true
+	defer func() {
+		if relayReserved {
+			s.detachedControlWG.Done()
+		}
+	}()
+	run, err := s.promoteDetachedRunAdmission(ctx, id, st, stopRun, func() *agent.Run {
+		return engine.ResumeApproval(memory.WithWorkspace(ownedLeaseCtx, env.Workspace().Root()), sess, env, askID, verdict)
+	})
+	if err != nil {
+		stopOwnedLease()
+		stopOwned()
+		return RunAskAcknowledgement{}, err
+	}
+	promoted = true
+	go func() {
+		defer s.detachedControlWG.Done()
+		s.relayDetachedControlRun(ownedLeaseCtx, id, run)
+	}()
+	relayReserved = false
+	return RunAskAcknowledgement{RunID: expectedRunID, AskID: askID}, nil
+}
+
+func (s *Service) reserveDetachedControlRelay() bool {
+	s.detachedControlMu.Lock()
+	defer s.detachedControlMu.Unlock()
+	if s.detachedControlClosed {
+		return false
+	}
+	s.detachedControlWG.Add(1)
+	return true
+}
+
+func (s *Service) closeDetachedControlAdmission() {
+	s.detachedControlMu.Lock()
+	s.detachedControlClosed = true
+	s.detachedControlMu.Unlock()
+}
+
+func (s *Service) waitDetachedControlRelays() {
+	s.waitBounded(func() {
+		s.detachedControlWG.Wait()
+	}, "timed out waiting for detached control relays; abandoning")
+}
+
+func (s *Service) waitBounded(wait func(), timeoutWarning string) {
+	done := make(chan struct{})
+	go func() {
+		wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(engineCloseTimeout):
+		s.cfg.Diagnostics.Log(context.Background(), port.LevelWarn, timeoutWarning,
+			"timeout", engineCloseTimeout.String())
+	}
+}
+
+func (s *Service) detachedControlContext(request context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.WithoutCancel(request))
+	shutdown := s.shutdownCtx
+	if shutdown == nil {
+		shutdown = context.Background()
+	}
+	stopShutdown := context.AfterFunc(shutdown, cancel)
+	return ctx, func() {
+		stopShutdown()
+		cancel()
+	}
+}
+
+func (s *Service) promoteDetachedRunAdmission(request context.Context, id session.SessionID, st *runState, stop context.CancelFunc, launch func() *agent.Run) (*agent.Run, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if request.Err() != nil {
+		return nil, request.Err()
+	}
+	if s.runs[id] != st || st.cancelling || s.draining.Load() {
+		return nil, checkExpectedRun(st.sess.RunID(), "")
+	}
+	if err := s.validateHeldLeaseLocked(id); err != nil {
+		return nil, err
+	}
+	run := launch()
+	st.run = run
+	st.runContextStop = stop
+	st.admissionCancel = nil
+	return run, nil
+}
+
+func (s *Service) relayDetachedControlRun(ctx context.Context, id session.SessionID, run *agent.Run) {
+	// The owned context cancels the engine on lease loss or Service shutdown.
+	// Persistence must still drain the resulting terminal tail, so retain its
+	// values while detaching cancellation exactly as the HTTP/gRPC relays do.
+	relayCtx := context.WithoutCancel(ctx)
+	recorder := NewRunEventRecorder(relayCtx, s, id)
+	defer recorder.Close()
+	for ev := range run.Events() {
+		s.relayEvent(ctx, id, ev, true, recorder)
+	}
+	s.finishRelayRun(relayCtx, id, run)
+}
+
+func (s *Service) validateHeldLeaseLocked(id session.SessionID) error {
+	if s.cfg.SessionLease == nil || s.leaseDisabled {
+		return nil
+	}
+	h := s.heldLeases[id]
+	if h == nil || !h.valid || h.ctx.Err() != nil {
+		return fmt.Errorf("%w: %q", ErrSessionLeasedElsewhere, id)
+	}
+	return nil
+}
+
+// liveRunForControlLocked applies the one exact-live transition gate shared by
+// every prompt-free run control. The caller holds st.persistMu and s.mu; keeping
+// the generation, registry, lifecycle, exact-run, and live-lease checks here
+// preserves one error precedence before each endpoint performs its own action.
+func (s *Service) liveRunForControlLocked(id session.SessionID, st *runState, expectedRunID string, generation runEntryGeneration) (*agent.Run, error) {
+	if s.validateRunEntryGenerationLocked(id, generation) != nil || s.runs[id] != st || st.run == nil || st.cancelling || st.cancelSignaled || st.run.Outcome() != agent.RunOutcomeUnknown {
+		return nil, checkExpectedRun(expectedRunID, "")
+	}
+	if err := checkExpectedRun(expectedRunID, st.run.RunID()); err != nil {
+		return nil, err
+	}
+	if err := s.validateHeldLeaseLocked(id); err != nil {
+		return nil, err
+	}
+	return st.run, nil
+}
+
+// CancelRun cancels only the exact addressed live run.
+func (s *Service) CancelRun(ctx context.Context, id session.SessionID, expectedRunID string) (RunControlAcknowledgement, error) {
+	if expectedRunID == "" {
+		return RunControlAcknowledgement{}, fmt.Errorf("%w: expected_run_id is required", ErrInvalidArgument)
+	}
+	generation := s.captureRunEntryGeneration(id)
+	sess, err := s.GetSession(ctx, id)
+	if err != nil {
+		return RunControlAcknowledgement{}, err
+	}
+	s.mu.Lock()
+	st := s.runs[id]
+	s.mu.Unlock()
+	if st == nil || st.run == nil {
+		if err := checkExpectedRun(expectedRunID, sess.RunID()); err != nil {
+			return RunControlAcknowledgement{}, err
+		}
+		if sess.State == session.StateAwaiting {
+			return RunControlAcknowledgement{}, ErrNoActiveRun
+		}
+		return RunControlAcknowledgement{}, checkExpectedRun(expectedRunID, "")
+	}
+	st.persistMu.Lock()
+	defer st.persistMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ctx.Err() != nil {
+		return RunControlAcknowledgement{}, ctx.Err()
+	}
+	run, err := s.liveRunForControlLocked(id, st, expectedRunID, generation)
+	if err != nil {
+		return RunControlAcknowledgement{}, err
+	}
+	st.cancelSignaled = true
+	run.Cancel()
+	return RunControlAcknowledgement{RunID: expectedRunID}, nil
+}
+
+// SteerRun enqueues only on the exact addressed live run and never promotes.
+func (s *Service) SteerRun(ctx context.Context, id session.SessionID, expectedRunID, text string, parts []session.Content, messageID string) (RunSteerAcknowledgement, error) {
+	if expectedRunID == "" || text == "" && len(parts) == 0 {
+		return RunSteerAcknowledgement{}, fmt.Errorf("%w: expected_run_id and steer content are required", ErrInvalidArgument)
+	}
+	if err := validateSteerMessageID(messageID); err != nil {
+		return RunSteerAcknowledgement{}, err
+	}
+	if _, err := s.GetSession(ctx, id); err != nil {
+		return RunSteerAcknowledgement{}, err
+	}
+	generation := s.captureRunEntryGeneration(id)
+	s.mu.Lock()
+	st := s.runs[id]
+	s.mu.Unlock()
+	if st == nil {
+		return RunSteerAcknowledgement{}, checkExpectedRun(expectedRunID, "")
+	}
+	st.persistMu.Lock()
+	defer st.persistMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ctx.Err() != nil {
+		return RunSteerAcknowledgement{}, ctx.Err()
+	}
+	run, err := s.liveRunForControlLocked(id, st, expectedRunID, generation)
+	if err != nil {
+		return RunSteerAcknowledgement{}, err
+	}
+	outcome, err := run.EnqueueSteerWithMessageID(text, parts, messageID)
+	if err != nil {
+		return RunSteerAcknowledgement{}, fmt.Errorf("server: steer enqueue: %w", err)
+	}
+	if outcome == agent.SteerTooLate {
+		return RunSteerAcknowledgement{}, checkExpectedRun(expectedRunID, "")
+	}
+	return RunSteerAcknowledgement{Outcome: outcome, RunID: expectedRunID, MessageID: messageID}, nil
+}
+
+// CancelRunSteer retracts only from the exact addressed live run.
+func (s *Service) CancelRunSteer(ctx context.Context, id session.SessionID, expectedRunID, messageID string) (RunSteerAcknowledgement, error) {
+	if expectedRunID == "" {
+		return RunSteerAcknowledgement{}, fmt.Errorf("%w: expected_run_id is required", ErrInvalidArgument)
+	}
+	if err := validateSteerMessageID(messageID); err != nil {
+		return RunSteerAcknowledgement{}, err
+	}
+	if _, err := s.GetSession(ctx, id); err != nil {
+		return RunSteerAcknowledgement{}, err
+	}
+	return s.cancelRunSteer(ctx, id, expectedRunID, messageID, s.captureRunEntryGeneration(id))
+}
+
+func (s *Service) cancelRunSteer(ctx context.Context, id session.SessionID, expectedRunID, messageID string, generation runEntryGeneration) (RunSteerAcknowledgement, error) {
+	s.mu.Lock()
+	st := s.runs[id]
+	s.mu.Unlock()
+	if st == nil {
+		return RunSteerAcknowledgement{}, checkExpectedRun(expectedRunID, "")
+	}
+	st.persistMu.Lock()
+	defer st.persistMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ctx.Err() != nil {
+		return RunSteerAcknowledgement{}, ctx.Err()
+	}
+	run, err := s.liveRunForControlLocked(id, st, expectedRunID, generation)
+	if err != nil {
+		return RunSteerAcknowledgement{}, err
+	}
+	outcome, err := run.CancelSteer()
+	if err != nil {
+		return RunSteerAcknowledgement{}, fmt.Errorf("server: steer cancel: %w", err)
+	}
+	return RunSteerAcknowledgement{Outcome: outcome, RunID: expectedRunID, MessageID: messageID}, nil
+}
+
 // Steer routes an operator steer (mid-run injected input, issue #512) for a
 // session to the right home. It is the Service-level routing decision the
 // wire-facing steer handler drives: the steer NEVER drops silently.
@@ -5640,15 +6083,11 @@ func (s *Service) Approve(ctx context.Context, id session.SessionID, askID strin
 // runs EXACTLY ONCE. The common live-run case takes the service lock only long
 // enough to order approval against lease-loss invalidation.
 //
-// WIRE EXPOSURE: the rehydrate-resume path (no live run → resumeFromAwaiting) is
-// reachable only through the HTTP POST /v1/sessions/{id}/approve endpoint, which
-// relays the resumed run as an SSE body (see the HTTP approve handler). The gRPC
-// Converse stream has NO rehydrate path: its ResumeApproval control frame resolves the
-// ask against the stream's OWN live in-process run only (grpc.go readControl), so a
-// gRPC client whose session was evicted has no resume path over Converse and a verdict
-// frame for a dead run is silently dropped. The gRPC rehydrate path is a tracked
-// follow-up (additive, out of the Phase 2 gate) — see docs/adr/0027-cloud-native.md
-// Phase 2.
+// WIRE EXPOSURE: this legacy rehydrate-resume path (no live run →
+// resumeFromAwaiting) remains reachable through HTTP POST
+// /v1/sessions/{id}/approve, which relays the resumed run as SSE. Converse still
+// resolves only its own live run. The prompt-free ResolveRunAsk RPC and strict HTTP
+// mirror use the separate acknowledgement-only, Service-owned transition above.
 func (s *Service) ApproveRun(ctx context.Context, id session.SessionID, askID string, verdict session.ApprovalVerdict, expectedRunID string) (*agent.Run, error) {
 	generation := s.captureRunEntryGeneration(id)
 	if s.draining.Load() {
@@ -5913,7 +6352,7 @@ func (s *Service) approvePlan(ctx context.Context, id session.SessionID, targetM
 		// verdict to an existing live run), there is nothing to relay here.
 		var resumedStop session.StopReason
 		if resumed != nil {
-			resumedStop = s.forwardRunEvents(ctx, resumed, out)
+			resumedStop = s.forwardRunEvents(ctx, id, resumed, out)
 			s.deregister(id, resumed)
 		}
 		// (5) Atomic continuation (allow paths only). A deny leaves the session
@@ -5949,7 +6388,7 @@ func (s *Service) approvePlan(ctx context.Context, id session.SessionID, targetM
 			out <- session.Event{Type: session.EvResult, Result: res}
 			return
 		}
-		s.forwardRunEvents(ctx, cont, out)
+		s.forwardRunEvents(ctx, id, cont, out)
 		s.deregister(id, cont)
 	}()
 
@@ -5964,12 +6403,12 @@ func (s *Service) approvePlan(ctx context.Context, id session.SessionID, targetM
 // / log-only-filter — those are the RELAY's discipline (the caller of
 // ApprovePlan owns the wire), this only forwards the raw events. It registers
 // nothing (the run is already registered by its producer).
-func (*Service) forwardRunEvents(ctx context.Context, run *agent.Run, out chan<- session.Event) session.StopReason {
+func (s *Service) forwardRunEvents(ctx context.Context, id session.SessionID, run *agent.Run, out chan<- session.Event) session.StopReason {
 	stopWatch := make(chan struct{})
 	go func() {
 		select {
 		case <-ctx.Done():
-			run.Cancel()
+			s.cancelRegisteredRun(id, run)
 		case <-stopWatch:
 		}
 	}()
@@ -6068,6 +6507,50 @@ func (s *Service) cancelLiveRun(id session.SessionID, target *agent.Run, expecte
 	return nil
 }
 
+// cancelRegisteredRunState is the internal cancellation boundary for lifecycle
+// owners that do not need caller-facing run/lease validation (shutdown, drain,
+// lease loss, relay failure, and provisional admission teardown). It marks the
+// exact registered runState under persistMu before signalling either the run or
+// its admission context. expected, when non-nil, prevents a stale relay from
+// cancelling a successor. admissionOnly limits Drain's early gate to provisional
+// entries; active runs are left for GracefulDrain/Close.
+func (s *Service) cancelRegisteredRunState(id session.SessionID, st *runState, expected *agent.Run, admissionOnly bool) {
+	if st == nil {
+		if expected != nil {
+			expected.Cancel()
+		}
+		return
+	}
+	st.persistMu.Lock()
+	s.mu.Lock()
+	current := s.runs[id] == st
+	run, admissionCancel := st.run, st.admissionCancel
+	if !current || (expected != nil && run != expected) || (admissionOnly && run != nil) {
+		s.mu.Unlock()
+		st.persistMu.Unlock()
+		if expected != nil && (!current || run != expected) {
+			expected.Cancel()
+		}
+		return
+	}
+	st.cancelSignaled = true
+	s.mu.Unlock()
+	st.persistMu.Unlock()
+	if admissionCancel != nil {
+		admissionCancel()
+	}
+	if run != nil {
+		run.Cancel()
+	}
+}
+
+func (s *Service) cancelRegisteredRun(id session.SessionID, run *agent.Run) {
+	s.mu.Lock()
+	st := s.runs[id]
+	s.mu.Unlock()
+	s.cancelRegisteredRunState(id, st, run, false)
+}
+
 // CancelChild cancels ONE child (a subagent) of the session's in-flight run,
 // addressed by its child session id (the `agentId:` trailer / subagent.start
 // child_id). It mirrors Approve exactly: LookupRun, then the store fallback —
@@ -6108,10 +6591,10 @@ func (s *Service) noActiveRun(ctx context.Context, id session.SessionID) error {
 // best-effort no-op when no run is registered.
 //
 // When the session is StateAwaiting, Persist also marks the runState.awaiting
-// flag (race-free for Close's cancel loop). The flag is the signal Close uses to
-// EXCLUDE a parked-awaiting run from the shutdown cancel loop: cancelling such a
-// run would overwrite the durable awaiting snapshot (the cloud-native Phase 2
-// resume point) with cancelled. Persist is called by the relay/test AFTER
+// flag. Close uses that signal to protect the durable awaiting snapshot before
+// cancelling the local run in memory, preventing the terminal relay from
+// overwriting the cloud-native Phase 2 resume point with cancelled. Persist is
+// called by the relay/test AFTER
 // observing an event (EvPermissionAsk → loop parked, or EvResult → loop done), so
 // reading sess.State here races no concurrent loop write (the loop is parked or
 // exited; the state write happened-before the event the caller observed). The
@@ -6180,15 +6663,14 @@ func (s *Service) persistPermissionAsk(ctx context.Context, id session.SessionID
 func (s *Service) persistRun(ctx context.Context, id session.SessionID, st *runState) {
 	// Save FIRST, then mark awaiting on success (H1 ordering): the flag must be
 	// set only after the durable StateAwaiting snapshot has actually landed, so
-	// Close (which skips cancelling awaiting runs) never skips a run whose
-	// resumable snapshot was never persisted. Set-before-save would let Close
-	// skip a run whose Save then fails, losing the resume point.
+	// Close protects only a real resumable handoff. Set-before-save would let
+	// Close suppress the terminal save even though no resume point exists.
 	err := s.saveSession(ctx, st.sess)
 	if err != nil {
 		// Persistence is best-effort: a Save failure must not break the live
 		// stream. The run continues from in-memory state; only resume-across-
-		// restart is affected. Leave the awaiting flag unset so Close still
-		// cancels this run (there is no durable snapshot worth preserving).
+		// restart is affected. Leave the awaiting flag unset so Close does not
+		// preserve a snapshot that never landed.
 		_ = err
 		return
 	}
@@ -6217,6 +6699,9 @@ func (s *Service) completeRelay(ctx context.Context, id session.SessionID, run *
 	if ok && st.run == run && (st.sess.State == session.StateCompleted || st.sess.State == session.StateCancelled || st.sess.State == session.StateFailed) {
 		st.persistMu.Lock()
 		defer st.persistMu.Unlock()
+		if st.preserveDurable.Load() {
+			return
+		}
 		s.persistRun(ctx, id, st)
 	}
 }
@@ -6871,8 +7356,8 @@ func (s *Service) onLeaseLost(ctx context.Context, id session.SessionID, expecte
 
 	s.stopAuthorizationExpiry(id)
 	s.invalidateLocalAuthorization(context.WithoutCancel(ctx), id)
+	var st *runState
 	var run *agent.Run
-	var admissionCancel context.CancelFunc
 	var leaseCancel context.CancelFunc
 	var lease port.Lease
 	var askID string
@@ -6887,9 +7372,9 @@ func (s *Service) onLeaseLost(ctx context.Context, id session.SessionID, expecte
 	s.cfg.MutationCapability.Invalidate(id)
 	leaseCancel = expected.cancel
 	lease = expected.lease
-	if st := s.runs[id]; st != nil {
-		run = st.run
-		admissionCancel = st.admissionCancel
+	if current := s.runs[id]; current != nil {
+		st = current
+		run = current.run
 		preserveAwaiting = st.awaiting.Load()
 		if preserveAwaiting {
 			if ask, pending := st.sess.PendingAsk(); pending {
@@ -6907,12 +7392,7 @@ func (s *Service) onLeaseLost(ctx context.Context, id session.SessionID, expecte
 	if leaseCancel != nil {
 		leaseCancel()
 	}
-	if admissionCancel != nil {
-		admissionCancel()
-	}
-	if run != nil {
-		run.Cancel()
-	}
+	s.cancelRegisteredRunState(id, st, nil, false)
 	if !preserveAwaiting {
 		releaseCtx, releaseCancel := context.WithTimeout(context.WithoutCancel(ctx), leaseAcquireTimeout)
 		defer releaseCancel()
@@ -7343,7 +7823,7 @@ func (s *Service) cleanupRunAdmission(id session.SessionID, st *runState, promot
 	if *promoted {
 		return
 	}
-	st.admissionCancel()
+	s.cancelRegisteredRunState(id, st, nil, true)
 	s.removeRunState(id, st)
 }
 
@@ -7402,11 +7882,8 @@ func (s *Service) promoteRunAdmission(id session.SessionID, st *runState, stop c
 	if s.runs[id] != st || st.cancelling || s.draining.Load() {
 		return nil, fmt.Errorf("%w: %q", ErrUnavailable, id)
 	}
-	if s.cfg.SessionLease != nil && !s.leaseDisabled {
-		h := s.heldLeases[id]
-		if h == nil || !h.valid || h.ctx.Err() != nil {
-			return nil, fmt.Errorf("%w: %q", ErrSessionLeasedElsewhere, id)
-		}
+	if err := s.validateHeldLeaseLocked(id); err != nil {
+		return nil, err
 	}
 	run := launch()
 	st.run = run

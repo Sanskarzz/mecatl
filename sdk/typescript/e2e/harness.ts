@@ -1,6 +1,6 @@
-import { type ChildProcess, spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { type ChildProcess, execFileSync, spawn } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
@@ -20,9 +20,11 @@ export interface ReadyDocument {
 }
 
 export interface Daemon {
+  ambientUserModelPath: string;
   ready: ReadyDocument;
   runtimeDirectory: string;
   storeDirectory: string;
+  userModelDirectory: string;
   workspace: string;
   restart(options?: DaemonRestartOptions): Promise<void>;
 }
@@ -31,6 +33,7 @@ export interface DaemonOptions {
   durable?: boolean;
   http?: boolean;
   script?: string;
+  trustProject?: boolean;
   uds?: boolean;
 }
 
@@ -47,17 +50,59 @@ export function fixture(name: string): string {
   return join(repositoryRoot, "sdk", "typescript", "e2e", "fixtures", name);
 }
 
+function socketScratchDirectory(): string {
+  // A linked worktree may have a path longer than Darwin's sockaddr_un limit.
+  // The shared repository root stays repository-local while avoiding that nested
+  // worktree prefix; the socket itself remains a short `.scratch/<id>.sock`.
+  const commonGitDirectory = execFileSync(
+    "git",
+    ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    { cwd: repositoryRoot, encoding: "utf8" },
+  ).trim();
+  return join(dirname(commonGitDirectory), ".scratch");
+}
+
 export async function withDaemon<T>(
   options: DaemonOptions,
   run: (daemon: Daemon) => Promise<T>,
 ): Promise<T> {
   const scratchDirectory = join(repositoryRoot, ".scratch");
+  const socketDirectory = socketScratchDirectory();
   await mkdir(scratchDirectory, { recursive: true });
+  await mkdir(socketDirectory, { recursive: true });
   const runtimeDirectory = await mkdtemp(join(scratchDirectory, "sdk-e2e-"));
   const readyFile = join(runtimeDirectory, "ready.json");
   const storeDirectory = join(runtimeDirectory, "store");
+  const userModelDirectory = join(runtimeDirectory, "user-model");
   const workspace = join(runtimeDirectory, "workspace");
-  await Promise.all([mkdir(storeDirectory), mkdir(workspace)]);
+  const homeDirectory = join(runtimeDirectory, "home");
+  const temporaryDirectory = join(runtimeDirectory, "tmp");
+  const xdgCacheDirectory = join(runtimeDirectory, "xdg-cache");
+  const xdgConfigDirectory = join(runtimeDirectory, "xdg-config");
+  const xdgDataDirectory = join(runtimeDirectory, "xdg-data");
+  const xdgStateDirectory = join(runtimeDirectory, "xdg-state");
+  const ambientUserModelPath = join(xdgConfigDirectory, "mecatl", "usermodel");
+  const socketPath = join(socketDirectory, `${basename(runtimeDirectory).slice(-6)}.sock`);
+  await Promise.all([
+    mkdir(storeDirectory),
+    mkdir(workspace),
+    mkdir(homeDirectory),
+    mkdir(temporaryDirectory),
+    mkdir(xdgCacheDirectory),
+    mkdir(dirname(ambientUserModelPath), { recursive: true }),
+    mkdir(xdgDataDirectory),
+    mkdir(xdgStateDirectory),
+  ]);
+  await writeFile(ambientUserModelPath, "ambient user-model poison\n", "utf8");
+  const environment: NodeJS.ProcessEnv = {
+    HOME: homeDirectory,
+    PATH: process.env.PATH,
+    TMPDIR: temporaryDirectory,
+    XDG_CACHE_HOME: xdgCacheDirectory,
+    XDG_CONFIG_HOME: xdgConfigDirectory,
+    XDG_DATA_HOME: xdgDataDirectory,
+    XDG_STATE_HOME: xdgStateDirectory,
+  };
   let effectiveOptions = { ...options };
   try {
     let running = await startDaemon(
@@ -66,8 +111,12 @@ export async function withDaemon<T>(
       storeDirectory,
       workspace,
       undefined,
+      socketPath,
+      userModelDirectory,
+      environment,
     );
     const daemon: Daemon = {
+      ambientUserModelPath,
       ready: running.ready,
       restart: async (restartOptions = {}) => {
         const previousReady = running.ready;
@@ -87,11 +136,15 @@ export async function withDaemon<T>(
           storeDirectory,
           workspace,
           previousReady,
+          socketPath,
+          userModelDirectory,
+          environment,
         );
         daemon.ready = running.ready;
       },
       runtimeDirectory,
       storeDirectory,
+      userModelDirectory,
       workspace,
     };
 
@@ -101,6 +154,7 @@ export async function withDaemon<T>(
       await stop(running.child);
     }
   } finally {
+    await rm(socketPath, { force: true });
     await rm(runtimeDirectory, { force: true, recursive: true });
   }
 }
@@ -111,6 +165,9 @@ async function startDaemon(
   storeDirectory: string,
   workspace: string,
   previousReady: ReadyDocument | undefined,
+  socketPath: string,
+  userModelDirectory: string,
+  environment: NodeJS.ProcessEnv,
 ): Promise<RunningDaemon> {
   const args = [
     "serve",
@@ -122,18 +179,19 @@ async function startDaemon(
     "--metrics-addr",
     "",
     "--no-soul",
-    "--no-user-model",
+    "--user-model-dir",
+    userModelDirectory,
     "--no-scheduler",
     "--flight-recorder=false",
   ];
   if (options.durable === true) {
     args.push("--store-dir", storeDirectory);
   }
+  if (options.trustProject === true) {
+    args.push("--trust-project");
+  }
   if (options.uds === true) {
-    args.push(
-      "--grpc-unix-socket",
-      previousReady?.socket_path ?? join(dirname(readyFile), "mecated.sock"),
-    );
+    args.push("--grpc-unix-socket", previousReady?.socket_path ?? socketPath);
     args.push("--http-addr", "");
   } else {
     args.push("--grpc-addr", previousReady?.grpc_address ?? "127.0.0.1:0");
@@ -144,10 +202,6 @@ async function startDaemon(
   }
   if (options.script !== undefined) args.push("--mock-script", options.script);
 
-  const environment = { ...process.env };
-  delete environment.ANTHROPIC_API_KEY;
-  delete environment.OPENAI_API_KEY;
-  delete environment.OPENROUTER_API_KEY;
   const child = spawn(join(repositoryRoot, "bin", "mecated"), args, {
     cwd: repositoryRoot,
     env: environment,

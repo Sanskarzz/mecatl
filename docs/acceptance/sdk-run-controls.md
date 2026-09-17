@@ -4,12 +4,13 @@
 **Work classification:** Architectural — this adds durable public protobuf, HTTP, generated Go, and TypeScript SDK contracts for mutating an explicitly addressed run without owning its event stream.
 **Decision record:** [ADR 0347](../adr/0347-run-id-addressed-prompt-free-controls.md)
 **Phase:** ergonomic detached run controls
-**Status:** proposed, 2026-09-16. The user approved the strict run binding and public SDK shape; ready for Plan / Interface review.
+**Status:** landed, 2026-09-16. Implemented on the stacked `impl/sdk-run-controls` candidate above Plan / Interface PR #1635; merge remains subject to Implementation PR review and CI.
 **Delivery:** Split. The new wire methods, bounded rehydration behavior, stale-run rule, and exported SDK resource need human review before implementation changes public contracts.
 **Expected tasks:** deferred to orchestration
 **Issue:** [stacklok/mecatl#1630](https://github.com/stacklok/mecatl/issues/1630).
 **Plan PR:** [#1635](https://github.com/stacklok/mecatl/pull/1635)
-**Approved baseline:** absent until the Plan / Interface PR merges
+**Approved baseline:** `180d18f9df776e20abe4c2540294dbf09fa6a831`, the explicitly user-approved Plan head. The user authorized the implementation stack to proceed in sequence before Plan / Interface PR #1635 merges. This is the recorded stack-before-merge exception, not a claim that the plan commit is already reachable from the target base.
+**Implementation review baseline:** `172b55fb52927f5fed286592d98696c03f19930c`, the final code-and-test candidate reviewed after panel repairs; the following commit records this metadata only.
 
 Let an SDK consumer that knows a session ID and run ID resolve an ordinary permission ask, cancel the run, steer with text or ordered media, or retract pending steering without owning or creating an event stream. The client binds every operation to that exact run, carries normal request options, and receives bounded typed acknowledgements over both gRPC and HTTP.
 
@@ -182,6 +183,7 @@ Steering reuses the existing [multimodal content contract](../adr/0251-multimoda
   - verify: vitest:sdk/typescript/test/run-controls.test.ts#Y2FuY2VsU3RlZXIgcmV0dXJucyBuYXJyb3dlZCBjb3JyZWxhdGVkIGFja25vd2xlZGdlbWVudHM — `sdk/typescript/test/run-controls.test.ts :: "cancelSteer returns narrowed correlated acknowledgements"`
 - AC4.5: Concurrent drain, cancellation, registry replacement, generation invalidation, and lease loss linearize before or after retraction: success reflects the winning exact-live transition, and every losing arm returns its registered error without touching a successor or an unowned inbox.
   - verify: `TestSDKRunControls_Scenario4_CancelSteerRaceAndLeaseGates`
+  - verify: `TestSDKRunControls_CancelAndDrainLinearizeAgainstPendingSteerRetraction`
 - AC4.6: Wrong-operation outcomes, unspecified/numeric-unknown outcomes, changed message/run IDs, promoted metadata, missing required raw JSON keys, malformed JSON, and transport-native malformed messages fail with `ProtocolError` rather than widening either acknowledgement union.
   - verify: vitest:sdk/typescript/test/run-controls.test.ts#c3RlZXIgY29udHJvbHMgcmVqZWN0IG1hbGZvcm1lZCBhY2tub3dsZWRnZW1lbnRz — `sdk/typescript/test/run-controls.test.ts :: "steer controls reject malformed acknowledgements"`
 
