@@ -4,12 +4,12 @@
 **Work classification:** Bounded — this repairs the existing hand-written TypeScript SDK HTTP/SSE decoder without changing protobuf, exported APIs, server behavior, or a durable architecture decision.
 **Decision record:** None — ADR 0279 already assigns daemon HTTP/SSE decoding to the hand-written SDK transport, and the fix stays inside that boundary.
 **Phase:** HTTP transport compatibility
-**Status:** proposed, 2026-09-17. Drafted from issue #1631 and the current SDK transport contract.
+**Status:** landed, 2026-09-17. All acceptance criteria and aggregate validation gates pass on the stacked implementation candidate.
 **Delivery:** Split. The recursive descriptor-guided conversion, fail-closed numeric rules, raw-response preservation, and release documentation deserve interface review before implementation.
 **Expected tasks:** deferred to orchestration
 **Issue:** [stacklok/mecatl#1631](https://github.com/stacklok/mecatl/issues/1631).
 **Plan PR:** [#1684](https://github.com/stacklok/mecatl/pull/1684)
-**Approved baseline:** absent until the Plan / Interface PR merges
+**Approved baseline:** `110017facdc7cb9fbbebf730af6587386f8de8a4` (Plan / Interface PR #1684 merge commit)
 
 Let the TypeScript SDK consume the daemon's existing standard-library JSON encoding of
 `google.protobuf.Timestamp` and `google.protobuf.Duration` over HTTP and SSE. Immediately before
