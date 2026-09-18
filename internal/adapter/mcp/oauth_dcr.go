@@ -36,6 +36,8 @@ const (
 	oauthDCRScope                   = "openid"
 	oauthDCRStatePending            = "pending"
 	oauthDCRStateReady              = "ready"
+	oauthDCRStateRemoving           = "removing"
+	oauthDCRStateRemoved            = "removed"
 	oauthDCRFailureOutcomeUnknown   = "registration_outcome_unknown"
 	oauthDCRFailureResponseInvalid  = "registration_response_invalid"
 	oauthDCRFailureReadyPersistence = "ready_persistence_failed"
@@ -182,7 +184,10 @@ type oauthDCRMetadata struct {
 	GrantTypes              []string `json:"grant_types"`
 	ResponseTypes           []string `json:"response_types"`
 	Scopes                  []string `json:"scopes"`
-	supportedScopes         []string
+	// AuthorizationResponseIssParameterSupported is the RFC 9207 capability
+	// discovered for this exact authorization server transaction.
+	AuthorizationResponseIssParameterSupported bool `json:"authorization_response_iss_parameter_supported,omitempty"`
+	supportedScopes                            []string
 }
 
 type oauthDCRRegistration struct {
@@ -238,8 +243,144 @@ func (t *oauthDCRTicket) consume() bool {
 	return true
 }
 
-// PrepareOAuthDCRLogin validates discovery and prepares one durable registration
-// attempt. It never launches a browser or sends the registration request.
+// OAuthDCRRemovalResult reports whether a lifecycle record existed. A missing
+// record is an authoritative settings-only removal; callers must not infer that
+// outcome from an unreadable or unavailable store.
+type OAuthDCRRemovalResult struct {
+	LifecycleFound bool
+}
+
+// RemoveOAuthDCR removes one local direct-DCR registration. It is deliberately
+// host-internal: the caller supplies the already-resolved, pinned credential
+// store and profile identity. It never contacts the authorization server.
+func RemoveOAuthDCR(ctx context.Context, resource string, opts OAuthOptions) (OAuthDCRRemovalResult, error) { //nolint:gocyclo // crash points are kept explicit.
+	if ctx == nil || opts.Client.DCR == nil || opts.CredentialStore == nil || opts.CredentialReader != nil {
+		return OAuthDCRRemovalResult{}, ErrOAuthDCRRecoveryRequired
+	}
+	caps := opts.CredentialStore.Capabilities()
+	if !caps.Persistent || !caps.CrossProcessCAS {
+		return OAuthDCRRemovalResult{}, ErrOAuthDCRRecoveryRequired
+	}
+	canonical, err := canonicalOAuthResource(resource)
+	if err != nil {
+		return OAuthDCRRemovalResult{}, ErrOAuthDCRRecoveryRequired
+	}
+	identity := oauthDCRIdentity{Profile: opts.Subject.Profile, Principal: opts.Subject.Principal, Resource: canonical, Issuer: opts.Issuer}
+	if err := validateDCRIdentity(identity); err != nil {
+		return OAuthDCRRemovalResult{}, ErrOAuthDCRRecoveryRequired
+	}
+	key, err := oauthDCRLifecycleKey(opts.Client.DCR.ServerName)
+	if err != nil {
+		return OAuthDCRRemovalResult{}, ErrOAuthDCRRecoveryRequired
+	}
+	stored, err := opts.CredentialStore.Get(ctx, key)
+	if errors.Is(err, credentialstore.ErrNotFound) {
+		return OAuthDCRRemovalResult{}, nil
+	}
+	if err != nil {
+		return OAuthDCRRemovalResult{}, ErrOAuthDCRRecoveryRequired
+	}
+	record, err := decodeOAuthDCRRecord(stored.Value, identity)
+	if err != nil || record.State == oauthDCRStatePending || record.State == oauthDCRStateReady && record.Registration == nil {
+		return OAuthDCRRemovalResult{}, ErrOAuthDCRRecoveryRequired
+	}
+	if record.State == oauthDCRStateRemoved {
+		return OAuthDCRRemovalResult{LifecycleFound: true}, nil
+	}
+	if record.State != oauthDCRStateReady && record.State != oauthDCRStateRemoving {
+		return OAuthDCRRemovalResult{}, ErrOAuthDCRRecoveryRequired
+	}
+
+	if record.State == oauthDCRStateReady {
+		record.State = oauthDCRStateRemoving
+		value, encodeErr := encodeOAuthDCRRecord(record, identity)
+		if encodeErr != nil {
+			return OAuthDCRRemovalResult{}, ErrOAuthDCRRecoveryRequired
+		}
+		updated, putErr := opts.CredentialStore.Put(ctx, key, value, &stored.Version)
+		if putErr != nil {
+			current, readErr := opts.CredentialStore.Get(ctx, key)
+			if readErr != nil {
+				return OAuthDCRRemovalResult{}, ErrOAuthDCRRecoveryRequired
+			}
+			candidate, decodeErr := decodeOAuthDCRRecord(candidateValue(current), identity)
+			if decodeErr != nil || candidate.State != oauthDCRStateRemoving && candidate.State != oauthDCRStateRemoved {
+				return OAuthDCRRemovalResult{}, ErrOAuthDCRRecoveryRequired
+			}
+			stored, record = current, candidate
+		} else {
+			stored = updated
+		}
+	}
+
+	grantIdentity := oauthCredentialIdentity{Profile: record.Identity.Profile, Principal: record.Identity.Principal, Resource: record.Identity.Resource, Issuer: record.Identity.Issuer, ClientKind: oauthDCRClientKind, ClientID: record.Registration.ClientID}
+	grantKey, err := oauthDCRCredentialKey(grantIdentity, record.Generation)
+	if err != nil {
+		return OAuthDCRRemovalResult{}, ErrOAuthDCRRecoveryRequired
+	}
+	if record.State != oauthDCRStateRemoved {
+		if err := removeDCRGrant(ctx, opts.CredentialStore, grantKey, record, opts.allowLoopbackForTest); err != nil {
+			return OAuthDCRRemovalResult{}, err
+		}
+		record.State = oauthDCRStateRemoved
+		value, encodeErr := encodeOAuthDCRRecord(record, identity)
+		if encodeErr != nil {
+			return OAuthDCRRemovalResult{}, ErrOAuthDCRRecoveryRequired
+		}
+		updated, putErr := opts.CredentialStore.Put(ctx, key, value, &stored.Version)
+		if putErr != nil {
+			current, readErr := opts.CredentialStore.Get(ctx, key)
+			if readErr != nil {
+				return OAuthDCRRemovalResult{}, ErrOAuthDCRRecoveryRequired
+			}
+			candidate, decodeErr := decodeOAuthDCRRecord(candidateValue(current), identity)
+			if decodeErr != nil || candidate.State != oauthDCRStateRemoved {
+				return OAuthDCRRemovalResult{}, ErrOAuthDCRRecoveryRequired
+			}
+			stored, record = current, candidate
+		} else {
+			stored = updated
+		}
+	}
+	return OAuthDCRRemovalResult{LifecycleFound: true}, nil
+}
+
+func candidateValue(record credentialstore.Record) []byte { return record.Value }
+
+func removeDCRGrant(ctx context.Context, store credentialstore.Store, key []byte, registration oauthDCRRecord, allowLoopback bool) error {
+	for attempt := 0; attempt < 2; attempt++ {
+		grant, err := store.Get(ctx, key)
+		if errors.Is(err, credentialstore.ErrNotFound) {
+			return nil
+		}
+		if err != nil {
+			return ErrOAuthDCRRecoveryRequired
+		}
+		issuer, err := validateHTTPURL("stored OAuth DCR issuer", registration.Identity.Issuer, !allowLoopback)
+		if err != nil {
+			return ErrOAuthDCRRecoveryRequired
+		}
+		grantIdentity := oauthCredentialIdentity{Profile: registration.Identity.Profile, Principal: registration.Identity.Principal, Resource: registration.Identity.Resource, Issuer: registration.Identity.Issuer, ClientKind: oauthDCRClientKind, ClientID: registration.Registration.ClientID}
+		if _, err := decodeOAuthDCRGrant(grant.Value, grantIdentity, registration.Generation, map[string]struct{}{urlOrigin(issuer): {}}); err != nil {
+			return ErrOAuthDCRRecoveryRequired
+		}
+		if err := store.Delete(ctx, key, grant.Version); err == nil || errors.Is(err, credentialstore.ErrNotFound) {
+			return nil
+		}
+		// Delete may have committed before its response was lost. Re-read
+		// before deciding whether the crash-safe retry is still required.
+		_, readErr := store.Get(ctx, key)
+		if errors.Is(readErr, credentialstore.ErrNotFound) {
+			return nil
+		}
+		if readErr != nil || attempt == 1 {
+			return ErrOAuthDCRRecoveryRequired
+		}
+	}
+	return ErrOAuthDCRRecoveryRequired
+}
+
+// PrepareOAuthDCRLogin validates the DCR lifecycle state and prepares the login flow.
 func PrepareOAuthDCRLogin(ctx context.Context, resource string, opts OAuthOptions, action OAuthDCRLoginAction) (OAuthOptions, string, error) { //nolint:gocyclo // explicit CAS states and recovery actions stay visible.
 	if ctx == nil {
 		return OAuthOptions{}, "", errors.New("OAuth DCR preparation requires a context")
@@ -294,6 +435,7 @@ func PrepareOAuthDCRLogin(ctx context.Context, resource string, opts OAuthOption
 	if err != nil {
 		return OAuthOptions{}, "", err
 	}
+	opts.dcrIssParameterSupported = meta.AuthorizationResponseIssParameterSupported
 	record, getErr = opts.CredentialStore.Get(ctx, key)
 	if getErr == nil {
 		stored, decodeErr := decodeOAuthDCRRecordRaw(record.Value)
@@ -315,6 +457,40 @@ func PrepareOAuthDCRLogin(ctx context.Context, resource string, opts OAuthOption
 			meta.RedirectPath = stored.Metadata.RedirectPath
 			if stored.State == oauthDCRStatePending {
 				return OAuthOptions{}, "", dcrRecovery(recoveryCategoryForPersistedDCRFailure(stored.FailureCategory))
+			}
+			if stored.State == oauthDCRStateRemoved {
+				// A valid removed tombstone permits a fresh pending generation and a
+				// new upstream registration — this is NOT a corrupt/recovery state.
+				pending, pendingErr := newOAuthDCRPending(identity, meta, oauthDCRRecord{}, "")
+				if pendingErr != nil {
+					return OAuthOptions{}, "", pendingErr
+				}
+				value, encodeErr := encodeOAuthDCRRecord(pending, identity)
+				if encodeErr != nil {
+					return OAuthOptions{}, "", encodeErr
+				}
+				updated, putErr := opts.CredentialStore.Put(ctx, key, value, &record.Version)
+				if errors.Is(putErr, credentialstore.ErrConflict) {
+					winner, winnerErr := opts.CredentialStore.Get(ctx, key)
+					if winnerErr != nil {
+						return OAuthOptions{}, "", ErrOAuthDCRRecoveryRequired
+					}
+					winnerStored, decodeErr := decodeOAuthDCRRecord(winner.Value, identity)
+					if decodeErr != nil {
+						return OAuthOptions{}, "", ErrOAuthDCRRecoveryRequired
+					}
+					winnerMeta := meta
+					winnerMeta.RedirectPath = winnerStored.Metadata.RedirectPath
+					if winnerStored.State == oauthDCRStateReady && winnerStored.MetadataFingerprint == fingerprintDCRMetadata(winnerMeta) && equalDCRMetadata(winnerStored.Metadata, winnerMeta) {
+						return withResolvedDCR(opts, winnerStored), winnerStored.Metadata.RedirectPath, nil
+					}
+					return OAuthOptions{}, "", ErrOAuthDCRRecoveryRequired
+				}
+				if putErr != nil {
+					return OAuthOptions{}, "", ErrOAuthDCRRecoveryRequired
+				}
+				opts.dcrTicket = &oauthDCRTicket{key: append([]byte(nil), key...), version: updated.Version, record: pending, registrationEndpoint: endpoint}
+				return opts, pending.Metadata.RedirectPath, nil
 			}
 			if stored.State != oauthDCRStateReady || stored.MetadataFingerprint != fingerprintDCRMetadata(meta) || !equalDCRMetadata(stored.Metadata, meta) {
 				return OAuthOptions{}, "", dcrRecovery(OAuthDCRRecoveryCorrupt)
@@ -507,6 +683,7 @@ func discoverDCRMetadata(ctx context.Context, resource string, opts OAuthOptions
 		TokenEndpointAuthMethod: "none", GrantTypes: []string{"authorization_code"},
 		ResponseTypes: []string{"code"}, Scopes: []string{oauthDCRScope},
 		supportedScopes: slices.Clone(as.ScopesSupported),
+		AuthorizationResponseIssParameterSupported: as.AuthorizationResponseIssParameterSupported,
 	}, as.RegistrationEndpoint, nil
 }
 
@@ -571,6 +748,7 @@ func resolvePreparedDCR(ctx context.Context, resource string, opts OAuthOptions,
 		if err != nil {
 			return OAuthOptions{}, ErrOAuthDCRRecoveryRequired
 		}
+		opts.dcrIssParameterSupported = meta.AuthorizationResponseIssParameterSupported
 		key, err := oauthDCRLifecycleKey(opts.Client.DCR.ServerName)
 		if err != nil {
 			return OAuthOptions{}, err
@@ -725,6 +903,7 @@ func sameStrings(a, b []string) bool {
 
 func withResolvedDCR(opts OAuthOptions, record oauthDCRRecord) OAuthOptions {
 	opts.dcrTicket = nil
+	opts.dcrIssParameterSupported = record.Metadata.AuthorizationResponseIssParameterSupported
 	opts.dcr = &oauthDCRResolved{issuer: record.Identity.Issuer, clientID: record.Registration.ClientID, generation: record.Generation, path: record.Metadata.RedirectPath, serverName: opts.Client.DCR.ServerName}
 	return opts
 }
@@ -897,7 +1076,7 @@ func validateOAuthDCRRecord(record oauthDCRRecord, expected oauthDCRIdentity) er
 		if record.Registration != nil || !validPersistedDCRFailureCategory(record.FailureCategory) {
 			return errors.New("OAuth DCR pending record is invalid")
 		}
-	case oauthDCRStateReady:
+	case oauthDCRStateReady, oauthDCRStateRemoving, oauthDCRStateRemoved:
 		if record.FailureCategory != "" {
 			return errors.New("OAuth DCR ready record contains failure category")
 		}
@@ -911,6 +1090,7 @@ func validateOAuthDCRRecord(record oauthDCRRecord, expected oauthDCRIdentity) er
 		if record.Registration.ClientIDIssuedAt != nil && *record.Registration.ClientIDIssuedAt < 0 {
 			return errors.New("OAuth DCR issuance time is invalid")
 		}
+		return nil
 	default:
 		return errors.New("OAuth DCR registration state is invalid")
 	}
@@ -931,7 +1111,7 @@ func validDCRRedirectPort(port string) bool {
 }
 
 func equalDCRMetadata(a, b oauthDCRMetadata) bool {
-	return a.Issuer == b.Issuer && a.Resource == b.Resource && a.RedirectPolicy == b.RedirectPolicy && a.RedirectPath == b.RedirectPath && a.TokenEndpointAuthMethod == b.TokenEndpointAuthMethod && slices.Equal(a.GrantTypes, b.GrantTypes) && slices.Equal(a.ResponseTypes, b.ResponseTypes) && slices.Equal(a.Scopes, b.Scopes)
+	return a.Issuer == b.Issuer && a.Resource == b.Resource && a.RedirectPolicy == b.RedirectPolicy && a.RedirectPath == b.RedirectPath && a.TokenEndpointAuthMethod == b.TokenEndpointAuthMethod && a.AuthorizationResponseIssParameterSupported == b.AuthorizationResponseIssParameterSupported && slices.Equal(a.GrantTypes, b.GrantTypes) && slices.Equal(a.ResponseTypes, b.ResponseTypes) && slices.Equal(a.Scopes, b.Scopes)
 }
 
 func fingerprintDCRMetadata(meta oauthDCRMetadata) string {

@@ -20,7 +20,7 @@ import (
 	"github.com/stacklok/mecatl/mcp/oauthlogin"
 )
 
-const mcpLoginUsage = "usage: mecated mcp login SERVER [--no-browser] [--permission-config PATH ...] [--reset-dcr-registration | --retry-dcr-registration]"
+const mcpLoginUsage = "usage: mecated mcp login SERVER [--no-browser] [--file PATH | --permission-config PATH ...] [--reset-dcr-registration | --retry-dcr-registration]"
 
 var errMCPLoginUsage = errors.New(mcpLoginUsage)
 
@@ -28,6 +28,7 @@ type mcpLoginArgs struct {
 	server            string
 	noBrowser         bool
 	permissionConfigs []string
+	file              string
 	dcrAction         mcp.OAuthDCRLoginAction
 }
 
@@ -35,56 +36,89 @@ func parseMCPLoginArgs(args []string, out io.Writer) (mcpLoginArgs, error) {
 	var parsed mcpLoginArgs
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-		switch arg {
-		case "-h", "--help":
+		if arg == "-h" || arg == "--help" {
 			_, _ = fmt.Fprintln(out, "Usage: "+strings.TrimPrefix(mcpLoginUsage, "usage: ")+"\n\nAuthorize one operator-configured OAuth MCP server. --no-browser prints the terminal authorization URL. --permission-config selects trusted operator settings and is repeatable. DCR registration recovery requires exactly one explicit --reset-dcr-registration or --retry-dcr-registration operation.")
 			return mcpLoginArgs{}, flag.ErrHelp
-		case "--no-browser":
-			if parsed.noBrowser {
-				return mcpLoginArgs{}, errMCPLoginUsage
-			}
-			parsed.noBrowser = true
-		case "--reset-dcr-registration":
-			if parsed.dcrAction != mcp.OAuthDCRLoginReuse {
-				return mcpLoginArgs{}, errMCPLoginUsage
-			}
-			parsed.dcrAction = mcp.OAuthDCRLoginResetRegistration
-		case "--retry-dcr-registration":
-			if parsed.dcrAction != mcp.OAuthDCRLoginReuse {
-				return mcpLoginArgs{}, errMCPLoginUsage
-			}
-			parsed.dcrAction = mcp.OAuthDCRLoginRetryRegistration
-		case "--permission-config":
-			if i+1 >= len(args) {
-				return mcpLoginArgs{}, errMCPLoginUsage
-			}
-			path := args[i+1] // #nosec G602 -- the immediately preceding bound check proves i+1 is valid.
-			if path == "" || strings.HasPrefix(path, "-") {
-				return mcpLoginArgs{}, errMCPLoginUsage
-			}
-			i++
-			parsed.permissionConfigs = append(parsed.permissionConfigs, path)
-		default:
-			if path, ok := strings.CutPrefix(arg, "--permission-config="); ok {
-				if path == "" {
-					return mcpLoginArgs{}, errMCPLoginUsage
-				}
-				parsed.permissionConfigs = append(parsed.permissionConfigs, path)
-				continue
-			}
-			if len(arg) > 0 && arg[0] == '-' {
-				return mcpLoginArgs{}, errMCPLoginUsage
-			}
-			if parsed.server != "" {
-				return mcpLoginArgs{}, errMCPLoginUsage
-			}
-			parsed.server = arg
 		}
+		handled, err := parseMCPLoginOption(arg, args, &i, &parsed)
+		if err != nil {
+			return mcpLoginArgs{}, err
+		}
+		if handled {
+			continue
+		}
+		if strings.HasPrefix(arg, "-") || parsed.server != "" {
+			return mcpLoginArgs{}, errMCPLoginUsage
+		}
+		parsed.server = arg
 	}
 	if parsed.server == "" {
 		return mcpLoginArgs{}, errMCPLoginUsage
 	}
 	return parsed, nil
+}
+
+func parseMCPLoginOption(arg string, args []string, index *int, parsed *mcpLoginArgs) (bool, error) {
+	switch arg {
+	case "--no-browser":
+		if parsed.noBrowser {
+			return false, errMCPLoginUsage
+		}
+		parsed.noBrowser = true
+		return true, nil
+	case "--reset-dcr-registration":
+		if parsed.dcrAction != mcp.OAuthDCRLoginReuse {
+			return false, errMCPLoginUsage
+		}
+		parsed.dcrAction = mcp.OAuthDCRLoginResetRegistration
+		return true, nil
+	case "--retry-dcr-registration":
+		if parsed.dcrAction != mcp.OAuthDCRLoginReuse {
+			return false, errMCPLoginUsage
+		}
+		parsed.dcrAction = mcp.OAuthDCRLoginRetryRegistration
+		return true, nil
+	case mcpFileFlag, "--permission-config":
+		return parseMCPLoginPathOption(arg, args, index, parsed)
+	}
+	if path, ok := strings.CutPrefix(arg, "--file="); ok {
+		return setMCPLoginFile(path, parsed)
+	}
+	if path, ok := strings.CutPrefix(arg, "--permission-config="); ok {
+		return addMCPLoginPermissionConfig(path, parsed)
+	}
+	return false, nil
+}
+
+func parseMCPLoginPathOption(option string, args []string, index *int, parsed *mcpLoginArgs) (bool, error) {
+	if *index+1 >= len(args) {
+		return false, errMCPLoginUsage
+	}
+	*index = *index + 1
+	path := args[*index]
+	if strings.HasPrefix(path, "-") {
+		return false, errMCPLoginUsage
+	}
+	if option == mcpFileFlag {
+		return setMCPLoginFile(path, parsed)
+	}
+	return addMCPLoginPermissionConfig(path, parsed)
+}
+
+func setMCPLoginFile(path string, parsed *mcpLoginArgs) (bool, error) {
+	if path == "" || parsed.file != "" || len(parsed.permissionConfigs) != 0 {
+		return false, errMCPLoginUsage
+	}
+	parsed.file = path
+	return true, nil
+}
+
+func addMCPLoginPermissionConfig(path string, parsed *mcpLoginArgs) (bool, error) {
+	if path == "" || parsed.file != "" {
+		return false, errMCPLoginUsage
+	}
+	parsed.permissionConfigs = append(parsed.permissionConfigs, path)
+	return true, nil
 }
 
 func selectMCPLoginServer(profiles *cliconfig.MCPProfiles, name string) (mcp.ServerConfig, error) {
@@ -159,25 +193,69 @@ var executeMCPLogin = func(ctx context.Context, server mcp.ServerConfig, runtime
 }
 
 func loadMCPLoginProfiles(explicit []string) (*cliconfig.MCPProfiles, error) {
+	return loadMCPLoginProfilesSelected(explicit, "")
+}
+
+func loadMCPLoginProfilesSelected(explicit []string, selected string) (*cliconfig.MCPProfiles, error) {
 	resolver := permconfig.NewWithEnv(permconfig.Options{Conventional: true, ExplicitFiles: explicit}, xdgconfig.OSEnv)
 	var operator *permconfig.MCPSection
 	if resolver != nil {
 		operator = resolver.OperatorMCP()
 	}
-	return cliconfig.LoadMCPProfiles(cliconfig.MCPProfileLoadOptions{Operator: operator, LookupEnv: os.LookupEnv})
+	return cliconfig.LoadMCPProfiles(cliconfig.MCPProfileLoadOptions{Operator: operator, LookupEnv: os.LookupEnv, SelectedName: selected})
 }
 
 func runMCPLogin(args []string, stdout io.Writer, stderr ...io.Writer) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return runMCPLoginContext(ctx, args, stdout, stderr...)
+}
+
+func runMCPLoginContext(ctx context.Context, args []string, stdout io.Writer, stderr ...io.Writer) error {
 	diagnosticOut := io.Discard
 	if len(stderr) > 0 && stderr[0] != nil {
 		diagnosticOut = stderr[0]
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	parsed, err := parseMCPLoginArgs(args, stdout)
 	if err != nil {
 		return err
 	}
 
-	profiles, err := loadMCPLoginProfiles(parsed.permissionConfigs)
+	explicit := parsed.permissionConfigs
+	selected := ""
+	if parsed.file != "" {
+		selected = parsed.file
+	} else if len(explicit) > 0 {
+		selected = explicit[0]
+	}
+	path, pathErr := mcpSettingsFile(selected)
+	if pathErr != nil {
+		return pathErr
+	}
+	extraSources := explicit
+	if len(extraSources) > 0 {
+		extraSources = extraSources[1:]
+	}
+	sources, sourceErr := mcpSettingsSources(path, extraSources)
+	if sourceErr != nil {
+		return sourceErr
+	}
+	for _, source := range sources {
+		_, _ = fmt.Fprintf(stdout, "MCP settings source: %s\n", source.path)
+	}
+	for _, source := range sources {
+		if source.config.MCP != nil {
+			_, _ = fmt.Fprintf(stdout, "MCP settings winner: %s\n", source.path)
+			break
+		}
+	}
+	if parsed.file != "" {
+		explicit = []string{path}
+	}
+	profiles, err := loadMCPLoginProfilesSelected(explicit, parsed.server)
 	if err != nil {
 		return err
 	}
@@ -188,12 +266,12 @@ func runMCPLogin(args []string, stdout io.Writer, stderr ...io.Writer) error {
 		return err
 	}
 
+	_, _ = fmt.Fprintln(stdout, "MCP onboarding: preparing browser authorization")
 	opts := oauthlogin.Options{NoBrowser: parsed.noBrowser}
 	if parsed.noBrowser {
 		opts.URLWriter = stdout
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	_, _ = fmt.Fprintln(stdout, "MCP onboarding: verifying MCP connection")
 	if err := executeMCPLogin(ctx, server, opts, app.MCPLoginOptions{DCRAction: parsed.dcrAction, Diagnostics: slogdiag.NewText(diagnosticOut)}); err != nil {
 		return mcpLoginRemedy(err)
 	}

@@ -22,8 +22,10 @@ import (
 type commandMode string
 
 const (
-	modeServe commandMode = "serve"
-	modeACP   commandMode = "acp"
+	modeServe     commandMode = "serve"
+	modeACP       commandMode = "acp"
+	mcpAddCommand             = "add"
+	mcpFileFlag               = "--file"
 )
 
 // errBareInvocation is the usage error a bare `mecated` (no command word) or a
@@ -239,7 +241,10 @@ func writeTopLevelCommands(out io.Writer) {
 	_, _ = fmt.Fprintf(out, "Commands:\n")
 	_, _ = fmt.Fprintf(out, "  serve                   run the Mecatl network daemon over gRPC and HTTP/SSE\n")
 	_, _ = fmt.Fprintf(out, "  acp                     run the Agent Client Protocol over standard input/output\n")
+	_, _ = fmt.Fprintf(out, "  mcp add NAME URL         discover and authorize a direct OAuth MCP server\n")
+	_, _ = fmt.Fprintf(out, "  mcp list                 list configured MCP profiles without network or prompts\n")
 	_, _ = fmt.Fprintf(out, "  mcp login SERVER [flags] authorize a configured OAuth MCP server\n")
+	_, _ = fmt.Fprintf(out, "  mcp remove NAME          remove a configured direct OAuth MCP server\n")
 	_, _ = fmt.Fprintf(out, "  import                  import a Codex or Claude Code session, skills, and workspace files\n")
 	_, _ = fmt.Fprintf(out, "  config init             write or print an operator settings.yaml template\n")
 	_, _ = fmt.Fprintf(out, "  config validate         validate operator settings.yaml without writing\n")
@@ -263,6 +268,15 @@ func resolveMCPSubcommand(args []string) commandResolution {
 			return nil
 		})}
 	}
+	if len(args) >= 3 && args[2] == mcpAddCommand {
+		return commandResolution{handled: true, run: subcommandAction(func(_ io.Reader, stdout, stderr io.Writer) error { return runMCPAdd(args[3:], stdout, stderr) })}
+	}
+	if len(args) >= 3 && args[2] == "list" {
+		return commandResolution{handled: true, run: subcommandAction(func(_ io.Reader, stdout, _ io.Writer) error { return runMCPList(args[3:], stdout) })}
+	}
+	if len(args) >= 3 && args[2] == "remove" {
+		return commandResolution{handled: true, run: subcommandAction(func(_ io.Reader, stdout, _ io.Writer) error { return runMCPRemove(args[3:], stdout) })}
+	}
 	if len(args) >= 3 && args[2] == "login" {
 		return commandResolution{
 			handled: true,
@@ -275,7 +289,7 @@ func resolveMCPSubcommand(args []string) commandResolution {
 }
 
 func writeMCPHelp(out io.Writer) {
-	_, _ = fmt.Fprintln(out, "Usage: "+strings.TrimPrefix(mcpLoginUsage, "usage: ")+"\n\nAuthorize one operator-configured OAuth MCP server. --permission-config selects trusted operator settings only; it never supplies OAuth values. DCR recovery modifiers are mutually exclusive and perform an explicit registration operation before login.")
+	_, _ = fmt.Fprintln(out, "Usage: mecated mcp <subcommand>\n\nSubcommands:\n  add NAME URL [--file PATH] [--credential-store auto|keyring|file]  discover, save, and authorize a direct OAuth server\n  list [--file PATH]                                                show configured profiles without network or prompts\n  login SERVER [--no-browser] [--file PATH | --permission-config PATH ...] [--reset-dcr-registration | --retry-dcr-registration]\n  remove NAME [--file PATH]                                         remove a local profile (no upstream revocation)\n\nLifecycle settings are host-local; changes affect newly started daemons. Use mecated mcp login SERVER to authorize a profile.")
 }
 
 func mcpUsageError(argv []string) error {
@@ -283,10 +297,11 @@ func mcpUsageError(argv []string) error {
 	if len(argv) >= 3 {
 		sub = argv[2]
 	}
+	const commands = "available subcommands:\n  add NAME URL [--file PATH] [--credential-store auto|keyring|file]\n  list [--file PATH]\n  login SERVER [--no-browser] [--file PATH | --permission-config PATH ...] [--reset-dcr-registration | --retry-dcr-registration]\n  remove NAME [--file PATH]"
 	if sub == "" {
-		return errors.New("mcp: missing subcommand\navailable subcommands:\n  " + strings.TrimPrefix(mcpLoginUsage, "usage: mecated ") + "    authorize a configured OAuth server")
+		return errors.New("mcp: missing subcommand\n" + commands)
 	}
-	return fmt.Errorf("mcp: unknown subcommand %q\navailable subcommands:\n  %s    authorize a configured OAuth server", sub, strings.TrimPrefix(mcpLoginUsage, "usage: mecated "))
+	return fmt.Errorf("mcp: unknown subcommand %q\n%s", sub, commands)
 }
 
 // configUsageError builds the error message for a bare/unknown `config` invocation.
