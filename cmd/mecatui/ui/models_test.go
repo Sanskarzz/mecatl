@@ -89,11 +89,14 @@ func (f *handoffTranscriptLoader) GetSessionTranscript(_ context.Context, _ stri
 
 // only, neither, and a context-limit-absent row.
 func sampleModels() *fakeModels {
+	// PromptCached mirrors production for these providers (ADR 0346): the
+	// canonical openai and openrouter endpoints both resolve to a cache dialect.
+	// The UNCACHED contrast has its own fixture, uncachedModels.
 	return &fakeModels{models: []client.ModelInfo{
-		{ID: "gpt-5", ProviderID: "openai", DisplayName: "GPT-5", Image: true, Reasoning: true, ContextLimit: 200000},
-		{ID: "gpt-5-mini", ProviderID: "openai", DisplayName: "GPT-5 mini", Reasoning: true, ContextLimit: 128000},
-		{ID: "text-embed", ProviderID: "openai", DisplayName: "text-embed"}, // neither cap, no ctx
-		{ID: "anthropic/claude", ProviderID: "openrouter", DisplayName: "Claude", Image: true, Reasoning: true, ContextLimit: 1000000},
+		{ID: "gpt-5", ProviderID: "openai", DisplayName: "GPT-5", Image: true, Reasoning: true, ContextLimit: 200000, PromptCached: true},
+		{ID: "gpt-5-mini", ProviderID: "openai", DisplayName: "GPT-5 mini", Reasoning: true, ContextLimit: 128000, PromptCached: true},
+		{ID: "text-embed", ProviderID: "openai", DisplayName: "text-embed", PromptCached: true}, // neither cap, no ctx
+		{ID: "anthropic/claude", ProviderID: "openrouter", DisplayName: "Claude", Image: true, Reasoning: true, ContextLimit: 1000000, PromptCached: true},
 	}}
 }
 
@@ -2343,4 +2346,89 @@ func TestFooterGatewayNoticeGolden(t *testing.T) {
 	m.sel = selection{} // no selection: the notice arm wins over statusMsg/"ready"
 	got := stripANSIstr(m.renderFooter())
 	compareGolden(t, "footer_gateway_notice.golden", []byte(got+"\n"))
+}
+
+// uncachedModels is the ADR 0346 contrast fixture: every row reports
+// PromptCached=false, which is the ONE shape composition can actually produce
+// now that decision 1 arms the breakpoint on every Responses endpoint. The flag
+// behind it (--no-prompt-cache) is harness-wide, so a fixture marking a single
+// non-caching provider would encode a state the server cannot emit.
+func uncachedModels() *fakeModels {
+	return &fakeModels{models: []client.ModelInfo{
+		{ID: "gpt-5", ProviderID: "openai", DisplayName: "GPT-5", Reasoning: true, ContextLimit: 200000},
+		{ID: "anthropic/claude-opus-4.8", ProviderID: "openrouter-anthropic", DisplayName: "Claude Opus 4.8", Reasoning: true, ContextLimit: 1000000},
+		{ID: "anthropic/claude-opus-4.8", ProviderID: "toolhive", DisplayName: "Claude Opus 4.8", Reasoning: true, ContextLimit: 1000000},
+	}}
+}
+
+// markedRowsFor returns the rendered model rows (never the legend) that carry
+// the no-cache marker, keyed by the substring identifying each row. The legend
+// line contains "no-cache" too, so a whole-view Contains cannot distinguish a
+// marked row from the explanation of one.
+func markedRowsFor(view, rowSubstring string) (found, marked bool) {
+	for _, line := range strings.Split(view, "\n") {
+		if strings.Contains(line, "no-cache = ") {
+			continue // the legend, not a row
+		}
+		if !strings.Contains(line, rowSubstring) {
+			continue
+		}
+		found = true
+		if strings.Contains(line, "no-cache") {
+			marked = true
+		}
+	}
+	return found, marked
+}
+
+// TestUnifiedPromptCache_Scenario2_PickerMarksUncachedRow pins AC3.5: the row
+// mecatl sends no cache breakpoint for is MARKED and stays SELECTABLE. Marking
+// rather than hiding was the explicit decision, so this asserts both halves,
+// plus that the legend only appears when there is a marker to explain.
+//
+// This is a RENDERER contract: it feeds PromptCached=false in directly, because
+// the renderer's job is to mark whatever false it is handed. Composition can
+// only produce false under --no-prompt-cache (a harness-wide switch), which the
+// sibling TestADR_0346_PromptCachedTrueWithoutDialect covers. The test name
+// keeps its Scenario2 prefix because the approved acceptance plan cites it
+// verbatim in AC3.5's verify line.
+func TestUnifiedPromptCache_Scenario2_PickerMarksUncachedRow(t *testing.T) {
+	m := newModelsModel(t, uncachedModels(), &fakeStore{}, modelsCaps(),
+		client.ModelSelection{ProviderID: "openai", ModelID: "gpt-5"})
+	mm, cmd := m.runModels()
+	m = feedCmd(t, mm.(Model), cmd)
+	view := string(stripANSI([]byte(m.View().Content)))
+
+	if found, marked := markedRowsFor(view, "toolhive"); !found || !marked {
+		t.Errorf("the toolhive Claude row must be marked (found=%v marked=%v), got:\n%s", found, marked, view)
+	}
+	// Scoping, the half that was previously unasserted: the SAME disabled
+	// posture leaves a non-Anthropic row unmarked, because false there only
+	// means mecatl sends no hint and an implicit cacher may cache anyway.
+	if found, marked := markedRowsFor(view, "GPT-5"); !found || marked {
+		t.Errorf("the gpt-5 row must NOT be marked (found=%v marked=%v), got:\n%s", found, marked, view)
+	}
+	if !strings.Contains(view, "no-cache = no prompt-cache breakpoint sent") {
+		t.Errorf("the legend must appear when a row is marked, got:\n%s", view)
+	}
+	// Selectable: the row is still present and reachable in the filtered list.
+	surface := modelsSurface(t, m)
+	var found bool
+	for _, mi := range surface.filtered {
+		if mi.ProviderID == "toolhive" && !mi.PromptCached {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("the uncached row must remain selectable, not be hidden")
+	}
+
+	// Contrast: an all-cached catalog shows neither marker nor legend.
+	clean := newModelsModel(t, sampleModels(), &fakeStore{}, modelsCaps(),
+		client.ModelSelection{ProviderID: "openai", ModelID: "gpt-5"})
+	cm, ccmd := clean.runModels()
+	clean = feedCmd(t, cm.(Model), ccmd)
+	if cleanView := string(stripANSI([]byte(clean.View().Content))); strings.Contains(cleanView, "no-cache") {
+		t.Errorf("an all-cached catalog must show no marker and no legend, got:\n%s", cleanView)
+	}
 }

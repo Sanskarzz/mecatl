@@ -3095,6 +3095,16 @@ message ModelInfo {
   bool reasoning = 5;
   // context_limit is the model's total context window in tokens (0 when unknown).
   int64 context_limit = 6;
+  // prompt_cached is true when mecatl ASKS the upstream to cache this
+  // (provider, model) pair's conversation prefix (ADR 0346). Decision 1 arms
+  // the protocol-native breakpoint on EVERY Responses endpoint, so false means
+  // caching is off harness-wide (the server's --no-prompt-cache), NOT that this
+  // endpoint cannot cache. Whether an upstream HONOURS the ask is not
+  // statically knowable and this field does not claim it. Clients SHOULD mark a
+  // false row rather than hide it; scoping the mark to Anthropic-family ids is
+  // the useful convention, since those cache solely on an explicit ask while an
+  // implicit cacher may cache regardless. Additive: an older client reads false.
+  bool prompt_cached = 7;
 }
 
 // ListModelsRequest requests the selectable-model inventory.

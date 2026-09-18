@@ -11,10 +11,15 @@ import (
 // 0100) buildParams (method) emits. The OpenAI Responses API already caches
 // implicitly (a breakpoint on the most recent user/tool message, matched
 // against the 50 most recent breakpoints, longest match wins) — this Option
-// only controls the hints layered on top: prompt_cache_key (routing
-// observability), prompt_cache_retention (an OpenAI-only, model-gated
-// retention extension), and OpenRouter's request-root cache_control field
-// (an OpenRouter-only extension; sending it to real OpenAI 400s).
+// only controls the vendor-shaped hints layered on top: prompt_cache_key
+// (routing observability) and prompt_cache_retention (an OpenAI-only,
+// model-gated retention extension).
+//
+// It does NOT control the ASK for a cache. ADR 0346 retired the request-root
+// cache_control field this type once carried for OpenRouter and replaced it
+// with the protocol-native prompt_cache_breakpoint, which rides the separate
+// WithPromptCacheBreakpoints Option precisely so an endpoint whose identity
+// the dialect cannot classify still gets the ask.
 type CacheDialect string
 
 const (
@@ -24,9 +29,12 @@ const (
 	// CacheDialectOpenAI emits prompt_cache_key, and — on an allow-listed
 	// model (retentionFor) — prompt_cache_retention.
 	CacheDialectOpenAI CacheDialect = "openai"
-	// CacheDialectOpenRouter emits prompt_cache_key and the OpenRouter-only
-	// request-root cache_control field. NEVER prompt_cache_retention — an
-	// OpenAI-only field a non-OpenAI upstream would reject.
+	// CacheDialectOpenRouter emits prompt_cache_key and nothing else. It once
+	// also emitted an OpenRouter-private request-root cache_control field;
+	// ADR 0346 retired that in favour of the protocol-native breakpoint, so the
+	// two OpenAI-shaped dialects now differ ONLY in retention. It must still
+	// NEVER emit prompt_cache_retention — an OpenAI-only field a non-OpenAI
+	// upstream would reject.
 	CacheDialectOpenRouter CacheDialect = "openrouter"
 )
 
@@ -43,11 +51,56 @@ func WithCacheDialect(d CacheDialect) Option {
 	return func(c *config) { c.cacheDialect = d }
 }
 
-// retentionDenyPrefixes are checked BEFORE any allow prefix so a newer,
-// narrower id always wins the classification — "gpt-5" is a prefix of
-// "gpt-5.6", where prompt_cache_retention is DEPRECATED (implicit caching
-// already covers it, and pre-5.6 400s can occur on newer knobs sent to it).
-var retentionDenyPrefixes = []string{
+// WithCacheKeySalt folds a per-process random value into the prompt_cache_key
+// prefix hash (ADR 0346). Composition mints one value per app.Build and passes
+// it to every openai-adapter entry.
+//
+// Why: the ADR 0100 derivation has no installation-specific input, so two
+// unrelated installations sharing harness version, soul, agent def and tool
+// inventory emit an IDENTICAL key. That lets a recipient correlate sessions
+// across principals and credentials, and confirm guessed configuration — and
+// routing metadata frequently outlives prompt bodies in a provider's retention
+// tiers, so the key outlives the content it fingerprints.
+//
+// "" (the Option unset) reproduces ADR 0100's derivation byte-for-byte, so a
+// consumer passing no Option is unaffected. The salt is never sent as itself,
+// never logged, and never persisted: a fresh value per process costs one
+// sticky-routing lane change per restart, which the derivation already treats
+// as fail-soft for an anchor change.
+func WithCacheKeySalt(salt string) Option {
+	return func(c *config) { c.cacheKeySalt = salt }
+}
+
+// WithPromptCacheBreakpoints arms the protocol-native explicit prompt-cache
+// breakpoint (ADR 0346). Composition passes !cfg.PromptCacheDisabled.
+//
+// It is a SEPARATE Option from WithCacheDialect on purpose. The dialect gates
+// vendor-shaped hints on endpoint identity; the breakpoint is part of the
+// Responses protocol and is exactly what an unrecognised endpoint needs, so
+// tying it to the dialect would leave CacheDialectNone endpoints — the ToolHive
+// gateway among them — with no way to ask for a cache, which is the bug this
+// ADR exists to fix.
+//
+// Default false, so a consumer passing no Option keeps the pre-ADR-0346 wire.
+func WithPromptCacheBreakpoints(on bool) Option {
+	return func(c *config) { c.breakpoints = on }
+}
+
+// explicitCacheModelPrefixes are the canonical-OpenAI model-id prefixes at or
+// after the GPT-5.6 cache-semantics cutover, where TWO things changed together:
+// prompt_cache_breakpoint became supported, AND prompt_cache_retention became
+// deprecated (implicit caching already covers it, and pre-5.6 400s can occur on
+// newer knobs sent to it).
+//
+// ONE list, because it is ONE documented event read from two sides —
+// retentionFor DENIES on it and supportsExplicitBreakpoint ALLOWS on it. ADR
+// 0346 decision 2 says this table is reused, and a second literal holding the
+// same two values is exactly how the two sides silently diverge on the next
+// model release.
+//
+// It is checked BEFORE any retention allow prefix so a newer, narrower id
+// always wins the classification — "gpt-5" is a prefix of "gpt-5.6".
+var explicitCacheModelPrefixes = []string{
 	"gpt-5.6",
 	"gpt-6",
 }
@@ -81,7 +134,7 @@ var dateSnapshotSuffix = regexp.MustCompile(`-\d{4}-\d{2}-\d{2}$`)
 // than guessed).
 func retentionFor(model string) (responses.ResponseNewParamsPromptCacheRetention, bool) {
 	m := normaliseModelID(model)
-	if hasAnyPrefix(m, retentionDenyPrefixes) {
+	if hasAnyPrefix(m, explicitCacheModelPrefixes) {
 		return "", false
 	}
 	if hasAnyPrefix(m, retentionAllowPrefixes) {
