@@ -48,18 +48,50 @@ Read the [Mecatl documentation](https://mecatl.dev/docs) to get started.
 
 ## Install
 
-Homebrew installs the two executables most people run — `mecatui`, the terminal
-client, and `mecated`, the server:
+The following methods install the two executables most people run — `mecatui`,
+the terminal client, and `mecated`, the server:
+
+<details>
+<summary><b>Homebrew</b></summary>
 
 ```sh
 brew install stacklok/tap/mecatl
 ```
 
+</details>
+
+<details>
+<summary><b>Conda</b></summary>
+
+```sh
+conda install -c conda-forge mecatl
+```
+
+</details>
+<details>
+<summary><b>Mamba</b></summary>
+
+```sh
+mamba install -c conda-forge mecatl
+```
+
+</details>
+
+<details>
+<summary><b>Pixi</b></summary>
+
+```sh
+pixi add mecatl
+```
+
+</details>
+
 Every release also attaches macOS and Linux archives (amd64 and arm64) with
 checksums, cosign signature bundles, SBOMs, and build provenance. See
 [Install Mecatl](https://mecatl.dev/docs/install) for archive verification, the
 container images, and the from-source path. `mecademo`, `mecatequi`, and
-`mecak8s` are not in the formula — build them from a checkout with `task build`.
+`mecak8s` are not in the formulae — build them from a checkout with
+`task build`.
 
 ## Run agents as production workloads
 
@@ -126,7 +158,8 @@ For an embedded deployment, see the
 
 > **Security:** `mecated` is unauthenticated by default and intended for
 > loopback, single-user use. Configure authentication and transport protection
-> before binding it off-loopback. The [deployment guide](https://mecatl.dev/docs/building/deployment/mecated) covers
+> before binding it off-loopback. The
+> [deployment guide](https://mecatl.dev/docs/building/deployment/mecated) covers
 > bearer auth, TLS/mTLS, OIDC, rate limits, and deployment posture.
 
 ## User documentation
