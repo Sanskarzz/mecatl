@@ -10,6 +10,10 @@ This is the detailed operator and wire reference. For the client-integration
 entry point, event lifecycle, and HTTP/SSE comparison, start with
 [Drive via gRPC / HTTP](/building/deployment/grpc-http.md).
 
+For generated RPC signatures, streaming directions, messages, enums, fields,
+and protobuf comments, see the
+[gRPC schema reference](/reference/grpc-schema.md).
+
 Service: `mecatl.v1.HarnessService` (`contracts/proto/mecatl/v1/harness.proto`).
 
 ## Server identity
