@@ -795,6 +795,14 @@ func (m Model) updateLifecycle(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		// any locally queued old-stream messages before binding the successor.
 		m.clearPending = nil
 		if m.stream != nil || m.streamCh != nil || m.cancelRun != nil {
+			// The source run is over and its stream terminal will now never be
+			// processed, so this is the LAST chance to settle the hook. The RPC
+			// response and the stream terminal arrive on independent commands,
+			// so server-side completion does not establish their reducer order:
+			// when the response wins the race, the terminal below never runs.
+			// Leaving it unsettled keeps Notifier.running true and silently
+			// dedupes the successor's busy signal.
+			m.notifyHookFailed(streamClosedReason)
 			m = m.endRun("")
 		}
 		m = m.resetSession()
@@ -895,6 +903,7 @@ func (m Model) updateLifecycle(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 			if msg.Err != nil {
 				m.conv.addError("stream error: " + msg.Err.Error())
 			}
+			m.notifyHookFailed(streamErrReason(msg.Err))
 			m = m.endRun(stopError)
 			m.failedStepRetryRun = false
 			m.failedStepRetryAuthoritative = false
@@ -917,6 +926,7 @@ func (m Model) updateLifecycle(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		if m.failedStepRetryRun && !m.failedStepRetryAuthoritative {
 			// RetryStart transport/server rejection is non-destructive. The server is
 			// authoritative, so preserve textarea, transcript, queue, and /retry access.
+			m.notifyHookFailed(streamErrReason(msg.Err))
 			m = m.endRun(stopError)
 			m.failedStepRetryRun = false
 			m.statusMsg = m.deps.Theme.Style("warning").Render("retry was not started: " + sanitizeTerminal(msg.Err.Error()) + " — resolve the condition and use /retry")
@@ -934,6 +944,7 @@ func (m Model) updateLifecycle(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 			m.promptRecovery.autoReplay = true
 		}
 		m.conv.addError("stream error: " + friendlyWorkspaceEnrollmentRejection(msg.Err.Error()))
+		m.notifyHookFailed(streamErrReason(msg.Err))
 		m = m.endRun(stopError)
 		liveCmd := m.armLiveFeed()
 		mm, drainCmd := m.drainQueue(stopError)
@@ -958,6 +969,11 @@ func (m Model) updateLifecycle(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		// RPC response arrives. Tear it down without draining queues, retrying steps,
 		// reopening live delivery, or otherwise continuing the source.
 		if m.clearPending != nil {
+			// A genuine terminal for the hook: the source run is over (no result
+			// will arrive). Without this the notifier stays running=true and the
+			// NEXT run's Start is silently deduped, so the host never goes busy
+			// again. Clear still owns the UI handoff; only the hook settles here.
+			m.notifyHookFailed(streamClosedReason)
 			m = m.endRun("closed")
 			m.clearPending.sourceSettled = true
 			m.phase = phaseConnecting
@@ -971,6 +987,9 @@ func (m Model) updateLifecycle(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		// finalise it; otherwise it's the expected post-result close (no-op).
 		if m.phase == phaseRunning || m.phase == phaseAwaitingApproval {
 			m.recoverPrompt(false)
+			// Genuine terminal: the stream ended while the run was still active,
+			// so the host gets a failed terminal rather than being left busy.
+			m.notifyHookFailed(streamClosedReason)
 			m = m.endRun("closed")
 			modeCmd := m.retryPendingModeCmd()
 			liveCmd := m.armLiveFeed()
@@ -1242,6 +1261,13 @@ func (m Model) applyDeliveryNote(msg client.DeliveryNoteMsg) (tea.Model, tea.Cmd
 func (m *Model) beginTurnEvent() {
 	if m.failedStepRetryRun {
 		m.failedStepRetryAuthoritative = true
+	}
+	// Host hook busy signal (schema: UserPromptSubmit) — the agent began work.
+	// The notifier dedupes to one busy signal per run, so firing on every
+	// turn.start is correct (and covers the first turn whether the run began from
+	// a prompt, a resume, or a retry).
+	if m.deps.AgentHook != nil {
+		m.deps.AgentHook.Start(m.deps.Ctx, m.sessionID)
 	}
 	m.conv.startAssistant()
 	m.activeTool = ""
@@ -1555,6 +1581,47 @@ func (m Model) settleFailedClearSource() (Model, tea.Cmd, bool) {
 	return m, m.prompt.Focus(), true
 }
 
+// notifyHookStop mirrors a genuine run terminal to the host's agent lifecycle
+// hook. It is NOT called on the auto-retry (FailedStepRetryEligible) branch,
+// where the run continues — only on paths that end the run. The notifier fires
+// the terminal once per busy period and no-ops without a preceding Start, so the
+// clearPending settle path and the deferred-retry path calling it is harmless.
+func (m Model) notifyHookStop(msg client.ResultMsg) {
+	if m.deps.AgentHook == nil {
+		return
+	}
+	failed := msg.Stop == stopError
+	m.deps.AgentHook.Stop(m.deps.Ctx, m.sessionID, failed, msg.Error)
+}
+
+// Terminal previews for hook notifications that carry no error value of their
+// own: a stream that closed mid-run, and an auth recovery that cancelled one.
+const (
+	streamClosedReason = "stream closed before the run finished"
+	authRecoveryReason = "authentication needs attention"
+)
+
+// streamErrReason renders a transport error for the hook's notification preview,
+// tolerating a nil error (some stream-death branches carry the fact without an
+// err value).
+func streamErrReason(err error) string {
+	if err == nil {
+		return "stream error"
+	}
+	return err.Error()
+}
+
+// notifyHookFailed mirrors a TRANSPORT/stream-death terminal (not a server
+// ResultMsg) to the host hook as a FAILED terminal. Like notifyHookStop it
+// no-ops without a preceding Start, so a transport error before any turn began
+// emits nothing.
+func (m Model) notifyHookFailed(reason string) {
+	if m.deps.AgentHook == nil {
+		return
+	}
+	m.deps.AgentHook.Stop(m.deps.Ctx, m.sessionID, true, reason)
+}
+
 // applyResult handles a terminal ResultMsg: it folds the run's usage into the running
 // totals, surfaces a terminal error, ends the run, and drains any queued prompts.
 // Extracted from updateStreamEvent's switch to keep that dispatcher flat.
@@ -1579,6 +1646,7 @@ func (m Model) applyResult(msg client.ResultMsg) (tea.Model, tea.Cmd) {
 		// The terminal facts still belong in the source projection, but Clear owns
 		// what happens next. Settle only: no queued prompt, failed-step retry,
 		// pending-mode retry, plan continuation, live-feed rearm, or other source run.
+		m.notifyHookStop(msg)
 		m = m.endRun(msg.Stop)
 		m.failedStepRetryRun = false
 		m.failedStepRetryAuthoritative = false
@@ -1598,14 +1666,21 @@ func (m Model) applyResult(msg client.ResultMsg) (tea.Model, tea.Cmd) {
 		if len(m.queued) > 0 {
 			m.queuePaused = "retry_pending"
 		}
+		// A genuine end: the run stopped and waits for a manual /retry.
+		m.notifyHookStop(msg)
 		m.statusMsg = m.deps.Theme.Style("warning").Render("retry stopped before the model was called — adjust configuration and use /retry")
 		return m, tea.Batch(m.refreshCmd(), m.retryPendingModeCmd(), m.armLiveFeed())
 	}
 	if msg.FailedStepRetryEligible() && !m.failedStepRetryTried {
+		// NOT a genuine end: an automatic retry run starts now, so no Superset
+		// Stop. The retry's turn.start re-Starts (deduped, still busy), and the
+		// eventual real terminal fires Stop below.
 		m.failedStepRetryTried = true
 		rm, retryCmd := m.startFailedStepRetry()
 		return rm, tea.Batch(m.refreshCmd(), retryCmd, m.armLiveFeed())
 	}
+	// Every remaining path is a genuine run terminal that returns to idle.
+	m.notifyHookStop(msg)
 	if msg.Stop == stopError && msg.RetryDispositionPresent && msg.RetryDisposition == client.RetryDispositionRetryable {
 		m.statusMsg = m.deps.Theme.Style("warning").Render("model step failed — use /retry to retry without duplicating the prompt")
 	}
@@ -3573,6 +3648,11 @@ func (m Model) reduceLiveAuthRecovery(reason client.AuthReason) (tea.Model, tea.
 	// particular, an active Converse run is cancelled and its generation is
 	// invalidated; auth recovery is not a completed run.
 	if m.phase == phaseRunning || m.phase == phaseAwaitingApproval {
+		// Genuine terminal: auth recovery cancels the active run and hands the
+		// user to the connect surface, so the hook must settle. (Distinct from
+		// the phaseAuthorizing park in StreamClosedMsg, where the run is only
+		// suspended and its own terminal still arrives — that stays silent.)
+		m.notifyHookFailed(authRecoveryReason)
 		m = m.endRun("")
 	}
 	m.disarmLiveFeed()

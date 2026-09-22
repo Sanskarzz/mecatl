@@ -37,6 +37,7 @@ import (
 	"github.com/adrg/xdg"
 	"golang.org/x/term"
 
+	"github.com/stacklok/mecatl/cmd/mecatui/agenthook"
 	"github.com/stacklok/mecatl/cmd/mecatui/client"
 	"github.com/stacklok/mecatl/cmd/mecatui/embed"
 	"github.com/stacklok/mecatl/cmd/mecatui/statusline"
@@ -292,8 +293,13 @@ func runWithOptions(argv []string, options runOptions) error {
 	defer func() { _ = statusSource.Close(context.Background()) }()
 
 	connectionMode := resolveConnectionMode(cfg)
+	// Held concretely (not just as the ui interface) because this run OWNS its
+	// shutdown: a /connect restart re-enters runWithOptions and builds a fresh
+	// notifier, so this one must be settled first (see closeAgentLifecycleHook).
+	agentHook := agenthook.New(os.Environ())
 	deps := applyLaunchIntent(cfg, ui.Deps{
 		Session:                 &sessionAdapter{cl: cl, mode: cfg.mode, debugTarget: cfg.debugTarget, debugMCP: cfg.debugMCP},
+		AgentHook:               agentLifecycleHook(agentHook),
 		Conv:                    cl,
 		MCP:                     cl,
 		Cmds:                    cl,
@@ -393,6 +399,11 @@ func runWithOptions(argv []string, options runOptions) error {
 	interrupted := ctx.Err() != nil
 
 	runCleanup(forceExit, func() {
+		// Settle the lifecycle hook FIRST: this must complete before the restart
+		// below can build a successor notifier, or a slow hook command could
+		// deliver this generation's terminal after the next generation's busy
+		// signal and mark the host idle during a live run.
+		closeAgentLifecycleHook(agentHook)
 		_ = cl.Close()
 		transCleanup()
 	})
@@ -666,6 +677,35 @@ func restartFromConnectIntentWith(argv []string, intent ui.ConnectRestartIntent,
 func applyLaunchIntent(cfg config, deps ui.Deps) ui.Deps {
 	deps.BrowseSessions = cfg.browseSessions
 	return deps
+}
+
+// agentLifecycleHook adapts the host-editor agent-lifecycle hook emitter to the
+// reducer's consumer interface, returning an honestly-nil interface when no
+// supported host was detected (so the reducer's nil check reflects the real "no
+// external channel" state instead of a typed-nil wrapper). See
+// cmd/mecatui/agenthook.
+func agentLifecycleHook(n *agenthook.Notifier) ui.LifecycleNotifier {
+	if n == nil {
+		return nil
+	}
+	return n
+}
+
+// agentHookDrainTimeout bounds how long shutdown waits for queued lifecycle
+// deliveries. Short on purpose: a wedged hook command must not delay exit or a
+// /connect restart, and a dropped late notification is far cheaper than a
+// terminal arriving during the NEXT run.
+const agentHookDrainTimeout = 3 * time.Second
+
+// closeAgentLifecycleHook settles this run's lifecycle notifier within a bound,
+// closing the generation boundary before any successor notifier exists.
+func closeAgentLifecycleHook(n *agenthook.Notifier) {
+	if n == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), agentHookDrainTimeout)
+	defer cancel()
+	n.Close(ctx)
 }
 
 const defaultDebugPrompt = "Diagnose the bound target session and explain the most likely cause of its reported behavior."
