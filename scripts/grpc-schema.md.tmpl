@@ -50,10 +50,10 @@ HTTP/SSE, see [Connect with gRPC or HTTP](/building/deployment/grpc-http.md).
 {{template "safe" .Description}}
 
 {{if .HasFields -}}
-| Field | Type | Label | Description |
-|---|---|---|---|
+| Field | Type | Label | Oneof | Description |
+|---|---|---|---|---|
 {{range .Fields -}}
-| `{{.Name}}` | `{{.LongType}}` | {{.Label}} | {{if (index .Options "deprecated" | default false)}}**Deprecated.** {{end}}{{template "table-safe" .Description}}{{if .DefaultValue}} Default: `{{.DefaultValue}}`.{{end}} |
+| `{{.Name}}` | `{{.LongType}}` | {{.Label}} | {{if and .IsOneof (ne .Label "optional")}}`{{.OneofDecl}}`{{end}} | {{if (index .Options "deprecated" | default false)}}**Deprecated.** {{end}}{{template "table-safe" .Description}}{{if .DefaultValue}} Default: `{{.DefaultValue}}`.{{end}} |
 {{end}}
 {{else -}}
 This message has no fields.
