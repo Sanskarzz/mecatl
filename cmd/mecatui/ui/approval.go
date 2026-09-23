@@ -77,6 +77,7 @@ func (m Model) applyApprovalSurfaceIntent(intent surfaceIntent) (model tea.Model
 	switch intent := intent.(type) {
 	case approvalResolvedIntent:
 		m.conv.addNotice(intent.notice)
+		m.notifyHookPermissionResult(intent.askID)
 		cmd := (&m).approvalSendCmd(intent.askID, intent.verdict)
 		model, cmd, stopSurfaceDispatch = m.finishApprovalIntent(intent.advance, intent.resume, cmd)
 		return model, cmd, true, stopSurfaceDispatch
@@ -138,6 +139,17 @@ func (m Model) notifyHookPermissionAsk(askID, reason string) {
 		return
 	}
 	m.deps.AgentHook.PermissionRequest(m.deps.Ctx, m.sessionID, reason)
+}
+
+// notifyHookPermissionResult clears the host's waiting state as soon as the
+// operator answers a visible main-session ask. The resumed run may not emit a
+// new turn.start before doing more work, so waiting for Start would leave the
+// host stuck on PermissionRequest until the terminal Stop.
+func (m Model) notifyHookPermissionResult(askID string) {
+	if m.deps.AgentHook == nil || askID == "" || isChildAsk(askID, m.sessionID) {
+		return
+	}
+	m.deps.AgentHook.PermissionResult(m.deps.Ctx, m.sessionID)
 }
 
 // applyPermissionAsk reduces a PermissionAskMsg. The surface owns its FIFO and

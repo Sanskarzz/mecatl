@@ -105,11 +105,13 @@ Run `mecatui` in a terminal provided by a supported editor and the editor can
 tell you when the agent needs an approval and when a run ends. You configure
 nothing in `mecatui` for this.
 
-`mecatui` reports three lifecycle points to the editor's agent hook: the start of
-a turn, an approval request from the main session, and the run's terminal state.
-The editor decides how to present them. Approval requests raised by a subagent
-stay out of the report, so delegated work does not compete with the main session
-for your attention.
+`mecatui` reports four lifecycle points to the editor's agent hook: the start of
+a turn, an approval request from the main session, the operator's answer to that
+request, and the run's terminal state. The answer returns the editor's status to
+working immediately instead of leaving the approval notification active until
+the run ends. The editor decides how to present these reports. Approval requests
+raised by a subagent stay out of the report, so delegated work does not compete
+with the main session for your attention.
 
 Superset is the supported editor. The reports reach it only once Superset
 registers `mecatl` as a hook-emitting agent. Until that registration ships,

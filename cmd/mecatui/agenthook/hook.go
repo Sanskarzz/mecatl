@@ -28,7 +28,8 @@
 // those — its only hooks are the per-tool-call PreToolUse/PostToolUse permission
 // gate (engine/governance), which carries no session-lifecycle signal. mecatui
 // already consumes the session.Event stream to render, so it emits the lifecycle
-// directly: turn start, a main-session permission ask, and the terminal result.
+// directly: turn start, a main-session permission ask, the operator's answer,
+// and the terminal result.
 //
 // # Host binding, and why it is inert by default
 //
@@ -76,6 +77,11 @@ const (
 	// EventPermissionRequest marks the agent blocked waiting on a human
 	// approval — the "needs attention" notification.
 	EventPermissionRequest EventType = "PermissionRequest"
+	// EventPermissionResult marks a human approval as answered and returns the
+	// host's status to working while the same run continues. Kimi and Superset's
+	// shared-hook normalizer use this spelling; other hosts may map the semantic
+	// transition differently when another binding is added.
+	EventPermissionResult EventType = "PermissionResult"
 )
 
 // runnerFunc dispatches one already-built hook invocation. It is the single seam
@@ -199,6 +205,17 @@ func (n *Notifier) PermissionRequest(_ context.Context, sessionID, message strin
 		return
 	}
 	n.enqueue(EventPermissionRequest, sessionID, message)
+}
+
+// PermissionResult emits the matching approval-answer transition. It leaves the
+// running flag set because the same run resumes and must still emit its eventual
+// Stop. Hosts use this event to clear their waiting notification/status and show
+// the agent as working again.
+func (n *Notifier) PermissionResult(_ context.Context, sessionID string) {
+	if n == nil {
+		return
+	}
+	n.enqueue(EventPermissionResult, sessionID, "")
 }
 
 // enqueue hands one event to the ordered delivery worker (started lazily on the

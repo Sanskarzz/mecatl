@@ -43,6 +43,9 @@ type LifecycleNotifier interface {
 	// PermissionRequest signals the agent is blocked on a human approval. It
 	// does not affect the run's busy state (a Stop must still follow).
 	PermissionRequest(ctx context.Context, sessionID, message string)
+	// PermissionResult signals that the human answered the approval and the same
+	// run resumed working.
+	PermissionResult(ctx context.Context, sessionID string)
 	// Stop signals the run reached a terminal state; failed selects the error
 	// terminal, message is an optional preview for the notification.
 	Stop(ctx context.Context, sessionID string, failed bool, message string)

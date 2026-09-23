@@ -29,8 +29,8 @@ func New(env []string) *Notifier {
 // pane's busy/idle chrome. That script is a NORMALIZER over the shared schema:
 // it reads `hook_event_name` (or camelCase `hookEventName`, or Codex's older
 // `type`) from stdin or argv[1], and collapses the vendor vocabulary into its
-// own Start | PermissionRequest | Stop triple — which is why emitting the
-// canonical cross-vendor names from hook.go is correct here.
+// own Start | PermissionRequest | Stop state transitions. Superset explicitly
+// maps PermissionResult back to Start (working), which clears the waiting state.
 const (
 	// supersetTerminalIDVar is set only inside a Superset v2 terminal. It is the
 	// participation gate every notify.sh caller applies (the script itself exits

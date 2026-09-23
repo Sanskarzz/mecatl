@@ -88,6 +88,7 @@ func TestNilNotifierIsNoOp(t *testing.T) {
 	var n *Notifier
 	n.Start(context.Background(), "s1")
 	n.PermissionRequest(context.Background(), "s1", "why")
+	n.PermissionResult(context.Background(), "s1")
 	n.Stop(context.Background(), "s1", false, "done")
 }
 
@@ -188,21 +189,23 @@ func TestStartStopStartAcrossRuns(t *testing.T) {
 	}
 }
 
-func TestPermissionRequestDoesNotAffectRunState(t *testing.T) {
-	r := newRecorder(3)
+func TestPermissionLifecycleDoesNotAffectRunState(t *testing.T) {
+	r := newRecorder(4)
 	n := newTestNotifier(r)
 	n.Start(context.Background(), "s")
 	n.PermissionRequest(context.Background(), "s", "approve Shell?")
+	n.PermissionResult(context.Background(), "s")
 	n.Stop(context.Background(), "s", false, "") // Stop must still fire
-	r.wait(t, 3)
+	r.wait(t, 4)
 
 	calls := r.snapshot()
 	events := []EventType{
 		decode(t, calls[0].payload).Event,
 		decode(t, calls[1].payload).Event,
 		decode(t, calls[2].payload).Event,
+		decode(t, calls[3].payload).Event,
 	}
-	want := []EventType{EventPromptSubmit, EventPermissionRequest, EventStop}
+	want := []EventType{EventPromptSubmit, EventPermissionRequest, EventPermissionResult, EventStop}
 	for i := range want {
 		if events[i] != want[i] {
 			t.Errorf("event[%d] = %q, want %q", i, events[i], want[i])
@@ -233,14 +236,13 @@ func TestPayloadEscapesHostileMessage(t *testing.T) {
 	}
 }
 
-// TestEventNamesAreCanonicalSchemaNames pins the emitted vocabulary to the
-// CROSS-VENDOR hook schema (identical in Anthropic's Claude Code and OpenAI's
-// Codex). These strings are a wire contract with every host tool that consumes
-// agent lifecycle hooks — renaming one to a host's normalized alias (Superset
-// collapses UserPromptSubmit→Start server-side, for example) would silently stop
-// other hosts from recognising the event, and a host that cannot map the name
-// drops it rather than guessing. Change these only alongside the vendors.
-func TestEventNamesAreCanonicalSchemaNames(t *testing.T) {
+// TestEventNamesMatchHostSchema pins the emitted vocabulary to the hook schema
+// understood by the supported host. These strings are a wire contract with the
+// host command: renaming one to a host's normalized alias (Superset collapses
+// UserPromptSubmit→Start server-side, for example) would silently stop another
+// compatible consumer from recognising it. Change these only alongside the host
+// bindings.
+func TestEventNamesMatchHostSchema(t *testing.T) {
 	for _, tc := range []struct {
 		got  EventType
 		want string
@@ -249,6 +251,7 @@ func TestEventNamesAreCanonicalSchemaNames(t *testing.T) {
 		{EventStop, "Stop"},
 		{EventStopFailure, "StopFailure"},
 		{EventPermissionRequest, "PermissionRequest"},
+		{EventPermissionResult, "PermissionResult"},
 	} {
 		if string(tc.got) != tc.want {
 			t.Errorf("event name = %q, want the canonical %q", tc.got, tc.want)

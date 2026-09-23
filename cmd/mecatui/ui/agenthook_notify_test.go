@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -21,7 +22,7 @@ type fakeLifecycleNotifier struct {
 }
 
 type lifecycleCall struct {
-	kind      string // "start" | "permission" | "stop"
+	kind      string // "start" | "permission" | "permission-result" | "stop"
 	sessionID string
 	failed    bool
 	message   string
@@ -37,6 +38,12 @@ func (f *fakeLifecycleNotifier) PermissionRequest(_ context.Context, sessionID, 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, lifecycleCall{kind: "permission", sessionID: sessionID, message: message})
+}
+
+func (f *fakeLifecycleNotifier) PermissionResult(_ context.Context, sessionID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, lifecycleCall{kind: "permission-result", sessionID: sessionID})
 }
 
 func (f *fakeLifecycleNotifier) Stop(_ context.Context, sessionID string, failed bool, message string) {
@@ -103,6 +110,27 @@ func TestAgentHookPermissionRequestFiresOnMainAsk(t *testing.T) {
 	_ = m
 }
 
+// TestAgentHookPermissionResultFiresWhenMainAskIsAnswered proves answering an
+// approval immediately returns the host from waiting to working. A resumed tool
+// call need not produce another turn.start, so that event cannot do this later.
+func TestAgentHookPermissionResultFiresWhenMainAskIsAnswered(t *testing.T) {
+	m, fake := modelWithNotifier(t)
+	m = applyAll(m,
+		client.TurnStartMsg{Turn: 1},
+		client.PermissionAskMsg{AskID: "sess-super-1:1:call-1:r0", Tool: "Shell", Args: `{"command":"ls"}`, Reason: "run ls?"},
+	)
+	m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
+
+	want := []string{"start", "permission", "permission-result"}
+	if got := fake.kinds(); !slices.Equal(got, want) {
+		t.Fatalf("answer should clear waiting state: want %v, got %v", want, got)
+	}
+	result := fake.snapshot()[2]
+	if result.sessionID != "sess-super-1" {
+		t.Errorf("PermissionResult carried wrong session id: %+v", result)
+	}
+}
+
 // TestAgentHookPermissionRequestSkippedForChildAsk proves a surfaced SUBAGENT ask
 // does NOT drive a terminal-level notification (Superset drives status from the
 // main loop only).
@@ -119,6 +147,22 @@ func TestAgentHookPermissionRequestSkippedForChildAsk(t *testing.T) {
 		}
 	}
 	_ = m
+}
+
+// TestAgentHookPermissionResultSkippedForChildAnswer proves the result-side
+// child filter independently: answering a surfaced child ask must not overwrite
+// the host's main-session lifecycle state.
+func TestAgentHookPermissionResultSkippedForChildAnswer(t *testing.T) {
+	m, fake := modelWithNotifier(t)
+	m = applyAll(m,
+		client.TurnStartMsg{Turn: 1},
+		client.PermissionAskMsg{AskID: "subagent-child-9:1:call-1:r0", Tool: "Shell", Args: `{"command":"ls"}`, Reason: "child wants ls"},
+	)
+	m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
+
+	if got := fake.kinds(); !slices.Equal(got, []string{"start"}) {
+		t.Fatalf("child answer must not emit a main lifecycle transition, got %v", got)
+	}
 }
 
 // TestAgentHookStopFiresOnResult proves a clean terminal is mirrored as Stop.
@@ -405,20 +449,17 @@ func TestAgentHookPermissionRequestOnQueuedMainAskPromotion(t *testing.T) {
 		}
 	}
 
-	// Resolving the child promotes the main ask to the visible head.
-	s := approvalSurfaceFor(&m)
-	if s == nil {
-		t.Fatal("expected an open approval surface")
-	}
-	if len(s.queue) != 1 {
-		t.Fatalf("expected the main ask queued behind the child, got %d queued", len(s.queue))
-	}
-	mm, _, _ := m.finishApprovalIntent(s.advance(), phaseRunning, nil)
-	m = mm.(Model)
+	// Resolving the child through the real key path promotes the main ask. The
+	// child answer itself must not emit PermissionResult; only the promoted main
+	// ask emits PermissionRequest.
+	m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
 
 	perms := 0
 	var got lifecycleCall
 	for _, c := range fake.snapshot() {
+		if c.kind == "permission-result" {
+			t.Fatalf("answering the child must not emit PermissionResult: %+v", fake.snapshot())
+		}
 		if c.kind == "permission" {
 			perms++
 			got = c
@@ -442,14 +483,9 @@ func TestAgentHookNoPermissionRequestPromotingChildAsk(t *testing.T) {
 		client.PermissionAskMsg{AskID: "subagent-a:1:call-1:r0", Tool: "Shell", Args: `{"command":"ls"}`, Reason: "child a"},
 		client.PermissionAskMsg{AskID: "subagent-b:1:call-1:r0", Tool: "Shell", Args: `{"command":"pwd"}`, Reason: "child b"},
 	)
-	s := approvalSurfaceFor(&m)
-	if s == nil || len(s.queue) != 1 {
-		t.Fatalf("expected a second child ask queued behind the first")
-	}
-	mm, _, _ := m.finishApprovalIntent(s.advance(), phaseRunning, nil)
-	m = mm.(Model)
+	m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
 	for _, c := range fake.snapshot() {
-		if c.kind == "permission" {
+		if c.kind == "permission" || c.kind == "permission-result" {
 			t.Fatalf("promoting a CHILD ask must not notify: %+v", fake.snapshot())
 		}
 	}
