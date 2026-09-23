@@ -1037,9 +1037,11 @@ func resolveTransport(ctx context.Context, cfg config) (target string, dial clie
 	// ~/.local/state/...), or io.Discard under --quiet / on any open failure — NEVER
 	// stderr, which would corrupt the Bubble Tea alt-screen. The same writer backs
 	// BOTH the app.Diagnostics sink and the perf surface's slog.Logger, so neither
-	// path leaks a line to the terminal. The file handle (when one was opened) is
-	// closed by the returned cleanup alongside the server.
-	diagW, diagCloser, toFile := openDiagLogWriter(xdgconfig.OSEnv, cfg.quiet, cfg.diagnosticsLog)
+	// path leaks a line to the terminal. Lock contention is reported immediately,
+	// before trust prompting or embedded startup can block or fail. The file handle
+	// (when one was opened) is closed by the returned cleanup alongside the server.
+	diagSink := openDiagLogWriterAndReport(xdgconfig.OSEnv, cfg.quiet, cfg.diagnosticsLog, os.Stderr)
+	diagW, diagCloser := diagSink.Writer, diagSink.Closer
 	diag := slogdiag.New(diagW, false, port.LevelInfo)
 	// A dedicated slog.Logger over the SAME writer for the perf surface's Logger field.
 	// Explicit injection (rather than relying on the redirected default below) keeps the
@@ -1078,11 +1080,13 @@ func resolveTransport(ctx context.Context, cfg config) (target string, dial clie
 		_ = diagCloser.Close()
 		return target, client.DialConfig{}, noop, fmt.Errorf("start embedded server: %w", err)
 	}
-	if toFile {
+	if diagSink.Path != "" {
 		// One line, written to the FILE sink (never the TUI), so an operator can find
-		// where the embedded server's diagnostics went.
+		// where the embedded server's diagnostics went. The path comes from the sink
+		// itself, so it names the file actually opened — the --diagnostics-log
+		// override and the per-process fallback included.
 		diag.Log(ctx, port.LevelInfo, "mecatui: embedded server diagnostics log opened",
-			"path", resolveDiagLogPath(xdgconfig.OSEnv))
+			"path", diagSink.Path)
 	}
 	fmt.Fprintf(os.Stderr, "mecatui: hosting an embedded mecated at %s\n", srv.Target())
 	if addr := srv.AdminAddr(); addr != "" {
