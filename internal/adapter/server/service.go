@@ -434,6 +434,11 @@ type Config struct {
 	// after process restart before the per-session engine is rebuilt. Nil preserves
 	// the default-only behavior for lightweight consumers and tests.
 	ResolveCapabilities func(providerID, modelID string, mode session.PermissionMode) port.ProviderCapabilities
+	// ResolveSessionModel returns the composition-resolved identity for persisted
+	// selector labels. GetSession uses it after restart before run entry rebuilds the
+	// per-session engine. It must be side-effect free; nil preserves the default-only
+	// behavior for lightweight consumers and tests.
+	ResolveSessionModel func(ProviderSelector, session.PermissionMode) ResolvedModel
 
 	// Posture is the SERVER-WIDE operator posture-ladder tier as a string
 	// ("strict"/"trusted"/"auto"/"yolo"), projected into the ServerCapabilities echo
@@ -5436,7 +5441,7 @@ func admitRunPurpose(sess *session.Session, purpose runPurpose) error {
 //     keeps the shared engine — BYTE-IDENTICAL to pre-Phase-3.
 func (s *Service) engineAndEnvironmentFor(ctx context.Context, sess *session.Session) (*agent.Engine, tool.Environment, error) { //nolint:gocyclo // the per-session engine/environment resolution is inherently branched
 	id := sess.ID
-	attribution := s.ResolvedModel(id)
+	attribution := s.resolvedModelFor(sess)
 	sess.SetUsageAttribution(attribution.ProviderID, attribution.ModelID)
 	engine := s.cfg.Engine
 	s.mu.Lock()
@@ -5867,12 +5872,39 @@ func (s *Service) sessionCapabilitiesFor(sess *session.Session) port.ProviderCap
 	return s.cfg.DefaultCapabilities
 }
 
-// ResolvedModel reports the EFFECTIVE provider+model for the session under id:
-// the per-session engine's precomputed resolved model when a per-session engine is
-// registered (a non-default provider/model selector or client MCP), else the
-// composition-computed DefaultResolvedModel (the shared/default-engine path). It
-// backs the CreateSessionResponse.resolved_model echo. Mirrors SessionCapabilities
-// verbatim.
+func (s *Service) resolvedModelFor(sess *session.Session) ResolvedModel {
+	if sess == nil {
+		return s.cfg.DefaultResolvedModel
+	}
+	s.mu.Lock()
+	se, ok := s.sessionEngines[sess.ID]
+	s.mu.Unlock()
+	if ok {
+		return s.resolveModelWindow(ResolvedModel{ProviderID: se.providerID, ModelID: se.modelID, ReasoningEffort: se.reasoningEffort})
+	}
+	if s.cfg.ResolveSessionModel != nil {
+		rm := s.cfg.ResolveSessionModel(ProviderSelector{ProviderID: sess.ProviderID, ModelID: sess.ModelID, ReasoningEffort: sess.ReasoningEffort}, sess.Mode)
+		return s.resolveModelWindow(rm)
+	}
+	if sess.ProviderID != "" || sess.ModelID != "" || sess.ReasoningEffort != "" {
+		return s.resolveModelWindow(ResolvedModel{ProviderID: sess.ProviderID, ModelID: sess.ModelID, ReasoningEffort: sess.ReasoningEffort})
+	}
+	return s.resolveModelWindow(s.cfg.DefaultResolvedModel)
+}
+
+func (s *Service) resolveModelWindow(rm ResolvedModel) ResolvedModel {
+	if s.cfg.ResolveContextWindow != nil {
+		if w := s.cfg.ResolveContextWindow(rm.ProviderID, rm.ModelID); w > 0 {
+			rm.ContextWindow = w
+		}
+	}
+	return rm
+}
+
+// ResolvedModel reports the EFFECTIVE provider+model for an in-memory session engine
+// registration, or the composition-computed shared-engine default when no registration
+// exists. Snapshot-aware transport and run-entry paths use resolvedModelFor so persisted
+// selector labels and mode-specific slots remain authoritative across restart.
 //
 // MODE→MODEL RE-EMIT (ADR 0030 Layer 3): the identity is read from the REGISTERED
 // per-session engine (se.providerID/se.modelID). After a plan↔execute switch
@@ -5905,28 +5937,10 @@ func (s *Service) ResolvedModel(id session.SessionID) ResolvedModel {
 	s.mu.Lock()
 	se, ok := s.sessionEngines[id]
 	s.mu.Unlock()
-	// Identity from the per-session engine when registered (a selector/MCP/rehydrated
-	// session), else the baked default identity. The WINDOW is resolved live-first
-	// below for either branch — the frozen per-session scalar is gone.
-	rm := s.cfg.DefaultResolvedModel
 	if ok {
-		rm = ResolvedModel{ProviderID: se.providerID, ModelID: se.modelID, ReasoningEffort: se.reasoningEffort}
+		return s.resolveModelWindow(ResolvedModel{ProviderID: se.providerID, ModelID: se.modelID, ReasoningEffort: se.reasoningEffort})
 	}
-	if s.cfg.ResolveContextWindow != nil {
-		// Overlay the live-first window; provider/model identity stays verbatim. The
-		// ECHO resolver honours the operator override and any catalogued/live window,
-		// and returns a deliberate PROVISIONAL 0 for a live-only model while the live
-		// refresh is in flight (the client treats 0 as "refetch on turn-end"). A 0
-		// therefore leaves rm.ContextWindow at whatever it already holds — the baked
-		// seed on the default branch (itself a provisional 0 for a live-only default),
-		// or 0 on the per-session branch — so the client's footer-heal gate fires and
-		// self-corrects once the refresh settles. Post-completion the resolver floors
-		// to 128k, so the echo never stays 0.
-		if w := s.cfg.ResolveContextWindow(rm.ProviderID, rm.ModelID); w > 0 {
-			rm.ContextWindow = w
-		}
-	}
-	return rm
+	return s.resolveModelWindow(s.cfg.DefaultResolvedModel)
 }
 
 func (s *Service) awaitContextWindow(ctx context.Context, id session.SessionID) error {

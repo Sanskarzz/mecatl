@@ -2272,6 +2272,9 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 			}
 			return modelCapability(reg, providerID, modelID)
 		},
+		ResolveSessionModel: func(sel server.ProviderSelector, mode session.PermissionMode) server.ResolvedModel {
+			return resolvedSessionProjection(cfg, reg, sel, mode)
+		},
 		// Posture: the resolved server-wide posture tier as a string, projected into the
 		// ServerCapabilities echo as CHROME (a client renders a "⚠ auto"/"⚠ yolo" badge).
 		// NOT session state — see server.Config.Posture.
@@ -2902,6 +2905,35 @@ func selectedProviderModel(reg *providerRegistry, providerID, model string) stri
 	return reg.DefaultModelFor(providerID)
 }
 
+func resolvedSessionIdentity(cfg Config, reg *providerRegistry, sel server.ProviderSelector, mode session.PermissionMode) (string, string) {
+	providerID, model := reg.Default(), cfg.Model
+	if sel.ProviderID != "" {
+		providerID = sel.ProviderID
+		model = selectedProviderModel(reg, providerID, sel.ModelID)
+	} else if model == "" {
+		model = reg.ResolvedDefaultModel()
+	}
+	if mode == session.ModePlan {
+		if planModel, configured := resolveSlotModel(cfg, slotPlan, model); configured && planModel != "" {
+			model = planModel
+		}
+	}
+	return providerID, model
+}
+
+func resolvedSessionProjection(cfg Config, reg *providerRegistry, sel server.ProviderSelector, mode session.PermissionMode) server.ResolvedModel {
+	providerID, model := resolvedSessionIdentity(cfg, reg, sel, mode)
+	effort, ok := NormalizeReasoningEffort(sel.ReasoningEffort)
+	if strings.TrimSpace(sel.ReasoningEffort) == "" || !ok {
+		effort, _ = NormalizeReasoningEffort(cfg.ReasoningEffort)
+	}
+	effort, _ = clampEffortForProvider(providerID, effort)
+	if supported, known := modelReasoningSupport(reg, providerID, model); effort != "" && known && !supported {
+		effort = ""
+	}
+	return server.ResolvedModel{ProviderID: providerID, ModelID: model, ReasoningEffort: effort}
+}
+
 // debugSessionEngineFactory builds the deliberately narrow analysis engine for a
 // debug session. Its authority is InspectSession plus direct tools from explicitly
 // selected, already-connected server-global MCP servers.
@@ -3045,10 +3077,12 @@ func sessionEngineFactoryWithTools(
 		// keeps the default provider + cfg.Model (pre-S3 behaviour). resolvedProviderID
 		// is threaded so the per-session capability intersection (modelCapability) keys
 		// on the right provider — the zero selector uses the registry default.
-		resolvedProvider, resolvedModel := provider, cfg.Model
-		resolvedProviderID := reg.Default()
-		if sel.ProviderID == "" && resolvedModel == "" {
-			resolvedProvider, resolvedModel = adoptHealedDefault(reg, resolvedProviderID, resolvedProvider)
+		resolvedProviderID, resolvedModel := resolvedSessionIdentity(cfg, reg, sel, mode)
+		resolvedProvider := provider
+		if sel.ProviderID == "" && cfg.Model == "" && resolvedModel != "" {
+			if entry, ok := reg.Lookup(resolvedProviderID); ok {
+				resolvedProvider = entry.provider
+			}
 		}
 		if sel.ProviderID != "" {
 			entry, err := resolveProviderSelection(reg, sel.ProviderID)
@@ -3056,27 +3090,6 @@ func sessionEngineFactoryWithTools(
 				return server.SessionEngineResult{}, err
 			}
 			resolvedProvider = entry.provider
-			resolvedProviderID = sel.ProviderID
-			// Empty model means this selected provider's own default. It must not
-			// inherit cfg.Model, which is resolved for the daemon default provider.
-			resolvedModel = selectedProviderModel(reg, sel.ProviderID, sel.ModelID)
-		}
-		// MODE→MODEL RE-RESOLUTION (ADR 0030 Layer 3, the opusplan pattern). When the
-		// session's PermissionMode is ModePlan and a `plan` slot resolves, the engine's
-		// model is RE-RESOLVED to the plan model — within the SAME session provider
-		// (resolveSlotModel returns a concrete id that flows verbatim to the provider; we
-		// NEVER switch resolvedProvider/resolvedProviderID, so "provider FIXED per
-		// session" holds). Everything downstream (windowFn, modelCapability,
-		// engineDepsForProvider) already keys on resolvedModel, so the swap is total with
-		// no further change here. ModeDefault/ModeAccept leave resolvedModel untouched
-		// (the session-selected model; acceptEdits shares the session model, no own slot)
-		// — byte-identical when no plan slot is configured (resolveSlotModel returns
-		// configured=false). This path is SILENT (no diagnostics): the build-once narration
-		// lives in logSlotConfigFacts, and re-firing here would duplicate per session/rebuild.
-		if mode == session.ModePlan {
-			if planModel, configured := resolveSlotModel(cfg, slotPlan, resolvedModel); configured && planModel != "" {
-				resolvedModel = planModel
-			}
 		}
 		// REASONING EFFORT (ADR 0055), re-minted via the engine FACTORY — never a
 		// clone-and-swap-LLM (the "provider FIXED per session" discipline). Precedence:

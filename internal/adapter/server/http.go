@@ -638,7 +638,7 @@ func (h *HTTPHandler) createSession(w http.ResponseWriter, r *http.Request) {
 		SessionID:           string(sess.ID),
 		Capabilities:        capabilitiesJSON(h.svc.capabilitiesFor(r.Context())),
 		SessionCapabilities: &sessionCapabilitiesJSON{Image: scaps.Image, Audio: scaps.Audio},
-		ResolvedModel:       resolvedModelToJSON(h.svc.ResolvedModel(sess.ID)),
+		ResolvedModel:       resolvedModelToJSON(h.svc.resolvedModelFor(sess)),
 		Placement:           placementMetadataToJSON(sess.Placement),
 	})
 }
@@ -776,7 +776,7 @@ func (h *HTTPHandler) writeSession(w http.ResponseWriter, status int, sess *sess
 		TitleProvenance:     valid(string(sess.TitleProvenance)),
 		TitleMetadata:       sessionTitleToJSON(titlePayload(sess)),
 		TokenUsage:          tokenUsageToJSON(sess.TokenUsageSnapshot()),
-		ResolvedModel:       resolvedModelToJSON(h.svc.ResolvedModel(sess.ID)),
+		ResolvedModel:       resolvedModelToJSON(h.svc.resolvedModelFor(sess)),
 		Kind:                string(sess.Kind),
 		Relationship:        toProtoSessionRelationship(sess.Relationship),
 	})
