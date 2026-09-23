@@ -61,11 +61,6 @@ the bidi Converse stream that drives one agent run.
 | `CancelMcpAuthorization` | `CancelMcpAuthorizationRequest` | `CancelMcpAuthorizationResponse` | Yes | Yes | CancelMcpAuthorization is the cancellation counterpart with the same first-frame and continuation-control grammar. |
 | `ListSessions` | `ListSessionsRequest` | `ListSessionsResponse` | No | No | ListSessions returns the stored-session inventory — the picker metadata a client renders to let an operator open an EXISTING session by id (issue #245 Phase 1). It is backed by `port.PrunableStore.List` (type-asserted on the configured store); a store that does not implement `PrunableStore`, or one that returns `ErrPruneUnsupported`, degrades to an EMPTY list — never an error — so a no-persistence/cloud server honestly reports &#34;no sessions&#34;. Each row carries only picker metadata (id, timestamps, state, turn count, model id); NO conversation content is loaded. Rows are sorted most-recently-active first (modified_at descending). Read-only. There is intentionally NO ServerCapabilities bit — see StreamSessionEvents for the rationale. |
 | `GetStorageHealth` | `GetStorageHealthRequest` | `GetStorageHealthResponse` | No | No | GetStorageHealth returns authenticated, content-free aggregate storage status. It never returns session ids, owners, paths, or transcript content. |
-| `PlanSessionMigration` | `PlanSessionMigrationRequest` | `SessionMigrationPlan` | No | No | Session migration is authenticated, semantics-preserving physical maintenance. Plan is read-only; apply/resume process bounded batches. |
-| `ApplySessionMigration` | `ApplySessionMigrationRequest` | `SessionMigrationJob` | No | No |  |
-| `ResumeSessionMigration` | `ResumeSessionMigrationRequest` | `SessionMigrationJob` | No | No |  |
-| `CancelSessionMigration` | `CancelSessionMigrationRequest` | `SessionMigrationJob` | No | No |  |
-| `GetSessionMigrationJob` | `GetSessionMigrationJobRequest` | `SessionMigrationJob` | No | No |  |
 | `PlanSessionCleanup` | `PlanSessionCleanupRequest` | `PlanSessionCleanupResponse` | No | No | Session cleanup is an authenticated plan/apply maintenance workflow. Plan is read-only; apply requires its caller-bound opaque confirmation token. |
 | `ApplySessionCleanup` | `ApplySessionCleanupRequest` | `CleanupJob` | No | No |  |
 | `CancelSessionCleanup` | `CancelSessionCleanupRequest` | `CleanupJob` | No | No |  |
@@ -184,33 +179,19 @@ read-only Task call site), not the raw frontmatter.
 
 
 
-#### `mecatl.v1.ApplySessionMigrationRequest`
-
-
-
-| Field | Type | Label | Oneof | Description |
-|---|---|---|---|---|
-| `plan_id` | `string` |  |  |  |
-| `batch_size` | `int32` |  |  |  |
-
-
-
-
 #### `mecatl.v1.Approval`
 
 Approval is the proto projection of session.ApprovalPayload (EvApproval):
 the verdict half of a permission ask. Metadata-only (gauntlet #7): tool NAME +
-verdict string + askID + the opaque gated-call id + the allow-always flag.
-NEVER raw args. LOG-ONLY on the live Converse wire; surfaced only by the
+verdict enum + askID + the opaque gated-call id. NEVER raw args. LOG-ONLY on the live Converse wire; surfaced only by the
 StreamSessionEvents replay.
 
 | Field | Type | Label | Oneof | Description |
 |---|---|---|---|---|
 | `ask_id` | `string` |  |  | ask_id is the id of the resolved permission ask (mirrors PermissionAsk.ask_id). |
-| `verdict` | `string` |  |  | verdict is the resolution string (allow_once / allow_always / deny) — a passthrough of session.VerdictString*, no enum. |
 | `tool` | `string` |  |  | tool is the NAME of the tool the ask gated. It is the tool name ALONE — never the call&#39;s args. |
 | `call_id` | `string` |  |  | call_id is the opaque id of the gated ToolCall (the durable, grammar-free correlation handle a 3b consumer uses to find the call in the conversation). |
-| `allow_always` | `bool` |  |  | allow_always mirrors (Verdict == allow_always): the verdict asked the harness to learn a per-session allow rule. It honestly reflects the VERDICT, not the policy outcome (Policy.Learn may no-op on an unlearnable call). |
+| `verdict` | `ApprovalVerdict` |  |  | verdict is the typed resolution of the permission ask. |
 
 
 
@@ -356,17 +337,6 @@ CancelRunSteerResponse reports the authoritative exact-run retraction result.
 
 
 #### `mecatl.v1.CancelSessionCleanupRequest`
-
-
-
-| Field | Type | Label | Oneof | Description |
-|---|---|---|---|---|
-| `job_id` | `string` |  |  |  |
-
-
-
-
-#### `mecatl.v1.CancelSessionMigrationRequest`
 
 
 
@@ -734,8 +704,7 @@ CreateSessionResponse carries the newly-allocated session id.
 | Field | Type | Label | Oneof | Description |
 |---|---|---|---|---|
 | `session_id` | `string` |  |  | session_id is the id of the created session. |
-| `capabilities` | `ServerCapabilities` |  |  | capabilities reports which optional features this server has enabled, for an honest client UI. Nil/absent from an older server → treat as all-false. |
-| `session_capabilities` | `SessionCapabilities` |  |  | session_capabilities reports the multimodal input capability of the provider+model THIS session actually resolved to — the INTERSECTION of the catalog&#39;s per-model modalities and the wired adapter&#39;s transmit capability, computed once in composition (internal/app). It MAY differ from `capabilities` (the server-wide shared-engine view) when the request carried provider_id/model_id selecting a NON-default engine. Clients gate per-session @-attach UX on THIS, not the server-wide bits. Nil/absent from an older server → fall back to `capabilities`. (multi-provider Phase 0, S5.) |
+| `session_capabilities` | `SessionCapabilities` |  |  | session_capabilities reports the multimodal input capability of the provider+model THIS session actually resolved to — the INTERSECTION of the catalog&#39;s per-model modalities and the wired adapter&#39;s transmit capability, computed once in composition (internal/app). Clients gate per-session @-attach UX on THIS value. |
 | `resolved_model` | `ResolvedModel` |  |  | resolved_model reports the EFFECTIVE provider+model THIS session actually resolved to, plus its context window — the single value computed once in composition (internal/app), the SAME composition-computed single-source discipline as session_capabilities (NEVER recomputed in a handler). It is echoed VERBATIM: the server owns the resolution (the empty-selector default, an env-derived provider, a passthrough model), so a client must read THIS rather than the model_id it sent (which is empty for a default session and ambiguous for passthrough). The model is FIXED per TURN; it is re-resolved BETWEEN turns when the session&#39;s permission mode changes the effective model (the plan-slot / opusplan pattern, ADR 0030 Layer 3) — re-read it from GetSession after a mode change. Nil/absent from an older server → the client falls back to today&#39;s behavior (no model segment in the header). |
 | `placement` | `PlacementMetadata` |  |  | placement is bounded display-only metadata, never reusable authority. |
 
@@ -971,7 +940,6 @@ event kind; the structured submessages are populated per kind.
 | `tool_result` | `ToolResult` |  |  | tool_result is set on tool.result events. |
 | `ask` | `PermissionAsk` |  |  | ask is set on permission.ask events; ask_id is echoed in ResumeApproval. |
 | `result` | `Result` |  |  | result is set on the terminal result event. |
-| `usage` | `Usage` |  |  | usage is set on usage-bearing events. On the result event it is the cumulative run total; turn.end carries its per-turn usage in turn_end. |
 | `turn_end` | `TurnEnd` |  |  | turn_end is set on turn.end events (this turn&#39;s usage + elapsed time). |
 | `hook` | `Hook` |  |  | hook is set on hook events: the structured phase/tool/decision so clients render hook notices distinctly (and colour blocked ones) instead of parsing the free-text `text` field. |
 | `subagent` | `Subagent` |  |  | subagent is set on the three subagent.* events (subagent.start / subagent.tool / subagent.end): a REDACTED, metadata-only projection of a Task child run. It NEVER carries child content (no message text, tool args, or result bodies) — only ids, a goal label, tool names/counts, usage, stop, and duration — so the context-isolation guarantee is preserved. |
@@ -1059,7 +1027,7 @@ It deliberately carries TWO different vocabularies side by side, because they
 answer different questions and conflating them is a bug:
 
   - `capabilities` answers &#34;what has this OPERATOR enabled?&#34; — it changes with
-    operator config. `bash: false` means the operator ran --no-bash.
+    operator config. `shell: false` means the Shell tool is unavailable.
   - `features` answers &#34;what does this BUILD implement?&#34; — it changes when
     mecatl is upgraded.
 
@@ -1070,7 +1038,7 @@ operator toggle will call an RPC the server has never heard of.
 | Field | Type | Label | Oneof | Description |
 |---|---|---|---|---|
 | `api_major` | `int32` |  |  | api_major is the wire-contract major version. It starts at 1 and bumps ONLY on a genuine break; additive changes are announced through `features` instead. A client gates on api_major + feature identifiers, NEVER on a server/package semver comparison. |
-| `capabilities` | `ServerCapabilities` |  |  | capabilities is the SAME ServerCapabilities projection CreateSessionResponse echoes — the operator-enabled feature set — served here so a client can read it without creating a probe session. Media (image/audio) here is a SERVER-WIDE hint for UI chrome only: the per-session CreateSessionResponse.session_capabilities echo remains authoritative for whether a given session may send media. |
+| `capabilities` | `ServerCapabilities` |  |  | capabilities is the canonical deployment-wide operator-enabled feature set. Media (image/audio) here is a SERVER-WIDE hint for UI chrome only: the per-session CreateSessionResponse.session_capabilities value remains authoritative for whether a given session may send media. |
 | `features` | `string` | repeated |  | features are the build&#39;s supported feature identifiers as OPEN STRINGS, not an enum — the EvNoProgress/StopBudget string-passthrough discipline. An unrecognised identifier is ignored by an older client; a new one is a minor release, never a wire-compat event. Identifiers are stable once published.  A feature that is only reachable on some listeners is advertised only on a listener that permits it, so this set is &#34;what this build implements AND this listener permits&#34; (see ADR 0237 / ADR 0248). |
 | `deployment` | `string` |  |  | deployment is an OPTIONAL, opaque, bounded, operator-set label for this deployment. It is empty by default and is NEVER derived from hostname, pod name, or environment — infrastructure topology is not something an authenticated caller is owed, and a label the operator did not choose is a leak with no consenting author. Set via mecated --deployment-id. |
 
@@ -1242,17 +1210,6 @@ diagnostic display projections, never connection instructions.
 
 
 #### `mecatl.v1.GetSessionCleanupJobRequest`
-
-
-
-| Field | Type | Label | Oneof | Description |
-|---|---|---|---|---|
-| `job_id` | `string` |  |  |  |
-
-
-
-
-#### `mecatl.v1.GetSessionMigrationJobRequest`
 
 
 
@@ -2310,14 +2267,6 @@ backend locator, exact EnvironmentRef, or reusable selector.
 
 
 
-#### `mecatl.v1.PlanSessionMigrationRequest`
-
-
-
-This message has no fields.
-
-
-
 #### `mecatl.v1.Principal`
 
 Principal is the verified caller an object is attributed to (ADR 0204 — caller
@@ -2551,8 +2500,7 @@ session.ResultPayload.
 | `text` | `string` |  |  | text is the final assistant text, if any. |
 | `usage` | `Usage` |  |  | usage is the token accounting accumulated during THIS run; it is not the durable session total and is distinct from per-turn TurnEnd.usage. |
 | `error` | `string` |  |  | error carries the failure detail when stop is &#34;error&#34; (empty otherwise). |
-| `permanent` | `bool` |  |  | permanent is true when an error stop is a PERMANENT provider rejection — replaying the identical request cannot succeed (e.g. a 4xx other than 408/429). Absent/false means transient or unclassified (fail-open). |
-| `retry_disposition` | `RetryDisposition` | optional |  | retry_disposition is always present on terminal results from new servers; absence identifies an older server, while explicit UNKNOWN is conservative. |
+| `retry_disposition` | `RetryDisposition` | optional |  | retry_disposition is always present on terminal results from current servers; absence identifies an older server, while explicit UNKNOWN is conservative. |
 | `stream_progress` | `StreamProgress` | optional |  | stream_progress is presence-aware for the same old-server distinction. |
 
 
@@ -2567,21 +2515,8 @@ event stream.
 | Field | Type | Label | Oneof | Description |
 |---|---|---|---|---|
 | `ask_id` | `string` |  |  | ask_id correlates the resolution with the paused ask. |
-| `allow` | `bool` |  |  | allow permits the tool when true, denies it when false. LEGACY: kept for back-compat with clients that predate `verdict`. When `verdict` is set (!= APPROVAL_VERDICT_UNSPECIFIED) it takes precedence and this bool is ignored; otherwise true maps to ALLOW_ONCE and false to DENY. |
-| `verdict` | `ApprovalVerdict` |  |  | verdict is the three-way resolution: deny, allow this call once, or allow always (which additionally LEARNS a per-session allow rule for the matching tool + exact pattern). Preferred over `allow`; UNSPECIFIED falls back to it. |
+| `verdict` | `ApprovalVerdict` |  |  | verdict is the required three-way resolution: deny, allow this call once, or allow always (which additionally learns a per-session allow rule for the matching tool + exact pattern). |
 | `expected_run_id` | `string` |  |  | expected_run_id, when set, scopes this control to ONE run: the server refuses it if the session&#39;s current run is a different one, and the newer run is left untouched.  It closes a real race, not a hypothetical one. Controls are addressed at a SESSION, so a control still in flight when a run ends would otherwise land on whatever run started next — approving a tool call the user never saw, or cancelling work they did not ask to stop. `seq` cannot distinguish the two runs (it restarts each run), so before run ids there was no way to express &#34;this one&#34;.  EMPTY is the legacy behaviour exactly: the control applies to whatever run is current. Existing clients are unaffected; a client that knows the run id it is acting on should always send it. |
-
-
-
-
-#### `mecatl.v1.ResumeSessionMigrationRequest`
-
-
-
-| Field | Type | Label | Oneof | Description |
-|---|---|---|---|---|
-| `job_id` | `string` |  |  |  |
-| `batch_size` | `int32` |  |  |  |
 
 
 
@@ -2708,7 +2643,7 @@ old clients ignore and new clients reading an old server see as false.
 | `memory` | `bool` |  |  | memory is true when cross-session memory tools (Remember/Recall) are registered. Agent-side: no overlay, surfaced as prose only. |
 | `skills` | `bool` |  |  | skills is true when the Skill tool is registered. Gates the /skills inventory browser (the read-only ListSkills snapshot). Activation stays the model&#39;s concern — the panel is discovery only. |
 | `teams` | `bool` |  |  | teams is true when agent teams are enabled (a member-engine factory is wired). Gates the f6 deep view&#39;s relevance. |
-| `bash` | `bool` |  |  | bash reports availability of the canonical Shell tool. Its historical spelling is retained for wire/API compatibility; false means Shell is not registered (for example, the operator ran --no-shell). |
+| `shell` | `bool` |  |  | shell reports availability of the canonical Shell tool. False means Shell is not registered (for example, the operator ran --no-shell). |
 | `image` | `bool` |  |  | image is true when the wired LLM provider consumes image prompt parts. Gates the @-mention file-attach UX for images (a client refuses to send an image part to a server whose provider cannot read it). |
 | `audio` | `bool` |  |  | audio is true when the wired LLM provider consumes audio prompt parts. Gates the @-mention file-attach UX for audio. |
 | `agents` | `bool` |  |  | agents is true when the agent-definition registry is resolvable and served (ListAgents returns the resolved snapshot). Independent of `teams` (the run-path member-engine): defs can be browsable without teams enabled. Gates the /agents definition-inventory panel. |
@@ -2721,8 +2656,7 @@ old clients ignore and new clients reading an old server see as false.
 | `reflection` | `bool` |  |  | reflection is true when explicit completed-session reflection is available. |
 | `learning_proposals` | `bool` |  |  | learning_proposals is true when proposal review and promotion are available. |
 | `learned_skills` | `bool` |  |  | learned_skills is true when the caller-partitioned lifecycle API is available. |
-| `storage_migration` | `bool` |  |  | storage_migration is true only when the backend implements durable bounded v1-to-v2 maintenance, a management authorizer is configured, and destructive mutation has cross-process lease exclusion (or explicitly proven private embedded single-writer composition). |
-| `storage_cleanup` | `bool` |  |  | storage_cleanup advertises the authenticated plan/apply/job maintenance API only under the same destructive-mutation exclusion as storage_migration. |
+| `storage_cleanup` | `bool` |  |  | storage_cleanup advertises the authenticated plan/apply/job maintenance API under destructive-mutation exclusion. |
 | `manual_dream` | `ManualDreamCapabilities` |  |  | manual_dream is the composition-time availability snapshot for the two deployment-owned manual consolidation targets. An older server leaves it absent; unavailable reasons are bounded, content-free operator categories. |
 | `storage_health` | `bool` |  |  | storage_health is true only when the backend implements bounded indexed health and this deployment has a management authorizer. |
 | `steer` | `bool` |  |  | steer is true when the server&#39;s engines arm the mid-run steer inbox (steer-while-running, issue #512): a client may then send multimodal `steer` / `steer_cancel` frames on the live Converse stream and render the EvSteer drain echo. When false because steer is disabled in composition, the client keeps its local merge-queue behaviour — a steer frame sent to such a server is promoted to a fresh follow-up run (the engine reports too_late on its disarmed inbox), never silently dropped. |
@@ -2749,9 +2683,6 @@ Session is a snapshot of server-side session state.
 | `tool_calls` | `int32` |  |  | tool_calls is the total number of tool invocations recorded. |
 | `created_at_unix` | `int64` |  |  | created_at_unix is the creation timestamp in Unix seconds. |
 | `resolved_model` | `ResolvedModel` |  |  | resolved_model is the EFFECTIVE provider+model this session resolved to (composition-computed, echoed verbatim; FIXED per TURN, re-resolved between turns on a permission-mode change — plan-slot / opusplan, ADR 0030 Layer 3). Mirrors CreateSessionResponse.resolved_model so a snapshot reader (GetSession) sees the same effective model the create response carried — and is the canonical place a client re-reads the model AFTER a mode change. Nil/absent from an older server → client falls back to today&#39;s behavior. |
-| `title` | `string` |  |  | **Deprecated.** title is the deprecated compatibility title; use title_metadata.title. |
-| `title_provenance` | `string` |  |  | **Deprecated.** title_provenance is deprecated compatibility provenance; use title_metadata.provenance. Allowed values: &#34;first-prompt&#34;, &#34;operator&#34;, &#34;generated&#34;, or empty for legacy/unknown. |
-| `capabilities` | `ServerCapabilities` |  |  | capabilities is the server&#39;s feature-advertisement snapshot (the SAME value CreateSessionResponse carries). It rides the Session snapshot so a client that reloads or switches to a persisted session (continue, /effort fork, /clear successor) can re-derive its affordances in ONE round-trip (GetSession) instead of creating another session. An older server omits the field, so the client sees a zero value and keeps its current caps untouched (fail-conservative). |
 | `kind` | `string` |  |  | kind and relationship preserve the durable trusted-producer identity. |
 | `relationship` | `SessionRelationship` |  |  |  |
 | `debug_mcp_servers` | `string` | repeated |  | Selected global server names and the exact creation-time direct-tool ceiling. These contain no URLs, headers, credentials, or inline MCP configuration. |
@@ -2833,62 +2764,6 @@ SessionInventoryCapabilities is the picker-safe action posture for one row.
 
 
 
-#### `mecatl.v1.SessionMigrationItemError`
-
-
-
-| Field | Type | Label | Oneof | Description |
-|---|---|---|---|---|
-| `item_handle` | `string` |  |  |  |
-| `reason_code` | `string` |  |  |  |
-| `message` | `string` |  |  |  |
-
-
-
-
-#### `mecatl.v1.SessionMigrationJob`
-
-
-
-| Field | Type | Label | Oneof | Description |
-|---|---|---|---|---|
-| `job_id` | `string` |  |  |  |
-| `state` | `string` |  |  |  |
-| `v1_families` | `int64` |  |  |  |
-| `v2_families` | `int64` |  |  |  |
-| `invalid_families` | `int64` |  |  |  |
-| `skipped_families` | `int64` |  |  |  |
-| `current_bytes` | `int64` |  |  |  |
-| `reclaimable_bytes` | `int64` |  |  |  |
-| `temporary_bytes` | `int64` |  |  |  |
-| `processed` | `int64` |  |  |  |
-| `migrated` | `int64` |  |  |  |
-| `failed` | `int64` |  |  |  |
-| `errors` | `SessionMigrationItemError` | repeated |  |  |
-
-
-
-
-#### `mecatl.v1.SessionMigrationPlan`
-
-
-
-| Field | Type | Label | Oneof | Description |
-|---|---|---|---|---|
-| `plan_id` | `string` |  |  |  |
-| `available` | `bool` |  |  |  |
-| `unavailable_reason` | `string` |  |  |  |
-| `v1_families` | `int64` |  |  |  |
-| `v2_families` | `int64` |  |  |  |
-| `invalid_families` | `int64` |  |  |  |
-| `skipped_families` | `int64` |  |  |  |
-| `current_bytes` | `int64` |  |  |  |
-| `reclaimable_bytes` | `int64` |  |  |  |
-| `temporary_bytes` | `int64` |  |  |  |
-
-
-
-
 #### `mecatl.v1.SessionRelationship`
 
 SessionRelationship carries the validated links appropriate to a session kind.
@@ -2924,13 +2799,11 @@ from its ListModels inventory by (provider_id, model_id) if it needs one.
 | `turns` | `int32` |  |  | turns is the persisted model-call count. Zero when the snapshot could not be loaded. |
 | `model_id` | `string` |  |  | model_id is the resolved model id this session ran on (bare string, no provider context). Empty when the session never resolved a model or the snapshot could not be loaded. |
 | `created_at_unix` | `int64` |  |  | created_at_unix is the creation timestamp in Unix seconds. Zero when the snapshot could not be loaded. |
-| `title` | `string` |  |  | **Deprecated.** title is the deprecated compatibility title; use title_metadata.title. |
 | `owner` | `Principal` |  |  | owner is the verified caller the session is attributed to (ADR 0204), stamped write-once at CreateSession from the validated token — never from the request body. UNSET for an ownerless session (a no-auth deployment, or a session persisted before the owner label existed; nothing backfills it). |
 | `kind` | `string` |  |  | kind and relationship are the durable trusted-producer taxonomy. |
 | `relationship` | `SessionRelationship` |  |  |  |
 | `capabilities` | `SessionInventoryCapabilities` |  |  | capabilities state which public actions are valid for this row. |
 | `reason_code` | `string` |  |  | reason_code explains why a capability is unavailable. Empty means no denial. |
-| `title_provenance` | `string` |  |  | **Deprecated.** title_provenance is deprecated compatibility provenance; use title_metadata.provenance. Allowed values: &#34;first-prompt&#34;, &#34;operator&#34;, &#34;generated&#34;, or empty for legacy/unknown. |
 | `placement` | `PlacementMetadata` |  |  |  |
 | `title_metadata` | `SessionTitle` |  |  | title_metadata is the canonical bounded, source-free title lifecycle projection. |
 | `token_usage` | `SessionSummary.TokenUsageEntry` | repeated |  | token_usage is the canonical durable session token accounting. Map keys identify usage types; `main` is ordinary main-session agent usage. Other keys are server-defined and are not enumerated here. |
@@ -3707,7 +3580,7 @@ mutation denial.
 
 | Name | Number | Description |
 |---|---|---|
-| `APPROVAL_VERDICT_UNSPECIFIED` | `0` | APPROVAL_VERDICT_UNSPECIFIED falls back to the legacy `allow` bool at the server boundary (true -&gt; ALLOW_ONCE, false -&gt; DENY). |
+| `APPROVAL_VERDICT_UNSPECIFIED` | `0` | APPROVAL_VERDICT_UNSPECIFIED is invalid at control boundaries. |
 | `APPROVAL_VERDICT_DENY` | `1` | APPROVAL_VERDICT_DENY refuses the proposed tool call. |
 | `APPROVAL_VERDICT_ALLOW_ONCE` | `2` | APPROVAL_VERDICT_ALLOW_ONCE permits this call only; nothing is learned. |
 | `APPROVAL_VERDICT_ALLOW_ALWAYS` | `3` | APPROVAL_VERDICT_ALLOW_ALWAYS permits this call and learns a per-session allow rule for the matching tool + exact pattern. |
