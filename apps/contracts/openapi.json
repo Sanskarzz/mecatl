@@ -18,31 +18,82 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "account": {
-                      "type": "string"
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "account": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "email": {
+                          "type": "string"
+                        },
+                        "mode": {
+                          "type": "string",
+                          "enum": [
+                            "oidc"
+                          ]
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "authenticated"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "account",
+                        "mode",
+                        "status"
+                      ],
+                      "additionalProperties": false
                     },
-                    "mode": {
-                      "type": "string",
-                      "enum": [
-                        "oidc",
-                        "static",
-                        "none"
-                      ]
+                    {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "type": "string",
+                          "enum": [
+                            "oidc"
+                          ]
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "anonymous"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "mode",
+                        "status"
+                      ],
+                      "additionalProperties": false
                     },
-                    "status": {
-                      "type": "string",
-                      "enum": [
-                        "authenticated",
-                        "anonymous",
-                        "disabled"
-                      ]
+                    {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "type": "string",
+                          "enum": [
+                            "static",
+                            "none"
+                          ]
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "disabled"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "mode",
+                        "status"
+                      ],
+                      "additionalProperties": false
                     }
-                  },
-                  "required": [
-                    "mode",
-                    "status"
                   ]
                 }
               }
@@ -55,6 +106,17 @@
       "get": {
         "operationId": "startAuthLogin",
         "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "popup"
+              ]
+            },
+            "required": false,
+            "name": "flow",
+            "in": "query"
+          },
           {
             "schema": {
               "type": "string"
@@ -197,6 +259,16 @@
       "get": {
         "operationId": "completeAuthLogin",
         "responses": {
+          "200": {
+            "description": "A popup completion page that reports only the authentication result.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
           "302": {
             "description": "Continue the browser authentication flow.",
             "headers": {
@@ -476,6 +548,79 @@
                   "required": [
                     "service",
                     "status"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/status": {
+      "get": {
+        "operationId": "getPublicStatus",
+        "responses": {
+          "200": {
+            "description": "Coarse Mecatl connection and browser sign-in facts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "connection": {
+                      "type": "string",
+                      "enum": [
+                        "checking",
+                        "reachable",
+                        "unavailable"
+                      ]
+                    },
+                    "signInRequired": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "connection",
+                    "signInRequired"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The client's public status request budget is exhausted.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "instance": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "detail",
+                    "instance",
+                    "status",
+                    "title",
+                    "type"
                   ]
                 }
               }
