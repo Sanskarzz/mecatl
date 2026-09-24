@@ -2,9 +2,14 @@
 
 import { getRuntimeOptions } from "@mecatl-studio/contracts/query";
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import { Keyboard } from "lucide-react";
-import { Badge } from "../../components/ui/badge";
 import { Kbd } from "../../components/ui/kbd";
+import {
+  freshDeploymentQuery,
+  useBrowserOnline,
+  useRefreshOnEntry,
+} from "../settings/settings-connection";
 import { deriveHelpFeatures } from "./help-features";
 import { keycaps, shortcutGroups, shortcutRegistry } from "./shortcut-registry";
 
@@ -28,12 +33,38 @@ const USAGE_LEGEND: ReadonlyArray<{ label: string; note: string }> = [
 
 export function ShortcutReference() {
   const mac = navigator.platform.includes("Mac");
-  const runtime = useQuery(getRuntimeOptions());
-  const features = runtime.data ? deriveHelpFeatures(runtime.data.capabilities) : undefined;
+  const browserOnline = useBrowserOnline();
+  const runtime = useQuery({
+    ...getRuntimeOptions(),
+    ...freshDeploymentQuery,
+    enabled: browserOnline,
+  });
+  const runtimeValidating = useRefreshOnEntry(
+    "shortcuts:runtime",
+    browserOnline,
+    runtime.data !== undefined,
+    runtime.refetch,
+  );
+  const features =
+    browserOnline &&
+    !runtimeValidating &&
+    !runtime.isFetching &&
+    !runtime.isError &&
+    runtime.data?.connection === "online"
+      ? deriveHelpFeatures(runtime.data.capabilities).filter((row) => row.enabled)
+      : undefined;
 
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto w-full max-w-4xl px-4 py-7 sm:px-8 sm:py-10">
+        <Link
+          className="inline-flex min-h-11 items-center rounded-lg text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline focus-visible:outline-2 focus-visible:outline-brand"
+          params={{ section: "about" }}
+          search={{ item: undefined }}
+          to="/workspace/settings/$section"
+        >
+          ← Settings
+        </Link>
         <div className="flex items-start gap-4">
           <span className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-brand/10 text-brand">
             <Keyboard aria-hidden="true" className="size-5" />
@@ -75,20 +106,21 @@ export function ShortcutReference() {
           <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
             Features on this agent
           </h2>
-          {runtime.isPending ? (
+          {browserOnline && (runtimeValidating || runtime.isFetching || runtime.isPending) ? (
             <p className="mt-3 text-sm text-muted-foreground">Checking what's turned on…</p>
           ) : runtime.error || !features ? (
             <p className="mt-3 text-sm text-muted-foreground">
               Connect to an agent to see which features are turned on.
             </p>
+          ) : features.length === 0 ? (
+            <p className="mt-3 text-sm text-muted-foreground">
+              No help features are enabled on this agent.
+            </p>
           ) : (
             <ul className="mt-3 grid gap-x-8 gap-y-2.5 sm:grid-cols-2">
               {features.map((row) => (
-                <li className={row.enabled ? "" : "text-muted-foreground"} key={row.id}>
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium">{row.label}</span>
-                    {!row.enabled && <Badge variant="outline">not enabled</Badge>}
-                  </div>
+                <li key={row.id}>
+                  <p className="text-sm font-medium">{row.label}</p>
                   <p className="text-xs text-muted-foreground">{row.hint}</p>
                 </li>
               ))}
