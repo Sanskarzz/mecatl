@@ -30,7 +30,7 @@ func scenarioPaletteState(commands []client.Command) paletteState {
 func TestMecatuiSlashPaletteBoundedList_Scenario1_GeometryAndIndicators(t *testing.T) {
 	for _, width := range []int{24, 48, 80} {
 		t.Run(fmt.Sprintf("width-%d", width), func(t *testing.T) {
-			st := scenarioPaletteState(scenarioPaletteCommands(maxPaletteRows + 2))
+			st := scenarioPaletteState(scenarioPaletteCommands(maxPaletteRows + 3))
 			got := renderPaletteSized(testTheme(), st, client.Capabilities{}, "/", width, maxPaletteRows)
 			if got == "" {
 				t.Fatal("usable geometry suppressed the palette")
@@ -61,11 +61,11 @@ func TestMecatuiSlashPaletteBoundedList_Scenario1_GeometryAndIndicators(t *testi
 		t.Fatal("suppressed palette retained valid list geometry")
 	}
 
-	// A one-row body still exposes both sides of a middle physical row without
-	// borrowing a second body row for indicator chrome.
-	st = scenarioPaletteState(scenarioPaletteCommands(3))
+	// A one-row body presents the shared logical overflow projection in its header,
+	// preserving the selectable row without re-counting physical lines locally.
+	st = scenarioPaletteState(scenarioPaletteCommands(5))
 	st.list.SetGeometry(20, 1, 1, bounded.Wrap)
-	st.list.SetCursor(1)
+	st.list.SetCursor(2)
 	got := ansi.Strip(renderPaletteSized(testTheme(), st, client.Capabilities{}, "/", 24, 1))
 	if !strings.Contains(got, "above") || !strings.Contains(got, "below") {
 		t.Fatalf("one-row body lost bidirectional overflow indicators:\n%s", got)
@@ -144,6 +144,14 @@ func TestMecatuiSlashPaletteBoundedList_Scenario1_SelectionAnchors(t *testing.T)
 	st.list.Move(bounded.LineUp)
 	if st.list.Cursor() != 1 {
 		t.Fatalf("Up cursor = %d, want one logical command", st.list.Cursor())
+	}
+	// The rendered palette must re-reveal the selected command even if an earlier
+	// measurement advanced its physical viewport.
+	st.list.SetCursor(2)
+	st.list.Scroll(bounded.PageUp)
+	visible := ansi.Strip(renderPaletteSized(testTheme(), st, client.Capabilities{}, "/", 24, 2))
+	if !strings.Contains(visible, "▶ /gamma") {
+		t.Fatalf("render lost selected final command:\n%s", visible)
 	}
 
 	m := newPaletteModel(t, sampleCommands())
@@ -383,6 +391,8 @@ func TestMecatuiSlashPaletteBoundedList_Scenario1_PreservesInteractionOwnership(
 		})
 	}
 
+	// A visible palette owns the first Escape even while a run streams. Its dismissal
+	// must leave the run untouched; only the next Escape reaches running cancellation.
 	running, _ := newQueueModel(t)
 	running = startRunning(t, running, "first")
 	running.prompt.Rewrite("/")
@@ -395,10 +405,16 @@ func TestMecatuiSlashPaletteBoundedList_Scenario1_PreservesInteractionOwnership(
 			t.Fatalf("running palette did not retain %q: open=%t prompt=%q", keyMsg.String(), running.palette.open, running.prompt.Value())
 		}
 	}
-	mm, _ := running.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	status := running.statusMsg
+	mm, cancel := running.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	running = mm.(Model)
-	if running.statusMsg != "cancelling…" || !running.palette.open {
-		t.Fatalf("running Escape did not remain run-cancel: status=%q open=%t", running.statusMsg, running.palette.open)
+	if cancel != nil || running.palette.open || !running.palette.dismissed || running.statusMsg != status {
+		t.Fatalf("visible running palette Escape did not only dismiss: cancel=%t open=%t dismissed=%t status=%q want=%q", cancel != nil, running.palette.open, running.palette.dismissed, running.statusMsg, status)
+	}
+	mm, cancel = running.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	running = mm.(Model)
+	if cancel == nil || running.statusMsg != "cancelling…" {
+		t.Fatalf("dismissed running palette Escape did not cancel: cancel=%t status=%q", cancel != nil, running.statusMsg)
 	}
 
 	short := newPaletteModel(t, sampleCommands())

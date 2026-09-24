@@ -188,6 +188,24 @@ func TestMecatuiBoundedScrollCursor_Scenario1_ClampsContentAndDegenerateBounds(t
 	if len(view.Rows)+chrome > 2 {
 		t.Fatalf("content plus indicators use %d rows, want <= 2: %#v", len(view.Rows)+chrome, view)
 	}
+
+	// A short tail is more useful as content than as a second overflow line.
+	tail := new(List)
+	tail.SetGeometry(12, 4, 1, Clip)
+	tail.SetItems([]ListItem{{ID: "a", Text: "a"}, {ID: "b", Text: "b"}, {ID: "c", Text: "c"}, {ID: "d", Text: "d"}, {ID: "e", Text: "e"}})
+	tail.Scroll(LineDown)
+	view = tail.ViewWithIndicators(4, false)
+	if len(view.Rows) != 4 || view.Rows[3].ID != "e" || view.Above != 0 || view.Below != 0 {
+		t.Fatalf("lone below row was not promoted into content: %#v", view)
+	}
+
+	threshold := new(List)
+	threshold.SetGeometry(12, 4, 1, Clip)
+	threshold.SetItems([]ListItem{{ID: "a", Text: "a"}, {ID: "b", Text: "b"}, {ID: "c", Text: "c"}, {ID: "d", Text: "d"}, {ID: "e", Text: "e"}, {ID: "f", Text: "f"}})
+	view = threshold.ViewWithIndicators(4, false)
+	if len(view.Rows) != 3 || view.Below != 3 {
+		t.Fatalf("three-row final tail did not retain lower indicator: %#v", view)
+	}
 }
 
 func TestMecatuiBoundedScrollCursor_Scenario1_RefreshPreservesSemanticAnchors(t *testing.T) {

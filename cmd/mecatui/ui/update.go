@@ -2048,7 +2048,7 @@ func (m Model) hasDoubleEscapeDraft() bool {
 // gets Escape first. Only the focused, plain idle composer can use the gesture.
 func (m Model) doubleEscapeEligible() bool {
 	return m.keyboardEventTypes && m.phase == phaseIdle && m.prompt.Focused() && m.hasDoubleEscapeDraft() &&
-		!m.sel.active && !m.prompt.HasSelection() && !m.paletteVisible() && !m.mention.open &&
+		!m.sel.active && !m.prompt.HasSelection() && !m.paletteVisible() && !m.mentionVisible() &&
 		m.queuePaused == "" && !bodyOwnerOpen(m)
 }
 
@@ -2796,12 +2796,14 @@ func (m Model) pasteGateOpen() bool {
 // stays focused so the user can compose a steer or queued follow-up. It mirrors
 // onIdleKey's precedence so the input behaves the same mid-run as at idle, with
 // two differences — bare local built-ins still run locally, then enter steers or
-// enqueues ordinary input; esc cancels the in-flight run directly:
+// enqueues ordinary input; a visible slash-command palette owns esc dismissal before
+// a subsequent esc cancels the in-flight run:
 //
-//	(1) an open palette claims its navigation and completion keys (↑/↓/tab/enter)
-//	    so builtins dispatch through the same path and workspace rows complete;
-//	    esc is handled by the cancel path below;
-//	(2) esc/Cancel sends Cancel and leaves the draft, staged queue, and steer state intact;
+//	(1) an open palette claims its navigation, completion, and dismissal keys
+//	    (↑/↓/tab/enter/esc) so builtins dispatch through the same path and workspace
+//	    rows complete;
+//	(2) esc/Cancel after palette dismissal sends Cancel and leaves the draft, staged queue,
+//	    and steer state intact;
 //	(3) any bound Newline chord (shift+enter, ctrl+j, ctrl+enter, alt+enter by
 //	    default) → insert a newline;
 //	(4) enter (Submit) → run a bare local built-in, or enqueuePrompt for model-facing
@@ -2811,18 +2813,17 @@ func (m Model) pasteGateOpen() bool {
 //
 // ctrl+t (expand) and ctrl+c (quit) are handled globally in onKey before this.
 func (m Model) onRunningKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	// Let the palette claim its navigation and completion keys while running. A
-	// selected builtin dispatches locally; a workspace row completes into the
-	// textarea. Esc stays with the layered cancel path below.
-	if m.paletteVisible() && !key.Matches(msg, m.keys.Cancel) {
+	// Let the palette claim its navigation, completion, and dismissal keys while
+	// running. A selected builtin dispatches locally; a workspace row completes into
+	// the textarea. Once Esc dismisses the palette, the next Esc reaches cancel below.
+	if m.paletteVisible() {
 		if mm, cmd, handled := m.onPaletteKey(msg); handled {
 			return mm, cmd
 		}
 	}
-	// The @-mention menu, like the palette, claims its navigation/complete keys
-	// while running EXCEPT enter (which reaches the same builtin dispatcher, then
-	// steers or queues) and esc (the Cancel branch sends Cancel directly).
-	if m.mention.open && !key.Matches(msg, m.keys.Submit) && !key.Matches(msg, m.keys.Cancel) {
+	// A visible @-mention menu has the same ownership while streaming as it does
+	// while idle, including completion and dismissal.
+	if m.mentionVisible() {
 		if mm, handled := m.onMentionKey(msg); handled {
 			return mm, nil
 		}
@@ -3125,7 +3126,7 @@ func (m Model) onIdleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	// The @-mention menu (mutually exclusive with the palette) claims the same
 	// navigation/complete keys while it is open.
-	if m.mention.open {
+	if m.mentionVisible() {
 		if mm, handled := m.onMentionKey(msg); handled {
 			return mm, nil
 		}
@@ -3279,16 +3280,25 @@ func (m Model) onPaletteKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 // the highlighted path; esc dismisses. The two menus never coexist (mutually
 // exclusive tokens), so the caller routes to whichever is open.
 func (m Model) onMentionKey(msg tea.KeyPressMsg) (Model, bool) {
-	switch msg.String() {
-	case keyMenuUp:
+	if !m.mentionVisible() {
+		return m, false
+	}
+	switch {
+	case msg.String() == keyMenuUp:
 		m.mentionMoveUp()
 		return m, true
-	case keyMenuDown:
+	case msg.String() == keyMenuDown:
 		m.mentionMoveDown()
 		return m, true
-	case keyMenuTab, keyMenuEnter:
+	case key.Matches(msg, m.keys.ScrollU):
+		m.mention.list.Move(bounded.PageUp)
+		return m, true
+	case key.Matches(msg, m.keys.ScrollD):
+		m.mention.list.Move(bounded.PageDown)
+		return m, true
+	case msg.String() == keyMenuTab || msg.String() == keyMenuEnter:
 		return m.mentionComplete(), true
-	case keyMenuDismiss:
+	case msg.String() == keyMenuDismiss:
 		return m.mentionDismiss(), true
 	}
 	return m, false
