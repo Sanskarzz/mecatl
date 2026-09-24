@@ -1483,7 +1483,7 @@ export function ChatWorkspace({ sessionId }: { sessionId?: string }) {
         )}
 
         {error && (
-          <div className="mx-auto mb-3 flex w-[calc(100%-2rem)] max-w-3xl items-start gap-2 rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          <div className="mx-auto mb-3 flex w-[calc(100%-2rem)] max-w-3xl items-start gap-2 rounded-lg bg-destructive/10 px-3 py-2 text-sm text-foreground">
             <AlertCircle aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
             {error}
             {watchable && !isRunning && (
@@ -1502,7 +1502,7 @@ export function ChatWorkspace({ sessionId }: { sessionId?: string }) {
           </div>
         )}
         {notice && (
-          <div className="mx-auto mb-3 w-[calc(100%-2rem)] max-w-3xl rounded-lg bg-success/10 px-3 py-2 text-sm text-success">
+          <div className="mx-auto mb-3 w-[calc(100%-2rem)] max-w-3xl rounded-lg bg-success/10 px-3 py-2 text-sm text-foreground">
             {notice}
           </div>
         )}
@@ -1767,7 +1767,7 @@ export function Message({
                 >
                   {display.kind === "link" ? (
                     <a
-                      className="flex items-center gap-2 px-3 py-2 text-sm text-foreground underline underline-offset-2 hover:text-brand"
+                      className="flex items-center gap-2 px-3 py-2 text-sm text-foreground underline underline-offset-2 hover:text-brand-ink"
                       href={display.href}
                       rel="noopener noreferrer"
                       target="_blank"
@@ -1867,7 +1867,7 @@ function MessageAvatar({
 }) {
   return (
     <span
-      className={`mt-1 flex size-7 shrink-0 items-center justify-center overflow-hidden rounded-full ${fallback === "agent" ? "bg-brand/10 text-brand" : "bg-muted text-muted-foreground"}`}
+      className={`mt-1 flex size-7 shrink-0 items-center justify-center overflow-hidden rounded-full ${fallback === "agent" ? "bg-brand/10 text-brand-ink" : "bg-muted text-muted-foreground"}`}
     >
       {avatarUrl ? (
         <img alt={name} className="size-full object-cover" src={avatarUrl} />

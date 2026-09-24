@@ -4,7 +4,7 @@
 **Work classification:** Bounded — changes browser presentation and local interaction inside the existing Studio web app. It adds no daemon, BFF, deployment, or trust boundary.
 **Decision record:** None — [ADR 0351](../adr/0351-mecatl-studio-in-repo-web-ui.md) already fixes Studio's browser/BFF boundary and local workspace; this plan defines a bounded visual and component contract within it.
 **Phase:** Studio design alignment, foundation for #1844 and #1846
-**Status:** proposed, 2026-09-24. The frozen design and material interface decisions below are ready for plan review.
+**Status:** landed, 2026-09-24. Candidate transition after Implementation PR #1873 passed its applicable CI gates; authoritative only when both stacked PRs merge.
 **Delivery:** Split. The token and control contract is reviewed before the independent implementation PR and the dependent shell and settings work.
 **Expected tasks:** deferred to orchestration
 **Issue:** [stacklok/mecatl#1843](https://github.com/stacklok/mecatl/issues/1843).
@@ -130,7 +130,7 @@ The current [entry point](../../apps/web/src/main.tsx) applies theme after modul
 
 ### Scenario 3 — appearance controls work at the 500px pivot
 
-The existing [settings choice control](../../apps/web/src/features/settings/option-field.tsx), [mobile hook](../../apps/web/src/lib/use-mobile.ts), and [Radix wrappers](../../apps/web/src/components/ui/dialog.tsx) provide the local starting point inside [ADR 0351](../adr/0351-mecatl-studio-in-repo-web-ui.md)'s web package.
+The [shared choice control](../../apps/web/src/components/ui/option-field.tsx), [mobile hook](../../apps/web/src/lib/use-mobile.ts), and [Radix wrappers](../../apps/web/src/components/ui/dialog.tsx) provide the local foundation inside [ADR 0351](../adr/0351-mecatl-studio-in-repo-web-ui.md)'s web package.
 
 **Acceptance:**
 - AC3.1: The shared OptionField and the reused Button, Input, Dialog, Sheet, DropdownMenu, and Switch expose visible focus and keyboard operation in light and dark; the selected option is announced and focus returns to the trigger after close.
