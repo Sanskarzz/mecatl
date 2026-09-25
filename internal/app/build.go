@@ -933,6 +933,23 @@ type Config struct {
 	ToolHiveEnabled     bool
 	ToolHiveGroup       string
 
+	// Harness context sources are trusted, kind-specific registrations. Operator
+	// policy enables and orders them; registration alone has no effect.
+	HarnessInstructionSources []HarnessSourceRegistration[prompt.InstructionAssembler]
+	HarnessCommandSources     []HarnessSourceRegistration[server.CommandSourceBinding]
+	HarnessRulesSources       []HarnessSourceRegistration[prompt.RulesSource]
+	HarnessSkillSources       []HarnessSourceRegistration[tool.SkillSource]
+	HarnessAgentDefSources    []HarnessSourceRegistration[tool.AgentDefSource]
+	harnessInstructions       prompt.InstructionAssembler
+	harnessRules              prompt.RulesSource
+	harnessSkills             tool.SkillSource
+	harnessAgentDefs          tool.AgentDefSource
+	harnessContextClose       func()
+	harnessScope              *HarnessSourceScope
+	harnessResolver           *harnessCommandResolver
+	harnessCommandBinding     server.CommandSourceBinding
+	harnessMCPCommands        *harnessMCPCommands
+
 	// File-based permission config (issue #13). PermissionsConventional turns on
 	// auto-discovery of the conventional per-project config (<ws>/.mecatl/settings.yaml
 	// and, with ImportClaudePermissions, <ws>/.claude/settings.json) plus the
@@ -1248,7 +1265,8 @@ type Config struct {
 	// already-probed source rather than re-dialling/re-probing per session.
 	// nil when CommandSourceURL is unset. Unexported: an internal composition
 	// detail, not an operator knob.
-	commandSource prompt.CommandSource
+	commandSource    prompt.CommandSource
+	commandWorkspace tool.Workspace
 	// skillCommandInputs is the build-once skill→command bridge inputs
 	// (the resolved seam's always-in-context SkillMeta inventory + the
 	// logical SkillSource the Skill tool loads through), stashed by buildEngine after
@@ -1512,12 +1530,6 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 			closeProfiles()
 		}
 	}()
-	// Remote store drivers (Phase B): a local dir and a driver URL for the same
-	// store are mutually exclusive — fatal here, before anything is constructed
-	// (the validateSkillDraftConfig precedent).
-	if err := validateDriverConfig(cfg); err != nil {
-		return nil, err
-	}
 	if (cfg.RedisFilesystem || cfg.RedisReadLedger) && cfg.RedisURL == "" {
 		return nil, errors.New("redis filesystem/read-ledger requires RedisURL")
 	}
@@ -1614,6 +1626,30 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	// SAME instance — one discovery pass, one cache, no per-consumer drift.
 	cfg.permResolver = buildPermResolver(cfg)
 	cfg.childPermResolver = buildChildPermResolver(cfg)
+	registerHarnessCompatibility(&cfg)
+	if section, err := validateHarnessPolicy(cfg); err != nil {
+		return nil, err
+	} else if section != nil {
+		if cfg.harnessResolver == nil {
+			cfg.harnessResolver = &harnessCommandResolver{}
+		}
+		prepareHarnessProcessBindings(&cfg)
+	}
+	if err := validateDriverConfig(cfg); err != nil {
+		return nil, err
+	}
+	harnessContextTransferred := false
+	defer func() {
+		if !harnessContextTransferred && cfg.harnessContextClose != nil {
+			cfg.harnessContextClose()
+		}
+	}()
+	if err := resolveProcessHarnessInstructions(ctx, &cfg); err != nil {
+		return nil, err
+	}
+	if err := resolveProcessHarnessSnapshots(ctx, &cfg); err != nil {
+		return nil, err
+	}
 	var commandRunnerErr error
 	cfg, commandRunnerErr = foldOperatorCommandRunnerEnvironment(cfg)
 	if commandRunnerErr != nil {
@@ -1962,7 +1998,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	// (the driverConns precedent). Runtime faults stay fail-soft inside the
 	// client. The once-guarded conn close folds into closeAll below.
 	commandConnClose := func() {}
-	if cfg.CommandSourceURL != "" {
+	if cfg.CommandSourceURL != "" && cfg.harnessResolver == nil {
 		conn, connClose, derr := cfg.drivers().dial(cfg, cfg.CommandSourceURL)
 		if derr != nil {
 			return nil, fmt.Errorf("dial command-source driver %q: %w", cfg.CommandSourceURL, derr)
@@ -2182,7 +2218,24 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	// The command lister backs ListCommands (the TUI palette). It reuses the SAME
 	// expander build the engine consumes, so the palette offers exactly the
 	// commands a "/<cmd>" prompt would expand. nil when commands are disabled.
-	commandLister := buildCommandLister(cfg, mcpProvider)
+	if cfg.harnessMCPCommands != nil {
+		cfg.harnessMCPCommands.provider = mcpProvider
+	}
+	commandLister, err := buildConfiguredCommandResolver(ctx, cfg, mcpProvider)
+	if err != nil {
+		return nil, err
+	}
+	if _, ownsHarnessContext := commandLister.(*harnessCommandResolver); ownsHarnessContext {
+		cfg.harnessContextClose = nil
+	}
+	commandResolverTransferred := false
+	defer func() {
+		if !commandResolverTransferred {
+			if closer, ok := commandLister.(interface{ Close() }); ok {
+				closer.Close()
+			}
+		}
+	}()
 	cfg.storageMaintenance = &storageMaintenanceState{}
 	dreamReviewer, dreamCapabilities := buildDreamReview(cfg, assets, provider != nil)
 	workspaceFactory := osfsWorkspaceFactory(cfg.diag())
@@ -2648,6 +2701,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		// in buildEngine so it shares the main engine's exact collaborators.
 		SessionEngine:          sessFactory,
 		SessionEngineWithTools: assets.sessionFactoryWithTools,
+		SessionContextEngine:   assets.sessionContextFactory,
 		DebugSessionEngine:     debugSessionEngineFactory(cfg, reg, provider, store, eventLog, policy, assets.globalMgr, assets.mcpRuntimes),
 		DebugMCP:               debugMCPAvailable(assets),
 		// ModeNeedsEngine (ADR 0030 Layer 3): tells the Service whether a session's
@@ -2677,6 +2731,9 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 			learned.Forget(id)
 			if cfg.planApprovals != nil {
 				cfg.planApprovals.ClearPlanApprovals(id)
+			}
+			if commandLister != nil {
+				commandLister.Retire(id)
 			}
 		},
 		// Durable event log (cloud-native Phase 3a): the relay Appends every
@@ -2822,6 +2879,12 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		schedClose()
 		refreshClose()
 		svc.Close()
+		if closer, ok := commandLister.(interface{ Close() }); ok {
+			closer.Close()
+		}
+		if cfg.harnessContextClose != nil && cfg.harnessResolver == nil {
+			cfg.harnessContextClose()
+		}
 		if assets.forkReaper != nil {
 			assets.forkReaper.Close()
 		}
@@ -2836,6 +2899,8 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	})
 	profilesTransferred = true
 	managedTempTransferred = true
+	harnessContextTransferred = true
+	commandResolverTransferred = true
 	return &Built{Service: svc, MCPBroker: brokerRuntime, MCPBrokerHandlers: brokerHandlers, MCPBrokerCallbackPath: brokerCallbackPath, Close: closeAll}, nil
 }
 
@@ -2848,6 +2913,9 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 // returned close is the driver branch's once-guarded conn close (nil for the
 // FS branch); Build folds it into closeAll.
 func resolveAgentSeam(ctx context.Context, cfg Config) (*agents.Registry, func(), error) {
+	if cfg.harnessAgentDefs != nil {
+		return resolveAgentRegistry(ctx, cfg), nil, nil
+	}
 	if cfg.AgentSourceURL == "" {
 		return resolveAgentRegistry(ctx, cfg), nil, nil
 	}
@@ -4070,6 +4138,8 @@ func escapePolicyForConfig(cfg Config, reg *providerRegistry, provider port.LLMP
 // resolveAgentSeam (FS or driver) — threaded in, never re-resolved here, so
 // every consumer (catalog, per-session factory, snapshot, team wiring) shares
 // the same registry.
+//
+//nolint:gocyclo // Provider-first principal binding adds one fail-fast branch to the established assembly.
 func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provider port.LLMProvider, store, engineStore port.SessionStore, agentReg *agents.Registry) (*agent.Engine, *mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, server.SessionEngineFactory, *permstore.Memory, port.PermissionPolicy, catalogAssets, *server.ScheduleManagerImpl, func(), error) {
 	// SkillDraft trust boundary: when enabled, the quarantine dir must live OUTSIDE
 	// the workspace root (so the model's workspace-confined Write/Edit cannot reach
@@ -4158,6 +4228,15 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 		return scheduleMgr
 	}
 
+	// Default children are constructed while buildCatalog runs, before the main
+	// instruction assembler below. Bind their root instructions to the admitted
+	// startup project source now; explicit harness policy already supplied its
+	// own assembler and remains untouched.
+	if cfg.harnessInstructions == nil && cfg.Workspace != "" && projectIngestionAdmitted(cfg) {
+		instructionSource, _ := osfs.NewWorkspace(cfg.Workspace)
+		cfg.harnessInstructions = prompt.RootAssembler{Source: instructionSource}
+	}
+
 	// agentReg (threaded from Build's single resolveAgentSeam) is shared with
 	// BOTH the build-time catalog's Subagent/Team tools and the per-session
 	// engine factory (Half B builds a per-session Subagent/Team tool over the
@@ -4236,7 +4315,16 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 	// the tier-0 project MemoryIndexAssembler. Operator facts no longer ride a
 	// turn-0 user fragment; the same user store is loaded per request into the
 	// volatile system-prompt suffix below.
-	instructions := buildInstructionAssembler(rulesSrc, soulSrc, memStore, userModelStore, !projectIngestionAdmitted(cfg))
+	instructions := cfg.harnessInstructions
+	if instructions == nil {
+		var instructionSource tool.Workspace
+		if cfg.Workspace != "" {
+			instructionSource, _ = osfs.NewWorkspace(cfg.Workspace)
+		}
+		instructions = buildInstructionAssembler(instructionSource, rulesSrc, soulSrc, memStore, userModelStore, !projectIngestionAdmitted(cfg))
+	} else {
+		instructions = prompt.NewMultiAssembler(instructions, prompt.RulesAssembler{Src: rulesSrc}, prompt.SoulAssembler{Src: soulSrc}, prompt.MemoryIndexAssembler{Src: memStore})
+	}
 
 	// Contextual review runs at the engine's exact action/result choke points;
 	// preserve the ordinary generic hook chain without a legacy reviewer wrapper.
@@ -4326,6 +4414,60 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 	// the UNWRAPPED hooks: the Phase-2b reviewer fires once per MAIN-engine Stop,
 	// not per per-session stop (one of the two sanctioned per-session deltas).
 	assets.sessionFactoryWithTools = sessionEngineFactoryWithTools(cfg, reg, provider, engineStore, sharedPolicy, hooks, mcpProvider, instructions, assets, guardrailWaiver)
+	if cfg.harnessResolver != nil {
+		assets.sessionContextFactory = func(ctx context.Context, id session.SessionID, owner *session.Principal, acquire server.ExecutionWorkspaceAcquirer, selector server.ProviderSelector, specs []mcp.ServerConfig, profile server.SessionProfile, workspace string, mode session.PermissionMode, extra []tool.Tool) (server.SessionEngineResult, error) {
+			// Reject an invalid selector before principal-scoped source binding creates
+			// unpublished state that cannot be adopted by a session.
+			if selector.ProviderID != "" {
+				if _, err := resolveProviderSelection(reg, selector.ProviderID); err != nil {
+					return server.SessionEngineResult{}, err
+				}
+			}
+			binding, release, err := cfg.harnessResolver.BorrowWithExecutionWorkspace(ctx, id, owner, string(profile), acquire)
+			if err != nil {
+				return server.SessionEngineResult{}, err
+			}
+			resolved := binding.(*resolvedCommandBinding)
+			bound := resolved.context
+			sessionCfg := cfg
+			sessionCfg.harnessInstructions = generationInstructions{harnessGeneration: resolved.generation, source: bound.harnessInstructions}
+			sessionCfg.harnessRules = bound.harnessRules
+			sessionCfg.harnessSkills = generationSkills{harnessGeneration: resolved.generation, source: bound.harnessSkills}
+			sessionCfg.harnessAgentDefs = bound.harnessAgentDefs
+			sessionCfg.harnessCommandBinding = generationCommands{harnessGeneration: resolved.generation, source: binding}
+			sessionAssets := assets
+			sessionAssets.agentReg = resolveAgentRegistry(ctx, sessionCfg)
+			seam, err := resolveSkillSeam(ctx, sessionCfg, sessionAssets.agentReg)
+			if err != nil {
+				release()
+				return server.SessionEngineResult{}, err
+			}
+			sessionAssets.skills, sessionAssets.skillSource, sessionAssets.skillIndex = seam.metas, seam.source, seam.index
+			// The process catalog is rooted in the caller-neutral startup seam. A
+			// principal binding needs its own catalog so the actual Skill tool, its
+			// logical assets, slash-command view, and learned overlays share the same
+			// owner-specific external source without mutating global ownership.
+			if sessionAssets.liveSkills != nil {
+				sessionAssets.liveSkills = coreskillfs.NewAtomicCatalog(seam.metas, seam.source, nil)
+			}
+			sessionCfg.skillCommandInputs = skillCommandInputs{metas: seam.metas, source: seam.source}
+			factory := sessionEngineFactoryWithTools(sessionCfg, reg, provider, engineStore, sharedPolicy, hooks, mcpProvider, replaceHarnessInstructions(instructions, sessionCfg), sessionAssets, guardrailWaiver)
+			result, err := factory(ctx, selector, specs, profile, workspace, mode, extra)
+			if err != nil {
+				release()
+				return result, err
+			}
+			closeEngine := result.Close
+			result.Close = sync.OnceValue(func() error {
+				defer release()
+				if closeEngine != nil {
+					return closeEngine()
+				}
+				return nil
+			})
+			return result, nil
+		}
+	}
 	sessFactory := sessionEngineFactory(cfg, reg, provider, engineStore, sharedPolicy, hooks, mcpProvider, instructions, assets, guardrailWaiver)
 	// The build-once assets travel back to Build whole so every catalog assembly
 	// and service projection share the same resolved collaborators.
@@ -4344,7 +4486,7 @@ func attachOperatorProfile(deps *agent.Deps, store tool.MemoryStore) {
 // composition tests/source compatibility, but operator facts now load per request
 // through Deps.OperatorProfileSource into the volatile system suffix; they are
 // never emitted as a user-message fragment.
-func buildInstructionAssembler(rulesSrc prompt.RulesSource, soulSrc prompt.SoulSource, memStore, userModelStore tool.MemoryStore, noRoot bool) prompt.InstructionAssembler {
+func buildInstructionAssembler(source tool.Workspace, rulesSrc prompt.RulesSource, soulSrc prompt.SoulSource, memStore, userModelStore tool.MemoryStore, noRoot bool) prompt.InstructionAssembler {
 	_ = userModelStore
 	if rulesSrc == nil && soulSrc == nil && memStore == nil {
 		if noRoot {
@@ -4353,14 +4495,14 @@ func buildInstructionAssembler(rulesSrc prompt.RulesSource, soulSrc prompt.SoulS
 			// zero-child MultiAssembler assembles to (nil, nil) — an honest no-op.
 			return prompt.NewMultiAssembler()
 		}
-		return prompt.RootAssembler{}
+		return prompt.RootAssembler{Source: source}
 	}
 	var assemblers []prompt.InstructionAssembler
 	if !noRoot {
 		// RootAssembler (AGENTS.md/CLAUDE.md) is project-tier ingestion: omitted when
 		// project ingestion is not admitted (issue #359 redesign — the ingestion gate
 		// is projectIngestionAdmitted, trust AND the ingestion grant).
-		assemblers = append(assemblers, prompt.RootAssembler{})
+		assemblers = append(assemblers, prompt.RootAssembler{Source: source})
 	}
 	if rulesSrc != nil {
 		assemblers = append(assemblers, prompt.RulesAssembler{Src: rulesSrc})
@@ -4423,6 +4565,9 @@ func buildSoulSourceWith(cfg Config, io baselineIO) prompt.SoulSource {
 // check holds — the typed-nil gotcha) and a narration; it NEVER aborts the build.
 // Diagnostics ride cfg.diag() (the injected port.Diagnostics), build-once here.
 func resolveRulesSeam(ctx context.Context, cfg Config) prompt.RulesSource {
+	if cfg.harnessRules != nil {
+		return cfg.harnessRules
+	}
 	// Project-tier rules are withheld when the project tier is not admitted (the
 	// same gate as agents/skills): untrusted, or the ingestion grant withheld. The
 	// user-tier lanes stay active regardless.
@@ -4720,6 +4865,9 @@ func engineDepsForProvider(
 // workspace's project-tier skills never enter the seam, so they never become
 // invocable as /<skill-name>.
 func buildCommandExpander(cfg Config, mcpProvider mcp.Provider) prompt.CommandExpander {
+	if cfg.harnessCommandBinding != nil {
+		return cfg.harnessCommandBinding
+	}
 	dirExp := buildDirCommandExpander(cfg)
 	var skillExp prompt.CommandExpander
 	if len(cfg.skillCommandInputs.metas) > 0 && cfg.skillCommandInputs.source != nil {
@@ -4747,45 +4895,19 @@ func buildCommandExpander(cfg Config, mcpProvider mcp.Provider) prompt.CommandEx
 	}
 }
 
-// buildCommandLister builds the server.CommandLister backing the ListCommands
-// RPC (the TUI palette). It reuses buildCommandExpander — the SAME expander the
-// engine consumes on the run path — so the palette enumerates exactly the
-// commands a "/<cmd>" prompt would expand. It returns nil (RPC yields an empty
-// list) when the expander cannot enumerate, i.e. it is the NoopExpander (commands
-// disabled) or does not implement prompt.CommandLister. Service supplies the exact
-// workspace returned by the authorized placement reattachment, so local, virtual,
-// and remote placements all discover through their own adapter.
-func buildCommandLister(cfg Config, mcpProvider mcp.Provider) server.CommandLister {
+// buildCommandLister binds the compatibility command chain to its configured
+// sources. Listing and expansion use the same precedence, independently of the
+// session's execution placement. A disabled chain needs no resolver.
+func buildCommandLister(cfg Config, mcpProvider mcp.Provider) server.CommandSourceResolver {
 	exp := buildCommandExpander(cfg, mcpProvider)
-	lister, ok := exp.(prompt.CommandLister)
+	binding, ok := exp.(server.CommandSourceBinding)
 	if !ok {
 		return nil
 	}
 	if _, isNoop := exp.(prompt.NoopExpander); isNoop {
-		// The NoopExpander lists nothing; skip the RPC wiring entirely so the
-		// palette stays empty without a per-request workspace open.
 		return nil
 	}
-	return commandListerFunc(func(ctx context.Context, ws tool.Workspace) ([]server.Command, error) {
-		cmds, err := lister.List(ctx, ws)
-		if err != nil {
-			return nil, err
-		}
-		out := make([]server.Command, 0, len(cmds))
-		for _, c := range cmds {
-			out = append(out, server.Command{Name: c.Name, Description: c.Description})
-		}
-		return out, nil
-	})
-}
-
-// commandListerFunc adapts a function to the server.CommandLister interface, the
-// same lightweight-adapter idiom mcpSourceProber uses for its prober closure.
-type commandListerFunc func(ctx context.Context, ws tool.Workspace) ([]server.Command, error)
-
-// List implements server.CommandLister.
-func (f commandListerFunc) List(ctx context.Context, ws tool.Workspace) ([]server.Command, error) {
-	return f(ctx, ws)
+	return staticCommandResolver{binding: binding}
 }
 
 // buildDirCommandExpander returns the file-backed slash-command expander, or nil
@@ -4799,24 +4921,25 @@ func buildDirCommandExpander(cfg Config) prompt.CommandExpander {
 	if cfg.CommandsDir == "" && !cfg.EnableCommands {
 		return nil
 	}
-	if cfg.CommandsDir != "" {
-		// An explicit --commands-dir is OPERATOR-supplied (not repo-injected), so it is
-		// trusted regardless of workspace trust — no project-tier gate applies.
-		return prompt.NewDirCommandExpander(cfg.CommandsDir)
-	}
-	// EnableCommands with no explicit dir: the package defaults are the PROJECT-tier
-	// dirs (workspace-relative .mecatl/commands, .claude/commands). They are repo-
-	// injected steering, so they are withheld when there IS a workspace to distrust
-	// AND the project tier is not admitted (Phase 2a): untrusted, or the ingestion
-	// grant withheld (projectIngestionAdmitted). With no workspace there is no
-	// project to gate (the expander resolves per-session against each session's
-	// root). An untrusted repo's slash commands cannot run before the operator
-	// trusts it; the agent still works in "ask the human" mode (raw text passes
-	// through the NoopExpander).
-	if cfg.Workspace != "" && !projectIngestionAdmitted(cfg) {
+	if cfg.CommandsDir == "" && cfg.Workspace != "" && !projectIngestionAdmitted(cfg) {
 		return nil
 	}
-	return prompt.NewDirCommandExpander()
+	source := cfg.commandWorkspace
+	if source == nil {
+		if cfg.Workspace == "" {
+			return nil
+		}
+		var err error
+		source, err = osfs.NewWorkspace(cfg.Workspace)
+		if err != nil {
+			cfg.diag().Log(context.Background(), port.LevelWarn, "could not bind slash-command source", "error", err)
+			return nil
+		}
+	}
+	if cfg.CommandsDir != "" {
+		return prompt.NewDirCommandExpander(source, cfg.CommandsDir)
+	}
+	return prompt.NewDirCommandExpander(source)
 }
 
 // slashCommandDecision mirrors buildDirCommandExpander's branch logic to produce
@@ -6028,6 +6151,13 @@ type skillCommandInputs struct {
 // verbatim from the pre-seam resolveSkills). agentReg feeds the driver
 // branch's LAZY preload index (only def-referenced skill bodies transfer).
 func resolveSkillSeam(ctx context.Context, cfg Config, agentReg *agents.Registry) (skillSeam, error) {
+	if cfg.harnessSkills != nil {
+		metas, err := cfg.harnessSkills.ListSkills(ctx)
+		if err != nil {
+			return skillSeam{}, err
+		}
+		return skillSeam{metas: metas, source: cfg.harnessSkills, index: driverSkillIndex(ctx, cfg, cfg.harnessSkills, metas, agentReg)}, nil
+	}
 	if cfg.SkillSourceURL != "" {
 		return resolveDriverSkillSeam(ctx, cfg, agentReg)
 	}
@@ -6656,9 +6786,8 @@ func childTelemetryFor(cfg Config, role string) (port.EventSink, port.ToolCallRe
 }
 
 func childOperatorProfileSource(cfg Config, role string) prompt.OperatorProfileSource {
-	switch {
-	case role == "guardrail-checker", role == "ask-reviewer", role == "model-router",
-		role == "usermodel-review", strings.Contains(role, "judge"):
+	switch role {
+	case "guardrail-checker", "ask-reviewer", "model-router", "usermodel-review", "parallel-judge":
 		return nil
 	default:
 		return cfg.operatorProfileSource
@@ -6787,6 +6916,17 @@ func childEngineDepsForProvider(cfg Config, role string, provider port.LLMProvid
 	)
 	deps.Catalog = cat
 	deps.PromptConfig = applyContextualGuardrailWorkerPosture(pc, guardrailsConfigured(cfg) && len(cat.Tools()) > 0)
+	if cfg.harnessInstructions != nil {
+		switch role {
+		case "guardrail-checker", "ask-reviewer", "model-router", "usermodel-review", "parallel-judge":
+		default:
+			instructions := cfg.harnessInstructions
+			if generation, ok := instructions.(generationInstructions); ok {
+				instructions = childGenerationInstructions{generationInstructions: generation}
+			}
+			deps.Instructions = prompt.NewMultiAssembler(instructions, prompt.RulesAssembler{Src: cfg.harnessRules})
+		}
+	}
 	deps.OperatorProfileSource = childOperatorProfileSource(cfg, role)
 	// Child engines do NOT expand slash commands (the old newChildEngineWithHooks
 	// path left CommandExpander nil — a sub-agent receives literal instructions, not
@@ -7989,9 +8129,15 @@ func applyMemberRoute(cfg Config, provReg *providerRegistry, parentProviderID, r
 }
 
 // base-sharing read-only-member backstop stays sound. `a` is read only when noFS.
+//
+//nolint:gocyclo // Member catalog shaping and its generation lease share one teardown transaction.
 func buildMemberEngine(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, teamHooks port.HookRunner, reg *agents.Registry, skillIdx skillIndex, runner, mutatingRunner tool.CommandRunner, roIsolationAvailable bool, mainMgr *mcp.Manager, a catalogAssets, noFS bool) server.MemberEngineFactory {
 	cfg.operatorProfileSource, _ = a.userModelStore.(prompt.OperatorProfileSource)
 	return func(t *team.Team, spec agent.MemberSpec, routedModel string) agent.MemberBuild {
+		generationClose, err := retainHarnessGeneration(cfg)
+		if err != nil {
+			return agent.MemberBuild{}
+		}
 		if noFS {
 			model, windowFn := resolveDefaultChildModel(cfg, provReg, parentProviderID, parentModel)
 			// OPT-IN model router (ADR 0034): an undefined member the supervisor classified
@@ -8017,7 +8163,7 @@ func buildMemberEngine(cfg Config, provReg *providerRegistry, provider port.LLMP
 			mustValidateClassifiedCatalog(classified, "no-FS team member tool catalog")
 			pc := applyNoFSPosture(promptConfig(modelCfgFor(cfg, model), ""), noFSMemberNote)
 			eng := newChildEngineForProvider(cfg, "member:"+spec.Name, provider, model, windowFn, cat, pc, nil)
-			return agent.MemberBuild{Engine: eng, MCPToolNames: exempt}
+			return agent.MemberBuild{Engine: eng, Close: generationClose, MCPToolNames: exempt}
 		}
 		classified := newClassifiedCatalog()
 		cat := classified.catalog
@@ -8189,7 +8335,17 @@ func buildMemberEngine(cfg Config, provReg *providerRegistry, provider port.LLMP
 		// member now resolves the parent model's REAL window via childWindowFor too
 		// (issue #64), flooring to 128k only for a genuinely uncatalogued model.
 		eng := newChildEngineForProvider(cfg, "member:"+spec.Name, childProvider, model, windowFn, cat, pc, memberHooks)
-		return agent.MemberBuild{Engine: eng, Mode: mode, Limits: memberLimits, Close: mcpClose, MCPToolNames: mcpNames, IsolateReadOnly: isolateReadOnly}
+		memberClose := sync.OnceValue(func() error {
+			var mcpErr, generationErr error
+			if mcpClose != nil {
+				mcpErr = mcpClose()
+			}
+			if generationClose != nil {
+				generationErr = generationClose()
+			}
+			return errors.Join(mcpErr, generationErr)
+		})
+		return agent.MemberBuild{Engine: eng, Mode: mode, Limits: memberLimits, Close: memberClose, MCPToolNames: mcpNames, IsolateReadOnly: isolateReadOnly}
 	}
 }
 
