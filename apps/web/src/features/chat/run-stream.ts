@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { RunStreamEvent, RunTruncated } from "@mecatl-studio/contracts";
-import { finalRunFailure, type RunDeliveryState, type RunFailure } from "./chat-state";
+import type { RunDeliveryState, RunFailure } from "./chat-state";
 
 /**
  * How many times one open of a chat may reattach the activity stream after a
@@ -19,6 +19,11 @@ export const MISSING_HISTORY_NOTICE =
 
 export const REPLAY_LIMIT_NOTICE =
   "This chat's history is too long to replay in full, so this view stopped following the run. The transcript below shows the saved history; reopen the chat to follow the run again.";
+
+/** Match the daemon's active states when deciding whether a chat needs a live stream. */
+export function isActiveSessionState(state: string | undefined): boolean {
+  return state === "running" || state === "awaiting" || state === "authorizing";
+}
 
 /** What the workspace does when a stream ends with `run.truncated`. */
 export type TruncationDecision =
@@ -50,8 +55,10 @@ export function decideTruncation(
 
 /** How a consumed run stream ended, as far as the workspace needs to react. */
 export type RunStreamEnd =
-  /** The stream reached its natural end; `failure` is set when the run failed or produced no result. */
+  /** A result or run.error supplied an authoritative run outcome. */
   | { kind: "settled"; failure?: RunFailure }
+  /** The stream closed without an outcome; controls and queued prompts remain available. */
+  | { kind: "uncertain" }
   /** The view stopped following the run because of a truncation; the run's outcome is unknown. */
   | { kind: "unfollowed" };
 
@@ -62,10 +69,29 @@ export type RunStreamEnd =
 export function runStreamEnd(
   state: Pick<RunDeliveryState, "failure" | "sawResult">,
   unfollowed: boolean,
-  fallbackPrompt: string,
 ): RunStreamEnd {
   if (unfollowed) return { kind: "unfollowed" };
-  return { failure: finalRunFailure(state, fallbackPrompt), kind: "settled" };
+  if (!state.sawResult && !state.failure) return { kind: "uncertain" };
+  return { failure: state.failure, kind: "settled" };
+}
+
+/**
+ * Suppresses overlapping durable event frames across replay reattachments.
+ * Event sequence numbers are decimal strings from the BFF; run boundaries are
+ * still passed through because the reducer handles repeated starts itself.
+ */
+export function createActivityDeduplicator(): (delivery: RunStreamEvent) => boolean {
+  const latestByRun = new Map<string, bigint>();
+  return (delivery) => {
+    if (delivery.type !== "run.event") return true;
+    const { runId, seq } = delivery.event;
+    if (!/^\d+$/u.test(seq)) return true;
+    const current = BigInt(seq);
+    const previous = latestByRun.get(runId);
+    if (previous !== undefined && current <= previous) return false;
+    latestByRun.set(runId, current);
+    return true;
+  };
 }
 
 /** A stream's claim on the chat view: the session its run belongs to. */
@@ -125,6 +151,18 @@ export function controlTarget(
   viewedSessionId: string | undefined,
 ): RunTarget | undefined {
   return target && target.sessionId === viewedSessionId ? target : undefined;
+}
+
+/** A stale control is the one BFF error for which steering may become a queue. */
+export function isStaleRunControl(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "status" in error &&
+    error.status === 409 &&
+    "code" in error &&
+    error.code === "stale_run_control"
+  );
 }
 
 /** True when a queue for `queueSessionId` may start its next run in the current view. */
