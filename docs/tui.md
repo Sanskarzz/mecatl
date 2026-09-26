@@ -818,8 +818,14 @@ read-only: they never mutate the client's local settings file and tell the opera
 the mode or sensitivity on the remote server host and restart that server.
 `/agents` and `/team` are distinct: `/agents` is the **definition inventory** (a
 palette-only `ListAgents` snapshot, gated on `caps.agents`), while `/team` opens
-the **live overlay** of a team that has actually run (gated on `caps.teams`).
-These never reach the model: a bare built-in line is intercepted locally even
+the **live overlay** of a team that has actually run (gated on `caps.teams`). The
+read-only `/agents` card is centered in the available conversation region, adapts
+to the terminal's available size, and is capped at 128 columns. Arrow bindings move one
+physical line, configured page bindings move its current visible height, and the mouse
+wheel moves one physical line while the card is open. The card owns those inputs, so
+the hidden conversation does not move. When the terminal is too short for the card,
+it shows only a compact close action and consumes wheel input rather than showing a
+partial inventory. These never reach the model: a bare built-in line is intercepted locally even
 while a run is streaming, although commands such as `/compact` then enforce their
 own idle-only boundary. `/diagnostics` is the exception: its bare form submits the
 generated sanitized report through the ordinary model-facing prompt path. It takes
