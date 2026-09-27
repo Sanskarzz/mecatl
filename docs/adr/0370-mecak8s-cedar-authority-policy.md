@@ -1,4 +1,4 @@
-# ADR 0364 — mecak8s projects one static Cedar authority policy
+# ADR 0370 — mecak8s projects one static Cedar authority policy
 
 - Status: Proposed
 - Date: 2026-09-25

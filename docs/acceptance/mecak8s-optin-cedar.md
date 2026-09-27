@@ -2,7 +2,7 @@
 
 **Contract:** human-reviewed/v2
 **Work classification:** Architectural — adds a public mecak8s CLI and Helm security interface for caller-scoped execution authority and fixes the operator-owned policy-file trust boundary.
-**Decision record:** [ADR 0364](../adr/0364-mecak8s-cedar-authority-policy.md)
+**Decision record:** [ADR 0370](../adr/0370-mecak8s-cedar-authority-policy.md)
 **Phase:** Kubernetes authority-evaluator parity
 **Status:** proposed, 2026-09-25. Derived from [stacklok/mecatl#1368](https://github.com/stacklok/mecatl/issues/1368) and the existing Cedar composition contract.
 **Delivery:** Split. The public Helm values, policy-source custody, OIDC prerequisite, and fail-closed security behavior require interface review before implementation.
@@ -24,7 +24,7 @@ and the [authority execution boundary](../architecture/agent-loop.md#authority-e
 
 ## Human decisions
 
-None — issue #1368 fixes evaluator parity, static operator policy, opt-in defaults, fail-closed startup, exact OIDC issuer/subject behavior, offline coverage, and deployment documentation; ADR 0364 fixes the remaining runtime OIDC gate, sanitized diagnostics, Helm source, mode, mount, rolling-convergence, and validation details without leaving implementation choices open.
+None — issue #1368 fixes evaluator parity, static operator policy, opt-in defaults, fail-closed startup, exact OIDC issuer/subject behavior, offline coverage, and deployment documentation; ADR 0370 fixes the remaining runtime OIDC gate, sanitized diagnostics, Helm source, mode, mount, rolling-convergence, and validation details without leaving implementation choices open.
 
 ## Interface contract
 
@@ -48,15 +48,15 @@ loads Cedar before listeners start, as required by
 
 **Acceptance:**
 - AC1.1: With no authority flags, `mecak8s` parses and projects `AuthorityEvaluator="local"` and an empty `CedarAuthorityPolicy`.
-  - verify: `TestADR_0364_Mecak8sCedar_Scenario1_DefaultIsLocal`
+  - verify: `TestADR_0370_Mecak8sCedar_Scenario1_DefaultIsLocal`
 - AC1.2: Explicit evaluator and policy flags preserve their exact values through `parseFlags` and `appConfig` into the two existing `app.Config` fields.
-  - verify: `TestADR_0364_Mecak8sCedar_Scenario1_FlagsThreadToComposition`
+  - verify: `TestADR_0370_Mecak8sCedar_Scenario1_FlagsThreadToComposition`
 - AC1.3: Selecting Cedar with an absent, unreadable, empty, definition-group-granting, or syntactically invalid policy fails the ordinary mecak8s build before serving and never substitutes another evaluator.
-  - verify: `TestADR_0364_Mecak8sCedar_Scenario1_InvalidPolicyFailsStartup`
+  - verify: `TestADR_0370_Mecak8sCedar_Scenario1_InvalidPolicyFailsStartup`
 - AC1.4: After final argument parsing, every Cedar spelling accepted by the shared selector (including case and surrounding-whitespace variants) with OIDC disabled fails startup before `app.Build` or listener creation, including when a direct invocation omits `--oidc-issuer` and when a later repeated argument clears it; `local` and `noop` retain their existing authentication choices.
-  - verify: `TestADR_0364_Mecak8sCedar_Scenario1_CedarRequiresEffectiveOIDC`
+  - verify: `TestADR_0370_Mecak8sCedar_Scenario1_CedarRequiresEffectiveOIDC`
 - AC1.5: Cedar load and evaluation failures return a stable sanitized classification without reproducing canary literals from malformed policy, policy entities, owner issuer/subject, resource, or tool input in errors or diagnostics.
-  - verify: `TestADR_0364_Mecak8sCedar_Scenario1_DiagnosticsDoNotDiscloseInputs`
+  - verify: `TestADR_0370_Mecak8sCedar_Scenario1_DiagnosticsDoNotDiscloseInputs`
 
 ### Scenario 2 — Helm projects one operator-owned static policy
 
@@ -68,15 +68,15 @@ storage-free under [ADR 0048](../adr/0048-mecak8s.md).
 
 **Acceptance:**
 - AC2.1: The default chart render passes `--authority-evaluator=local`, and renders no Cedar policy argument, volume mount, volume, or policy-object content.
-  - verify: `TestADR_0364_Mecak8sCedar_Scenario2_HelmDefaultIsLocal`
+  - verify: `TestADR_0370_Mecak8sCedar_Scenario2_HelmDefaultIsLocal`
 - AC2.2: A Cedar ConfigMap source and a Cedar Secret source each render the exact evaluator/policy arguments and one non-optional, read-only, single-key projection to `/etc/mecatl-authority/authority.cedar`, using `defaultMode: 0444` and `0440` respectively; source names and keys are YAML-quoted so valid string-like values retain their type, and the chart creates neither source object nor renders policy bytes.
-  - verify: `TestADR_0364_Mecak8sCedar_Scenario2_HelmPolicyProjection`
+  - verify: `TestADR_0370_Mecak8sCedar_Scenario2_HelmPolicyProjection`
 - AC2.3: Both JSON Schema and template-helper validation (including `helm template --skip-schema-validation`) reject unknown evaluators, Cedar without OIDC, Cedar without exactly one source, invalid or overlong DNS-1123 source names, an empty/invalid/overlong Kubernetes data key, both source kinds together, and policy sources attached to `local` or `noop`.
-  - verify: `TestADR_0364_Mecak8sCedar_Scenario2_HelmValidation`
+  - verify: `TestADR_0370_Mecak8sCedar_Scenario2_HelmValidation`
 - AC2.4: `extraArgs` remains after the chart-owned evaluator argument, preserving its existing documented precedence and compatibility escape hatch.
-  - verify: `TestADR_0364_Mecak8sCedar_Scenario2_ExtraArgsPrecedence`
+  - verify: `TestADR_0370_Mecak8sCedar_Scenario2_ExtraArgsPrecedence`
 - AC2.5: Cedar retains the chart's ordinary `RollingUpdate` strategy. The rendered workload has no false content-checksum promise for the external object, while changing its configured source name changes the pod template; deployment documentation requires waiting for rollout completion and recommends versioned immutable source names.
-  - verify: `TestADR_0364_Mecak8sCedar_Scenario2_RolloutContract`
+  - verify: `TestADR_0370_Mecak8sCedar_Scenario2_RolloutContract`
 
 ### Scenario 3 — exact OIDC bot identity loses WebSearch only
 
@@ -88,9 +88,9 @@ continues to authorize the selected tool rather than trusting disclosure.
 
 **Acceptance:**
 - AC3.1: With Cedar selected and `WebSearch` present in both carried capability sets, requests entering through the real in-process mecak8s authentication interceptor and an offline fake `PrincipalValidator` create durable sessions for their verified principals. A policy forbidding `Tool::"WebSearch"` for one exact owner `(issuer, subject)` returns a Cedar authority denial for that bot before the search provider runs, while another authenticated subject under the same issuer reaches the offline fake search provider successfully.
-  - verify: `TestADR_0364_Mecak8sCedar_Scenario3_ExactOIDCBotWebSearchDenial`
+  - verify: `TestADR_0370_Mecak8sCedar_Scenario3_ExactOIDCBotWebSearchDenial`
 - AC3.2: The same subject under a different issuer and a different subject under the same issuer do not collide with the forbidden pair; an ownerless Cedar execution remains denied before the tool body.
-  - verify: `TestADR_0364_Mecak8sCedar_Scenario3_PrincipalPairIsExact`
+  - verify: `TestADR_0370_Mecak8sCedar_Scenario3_PrincipalPairIsExact`
 - AC3.3: The canonical mecak8s deployment guide documents ConfigMap and Secret projection and modes, the exact bot-denial example, OIDC ownership, local default, startup failure, tightening-only behavior, the possible mixed-policy window from independent restarts or rolling replacement, waiting for rollout completion, and the recommendation to use versioned immutable source names; the shared authority guide links to that deployment procedure without duplicating Helm values.
   - verify: `task docs`, `task site:build`
 
