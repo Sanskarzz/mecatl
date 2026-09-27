@@ -67,7 +67,7 @@ shipped default when none exists; the command receives no feedback and
 command output, arguments, paths, or raw failure text. The status-line guide describes
 the command-output and troubleshooting contract.
 
-See [Status line customization](https://github.com/stacklok/mecatl/blob/main/user-docs/mecatui/status-line.md)
+See [Status line customization](../user-docs/mecatui/status-line.md)
 for the complete settings schema, input reference, StatusML grammar, safety limits,
 and copyable template and executable examples.
 
@@ -109,7 +109,7 @@ bounds the result before OSC 0 construction.
 An explicit `--terminal-title=on` overrides settings disablement. Otherwise the
 settings `enabled` value applies. Terminals and multiplexers decide whether to
 present OSC 0, so the client cannot guarantee a tab or pane label. The complete
-settings schema and precedence are in [Status line customization](https://github.com/stacklok/mecatl/blob/main/user-docs/mecatui/status-line.md#customize-the-terminal-title).
+settings schema and precedence are in [Status line customization](../user-docs/mecatui/status-line.md#customize-the-terminal-title).
 
 ## Build
 
@@ -159,7 +159,7 @@ The token is not public API credit and the private backend is not a supported
 third-party contract. mecatui reads one immutable snapshot before hosting its
 embedded server: after replacing an expired/rejected token, quit and relaunch.
 There is no login or refresh. See the [exact schema and plaintext same-UID Shell
-boundary](https://mecatl.dev/docs/building/deployment/settings#configure-provider-credentials).
+boundary](../user-docs/building/deployment/settings.md#configure-provider-credentials).
 `mecatui connect` never reads the local file; configure the external `mecated`
 instead.
 
@@ -191,7 +191,7 @@ Run `mecatui --help`, `mecatui -h`, or `mecatui help` for the concise top-level 
 
 The transport is exactly what the invocation says — there is no implicit probe
 or fallback. For the local-versus-remote configuration ownership and intentional
-default differences, see the [settings guide](https://mecatl.dev/docs/building/deployment/settings):
+default differences, see the [settings guide](../user-docs/building/deployment/settings.md):
 bare mode owns an embedded server, while connect mode is client-only and the remote
 server is authoritative.
 
@@ -364,7 +364,7 @@ and `--tls-ca` also select verified TLS. `--tls=false` is the explicit plaintext
 downgrade, and a bearer is refused on that remote plaintext transport. Use
 `connect --tls-ca` when the server uses a private CA. The remote server owns
 placement: mecatui sends no local cwd, and `--workspace` is rejected in every connect
-form rather than being treated as a path inside an agent pod. See [Run mecated standalone](https://mecatl.dev/docs/building/deployment/mecated) for the attribution model and its non-tenancy limits.
+form rather than being treated as a path inside an agent pod. See [Run mecated standalone](../user-docs/building/deployment/mecated.md) for the attribution model and its non-tenancy limits.
 
 On later `connect`, a saved target supplies a managed dynamic bearer source: each RPC
 asks for a currently validated access token. Application token demand, rather than RPC
@@ -493,18 +493,25 @@ mecatui connect 127.0.0.1:8080 --resume-latest
 
 Adoption does not create a temporary session: mecatui loads and displays the stored
 transcript, placement label, mode, model, and capabilities, then targets the same opaque ID.
-`--mode` describes only a newly created session; an adopted chat keeps its stored values. Scheduled runs, child runs, unknown legacy rows, chats
-awaiting approval, active chats, and rows without a complete authoritative transcript
-are not eligible. Exact `--resume` reports why its row cannot be continued; `--resume-latest`
-skips ineligible or unreadable rows and tries the next one. A genuine inventory-list
-failure still surfaces rather than being masked as "start new".
+`--mode` describes only a newly created session; an adopted chat keeps its stored values.
+Scheduled runs, child runs, unknown legacy rows, active chats, and rows without a complete
+authoritative transcript are not eligible for ordinary continuation. Exact `--resume` can
+instead open the guarded recovery path for an owned main chat with one supported pending
+ordinary approval. `--resume-latest` always excludes chats awaiting approval, skips other
+ineligible or unreadable rows, and tries the next one. Exact `--resume` reports why a row
+cannot be continued or safely recovered. A genuine inventory-list failure still surfaces
+rather than being masked as "start new".
 
-The read-only startup lookup does not reopen, recover, abandon, or acquire a lease.
-Those checks remain atomic at the ordinary run-entry funnel when the first new prompt
-is sent. If that attachment fails, the stored transcript remains visible and no
-fallback session is created: press `r` to retry the preserved prompt or `esc` to go
-Back and edit it. Combining a resume selector with `--prompt` or `--prompt-file`
-adopts the transcript first and then submits the seed exactly once as the next turn.
+The ordinary continuation lookup does not reopen, recover, abandon, or acquire a
+lease. Those checks remain atomic at the ordinary run-entry funnel when the first
+new prompt is sent. Exact pending-approval recovery instead verifies a durable
+watch and waits for the owner's choice; see
+[Recover a pending approval](https://github.com/stacklok/mecatl/blob/main/user-docs/mecatui/sessions.md#recover-a-pending-approval).
+If ordinary attachment fails, the stored transcript remains visible and no
+fallback session is created: press `r` to retry the preserved prompt or `esc` to
+go Back and edit it. Combining a resume selector with `--prompt` or
+`--prompt-file` submits the seed exactly once after an ordinary continuation;
+during pending-approval recovery it remains an unsent draft.
 
 On an ordinary clean exit, after the terminal has left the alternate screen and cleanup
 has completed, mecatui writes exactly one handoff line to **stderr**:
@@ -527,7 +534,9 @@ decoded value to `--resume` later.
 `-p`/`--prompt` (or `--prompt-file` for a longer body) launches the session with
 a seed prompt auto-submitted as the FIRST turn — the equivalent of typing the
 prompt and pressing enter the moment the session is ready. The TUI then stays
-interactive for follow-ups; this is NOT a print-and-exit one-shot.
+interactive for follow-ups; this is NOT a print-and-exit one-shot. During
+pending-approval recovery, the seed remains an unsent composer draft instead;
+it is not automatically submitted after the approval or recovered run finishes.
 
 ```sh
 mecatui -p "Summarize the failing tests in this repo"
@@ -545,9 +554,9 @@ a short directive with a longer brief. The seed fires ONCE: a `/models` restart 
 |---|---|---|
 | `--workspace` | cwd | **embedded only:** trusted operator configuration for the hosted server's default root; never sent in CreateSession and rejected by every `connect` form |
 | `--mode` | `default` | permission posture for a new session: `default` \| `plan` \| `accept-edits`; an adopted chat keeps its stored mode |
-| `--resume` | – | continue the owned main chat with this exact opaque session ID; loads its authoritative transcript without creating a throwaway session; mutually exclusive with `--resume-latest` |
-| `--resume-latest` | off | continue the newest eligible owned main chat with an available authoritative transcript; excludes active, awaiting, scheduled, child, and unknown sessions; when none is eligible, start a new chat; mutually exclusive with `--resume` |
-| `-p` / `--prompt` | – | seed prompt auto-submitted once the first session is ready (the CLI task to launch with). The TUI stays interactive for follow-ups; this is NOT a one-shot. Both `--prompt` and `--prompt-file` may be given (literal first, joined by a blank line). Fires ONCE — a `/models` restart or `/clear` never re-submits it |
+| `--resume` | – | continue the owned stored main chat with this exact opaque session ID, or recover its supported pending ordinary approval; mutually exclusive with `--resume-latest` |
+| `--resume-latest` | off | continue the newest eligible owned main chat with an available authoritative transcript; excludes active, pending-approval, scheduled, child, and unknown sessions; when none is eligible, start a new chat; mutually exclusive with `--resume` |
+| `-p` / `--prompt` | – | seed prompt auto-submitted once the first session is ready; kept as an unsent draft during pending-approval recovery. The TUI stays interactive for follow-ups; this is NOT a one-shot. Both `--prompt` and `--prompt-file` may be given (literal first, joined by a blank line). Fires ONCE — a `/models` restart or `/clear` never re-submits it |
 | `--prompt-file` | – | path to a file whose contents are the seed prompt body. Read at startup (fail-fast on unreadable). Joined after `--prompt` when both are given. Same once-only semantics as `--prompt` |
 | `--theme` | `aztec` | theme name (also `MECATUI_THEME`); giving either pins the theme and disables the light/dark auto-detect below |
 | `--theme-dir` | – | extra directory of `*.json` themes to load |
@@ -569,7 +578,7 @@ a short directive with a longer brief. The seed fires ONCE: a `/models` restart 
 | `--anthropic-base-url` | – | native Anthropic API base URL override for the **embedded** server (compatible/proxy endpoints; key from `ANTHROPIC_API_KEY`) |
 | `--openai-base-url` | – | OpenAI base URL override for the **embedded** server |
 | `--openrouter-base-url` | – | OpenRouter base URL override for the **embedded** server (default `https://openrouter.ai/api/v1`) |
-| `--api-key-file` | – (auto) | **embedded** server: path to the YAML credentials file (`providers.<name>.api_key`, or the experimental `providers.openai-codex.oauth` snapshot); overrides `$XDG_CONFIG_HOME/mecatl/auth.yaml`. Environment wins for API-key providers; Codex has no env alias. See [the exact schema](https://mecatl.dev/docs/building/deployment/settings#configure-provider-credentials) |
+| `--api-key-file` | – (auto) | **embedded** server: path to the YAML credentials file (`providers.<name>.api_key`, or the experimental `providers.openai-codex.oauth` snapshot); overrides `$XDG_CONFIG_HOME/mecatl/auth.yaml`. Environment wins for API-key providers; Codex has no env alias. See [the exact schema](../user-docs/building/deployment/settings.md#configure-provider-credentials) |
 | `--mock` | off | **embedded** server: use the offline mock provider (no network) |
 | `--no-shell` | off | **embedded** server: disable the Shell tool (shell-less) |
 | `--memory-dir` | – (auto) | **embedded** server: per-project memory store dir; empty = a default under `$XDG_DATA_HOME/mecatui/memory` |
@@ -809,8 +818,14 @@ read-only: they never mutate the client's local settings file and tell the opera
 the mode or sensitivity on the remote server host and restart that server.
 `/agents` and `/team` are distinct: `/agents` is the **definition inventory** (a
 palette-only `ListAgents` snapshot, gated on `caps.agents`), while `/team` opens
-the **live overlay** of a team that has actually run (gated on `caps.teams`).
-These never reach the model: a bare built-in line is intercepted locally even
+the **live overlay** of a team that has actually run (gated on `caps.teams`). The
+read-only `/agents` card is centered in the available conversation region, adapts
+to the terminal's available size, and is capped at 128 columns. Arrow bindings move one
+physical line, configured page bindings move its current visible height, and the mouse
+wheel moves one physical line while the card is open. The card owns those inputs, so
+the hidden conversation does not move. When the terminal is too short for the card,
+it shows only a compact close action and consumes wheel input rather than showing a
+partial inventory. These never reach the model: a bare built-in line is intercepted locally even
 while a run is streaming, although commands such as `/compact` then enforce their
 own idle-only boundary. `/diagnostics` is the exception: its bare form submits the
 generated sanitized report through the ordinary model-facing prompt path. It takes
@@ -1711,7 +1726,9 @@ one **`Legacy session — inspect only`**. ADR 0291 removed writable legacy adop
 there is no preflight/adopt action and no way to supply a replacement workspace or
 placement authority.
 `tab` switches tabs; the
-search box filters the current tab. Search matches the title, full session ID,
+search box filters the current tab. The remappable `Up` and `Down` actions move
+one session at a time, while `ScrollU` and `ScrollD` move by a physical page.
+Search matches the title, full session ID,
 its terminal-safe short handle, model, bounded placement label, and the available
 relationship metadata (parent/call, schedule/origin, team/member). This keeps
 scheduled fires and delegation children discoverable without making their IDs
@@ -2307,7 +2324,7 @@ task test:golden     # go test ./cmd/mecatui/ui -update, then re-run
 
 ## See also
 
-- [User documentation](https://mecatl.dev/docs/) — the `mecated` deployment guide, settings, and client reference.
+- [User documentation](../user-docs/intro.md) — the `mecated` deployment guide, settings, and client reference.
 - [Architecture guide](architecture.md) — the event stream and gRPC `Converse` surface this client renders.
 - [UX discoverability design](adr/0025-ux-discoverability.md) — the rationale behind the capability-wiring approach this UI takes.
 - [Clipboard image paste design](adr/0026-clipboard-image-paste.md) — the non-obvious decisions behind `ctrl+v`.

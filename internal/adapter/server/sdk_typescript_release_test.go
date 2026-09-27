@@ -56,7 +56,7 @@ func TestSDKTypescriptRelease_Scenario1_RPCTransportCatalogParity(t *testing.T) 
 		t.Fatalf("stale generated mecatl.v1 service catalog/exclusion decision: %v", missing)
 	}
 
-	wantCounts := map[string]int{"HarnessService": 76, "ScheduleService": 10}
+	wantCounts := map[string]int{"HarnessService": 77, "ScheduleService": 10}
 	wantKeys := make(map[string]struct{}, 90)
 	for service := range targetServices {
 		methods := descriptorsByService[service]
@@ -235,6 +235,7 @@ func TestSDKTypescriptRelease_Scenario1_PublicServiceProjectionParity(t *testing
 		"LostOwnershipCandidates",
 		"MaintenanceMutationAvailable",
 		"ManualDreamCapabilities",
+		"ReconcileReferenceIntents",
 		"MaybeAutoApprovePlan",
 		"OwnershipEnforced",
 		"Persist",
@@ -242,6 +243,7 @@ func TestSDKTypescriptRelease_Scenario1_PublicServiceProjectionParity(t *testing
 		"ProviderStatuses",
 		"PublishSessionEvent",
 		"ReattachPlacement",
+		"ReattachPlacementForBinding",
 		"ReattachPlacementInScope",
 		"ReconcileLeaseLossTombstone",
 		"RecoverNotice",
@@ -259,6 +261,7 @@ func TestSDKTypescriptRelease_Scenario1_PublicServiceProjectionParity(t *testing
 		"SettleIfStale",
 		"StaleRunningCandidates",
 		"StartInteractiveRunContent",
+		"StartInteractiveRunContentWithPlanContinuation",
 		"StartRun",
 		"StartScheduledRunContent",
 		"Steer",

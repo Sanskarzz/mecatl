@@ -35,6 +35,7 @@ is listed, and its follow-on reading is noted. Read any that cover your area.
 | [Context & compaction](architecture/context-and-compaction.md) | How does the token budget + compaction cascade keep a long run inside the context window? | [agent loop](architecture/agent-loop.md) |
 | [Memory](architecture/memory.md) | How does cross-session recall (Remember/Recall/SearchMemory) work? What is the user model? | [agent loop](architecture/agent-loop.md) |
 | [Observability](architecture/observability.md) | What telemetry, persistence, and reliability seams exist? How do the event log, session lease, and remote drivers work? | [ports](architecture/ports.md) |
+| [Local microVM environments](architecture/microvm-environments.md) | How does the opt-in local runtime preserve environment affinity, isolate paths and credentials, verify artifacts, govern guest egress, recover lifecycle state, and report readiness? | [ports](architecture/ports.md) |
 | [Parallelism](architecture/parallelism.md) | How does fork-join parallelism (the Parallel tool) work? How are team-member workspaces isolated? What is worktree binding? | [subagents & teams](architecture/subagents-and-teams.md) |
 | [Extensibility](architecture/extensibility.md) | What MCP, skills, progressive disclosure, and engine-as-library seams exist? | [ports](architecture/ports.md) |
 | [Deployment & hardening](architecture/deployment-and-hardening.md) | How is the server hardened (auth, rate limiting, health, graceful shutdown)? How do workspace trust, the posture ladder, and permission/bash governance work? | [API surface](architecture/api-surface.md) |
@@ -52,10 +53,11 @@ is listed, and its follow-on reading is noted. Read any that cover your area.
 | Step | Page |
 | --- | --- |
 | 1 | [Project README](../README.md) — feature overview and quick start |
-| 2 | [Build your first agent](https://mecatl.dev/docs/building/getting-started/first-agent) |
-| 3 | [See Mecatl in 60 seconds](https://mecatl.dev/docs/building/getting-started/demo) |
-| 4 | [Run `mecated` standalone](https://mecatl.dev/docs/building/deployment/mecated) |
-| Then | Choose a task, feature, deployment, or reference from the [public documentation](https://mecatl.dev/docs/) |
+| 2 | [Build your first agent](../user-docs/building/getting-started/first-agent.md) |
+| 3 | [See Mecatl in 60 seconds](../user-docs/building/getting-started/demo.md) |
+| 4 | [Run `mecated` standalone](../user-docs/building/deployment/mecated.md) |
+| Optional | [Local microVM environments](../user-docs/building/deployment/microvm-environments.md) |
+| Then | Choose a task, feature, deployment, or reference from the [public documentation](../user-docs/intro.md) |
 
 ---
 
@@ -63,7 +65,7 @@ is listed, and its follow-on reading is noted. Read any that cover your area.
 
 | Step | Page |
 | --- | --- |
-| 1 | [Building on mecatl](https://github.com/stacklok/mecatl/blob/main/user-docs/building/index.md) |
+| 1 | [Building on mecatl](../user-docs/building/index.md) |
 | 2 | [`engine/session`](../engine/session) — the domain entry point |
-| 3 | [Extension points](https://github.com/stacklok/mecatl/blob/main/user-docs/building/extension-points/index.md) |
+| 3 | [Extension points](../user-docs/building/extension-points/index.md) |
 | 4 | [`engine/COMPATIBILITY.md`](../engine/COMPATIBILITY.md) — the stability contract |

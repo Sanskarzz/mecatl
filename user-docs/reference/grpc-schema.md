@@ -47,6 +47,7 @@ the bidi Converse stream that drives one agent run.
 | **RPC:** `ForkSession`<br />**Request:** `ForkSessionRequest`<br />**Response:** `ForkSessionResponse` | <span className="grpc-mobile-label">Client streaming</span>No | <span className="grpc-mobile-label">Server streaming</span>No | <span className="grpc-mobile-label">Description</span><GrpcDescription name="ForkSession">ForkSession creates a history-carrying successor with optional placement and model-routing overrides.</GrpcDescription> |
 | **RPC:** `Converse`<br />**Request:** `ConverseRequest`<br />**Response:** `ConverseResponse` | <span className="grpc-mobile-label">Client streaming</span>Yes | <span className="grpc-mobile-label">Server streaming</span>Yes | <span className="grpc-mobile-label">Description</span><GrpcDescription name="Converse">Converse drives one run. The first frame MUST be `prompt` or `retry`; later frames may carry controls. A received second `prompt` or `retry` is rejected with INVALID_ARGUMENT. The server streams `Event` envelopes until either a terminal `result` or a pending `authorization.required` park, then closes the stream; controls still in transit may instead observe normal stream completion. A context cancel from the client aborts the run.</GrpcDescription> |
 | **RPC:** `ResolveRunAsk`<br />**Request:** `ResolveRunAskRequest`<br />**Response:** `ResolveRunAskResponse` | <span className="grpc-mobile-label">Client streaming</span>No | <span className="grpc-mobile-label">Server streaming</span>No | <span className="grpc-mobile-label">Description</span><GrpcDescription name="ResolveRunAsk">ResolveRunAsk resolves one ordinary permission ask on the exact addressed run without opening or owning its event stream.</GrpcDescription> |
+| **RPC:** `ResolvePlanAsk`<br />**Request:** `ResolvePlanAskRequest`<br />**Response:** `ResolvePlanAskResponse` | <span className="grpc-mobile-label">Client streaming</span>No | <span className="grpc-mobile-label">Server streaming</span>No | <span className="grpc-mobile-label">Description</span><GrpcDescription name="ResolvePlanAsk">ResolvePlanAsk acknowledges a verdict for one exact plan-originated ask.</GrpcDescription> |
 | **RPC:** `CancelRun`<br />**Request:** `CancelRunRequest`<br />**Response:** `CancelRunResponse` | <span className="grpc-mobile-label">Client streaming</span>No | <span className="grpc-mobile-label">Server streaming</span>No | <span className="grpc-mobile-label">Description</span><GrpcDescription name="CancelRun">CancelRun cancels the exact addressed live run without opening Converse.</GrpcDescription> |
 | **RPC:** `SteerRun`<br />**Request:** `SteerRunRequest`<br />**Response:** `SteerRunResponse` | <span className="grpc-mobile-label">Client streaming</span>No | <span className="grpc-mobile-label">Server streaming</span>No | <span className="grpc-mobile-label">Description</span><GrpcDescription name="SteerRun">SteerRun injects an instruction into the exact addressed live run. Unlike the legacy Converse control, it never promotes a late steer to a successor.</GrpcDescription> |
 | **RPC:** `CancelRunSteer`<br />**Request:** `CancelRunSteerRequest`<br />**Response:** `CancelRunSteerResponse` | <span className="grpc-mobile-label">Client streaming</span>No | <span className="grpc-mobile-label">Server streaming</span>No | <span className="grpc-mobile-label">Description</span><GrpcDescription name="CancelRunSteer">CancelRunSteer retracts the pending steer on the exact addressed live run.</GrpcDescription> |
@@ -59,7 +60,7 @@ the bidi Converse stream that drives one agent run.
 | **RPC:** `ListSessionMcpConnectors`<br />**Request:** `ListSessionMcpConnectorsRequest`<br />**Response:** `ListSessionMcpConnectorsResponse` | <span className="grpc-mobile-label">Client streaming</span>No | <span className="grpc-mobile-label">Server streaming</span>No | <span className="grpc-mobile-label">Description</span><GrpcDescription name="ListSessionMcpConnectors">ListSessionMcpConnectors inspects the owned session&#39;s broker-local catalogue. This read neither probes upstreams nor progresses enrollment.</GrpcDescription> |
 | **RPC:** `ListToolHiveGroups`<br />**Request:** `ListToolHiveGroupsRequest`<br />**Response:** `ListToolHiveGroupsResponse` | <span className="grpc-mobile-label">Client streaming</span>No | <span className="grpc-mobile-label">Server streaming</span>No | <span className="grpc-mobile-label">Description</span><GrpcDescription name="ListToolHiveGroups">ListToolHiveGroups returns the distinct, non-empty ToolHive groups present in the resolved source inventory. Derived from the snapshot — it does NOT call ToolHive.</GrpcDescription> |
 | **RPC:** `ListAgents`<br />**Request:** `ListAgentsRequest`<br />**Response:** `ListAgentsResponse` | <span className="grpc-mobile-label">Client streaming</span>No | <span className="grpc-mobile-label">Server streaming</span>No | <span className="grpc-mobile-label">Description</span><GrpcDescription name="ListAgents">ListAgents returns the resolved agent-definition registry snapshot: each discovered agent def&#39;s routing metadata (name/description), its resolved model, its effective read-only tool scope, permission mode, and UX color. Derived from the snapshot taken at startup; it performs no live discovery.</GrpcDescription> |
-| **RPC:** `ListCommands`<br />**Request:** `ListCommandsRequest`<br />**Response:** `ListCommandsResponse` | <span className="grpc-mobile-label">Client streaming</span>No | <span className="grpc-mobile-label">Server streaming</span>No | <span className="grpc-mobile-label">Description</span><GrpcDescription name="ListCommands">ListCommands returns slash commands discovered for one owned session&#39;s exact server-bound placement. It authorizes and reattaches that session before discovery and accepts no workspace/root input. It powers the client&#39;s command palette; command expansion remains a run-path concern. A no-FS session or a server with no command expander returns an empty list.</GrpcDescription> |
+| **RPC:** `ListCommands`<br />**Request:** `ListCommandsRequest`<br />**Response:** `ListCommandsResponse` | <span className="grpc-mobile-label">Client streaming</span>No | <span className="grpc-mobile-label">Server streaming</span>No | <span className="grpc-mobile-label">Description</span><GrpcDescription name="ListCommands">ListCommands returns slash commands from the configured, resolved sources for one authorized, owned session. It runs independently of execution and accepts no client workspace/root input. A source that needs execution files acquires only that session&#39;s exact backend. It powers the client&#39;s command palette; command expansion remains a run-path concern. A server with no configured command sources returns an empty list; a no-FS session can retain independently configured sources.</GrpcDescription> |
 | **RPC:** `ListWorktrees`<br />**Request:** `ListWorktreesRequest`<br />**Response:** `ListWorktreesResponse` | <span className="grpc-mobile-label">Client streaming</span>No | <span className="grpc-mobile-label">Server streaming</span>No | <span className="grpc-mobile-label">Description</span><GrpcDescription name="ListWorktrees">ListWorktrees discovers eligible alternatives for one owned source session&#39;s exactly reattached placement. Results carry bounded display metadata and an opaque source-scoped selector accepted only by ClearSession or ForkSession. The server re-enumerates and matches current choices on use; selectors are not paths, are not persisted, and expire on restart. A no-FS session or a server with no worktree lister returns an empty list.</GrpcDescription> |
 | **RPC:** `StreamSessionEvents`<br />**Request:** `StreamSessionEventsRequest`<br />**Response:** `Event` | <span className="grpc-mobile-label">Client streaming</span>No | <span className="grpc-mobile-label">Server streaming</span>Yes | <span className="grpc-mobile-label">Description</span><GrpcDescription name="StreamSessionEvents">StreamSessionEvents replays a session&#39;s durable event log as a server stream of `Event` envelopes (cloud-native Phase 3a read-back). It is the client-tier surface over the SAME `port.EventLog.Read` the operator-tier 3c EventLogService.Read serves; the loop itself stays storage-agnostic (it only emits — persistence lives at the relay, never in `engine/agent`). The log stores ALREADY-REDACTED events and inherits the stream&#39;s redaction, so this path adds none (gauntlet #7: no raw args/deny-reason bodies/child content ever cross).  UNLIKE the live `Converse` relay — which SKIPS the three log-only event kinds (`approval`/`compaction_archive`/`user_prompt`) on the client wire because they are persistence-only — StreamSessionEvents relays ALL events, including those three: a client opening a PAST session wants the verdicts and user prompts, as they ARE the transcript. They are metadata-only/redacted by construction, so no extra filter applies here.  Read-only: no live model call, no mutation, no Converse run is started. An unknown session id yields an EMPTY stream (absence is data — a never-created or pruned id is indistinguishable, by design). A server with NO durable EventLog wired returns `UNIMPLEMENTED` (HTTP 501). There is intentionally NO ServerCapabilities bit for this feature: the capability is RPC-discoverable (UNIMPLEMENTED vs. an empty stream degrade honestly).</GrpcDescription> |
 | **RPC:** `StreamSessionLive`<br />**Request:** `StreamSessionLiveRequest`<br />**Response:** `Event` | <span className="grpc-mobile-label">Client streaming</span>No | <span className="grpc-mobile-label">Server streaming</span>Yes | <span className="grpc-mobile-label">Description</span><GrpcDescription name="StreamSessionLive">StreamSessionLive is the LIVE per-session event stream (ADR 0075 fire-result-delivery Scenario 6 / Wave 3): a server-streaming RPC backed by the in-process per-session subscription registry (Service.Subscribe / PublishSessionEvent, List 1 row 35). It is the UNIFIED transport for BOTH embedded and remote clients — the embedded mecatui dials its in-process server over a real gRPC UNIX socket, so the in-process Subscribe registry is unreachable from the TUI without a wire transport; this RPC is that transport, and it serves a remote mecated identically (ONE proto, ONE TUI consumption path).  UNLIKE StreamSessionEvents (the durable-log READ-BACK, which relays ALL events including the three log-only kinds), StreamSessionLive is a LIVE stream and applies the SAME live-wire relay discipline as the live `Converse` relay, with ONE narrow exception: a fire-result delivery note (an EvUserPrompt whose text starts with the renderFireDelivery provenance header &#34;[scheduled task &#34;) is RELAYED so the connected client renders the delivery card as it happens (AC6.2). The other two log-only kinds (EvApproval, EvCompactionArchive) stay SKIPPED on the live wire (they are persistence-only; a client holds its own verdict/compaction view); a non-delivery EvUserPrompt stays SKIPPED too (the client already holds its own prompt). The delivery note is metadata-only/redacted by construction (gauntlet #7 — it is the fenced-untrusted harness note the engine recorded).  The stream stays open until the client cancels or disconnects. The handler is drain-to-discard: a dead client never wedges the delivery run (a full subscriber channel drops the event, AC6.3). The durable log records the tail regardless (it is appended by the relay/loop, independent of this stream). There is intentionally NO ServerCapabilities bit — the capability is RPC-discoverable (UNIMPLEMENTED on an older server, an empty stream on a server with no subscribers). An unknown session id yields an empty stream (absence is data — a never-created id is indistinguishable from a session with no live events yet).</GrpcDescription> |
@@ -635,6 +636,20 @@ session.Content for tool-result Parts). A sum-type over Kind.
 
 
 
+#### `mecatl.v1.ContextOccupancy`
+
+ContextOccupancy is the latest display-only context-meter numerator recorded
+for a completed agent-loop turn. It is neither durable token accounting nor a
+run budget baseline.
+
+| Field | Type | Label | Oneof | Description |
+|---|---|---|---|---|
+| `input_tokens` | `int64` |  |  |  |
+| `estimated` | `bool` |  |  |  |
+
+
+
+
 #### `mecatl.v1.ControlRefused`
 
 ControlRefused is the metadata-only acknowledgement for a rejected in-stream
@@ -984,6 +999,7 @@ event kind; the structured submessages are populated per kind.
 | `title` | `SessionTitle` |  |  | title is set on session.title events. It is the authoritative, source-free title lifecycle projection after a persisted title state change. |
 | `authorization` | `Authorization` |  |  | authorization is set on authorization.required and authorization.resolved events. It is safe durable correlation only; the live presentation URL and private continuation state never enter this payload. |
 | `control_refused` | `ControlRefused` |  |  | control_refused is set on control.refused events. It identifies the exact approval ask whose submitted control was rejected and carries only a stable machine category; raw arguments and refusal rationale never enter it. |
+| `plan_continuation_failure` | `PlanContinuationFailure` |  |  | plan_continuation_failure is a session-scoped, content-safe indication that an accepted plan allow could not start its proceed run. |
 
 
 
@@ -2370,6 +2386,7 @@ Mirrors session.PendingAsk.
 | `args` | `string` |  |  | args is the proposed tool-call argument payload (raw JSON). |
 | `reason` | `string` |  |  | reason explains why approval is required. |
 | `guardrail` | `GuardrailApprovalScope` |  |  |  |
+| `call_id` | `string` | optional |  | call_id is the exact durable tool-call ID for presentation correlation. Absence means no tool-row attachment can be proven. |
 
 
 
@@ -2385,6 +2402,19 @@ backend locator, exact EnvironmentRef, or reusable selector.
 | `label` | `string` |  |  |  |
 | `branch` | `string` |  |  |  |
 | `revision` | `string` |  |  |  |
+
+
+
+
+#### `mecatl.v1.PlanContinuationFailure`
+
+PlanContinuationFailure correlates a known failed server-owned proceed start.
+No execution run exists, so Event.run_id is empty.
+
+| Field | Type | Label | Oneof | Description |
+|---|---|---|---|---|
+| `plan_run_id` | `string` |  |  |  |
+| `ask_id` | `string` |  |  |  |
 
 
 
@@ -2454,6 +2484,7 @@ min_len — it is optional when parts is set.
 | `session_id` | `string` |  |  | session_id is the session this run belongs to. |
 | `text` | `string` |  |  | text is the flattened user prompt text; optional when parts is set. |
 | `parts` | `Content` | repeated |  | parts carries non-text media (image/audio) alongside the text. |
+| `server_owned_plan_continuation` | `bool` |  |  | server_owned_plan_continuation opts this run into exact plan-ask controls and makes the daemon responsible for starting its approved proceed run. |
 
 
 
@@ -2616,6 +2647,32 @@ RefreshMcpSourcesResponse identifies the request-pinned runtime snapshot.
 | Field | Type | Label | Oneof | Description |
 |---|---|---|---|---|
 | `session` | `Session` |  |  |  |
+
+
+
+
+#### `mecatl.v1.ResolvePlanAskRequest`
+
+ResolvePlanAskRequest addresses one plan-originated ask on one exact run.
+
+| Field | Type | Label | Oneof | Description |
+|---|---|---|---|---|
+| `session_id` | `string` |  |  |  |
+| `expected_run_id` | `string` |  |  |  |
+| `ask_id` | `string` |  |  |  |
+| `verdict` | `ApprovalVerdict` |  |  |  |
+
+
+
+
+#### `mecatl.v1.ResolvePlanAskResponse`
+
+ResolvePlanAskResponse acknowledges only the accepted run/ask correlation.
+
+| Field | Type | Label | Oneof | Description |
+|---|---|---|---|---|
+| `run_id` | `string` |  |  |  |
+| `ask_id` | `string` |  |  |  |
 
 
 
@@ -2895,6 +2952,7 @@ Session is a snapshot of server-side session state.
 | `title_metadata` | `SessionTitle` |  |  | title_metadata is the canonical bounded, source-free title lifecycle projection. |
 | `token_usage` | `Session.TokenUsageEntry` | repeated |  | token_usage is the canonical durable session token accounting. Map keys identify usage types; `main` is ordinary main-session agent usage. Other keys are server-defined and are not enumerated here. |
 | `session_capabilities` | `SessionCapabilities` |  |  | session_capabilities is the selected provider+model&#39;s authoritative media input capability. It mirrors CreateSessionResponse.session_capabilities so GetSession, resume, clear, and fork retain accurate media gates. Nil on an older server tells clients to fall back to the server-wide capabilities. |
+| `latest_context_occupancy` | `ContextOccupancy` |  |  | latest_context_occupancy is optional display state from the latest completed agent-loop turn. Its absence is unknown, including for legacy snapshots. |
 
 
 
@@ -3586,6 +3644,7 @@ overloading the shared Event fields.
 |---|---|---|---|---|
 | `usage` | `Usage` |  |  | usage is THIS turn&#39;s model-call token accounting (not the run total or the durable session total). |
 | `duration_ms` | `int64` |  |  | duration_ms is the elapsed milliseconds for the turn&#39;s model call; 0 when the server had no clock. |
+| `estimated` | `bool` |  |  | estimated is true when usage.input_tokens is a display-only fallback estimate rather than provider-reported usage. |
 
 
 
@@ -4260,6 +4319,7 @@ post-fire outcome).
 | `last_fire_started_at` | `google.protobuf.Timestamp` |  |  | last_fire_started_at is when the current fire&#39;s RUN actually began (RecordFireStart), distinct from last_fire_at (the Claim instant). The in-flight liveness marker: absent means the current fire has not started its run yet (the crash-after-Claim state). Set by RecordFireStart, cleared by RecordFire. Issue #386. |
 | `last_fire_progress_at` | `google.protobuf.Timestamp` |  |  | last_fire_progress_at is the last observed progress instant for the current fire (RecordFireProgress). Absent means &#34;no progress observed yet&#34;. Best- effort liveness: a stale value is a stuck-fire signal. Issue #386. |
 | `fire_deadline` | `google.protobuf.Timestamp` |  |  | fire_deadline is the current fire&#39;s wall-clock deadline (RecordFireStart): start + ScheduleSpec.fire_timeout (or absent when fire_timeout is zero / the deployment default applies). A watchdog reads it to decide whether to terminate the in-flight run with StopTimeout. Absent means &#34;no explicit deadline&#34;. Issue #386. |
+| `deletion_pending` | `bool` |  |  | deletion_pending is true while exact owned-placement cleanup is retryable. The private deletion token and placement binding are never projected. |
 
 
 

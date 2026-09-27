@@ -470,10 +470,11 @@ func (m Model) scrollIndicator() string {
 const changedFilesIndicatorLimit = 999
 
 func (m Model) changedFilesIndicator() string {
-	n := len(m.conv.filesChanged)
-	if n == 0 {
+	appendix, ok := m.conv.scrollback.AppendixSnapshot()
+	if !ok || len(appendix.Files) == 0 {
 		return ""
 	}
+	n := len(appendix.Files)
 	if n > changedFilesIndicatorLimit {
 		return "✎ 999+ files"
 	}
@@ -568,6 +569,9 @@ func (m Model) footerActivity() string {
 		left = m.deps.Theme.Style("askTitle").Render(label)
 	case phaseConnecting:
 		left = m.sp.View() + " connecting…"
+		if m.statusMsg != "" {
+			left = m.sp.View() + " " + m.statusMsg
+		}
 	default:
 		left = m.idleFooterLeft()
 	}
@@ -742,9 +746,16 @@ func (m Model) contextWindow() int64 {
 func (m Model) fitFooter(left string, width int) string {
 	th := m.deps.Theme
 	window := m.contextWindow()
-	meter := renderContextMeter(th, m.contextTokens, window)
+	contextKnown := !m.contextUnknown || m.contextTokens > 0
+	meter := renderContextMeterState(th, m.contextTokens, window, contextKnown, m.contextEstimated)
 	meterCompact := renderContextMeterCompact(th, m.contextTokens, window)
 	meterMinimal := renderContextMeterMinimal(th, m.contextTokens, window)
+	if !contextKnown {
+		meterCompact, meterMinimal = meter, meter
+	} else if m.contextEstimated {
+		meterCompact = "ctx ~" + strings.TrimPrefix(meterCompact, "ctx ")
+		meterMinimal = "ctx ~" + strings.TrimPrefix(meterMinimal, "ctx ")
+	}
 
 	// The agents prefix is the combined team + subagent-fleet advertisement, prepended
 	// to the right side at three tiers (full/medium/compact). Each is built from up to

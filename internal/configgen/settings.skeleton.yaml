@@ -342,6 +342,13 @@
 #   # AcknowledgeMainDeletion explicitly consents to destructive main-session cleanup.
 #   acknowledge_main_deletion: false
 
+#| === system_prompt === (tier: operator)
+#| Strict standard prompt policy. Operator-tier only; project values are ignored.
+# system_prompt:
+#   # CommitCoauthor controls the standard commit co-author guidance. Nil preserves the
+#   # default enabled behavior; false opts out.
+#   commit_coauthor: false
+
 #| === command_runner === (tier: operator)
 #| Built-in command interpreter and main-runner environment policy. Operator-tier only;
 #| project values are ignored. Explicit --shell overrides shell, and --no-shell disables
@@ -378,6 +385,22 @@
 #   principals:
 #     - issuer: https://idp.example/realms/operators
 #       subject: storage-admin
+
+#| === execution === (tier: operator)
+#| Server-owned execution placement and MicroVM guest-egress policy. Operator-tier only;
+#| project values are ignored. Bare mecatui and mecated resolve the same settings.
+# execution:
+#   # The default_placement setting selects the server-owned default placement backend.
+#   default_placement: host-local
+#   # The microvm block configures local MicroVM execution without creating a public
+#   # profile.
+#   microvm:
+#     # The guest_egress block controls network destinations reachable from the guest.
+#     guest_egress:
+#       # mode accepts permissive, deny-all, or allowlist. Permissive is the default.
+#       mode: permissive
+#       # allow lists HOST:PORT/tcp|udp destinations and is valid only in allowlist mode.
+#       allow: []
 
 #| === steer === (tier: operator)
 #| OPERATOR-TIER mid-run steer knob (steer-while-running, issue #512): when true (the

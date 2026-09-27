@@ -2,7 +2,13 @@
 
 import { ExternalLink, MessageSquareText } from "lucide-react";
 import { memo, useCallback, useRef } from "react";
+import { type AuthorizationHandoff, AuthorizationReviewTrigger } from "./authorization-review";
 import type { ChatMessage } from "./chat-state";
+import {
+  type DelegationActivity,
+  DelegationCardRow,
+  type DelegationFocus,
+} from "./delegation-card";
 import { FailedTurnCard } from "./failed-turn-card";
 import { type ChatImage, chatImageDisplay } from "./local-file-preview";
 import { MarkdownMessage } from "./markdown-message";
@@ -23,6 +29,7 @@ export function isNearTranscriptBottom(metrics: TranscriptScrollMetrics): boolea
 }
 
 export interface TranscriptRowState {
+  delegations?: DelegationActivity[];
   message: ChatMessage;
   showToolCalls: boolean;
   streaming: boolean;
@@ -34,6 +41,7 @@ export function shouldUpdateTranscriptRow(
   next: TranscriptRowState,
 ): boolean {
   return (
+    previous.delegations !== next.delegations ||
     previous.message !== next.message ||
     previous.showToolCalls !== next.showToolCalls ||
     previous.streaming !== next.streaming
@@ -42,7 +50,9 @@ export function shouldUpdateTranscriptRow(
 
 interface TranscriptRowProps extends TranscriptRowState {
   agentName: string;
+  onOpenActivity?: (focus: DelegationFocus, opener: HTMLButtonElement) => void;
   onOpenThread?: (message: ChatMessage) => void;
+  onReviewAuthorization?: (authorization: AuthorizationHandoff) => void;
   onPreviewImage?: (image: ChatImage) => void;
   onPreviewTool?: (tool: ToolActivity) => void;
   threadDisabled: boolean;
@@ -52,8 +62,11 @@ interface TranscriptRowProps extends TranscriptRowState {
 
 function TranscriptRow({
   agentName,
+  delegations,
   message,
+  onOpenActivity,
   onOpenThread,
+  onReviewAuthorization,
   onPreviewImage,
   onPreviewTool,
   showToolCalls,
@@ -74,6 +87,8 @@ function TranscriptRow({
     message.images?.length ||
     message.reasoning ||
     (showToolCalls && message.tools?.length) ||
+    message.authorizations?.length ||
+    (delegations && delegations.length > 0) ||
     message.failure ||
     hasVisibleStopReason(message.stopReason ?? "") ||
     message.turnStat;
@@ -177,9 +192,39 @@ function TranscriptRow({
                   )}
                 </>
               )}
+              {message.authorizations
+                ?.filter(
+                  (authorization) =>
+                    authorization.callId === tool.id && authorization.runId === tool.runId,
+                )
+                .map((authorization) => (
+                  <AuthorizationReviewTrigger
+                    authorization={authorization}
+                    key={authorization.authorizationId}
+                    onReview={onReviewAuthorization ?? (() => undefined)}
+                  />
+                ))}
             </li>
           ))}
         </ol>
+      )}
+      {message.authorizations
+        ?.filter(
+          (authorization) =>
+            !showToolCalls ||
+            !message.tools?.some(
+              (tool) => tool.id === authorization.callId && tool.runId === authorization.runId,
+            ),
+        )
+        .map((authorization) => (
+          <AuthorizationReviewTrigger
+            authorization={authorization}
+            key={authorization.authorizationId}
+            onReview={onReviewAuthorization ?? (() => undefined)}
+          />
+        ))}
+      {!user && delegations && delegations.length > 0 && onOpenActivity && (
+        <DelegationCardRow activities={delegations} onOpen={onOpenActivity} />
       )}
       {!streaming && !message.failure && <StopReasonChip stopReason={message.stopReason ?? ""} />}
       {message.failure && (
@@ -216,15 +261,20 @@ const MemoTranscriptRow = memo(
     previous.userName === next.userName &&
     previous.threadDisabled === next.threadDisabled &&
     previous.threadSessionId === next.threadSessionId &&
+    previous.onOpenActivity === next.onOpenActivity &&
     previous.onOpenThread === next.onOpenThread &&
+    previous.onReviewAuthorization === next.onReviewAuthorization &&
     previous.onPreviewImage === next.onPreviewImage &&
     previous.onPreviewTool === next.onPreviewTool,
 );
 
 export interface ChatTranscriptProps {
   agentName?: string;
+  delegationsByMessageId?: Record<string, DelegationActivity[]>;
   messages: ChatMessage[];
+  onOpenActivity?: (focus: DelegationFocus, opener: HTMLButtonElement) => void;
   onOpenThread?: (message: ChatMessage) => void;
+  onReviewAuthorization?: (authorization: AuthorizationHandoff) => void;
   onPreviewImage?: (image: ChatImage) => void;
   onPreviewTool?: (tool: ToolActivity) => void;
   showToolCalls: boolean;
@@ -237,8 +287,11 @@ export interface ChatTranscriptProps {
 /** Flat, left-aligned conversation rows; settled rows keep their React identity. */
 export function ChatTranscript({
   agentName = "Mecatl",
+  delegationsByMessageId,
   messages,
+  onOpenActivity,
   onOpenThread,
+  onReviewAuthorization,
   onPreviewImage,
   onPreviewTool,
   showToolCalls,
@@ -247,14 +300,35 @@ export function ChatTranscript({
   threadSessionIdForMessage,
   userName = "You",
 }: ChatTranscriptProps) {
-  const actions = useRef({ onOpenThread, onPreviewImage, onPreviewTool });
-  actions.current = { onOpenThread, onPreviewImage, onPreviewTool };
+  const actions = useRef({
+    onOpenActivity,
+    onOpenThread,
+    onPreviewImage,
+    onPreviewTool,
+    onReviewAuthorization,
+  });
+  actions.current = {
+    onOpenActivity,
+    onOpenThread,
+    onPreviewImage,
+    onPreviewTool,
+    onReviewAuthorization,
+  };
+  const openActivity = useCallback(
+    (focus: DelegationFocus, opener: HTMLButtonElement) =>
+      actions.current.onOpenActivity?.(focus, opener),
+    [],
+  );
   const previewImage = useCallback(
     (image: ChatImage) => actions.current.onPreviewImage?.(image),
     [],
   );
   const previewTool = useCallback(
     (tool: ToolActivity) => actions.current.onPreviewTool?.(tool),
+    [],
+  );
+  const reviewAuthorization = useCallback(
+    (authorization: AuthorizationHandoff) => actions.current.onReviewAuthorization?.(authorization),
     [],
   );
   const openThread = useCallback(
@@ -267,9 +341,12 @@ export function ChatTranscript({
       {messages.map((message) => (
         <MemoTranscriptRow
           agentName={agentName}
+          delegations={delegationsByMessageId?.[message.id]}
           key={message.id}
           message={message}
+          onOpenActivity={onOpenActivity ? openActivity : undefined}
           onOpenThread={onOpenThread ? openThread : undefined}
+          onReviewAuthorization={onReviewAuthorization ? reviewAuthorization : undefined}
           onPreviewImage={onPreviewImage ? previewImage : undefined}
           onPreviewTool={onPreviewTool ? previewTool : undefined}
           showToolCalls={showToolCalls}

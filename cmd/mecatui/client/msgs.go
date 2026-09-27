@@ -57,6 +57,7 @@ type TurnEndMsg struct {
 	Turn       int32
 	Usage      Usage
 	DurationMs int64
+	Estimated  bool
 }
 
 // ToolCallMsg announces a tool invocation (status: running until its result).
@@ -155,6 +156,7 @@ type PermissionAskMsg struct {
 	Reason        string
 	ExpectedRunID string
 	Guardrail     *GuardrailApprovalScope
+	Recovery      bool
 }
 
 // GuardrailApprovalScope distinguishes an outbound action approval from release
@@ -1165,7 +1167,7 @@ func EventToMsg(ev *mecatlv1.Event) tea.Msg {
 		return TurnStartMsg{Turn: ev.GetTurn()}
 	case "turn.end":
 		te := ev.GetTurnEnd()
-		return TurnEndMsg{Turn: ev.GetTurn(), Usage: usageFrom(te.GetUsage()), DurationMs: te.GetDurationMs()}
+		return TurnEndMsg{Turn: ev.GetTurn(), Usage: usageFrom(te.GetUsage()), DurationMs: te.GetDurationMs(), Estimated: te.GetEstimated()}
 	case "message.delta":
 		return AssistantDeltaMsg{Turn: ev.GetTurn(), Text: ev.GetText()}
 	case "reasoning.delta":

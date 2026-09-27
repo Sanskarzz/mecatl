@@ -13,10 +13,32 @@ The covered surface is the eight core packages (`session`, `governance`, `learni
 
 ### Added
 
+- **Configurable standard commit co-author guidance** — adds
+  `prompt.Config.CommitCoauthor`. `nil` and `true` include the canonical Mecatl
+  commit-trailer guidance in the standard stable prompt prefix; `false` omits it.
+  Added (minor).
+
+- **Display-only latest context occupancy** — adds `session.ContextOccupancy` and
+  `Session.LatestContextOccupancy` / `Session.RecordLatestContextOccupancy` for
+  the optional non-zero context-meter numerator from a completed agent-loop turn.
+  It remains distinct from canonical `TokenUsage` and run budgets. Added (minor).
+
 - **Root-session run correlation context** — adds `port.WithRootSessionID` and
   `port.RootSessionIDFromContext` so trusted engine composition can preserve one
   causal session identity across nested runs without changing active session
   identity. Added (minor).
+
+- **Plan continuation failure correlation** — adds
+  `session.EvPlanContinuationFailed` and
+  `session.PlanContinuationFailurePayload` for a session-scoped, content-safe
+  signal when an approved plan cannot start its server-owned proceed run while
+  the daemon still holds the session lease. Added (minor).
+
+- **Exact plan-ask resolution** — adds `agent.Run.ResolvePlanAsk` and
+  `agent.AskResolutionNotPlan`. The new method consumes only a root
+  plan-originated ask and reports ordinary asks without changing them.
+  `Run.Approve` and `ResolveOrdinaryAsk` retain their existing behavior.
+  Added (minor).
 
 - **Delegated-model routing decision evidence** — adds `agent.ModelRouteResult`,
   `agent.SubagentModelRouter`, and `session.RoutingDecision`, with optional decision
@@ -99,6 +121,8 @@ The covered surface is the eight core packages (`session`, `governance`, `learni
 - **Draft-aware session activity classification** — adds `session.ActivityState`, the `ActivityUnknown`/`ActivityDraft`/`ActivityActive` constants, and pure `session.ActivityOf`, using `IsGenuineUserPrompt` so empty and multimodal genuine user history is active while harness compaction summaries remain drafts. `port.SessionDiscoveryMeta.Activity` carries the atomically written, content-free activity projection; unavailable, corrupt, legacy, and unsupported discovery metadata normalizes to unknown. Adds `session.ValidActivity` (the one fail-closed validity clamp for the type, replacing three adapters' independent inline checks) and `port.SupportsActivityProjection` (the one capability-probe rule for `SessionActivityProjectionPager`, replacing three duplicated type-assertion call sites). Added (minor).
 
 - **Authoritative synthetic user-prompt origin** — adds `session.UserPromptPayload.Synthetic` so durable user-prompt events distinguish harness-authored continuations from principal and legacy prompts without changing folded conversation messages. Added (minor).
+
+- **Schedule placement ownership lifecycle** — adds `port.ScheduleSpec.PlacementOwned` as trusted durable host metadata, `ScheduleState.DeletionID`, the optional atomic `port.ScheduleDeletionStore`, and deletion lifecycle sentinels so schedule managers can distinguish exclusively provisioned placements from borrowed/legacy placements and safely retry exact cleanup without deleting a later same-name incarnation. Added (minor).
 
 - **Session-load failure classification** — adds `port.SessionLoadFailureClass`,
   `SessionLoadFailureError`, `ErrSessionLoadFailure`, `NewSessionLoadFailure`, and

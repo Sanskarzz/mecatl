@@ -72,6 +72,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/mcpauthority"
 	"github.com/stacklok/mecatl/internal/adapter/mcpbroker"
 	"github.com/stacklok/mecatl/internal/adapter/memory"
+	"github.com/stacklok/mecatl/internal/adapter/microvmmanager"
 	"github.com/stacklok/mecatl/internal/adapter/modelhook"
 	"github.com/stacklok/mecatl/internal/adapter/openaicodex"
 	"github.com/stacklok/mecatl/internal/adapter/osfs"
@@ -146,14 +147,43 @@ type Config struct {
 	// PlacementScope is the trusted authorization scope passed to the provider.
 	// Empty defaults to the process deployment scope.
 	PlacementScope server.PlacementScope
+	// DefaultPlacement and MicroVMGuestEgress are command-root overrides for the
+	// operator execution policy. Their Set bits preserve omission so settings.yaml
+	// remains authoritative unless a serve flag was actually supplied.
+	DefaultPlacement      string
+	DefaultPlacementSet   bool
+	MicroVMGuestEgress    microvmmanager.GuestEgressSelection
+	MicroVMGuestEgressSet bool
+	MicroVMReadyRequest   func(microvmmanager.GuestEgressSelection) (microvmmanager.ReadyRequest, error)
+	MicroVMManagerFactory func() (MicroVMReadyManager, string, error)
+	executionConfigured   bool
+	placementSelectorRead func([]byte) (int, error)
+	// MicroVMReadinessObserver receives bounded, secret-free preparation updates.
+	// MicroVMReadinessFailureHint is appended to a stable preparation error without
+	// exposing the manager's private paths or process output.
+	MicroVMReadinessObserver    microvmmanager.ReadinessObserver
+	MicroVMReadinessFailed      func(microvmmanager.ReadinessStage)
+	MicroVMReadinessFailureHint string
+	// RemoteExecution selects the native remote-environment catalog attenuation and
+	// model-visible posture. It is set only by an explicit composition root.
+	RemoteExecution bool
 	// ClientMCPOnCreate permits client-provided MCP servers on a session-creating
 	// API request (issue #821, ADR 0237 applied to outbound MCP). It is a
 	// deployment policy the cmd/ main decides from its listener topology and Build passes through verbatim; the zero value fails
 	// closed, so a composition root that never sets it refuses the field.
 	ClientMCPOnCreate bool
-	Model             string
-	UseOpenAI         bool
-	OpenAIKey         string
+	// EnvironmentForkers routes isolated delegation children by the parent
+	// EnvironmentRef kind. External backends (for example microVM) register their
+	// complete child-environment forker here; local/memory parents retain the
+	// ordinary host forker. An unregistered external kind fails closed rather than
+	// creating a host-local child under a remote parent.
+	EnvironmentForkers map[session.EnvironmentKind]tool.EnvironmentForker
+	// EnvironmentMergers routes merge-back through the same backend kind as the
+	// parent; external children must never fall through to the host Git merger.
+	EnvironmentMergers map[session.EnvironmentKind]tool.EnvironmentMerger
+	Model              string
+	UseOpenAI          bool
+	OpenAIKey          string
 	// OpenAIBearerTokenFile is a rotating credential source for only the OpenAI
 	// registry entry. The adapter reads it for every request.
 	OpenAIBearerTokenFile string
@@ -1290,6 +1320,9 @@ type Config struct {
 	// is a REAL nil interface and "nil resolver behaves like NewPolicy" holds).
 	// Unexported: an internal composition detail, not an operator knob.
 	permResolver permpolicy.RuleResolver
+	// commitCoauthor is the resolved operator-only standard-prompt setting. Nil
+	// retains prompt.Config's enabled-by-default behavior.
+	commitCoauthor *bool
 	// childPermResolver is permResolver PINNED to the SERVER workspace root
 	// (issue #32): child/member/branch engines run over forked workspaces, and
 	// project permission rules must resolve from the server root, never from
@@ -1625,7 +1658,13 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	// the child deps builders (the workspace-PINNED child resolver) consume the
 	// SAME instance — one discovery pass, one cache, no per-consumer drift.
 	cfg.permResolver = buildPermResolver(cfg)
+	cfg = foldOperatorCommitCoauthor(cfg)
 	cfg.childPermResolver = buildChildPermResolver(cfg)
+	var executionErr error
+	cfg, executionErr = ConfigureExecution(cfg)
+	if executionErr != nil {
+		return nil, executionErr
+	}
 	registerHarnessCompatibility(&cfg)
 	if section, err := validateHarnessPolicy(cfg); err != nil {
 		return nil, err
@@ -2067,6 +2106,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	// The local capability is shared by Service lease ownership, delegation-child
 	// liveness, and the engine's persistence/audit adapters.
 	mutationCapability := server.NewSessionMutationCapability(sessionLease != nil)
+
 	// One process-wide liveness registry bridges engine-owned delegation children
 	// to Service/retention without introducing an engine→server dependency. When
 	// leasing is configured it owns distributed child holds as well.
@@ -2244,7 +2284,11 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		placementScope = defaultPlacementScope
 	}
 	var placementSelectorKey [32]byte
-	if _, err := rand.Read(placementSelectorKey[:]); err != nil {
+	readPlacementSelector := cfg.placementSelectorRead
+	if readPlacementSelector == nil {
+		readPlacementSelector = rand.Read
+	}
+	if _, err := readPlacementSelector(placementSelectorKey[:]); err != nil {
 		return nil, fmt.Errorf("initialize placement selector signer: %w", err)
 	}
 	placementProvider := cfg.PlacementProvider
@@ -2264,18 +2308,25 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		sessionReadLedger = redisBackend.ReadLedger
 	}
 	worktreeLister := buildWorktreeLister(cfg)
+	selectorIssuer, err := server.NewWorktreeSelectorIssuer(placementSelectorKey[:])
+	if err != nil {
+		return nil, fmt.Errorf("initialize placement selector issuer: %w", err)
+	}
+	localProvider := &localPlacementProvider{
+		scope: placementScope, root: cfg.Workspace, workspace: workspaceFactory,
+		runnerForRoot: func(root string) tool.CommandRunner {
+			return buildCommandRunnerForRoot(cfg, root)
+		},
+		worktrees: worktreeLister, selectors: selectorIssuer,
+	}
 	if placementProvider == nil {
-		selectorIssuer, err := server.NewWorktreeSelectorIssuer(placementSelectorKey[:])
-		if err != nil {
-			return nil, fmt.Errorf("initialize placement selector issuer: %w", err)
+		placementProvider = localProvider
+	} else if cfg.RemoteExecution {
+		profiledProvider := &profilePlacementProvider{remote: placementProvider, local: localProvider}
+		if err := profiledProvider.ValidatePlacement(ctx); err != nil {
+			return nil, fmt.Errorf("validate default placement: %w", err)
 		}
-		placementProvider = &localPlacementProvider{
-			scope: placementScope, root: cfg.Workspace, workspace: workspaceFactory,
-			runnerForRoot: func(root string) tool.CommandRunner {
-				return buildCommandRunnerForRoot(cfg, root)
-			},
-			worktrees: worktreeLister, selectors: selectorIssuer,
-		}
+		placementProvider = profiledProvider
 	}
 	attempts := startAttemptRecovery(ctx, cfg, reg, store, eventLog, assets.attemptRepository, assets.reflectionRepository, assets, placementProvider, placementScope)
 	if attempts != nil {
@@ -2358,6 +2409,8 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 
 		PlacementProvider: placementProvider,
 		PlacementScope:    placementScope,
+		ExecutionAccess:   executionAccess(placementProvider),
+		ReferenceIntents:  referenceIntentLifecycle(placementProvider),
 		SessionReadLedger: sessionReadLedger,
 		RootAuthority: func(kind session.SessionKind) session.Authority {
 			return mintRuntimeRootAuthority(assets.rootCatalog, assets.mcpRuntimes, kind)
@@ -2805,7 +2858,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	}
 	applyTeamConfig(&svcCfg, cfg, reg, provider, mainMgr, agentReg, assets.skillIndex, assets)
 
-	svc, err := server.NewServiceContext(ctx, svcCfg)
+	svc, err := server.NewService(svcCfg)
 	if err != nil {
 		closeBroker()
 		childLiveness.Close()
@@ -2863,6 +2916,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	// subagent-*/parallel-*/team-* children the run-entry funnel's own repair
 	// (Step 3) never sees. See internal/app/session_reconcile.go.
 	staleSessionReconcileClose := startStaleSessionReconcile(cfg, svc)
+	referenceIntentReconcileClose := startReferenceIntentReconcile(ctx, svcCfg.ReferenceIntents, svc)
 
 	// Close tears down the main MCP manager AND any per-session client-MCP engines
 	// still registered (svc.Close), so a process exit leaks neither. It also cancels
@@ -2873,6 +2927,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		if assets.reflectionLifecycle != nil {
 			assets.reflectionLifecycle.close()
 		}
+		referenceIntentReconcileClose()
 		staleSessionReconcileClose()
 		childGCClose()
 		managedTempWorkerClose()
@@ -3219,6 +3274,16 @@ func sessionEngineFactory(
 	}
 }
 
+func remoteSessionConfiguration(cfg Config, profile server.SessionProfile, workspace string, instructions prompt.InstructionAssembler, policy port.PermissionPolicy) (string, bool, prompt.InstructionAssembler, port.PermissionPolicy) {
+	if !cfg.RemoteExecution || profile == server.ProfileNoFS {
+		return workspace, false, instructions, policy
+	}
+	if variants, ok := policy.(sessionPermissionPolicies); ok {
+		policy = variants.remote
+	}
+	return "", true, instructions, policy
+}
+
 func sessionEngineFactoryWithTools(
 	cfg Config,
 	reg *providerRegistry,
@@ -3245,7 +3310,8 @@ func sessionEngineFactoryWithTools(
 		// is scoped to this one session's assembly; the SHARED engine keeps the
 		// build-time pin over cfg.Workspace (the server's own root — the one
 		// the shared engine was assembled for).
-		cfg.childPermResolver = childPermResolverFor(cfg, workspace)
+		projectWorkspace, remote, sessionInstructions, sessionPolicy := remoteSessionConfiguration(cfg, profile, workspace, instructions, policy)
+		cfg.childPermResolver = childPermResolverFor(cfg, projectWorkspace)
 		// The NO-FS profile (issue #55): the service routes every no-fs session
 		// through this factory unconditionally (the shared engine has the FS tools
 		// baked in), and the profile selects the no-FS catalog assembly + the
@@ -3395,7 +3461,7 @@ func sessionEngineFactoryWithTools(
 		// Caller-scoped lazy hydration: rebuild this authenticated session's global
 		// and admitted project generations from durable state before binding the
 		// Skill tool. A failed authoritative read clears only these partitions.
-		skillPartitions := hydrateLearnedSkillPartitions(ctx, cfg, runtimeAssets, workspace)
+		skillPartitions := hydrateLearnedSkillPartitions(ctx, cfg, runtimeAssets, projectWorkspace)
 
 		cat, closeFn, clientToolNames := assembleCatalog(ctx, cfg, reg, store, hooks, &runtimeAssets, catalogSession{
 			provider:        resolvedProvider,
@@ -3404,6 +3470,7 @@ func sessionEngineFactoryWithTools(
 			clientMgr:       mgr,
 			narrate:         false,
 			noFS:            noFS,
+			remote:          remote,
 			mode:            mode,
 			skillPartitions: skillPartitions,
 			sessionTools:    sessionTools,
@@ -3415,13 +3482,14 @@ func sessionEngineFactoryWithTools(
 		// the shared wiring, so no collaborator is silently dropped and a non-default
 		// provider never contaminates compaction/counting.
 		learningCfg := cfg
-		learningCfg.Workspace = workspace
-		learningCfg.LearningMode, learningCfg.LearningSensitivity, learningCfg.SkillActivationPolicy = learningPolicyForWorkspace(cfg, workspace)
+		learningCfg.Workspace = projectWorkspace
+		learningCfg.LearningMode, learningCfg.LearningSensitivity, learningCfg.SkillActivationPolicy = learningPolicyForWorkspace(cfg, projectWorkspace)
 		learningCfg.Model = resolvedModel
 		learningCfg.attemptRepository = runtimeAssets.attemptRepository
 		learningCfg.automaticAdmissionLedger = runtimeAssets.automaticAdmissionLedger
 		learningCfg.learningSourceStore = store
-		deps := engineDepsForProvider(cfg, resolvedProvider, resolvedModel, windowFn, store, policy, hooks, mcpProvider, instructions)
+		deps := engineDepsForProvider(cfg, resolvedProvider, resolvedModel, windowFn, store, sessionPolicy, hooks, mcpProvider, sessionInstructions)
+		deps = applyRemoteExecutionPosture(deps, remote)
 		attachOperatorProfile(&deps, runtimeAssets.userModelStore)
 		deps.LearningMode = learningCfg.LearningMode
 		deps.LearningObserver = bindMaterializationLifecycle(buildReflectionObserver(learningCfg, resolvedProvider, learningCfg.Model, runtimeAssets.userModelStore, runtimeAssets.memStore, runtimeAssets.reflectionRepository, runtimeAssets.reflectionCoordinator, runtimeAssets.learningAdmissionGate, buildProcedureProcessor(learningCfg, runtimeAssets)), runtimeAssets.reflectionLifecycle)
@@ -4344,7 +4412,12 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 	// the SAME contextual ToolReviewer route; the option is a
 	// no-op at any non-auto posture or with no checker, so yolo/strict/trusted
 	// and the un-knobbed auto stay byte-identical.
-	sharedPolicy := escapePolicyForConfig(cfg, reg, provider, policy)
+	sharedPolicy := sessionPermissionPolicies{
+		standard: escapePolicyForConfig(cfg, reg, provider, policy),
+		// Pin no workspace: retain operator permissions without project discovery.
+		remote: escapePolicyForConfig(cfg, reg, provider,
+			permpolicy.NewPolicyWithResolver(mainRules(cfg), learned, childPermResolverFor(cfg, ""), mainEvaluatorOptions(cfg)...)),
+	}
 	var learningAdmissionGate *learningAdmissionGate
 	if cfg.operatorLearningMode != learning.Off {
 		learningAdmissionGate = newLearningAdmissionGate(cfg.LearningAdmissionInterval)
@@ -4477,6 +4550,18 @@ func attachOperatorProfile(deps *agent.Deps, store tool.MemoryStore) {
 	if store != nil {
 		deps.OperatorProfileSource = store
 	}
+}
+
+type sessionPermissionPolicies struct {
+	standard port.PermissionPolicy
+	remote   port.PermissionPolicy
+}
+
+func (p sessionPermissionPolicies) Evaluate(ctx context.Context, id session.SessionID, mode session.PermissionMode, call session.ToolCall, ws tool.WorkspaceReader) governance.PermissionDecision {
+	return p.standard.Evaluate(ctx, id, mode, call, ws)
+}
+func (p sessionPermissionPolicies) Learn(id session.SessionID, call session.ToolCall) {
+	p.standard.Learn(id, call)
 }
 
 // buildInstructionAssembler composes the ephemeral turn-0 instruction fragments:
@@ -5575,7 +5660,7 @@ func compactionDecision(cfg Config) diagFact {
 // here with the composition-resolved provider (or the not-configured sentinel),
 // NOT as a zero-value tools.All()/NoFS() entry — an only-when-configured tool that
 // vanishes would be the silent-disable this harness avoids.
-func registerCoreTools(cfg Config, cat *tool.Catalog, log, noFS bool, searchProvider tool.SearchProvider) {
+func registerCoreTools(cfg Config, cat *tool.Catalog, log, noFS, remote bool, searchProvider tool.SearchProvider) {
 	if noFS {
 		for _, t := range tools.NoFS() {
 			cat.MustRegister(t)
@@ -5587,7 +5672,8 @@ func registerCoreTools(cfg Config, cat *tool.Catalog, log, noFS bool, searchProv
 		cat.MustRegister(t)
 	}
 	cat.MustRegister(refsearch.NewWebSearchTool(searchProvider))
-	if runner := buildCommandRunner(cfg); runner != nil {
+	runner := buildCommandRunner(cfg)
+	if runner != nil || remote {
 		// The AGENT-loop Shell tool (not the fstools one): foreground byte-identical,
 		// plus the `background: true` detach over the run's child registry. Its
 		// companion ShellStatus — the SOLE status/collect/cancel channel for those
@@ -5597,7 +5683,11 @@ func registerCoreTools(cfg Config, cat *tool.Catalog, log, noFS bool, searchProv
 		cat.MustRegister(agent.NewShellTool())
 		cat.MustRegister(agent.NewShellStatusTool())
 		if log {
-			cfg.diag().Log(context.Background(), port.LevelInfo, "Shell tool ENABLED", "shell", cfg.Shell, "cwd", cfg.Workspace)
+			if remote {
+				cfg.diag().Log(context.Background(), port.LevelInfo, "Shell tool ENABLED", "shell", "remote execution")
+			} else {
+				cfg.diag().Log(context.Background(), port.LevelInfo, "Shell tool ENABLED", "shell", cfg.Shell, "cwd", cfg.Workspace)
+			}
 		}
 	} else if log {
 		cfg.diag().Log(context.Background(), port.LevelInfo, "Shell tool DISABLED (shell-less mode): the agent has no command execution",
@@ -5849,7 +5939,8 @@ func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provid
 	// consumer.
 	var autoMerger tool.EnvironmentMerger
 	if cfg.EnableParallel {
-		autoMerger = forker.NewSerializingMerger(forker.NewMerger())
+		localMerger := forker.NewMerger()
+		autoMerger = forker.NewSerializingMerger(forker.NewKindMergerRouter(localMerger, cfg.EnvironmentMergers))
 	}
 
 	assets := catalogAssets{
@@ -5911,6 +6002,7 @@ func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provid
 		provider:   provider,
 		providerID: reg.Default(),
 		model:      cfg.Model,
+		remote:     cfg.RemoteExecution,
 		narrate:    true,
 	})
 	// Aggregate the build-time Subagent per-def INLINE MCP managers' teardown into
@@ -7566,13 +7658,13 @@ func buildSubagentTool(ctx context.Context, cfg Config, provReg *providerRegistr
 		// buildSandboxedCommandRunner does (sandboxedRunner != nil already proves the
 		// gate passed at build time; the per-child builder re-checks it so a future
 		// per-session trust change cannot hand a shell to an untrusted child).
-		taskForker := forker.New(newForkWorkspace(), forker.WithDirtyOverlay(),
+		taskForker := routeChildForker(cfg, forker.New(newForkWorkspace(), forker.WithDirtyOverlay(),
 			forker.WithRunner(func(childRoot string) tool.CommandRunner {
 				if !sandboxedShellAvailable(cfg) {
 					return nil
 				}
 				return newHardenedRunnerForRoot(cfg, childRoot)
-			}))
+			})))
 		opts = append(opts, agent.WithChildForker(taskForker))
 	}
 	// Base-sharing children retain the parent content backend but receive a
@@ -7892,6 +7984,10 @@ func buildAgentWritableEngineFactory(ctx context.Context, cfg Config, provReg *p
 	return ordinary
 }
 
+func routeChildForker(cfg Config, local tool.EnvironmentForker) tool.EnvironmentForker {
+	return forker.NewKindRouter(local, cfg.EnvironmentForkers)
+}
+
 // buildTeamWiring constructs the agent-team dependencies — the unified per-member
 // engine factory, the TWO workspace forkers (force-copy for mutating members,
 // worktree for read-only-isolated members), and the shared team hooks runner — that
@@ -7991,11 +8087,11 @@ func buildTeamWiring(_ context.Context, cfg Config, provReg *providerRegistry, p
 		}
 		return newHardenedRunnerForRoot(cfg, childRoot)
 	}
-	fk := forker.New(newForkWorkspace(), forker.WithForceCopy(), forker.WithRunner(fkRunnerBuilder))
-	roFk := forker.New(newForkWorkspace(), forker.WithDirtyOverlay(), forker.WithRunner(roRunnerBuilder))
+	fk := routeChildForker(cfg, forker.New(newForkWorkspace(), forker.WithForceCopy(), forker.WithRunner(fkRunnerBuilder)))
+	roFk := routeChildForker(cfg, forker.New(newForkWorkspace(), forker.WithDirtyOverlay(), forker.WithRunner(roRunnerBuilder)))
 	memberRunner := buildSandboxedCommandRunner(cfg)
 	mutatingRunner := buildForceCopyRunner(cfg)
-	roIsolationAvailable := memberRunner != nil && roFk != nil
+	roIsolationAvailable := memberRunner != nil
 	factory := buildMemberEngine(cfg, provReg, provider, parentProviderID, parentModel, teamHooks, agentReg, skillIdx, memberRunner, mutatingRunner, roIsolationAvailable, mainMgr, a, false)
 	return factory, fk, roFk, childWorkspaceView, teamHooks
 }
@@ -8502,6 +8598,21 @@ func applyRedisWorkspacePosture(pc prompt.Config, enabled bool) prompt.Config {
 
 const workspaceRootForPrompt = "/workspace"
 
+const remoteExecutionPostureNote = "This session uses a persistent remote Kubernetes workspace. Use the filesystem tools and foreground Shell for work in /workspace. Local project instructions, rules, project-scoped skills and commands, schedules, SkillDraft, Parallel, Team, and Subagent delegation are unavailable; explicitly selected independent commands, operator-global skills, MCP, memory, and web tools remain available. Never assume harness-local files are part of this workspace."
+
+func applyRemoteExecutionPosture(deps agent.Deps, enabled bool) agent.Deps {
+	if !enabled {
+		return deps
+	}
+	pc := &deps.PromptConfig
+	pc.Env.Cwd, pc.Env.Shell, pc.Env.GitStatus = workspaceRootForPrompt, "remote foreground shell", ""
+	if pc.Role == "" {
+		pc.Role = prompt.DefaultRole()
+	}
+	pc.Role += "\n\n" + remoteExecutionPostureNote
+	return deps
+}
+
 func applyDebugSessionPosture(pc prompt.Config, target session.SessionID, selectedServers []string) prompt.Config {
 	if pc.Role == "" {
 		pc.Role = prompt.DefaultRole()
@@ -8785,7 +8896,9 @@ const (
 		"the terminal client, which starts an embedded server by default or attaches to a remote one via " +
 		"`mecatui connect ADDRESS`; mecated the general-purpose gRPC and HTTP/SSE server; mecak8s the " +
 		"Kubernetes-native server keeping session state in Redis; mecatequi a one-shot CI task returning " +
-		"a patch."
+		"a patch; mecatl-execution-provider the authenticated Kubernetes control plane that owns persistent " +
+		"execution-environment lifecycle; mecatl-executor the credential-free workload helper that performs " +
+		"one confined filesystem or command operation inside an executor Pod."
 
 	// selfKnowledgePostureAxes is the load-bearing content clause: the three safety
 	// axes, kept distinct. Conflating the per-session permission mode with the
@@ -8937,6 +9050,7 @@ func lookupMemberDef(d port.Diagnostics, reg *agents.Registry, spec agent.Member
 // spawn never re-runs git on the hot path (FIX 2).
 func promptConfig(cfg Config, gitStatus string) prompt.Config {
 	pc := prompt.Config{
+		CommitCoauthor: cfg.commitCoauthor,
 		Env: prompt.Env{
 			Cwd:       cfg.Workspace,
 			OS:        runtime.GOOS,
@@ -8953,6 +9067,19 @@ func promptConfig(cfg Config, gitStatus string) prompt.Config {
 		pc.Role = prompt.DefaultRole() + "\n\n" + d
 	}
 	return pc
+}
+
+// foldOperatorCommitCoauthor carries the already-resolved OPERATOR-TIER
+// system_prompt.commit_coauthor setting into shared prompt composition. Nil retains
+// prompt.Config's enabled-by-default behavior; project-tier values never reach the
+// resolver accessor.
+func foldOperatorCommitCoauthor(cfg Config) Config {
+	res, ok := cfg.permResolver.(*permconfig.Resolver)
+	if !ok || res == nil {
+		return cfg
+	}
+	cfg.commitCoauthor = res.OperatorCommitCoauthor()
+	return cfg
 }
 
 // foldOperatorReasoningEffort merges the OPERATOR-TIER `reasoning-effort:` YAML

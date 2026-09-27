@@ -86,9 +86,12 @@ Documentation/citation conventions are in [`docs/design/README.md`](../design/RE
 - [0349 - Cause-free TypeScript SDK malformed-success decoding](./0349-typescript-sdk-malformed-success-decoding.md) *(proposed; narrows decoder diagnostics at the HTTP successful-response boundary)*
 - [0351 — Mecatl Studio: in-repo web UI behind a BFF over the published SDK](./0351-mecatl-studio-in-repo-web-ui.md) *(proposed; `apps/` workspace, one-origin image, `MECATL_*`/`STUDIO_*` split)*
 - [0361 — Studio exposes coarse status and completes browser login in a popup](./0361-studio-anonymous-status-and-popup-login.md) *(proposed; anonymous status, authenticated runtime, and same-origin callback messaging)*
+- [0366 — Resolve plan asks by exact run and ask](./0366-exact-plan-ask-control.md) *(proposed; strict control for live and restored plan asks, extending ADR 0347)*
 - [0342 - Gate runs on unresolved live context windows](./0342-context-window-admission.md) *(supersedes ADR 0016 only for pre-swap run admission)*
 - [0356 — Durable context occupancy in session snapshots](./0356-durable-context-occupancy.md) *(proposed; extends ADR 0307 without changing lifetime-ledger or budget semantics)*
+- [0367 — Operator-configurable standard commit co-author guidance](./0367-configurable-commit-coauthor-guidance.md) *(proposed; strict operator-only opt-out for default standard-prompt commit attribution)*
 - [0346 - Prompt-cache breakpoints are protocol-native, never vendor-keyed](./0346-unified-prompt-cache-dialect.md) *(supersedes ADR 0100's prompt_cache_breakpoint deferral, its root cache_control dialect arm, and its OpenRouter TTL deferral; extends ADR 0334 to OpenRouter)*
+- [0364 — Optional native Kubernetes execution provider](./0364-native-kubernetes-execution.md) *(draft; separate service, preserves ADR 0048)*
 - [0036 — `engine/` is its own Go module (monorepo via `go.work`)](./0036-engine-module.md)
 - [0037 — Engine public-API stability contract](./0037-engine-stability-contract.md)
 - [0038 — Event-sourced SessionStore rehydration (the reference fold)](./0038-event-sourced-rehydration.md) *(Decision 3 origin-opacity and no-public-replay clauses proposed to be superseded by 0337)*
@@ -156,6 +159,8 @@ Documentation/citation conventions are in [`docs/design/README.md`](../design/RE
 - [0208 — Execution environments and version-aware file mutation](./0208-execution-environment.md) *(runtime-seam deferral superseded by 0211; version protocol authoritative)*
 - [0211 — Execution-environment runtime seam](./0211-execution-environment-runtime-seam.md) *(supersedes 0208 decisions 1–3; phase-3 persistence deferral superseded by 0214)*
 - [0214 — Execution-environment persistence and reattachment](./0214-environment-persistence.md) *(supersedes 0211 decision 6 only)*
+- [0368 — Local microVM execution environments and developer-only release activation](./0368-microvm-execution-environments.md)
+- [0365 — Prepare Darwin VirtioFS ownership and supervise the direct runner](./0365-microvm-darwin-xattr-ownership.md) *(proposed; partially supersedes ADR 0368's macOS platform deferral if accepted; Linux amd64 remains authoritative)*
 
 ### Agents, teams & delegation
 - [0283 — Managed delegation-fork lifecycle](./0283-managed-delegation-fork-lifecycle.md) *(proposed; depends on 0281)*
@@ -190,6 +195,7 @@ Documentation/citation conventions are in [`docs/design/README.md`](../design/RE
 - [0035 — Surface the per-delegation model for ALL children, not just routed ones](./0035-per-delegation-model-surface.md)
 - [0042 — Taxonomy-gated subagent model router (enable by config, not a flag)](./0042-taxonomy-gated-model-router.md)
 - [0352 — Jev as an explicit delegated-model router backend](./0352-jev-delegated-model-router.md) *(proposed; narrowly supersedes ADR 0031's LLM-only classifier construction when selected)*
+- [0369 — Delegation selectors use provider/model pairs and router categories](./0369-delegation-provider-model-selectors.md) *(proposed; explicit selectors preserve omitted-selector routing and keep router categories out of root-session inventory)*
 - [0064 — Auto-detect the ToolHive LLM gateway proxy as a native provider](./0064-toolhive-llm-gateway-provider.md)
 - [0102 — ToolHive LLM gateway DIRECT mode (in-process OIDC token injection)](./0102-toolhive-direct-mode.md)
 - [0067 — OpenAI Chat Completions adapter (OpenCode Go provider)](./0067-openai-chat-completions-adapter.md)

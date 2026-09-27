@@ -19,6 +19,7 @@ import (
 	customization "github.com/stacklok/mecatl/cmd/mecatui/customization"
 	"github.com/stacklok/mecatl/cmd/mecatui/internal/terminaltext"
 	"github.com/stacklok/mecatl/cmd/mecatui/theme"
+	"github.com/stacklok/mecatl/cmd/mecatui/ui/internal/scrollback"
 	"github.com/stacklok/mecatl/cmd/mecatui/ui/platform"
 	"github.com/stacklok/mecatl/cmd/mecatui/ui/prompttextarea"
 	"github.com/stacklok/mecatl/cmd/mecatui/ui/welcome"
@@ -184,6 +185,9 @@ type Deps struct {
 	// tests. nil disables the live bridge (the ui still renders deliveries via the
 	// replay on a session switch/reload, just not live). *Client satisfies it.
 	LiveStream client.LiveStreamer
+	// PendingApprovals owns exact-run watch and control operations for an exact
+	// startup recovery. It is unused for ordinary continuation.
+	PendingApprovals PendingApprovalController
 	// MCPAuthorization is the distinct browser authorization surface. It never
 	// shares the permission-approval stream or controls.
 	MCPAuthorization client.MCPAuthorizationController
@@ -317,6 +321,12 @@ type Deps struct {
 	// hint + affordances). Set by --no-banner, --quiet, or a non-interactive stdin
 	// (composed in main). Default false (full splash).
 	NoBanner bool
+
+	// StartupProgress carries bounded host-composition progress while the first
+	// session is being created. StartupFailureHint returns matching host-owned
+	// remediation when that preparation fails behind a redacted server error.
+	StartupProgress    <-chan string
+	StartupFailureHint func() string
 
 	// Ctx is the program-level context; per-run stream contexts derive from it.
 	Ctx context.Context //nolint:containedctx // stored to parent per-run stream cancels
@@ -535,6 +545,9 @@ type Model struct {
 	sessionsTranscriptRequestToken uint64
 	sessionsPageRequestToken       uint64
 	sessionsActionRequestToken     uint64
+	// agentsInvRequestToken identifies ListAgents work across inventory lifetimes.
+	// It is retained after close so a delayed result cannot update a later open.
+	agentsInvRequestToken uint64
 	// mcpRequestToken identifies broker inventory work across MCP panel lifetimes.
 	// A panel-local refresh generation alone restarts at one after reopen.
 	mcpRequestToken        uint64
@@ -671,8 +684,10 @@ type Model struct {
 	// is later; the field carries the one migrated surface. A surface's state is
 	// created at Open and lives ONLY inside this interface field — never a
 	// pre-declared tombstone field (surface.go).
-	modal           surface
-	pendingApproval *approvalResolvedIntent
+	modal                     surface
+	pendingApproval           *approvalResolvedIntent
+	pendingRecovery           *pendingApprovalRecovery
+	pendingRecoveryGeneration uint64
 	// modelSwitchRequestToken correlates the asynchronous create-and-hydrate handoff.
 	// A stale result must not replace a session selected by a later lifecycle action.
 	modelSwitchRequestToken uint64
@@ -898,7 +913,9 @@ type Model struct {
 	// latest turn's prompt size, which already includes cache-served tokens) —
 	// never the cumulative ResultMsg total. Distinct from usage, which is the
 	// cumulative session total.
-	contextTokens int64
+	contextTokens    int64
+	contextUnknown   bool
+	contextEstimated bool
 
 	// expandTools toggles all tool-result bodies (and Edit/Write diffs) between
 	// the line-capped view and the full view. Flipped by ctrl+t.
@@ -1138,10 +1155,41 @@ func New(deps Deps) Model {
 		m.activeMode = client.ModeString(client.ModeFromString(resume.Snapshot.Mode))
 		(&m).setResolvedSessionModel(resume.Snapshot.ResolvedModel)
 		m.caps = resume.Snapshot.Capabilities
+		m.usage = resume.Snapshot.Usage
+		if occupancy := resume.Snapshot.ContextOccupancy; occupancy != nil {
+			m.contextTokens = occupancy.InputTokens
+			m.contextEstimated = occupancy.Estimated
+		} else {
+			m.contextUnknown = true
+		}
 		m.conv = conversationFromTranscript(resume.Transcript.Messages)
 		m.startupAdopted = true
 		m.restartedThisRun = true
 		m.statusMsg = "continuing chat " + terminaltext.Sanitize(resume.Row.Title) + " — type to add a turn"
+		if resume.Pending != nil {
+			m.pendingRecoveryGeneration++
+			recoveryCtx, recoveryCancel := context.WithCancel(deps.Ctx)
+			snapshotCalls := make(map[string]struct{})
+			for i := 0; i < m.conv.scrollback.Len(); i++ {
+				toolCard, ok := m.conv.scrollback.SnapshotAt(i).Payload.(scrollback.ToolCardSnapshot)
+				if ok && !toolCard.Resolved {
+					snapshotCalls[toolCard.Call.ID] = struct{}{}
+				}
+			}
+			m.pendingRecovery = &pendingApprovalRecovery{
+				approval: *resume.Pending, ctx: recoveryCtx, cancel: recoveryCancel,
+				generation: m.pendingRecoveryGeneration, snapshotCalls: snapshotCalls,
+			}
+			m.phase = phaseConnecting
+			m.pendingInitialPrompt = ""
+			if deps.InitialPrompt != "" {
+				m.prompt.Rewrite(deps.InitialPrompt)
+				m.statusMsg = "initial prompt kept as a draft while approval recovery is pending"
+			} else {
+				m.statusMsg = "verifying pending approval recovery"
+			}
+			m.prompt.Blur()
+		}
 		m.refreshView()
 	}
 	return m
@@ -1176,10 +1224,13 @@ func (m Model) resetSession() Model {
 }
 
 func (m Model) resetSessionDerived() Model {
+	(&m).retirePendingApprovalRecovery()
 	m.admissionSubmission = nil
 	m = m.resetDocumentProjection()
 	m.usage = client.Usage{}
 	m.contextTokens = 0
+	m.contextUnknown = false
+	m.contextEstimated = false
 	m.activeTool = ""
 	m.toolProgress = ""
 	if m.authorization.controlCancel != nil {
@@ -1263,6 +1314,21 @@ func (m Model) resetSessionDerived() Model {
 // startupResumeReadyMsg starts post-adoption work only after Bubble Tea owns the
 // model, preserving transcript-before-seed ordering.
 type startupResumeReadyMsg struct{}
+type startupProgressMsg string
+
+func (m Model) startupProgressCmd() tea.Cmd {
+	if m.deps.StartupProgress == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		select {
+		case message := <-m.deps.StartupProgress:
+			return startupProgressMsg(message)
+		case <-m.deps.Ctx.Done():
+			return nil
+		}
+	}
+}
 
 // Init starts the spinner and kicks off connect.
 //
@@ -1285,6 +1351,9 @@ func (m Model) Init() tea.Cmd {
 	// false unless composition armed it (stdout is a real TTY).
 	if m.deps.ProbeKeyboardCapability {
 		startup = tea.Batch(m.keyboardProbeDeadlineCmd(), startup)
+	}
+	if m.deps.StartupProgress != nil {
+		startup = tea.Batch(startup, m.startupProgressCmd())
 	}
 	// The light/dark auto-detect (ADR 0280) wraps structurally around whatever
 	// startup fires, so every branch gets it without threading a themeDetectCmd
@@ -1321,6 +1390,9 @@ func (m Model) startupCmd() tea.Cmd {
 		return tea.Batch(cmds...)
 	}
 	if m.deps.Resume != nil {
+		if m.pendingRecovery != nil {
+			return tea.Batch(m.sp.Tick, m.openPendingApprovalWatchCmd(), m.statusLineWaitCmd())
+		}
 		return tea.Batch(m.sp.Tick, func() tea.Msg { return startupResumeReadyMsg{} }, m.statusLineWaitCmd())
 	}
 	if m.deps.Models != nil {

@@ -188,7 +188,9 @@ func (c *Config) UnmarshalYAML(node ast.Node) error {
 		"mcp":                    newPermconfigNodePointer(&c.MCP),
 		"retention":              newPermconfigNodePointer(&c.Retention),
 		"storage_management":     newPermconfigNodePointer(&c.StorageManagement),
+		"system_prompt":          newPermconfigNodePointer(&c.SystemPrompt),
 		"command_runner":         newPermconfigNodePointer(&c.CommandRunner),
+		"execution":              newPermconfigNodePointer(&c.Execution),
 		"temporary_storage":      newPermconfigNodePointer(&c.TemporaryStorage),
 	}
 	for _, entry := range mapping.Values {

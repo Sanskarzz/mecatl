@@ -260,6 +260,16 @@ Versioned automatic session cleanup policy. Operator-tier only; project values a
 | `retention.sweep_cadence` | `duration` | `1h` | SweepCadence is the repeat interval; 0 disables repeats while retaining the compatibility startup sweep. |
 | `retention.acknowledge_main_deletion` | `bool` | `false` | AcknowledgeMainDeletion explicitly consents to destructive main-session cleanup. |
 
+## `system_prompt`
+
+Tier: **operator**
+
+Strict standard prompt policy. Operator-tier only; project values are ignored.
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `system_prompt.commit_coauthor` | `bool` | `true` | CommitCoauthor controls the standard commit co-author guidance. Nil preserves the default enabled behavior; false opts out. |
+
 ## `command_runner`
 
 Tier: **operator**
@@ -300,6 +310,20 @@ Exact verified OIDC issuer/subject pairs authorized for process-wide storage hea
 | `storage_management.principals` | `[]storagemanagementprincipal` | `(absent)` | Principals lists exact verified OIDC issuer/subject pairs. Empty grants nobody. |
 | `storage_management.principals[].issuer` | `string` | `(empty)` | Issuer must equal the verified token issuer byte-for-byte. |
 | `storage_management.principals[].subject` | `string` | `(empty)` | Subject must equal the verified token subject byte-for-byte. |
+
+## `execution`
+
+Tier: **operator**
+
+Server-owned execution placement and MicroVM guest-egress policy. Operator-tier only; project values are ignored. Bare mecatui and mecated resolve the same settings.
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `execution.default_placement` | `string` | `host-local` | The default_placement setting selects the server-owned default placement backend. |
+| `execution.microvm` | `executionmicrovmsection` | `(absent)` | The microvm block configures local MicroVM execution without creating a public profile. |
+| `execution.microvm.guest_egress` | `executionguestegresssection` | `(absent)` | The guest_egress block controls network destinations reachable from the guest. |
+| `execution.microvm.guest_egress.mode` | `string` | `permissive` | mode accepts permissive, deny-all, or allowlist. Permissive is the default. |
+| `execution.microvm.guest_egress.allow` | `[]string` | `(absent)` | allow lists HOST:PORT/tcp\|udp destinations and is valid only in allowlist mode. |
 
 ## `steer`
 

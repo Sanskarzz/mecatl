@@ -160,6 +160,12 @@ func toProto(ev session.Event) *mecatlv1.Event {
 	if ev.Authorization != nil {
 		out.Authorization = toProtoAuthorization(*ev.Authorization)
 	}
+	if ev.PlanContinuationFailure != nil {
+		out.PlanContinuationFailure = &mecatlv1.PlanContinuationFailure{
+			PlanRunId: valid(ev.PlanContinuationFailure.PlanRunID),
+			AskId:     valid(ev.PlanContinuationFailure.AskID),
+		}
+	}
 	if ev.Result != nil {
 		out.Result = toProtoResult(*ev.Result)
 	}
@@ -773,13 +779,18 @@ func mediaKindFromBlock(k mecatlv1.ContentBlock_Kind) session.MediaKind {
 
 // toProtoAsk maps a session.PendingAsk to its proto PermissionAsk form.
 func toProtoAsk(a session.PendingAsk) *mecatlv1.PermissionAsk {
-	return &mecatlv1.PermissionAsk{
+	out := &mecatlv1.PermissionAsk{
 		AskId:     a.AskID,
 		Tool:      valid(a.Tool),
 		Args:      valid(string(a.Args)),
 		Reason:    valid(a.Reason),
 		Guardrail: toProtoGuardrailApprovalScope(a.Guardrail),
 	}
+	if a.Call != "" {
+		callID := valid(string(a.Call))
+		out.CallId = &callID
+	}
+	return out
 }
 
 func toProtoGuardrailApprovalScope(scope *session.GuardrailPendingScope) *mecatlv1.GuardrailApprovalScope {
@@ -910,6 +921,7 @@ func toProtoTurnEnd(p session.TurnEndPayload) *mecatlv1.TurnEnd {
 	return &mecatlv1.TurnEnd{
 		Usage:      toProtoUsage(p.Usage),
 		DurationMs: p.DurationMs,
+		Estimated:  p.Estimated,
 	}
 }
 
@@ -984,12 +996,21 @@ func toProtoSession(s *session.Session, rm ResolvedModel, _ *mecatlv1.ServerCapa
 			Image: sessionCaps.Image,
 			Audio: sessionCaps.Audio,
 		},
-		Kind:            string(s.Kind),
-		Relationship:    toProtoSessionRelationship(s.Relationship),
-		DebugMcpServers: validStrings(s.DebugMCPServers),
-		DebugMcpTools:   validStrings(s.DebugMCPTools),
-		Placement:       placementMetadataToProto(s.Placement),
+		Kind:                   string(s.Kind),
+		Relationship:           toProtoSessionRelationship(s.Relationship),
+		DebugMcpServers:        validStrings(s.DebugMCPServers),
+		DebugMcpTools:          validStrings(s.DebugMCPTools),
+		Placement:              placementMetadataToProto(s.Placement),
+		LatestContextOccupancy: toProtoContextOccupancy(s),
 	}
+}
+
+func toProtoContextOccupancy(s *session.Session) *mecatlv1.ContextOccupancy {
+	occupancy, ok := s.LatestContextOccupancy()
+	if !ok {
+		return nil
+	}
+	return &mecatlv1.ContextOccupancy{InputTokens: int64(occupancy.InputTokens), Estimated: occupancy.Estimated}
 }
 
 func titlePayload(s *session.Session) session.TitlePayload {

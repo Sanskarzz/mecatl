@@ -16,6 +16,7 @@ const (
 	configDurationType = "duration"
 	configAbsent       = "(absent)"
 	configRequired     = "(required)"
+	configFalse        = "false"
 )
 
 // BuildModel constructs the settings.yaml Model by REFLECTING over the permconfig
@@ -37,9 +38,11 @@ func BuildModel(docs Docs) *Model {
 		harnessContextSubtree(docs),
 		learningSubtree(docs),
 		retentionSubtree(docs),
+		systemPromptSubtree(docs),
 		commandRunnerSubtree(docs),
 		temporaryStorageSubtree(docs),
 		storageManagementSubtree(docs),
+		executionSubtree(docs),
 		steerSubtree(docs),
 		modelsSubtree(docs),
 		openRouterSubtree(docs),
@@ -81,7 +84,7 @@ func zeroDefault(t reflect.Type) string {
 	case reflect.String:
 		return "(empty)"
 	case reflect.Bool:
-		return "false"
+		return configFalse
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		return "0"
 	default:
@@ -274,6 +277,18 @@ func retentionSubtree(docs Docs) *Subtree {
 		Doc: "Versioned automatic session cleanup policy. Operator-tier only; project values are ignored. Zero disables each limit. Explicit compatibility flags outrank these values.", Fields: fields}
 }
 
+func systemPromptSubtree(docs Docs) *Subtree {
+	fields := fieldsOf("SystemPromptSection", permconfig.SystemPromptSection{}, docs)
+	fields[0].Default, fields[0].ExampleValue = "true", configFalse
+	return &Subtree{
+		Key:          "system_prompt",
+		Tier:         TierOperator,
+		CommentedOut: true,
+		Doc:          "Strict standard prompt policy. Operator-tier only; project values are ignored.",
+		Fields:       fields,
+	}
+}
+
 func commandRunnerSubtree(docs Docs) *Subtree {
 	fields := fieldsOf("CommandRunnerSection", permconfig.CommandRunnerSection{}, docs)
 	environment := fieldsOf("CommandRunnerEnvironment", permconfig.CommandRunnerEnvironment{}, docs)
@@ -315,6 +330,21 @@ func temporaryStorageSubtree(docs Docs) *Subtree {
 	}
 	return &Subtree{Key: "temporary_storage", Tier: TierOperator, CommentedOut: true,
 		Doc: "Managed command temporary-storage policy. Read only from user-global settings.yaml; project and explicit CLI config values are ignored. Managed mode is Linux-only; system preserves inherited temporary-directory behavior.", Fields: fields}
+}
+
+func executionSubtree(docs Docs) *Subtree {
+	fields := fieldsOf("ExecutionSection", permconfig.ExecutionSection{}, docs)
+	microVM := fieldsOf("ExecutionMicroVMSection", permconfig.ExecutionMicroVMSection{}, docs)
+	guestEgress := fieldsOf("ExecutionGuestEgressSection", permconfig.ExecutionGuestEgressSection{}, docs)
+	fields[0].Default, fields[0].ExampleValue = "host-local", "host-local"
+	fields[1].Nested = microVM
+	microVM[0].Nested = guestEgress
+	guestEgress[0].Default, guestEgress[0].ExampleValue = "permissive", "permissive"
+	return &Subtree{
+		Key: "execution", Tier: TierOperator, CommentedOut: true,
+		Doc:    "Server-owned execution placement and MicroVM guest-egress policy. Operator-tier only; project values are ignored. Bare mecatui and mecated resolve the same settings.",
+		Fields: fields,
+	}
 }
 
 func storageManagementSubtree(docs Docs) *Subtree {

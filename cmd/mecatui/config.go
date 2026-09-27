@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/charmbracelet/x/ansi"
@@ -43,17 +44,21 @@ type config struct {
 	workspace string
 	// workspaceExplicit distinguishes an operator-supplied --workspace from the
 	// empty default. Remote connect rejects the former without resolving it.
-	workspaceExplicit bool
-	mode              string
-	theme             string
-	themeDir          string
-	authToken         string
-	anonymous         bool
-	useTLS            bool
-	tlsExplicit       bool
-	tlsCA             string
-	insecure          bool
-	listThemes        bool
+	workspaceExplicit     bool
+	microVMDevRelease     string
+	microVMDevAcknowledge bool
+	microVMProgress       chan string
+	microVMSelected       *atomic.Bool
+	mode                  string
+	theme                 string
+	themeDir              string
+	authToken             string
+	anonymous             bool
+	useTLS                bool
+	tlsExplicit           bool
+	tlsCA                 string
+	insecure              bool
+	listThemes            bool
 	// debug enables all mecatui client-side diagnostic surfaces. An explicit
 	// --debug value outranks MECATUI_DEBUG.
 	debug        bool
@@ -375,17 +380,18 @@ func parseTransportFlags(mode transportMode, out io.Writer, args []string, brows
 	cfg.browseSessions = len(browseSessions) > 0 && browseSessions[0]
 	fs := flag.NewFlagSet("mecatui", flag.ContinueOnError)
 	fs.SetOutput(out)
-	fs.StringVar(&cfg.workspace, "workspace", "", "set the embedded server workspace to DIR (default: current directory)")
+	fs.StringVar(&cfg.workspace, "workspace", "", "embedded server only: absolute deployment workspace root (default: cwd); not accepted by connect")
+	registerMicroVMDevelopmentFlags(fs, &cfg.microVMDevRelease, &cfg.microVMDevAcknowledge)
 	fs.StringVar(&cfg.mode, "mode", "default", "start sessions in permission mode: default, plan, or accept-edits")
 	fs.Func("debug-mcp", "attach configured streaming-HTTP MCP server NAME to debug sessions (repeatable)", func(value string) error {
 		cfg.debugMCP = append(cfg.debugMCP, value)
 		return nil
 	})
-	fs.StringVar(&cfg.resumeID, "resume", "", "continue the main chat with SESSION_ID (conflicts with --resume-latest)")
-	fs.BoolVar(&cfg.resumeLatest, "resume-latest", false, "continue the most recent resumable main chat, or start a new chat if none is available (conflicts with --resume)")
-	fs.StringVar(&cfg.prompt, "prompt", "", "submit TEXT when the session is ready; the TUI remains open for follow-ups")
+	fs.StringVar(&cfg.resumeID, "resume", "", "continue a stored main chat or supported ordinary pending approval with SESSION_ID (conflicts with --resume-latest)")
+	fs.BoolVar(&cfg.resumeLatest, "resume-latest", false, "continue the most recent resumable main chat, excluding pending approvals, or start a new chat if none is available (conflicts with --resume)")
+	fs.StringVar(&cfg.prompt, "prompt", "", "submit TEXT when the session is ready; kept as an unsent draft during pending-approval recovery; the TUI remains open for follow-ups")
 	fs.StringVar(&cfg.prompt, "p", "", "short form of --prompt")
-	fs.StringVar(&cfg.promptFile, "prompt-file", "", "submit the contents of FILE when the session is ready; appended after --prompt when both are set")
+	fs.StringVar(&cfg.promptFile, "prompt-file", "", "submit the contents of FILE when the session is ready; appended after --prompt; kept as an unsent draft during pending-approval recovery")
 	fs.StringVar(&cfg.theme, "theme", "", "theme name (default: aztec)")
 	fs.StringVar(&cfg.themeDir, "theme-dir", "", "extra directory of *.json themes to load")
 	fs.StringVar(&cfg.authToken, "auth-token", "", "bearer token for an external server (or MECATL_AUTH_TOKEN)")
@@ -494,29 +500,8 @@ func parseTransportFlags(mode transportMode, out io.Writer, args []string, brows
 		return fs, config{}, err
 	}
 
-	// --help-flags is the bare/local common flag reference.
-	if cfg.helpFlags {
-		if mode != modeLocal || cfg.browseSessions {
-			return fs, config{}, errors.New("--help-flags is available only as bare 'mecatui --help-flags'")
-		}
-		writeBareCommonHelp(fs.Output(), fs)
-		return nil, config{}, flag.ErrHelp
-	}
-
-	// --help-all was parsed as a normal flag; render and return ErrHelp (exit 0).
-	if cfg.helpAll {
-		out := fs.Output()
-		if cfg.browseSessions {
-			writeSessionsHelpAll(out, fs, mode)
-		} else {
-			switch mode {
-			case modeConnect:
-				writeConnectHelpAll(out, fs)
-			default:
-				writeBareHelpAll(out, fs)
-			}
-		}
-		return nil, config{}, flag.ErrHelp
+	if helpFS, handled, err := handleTransportHelp(fs, cfg, mode); handled {
+		return helpFS, config{}, err
 	}
 
 	// By-name applicability rejection (ADR 0087): connect rejects embedded-only
@@ -529,6 +514,9 @@ func parseTransportFlags(mode transportMode, out io.Writer, args []string, brows
 	}
 
 	if err := finalizeParsedConfig(fs, &cfg); err != nil {
+		return fs, config{}, err
+	}
+	if err := validateMicroVMDevelopmentFlags(cfg); err != nil {
 		return fs, config{}, err
 	}
 	if err := validateResumeSelectors(cfg); err != nil {
@@ -545,6 +533,39 @@ func parseTransportFlags(mode transportMode, out io.Writer, args []string, brows
 		cfg.promptFileBody = string(body)
 	}
 	return fs, cfg, nil
+}
+
+func handleTransportHelp(fs *flag.FlagSet, cfg config, mode transportMode) (*flag.FlagSet, bool, error) {
+	if cfg.helpFlags {
+		if mode != modeLocal || cfg.browseSessions {
+			return fs, true, errors.New("--help-flags is available only as bare 'mecatui --help-flags'")
+		}
+		writeBareCommonHelp(fs.Output(), fs)
+		return nil, true, flag.ErrHelp
+	}
+	if !cfg.helpAll {
+		return fs, false, nil
+	}
+
+	out := fs.Output()
+	if cfg.browseSessions {
+		writeSessionsHelpAll(out, fs, mode)
+	} else if mode == modeConnect {
+		writeConnectHelpAll(out, fs)
+	} else {
+		writeBareHelpAll(out, fs)
+	}
+	return nil, true, flag.ErrHelp
+}
+
+func validateMicroVMDevelopmentFlags(cfg config) error {
+	_, _, err := microVMDevelopmentReadyRequest(
+		cfg.microVMDevRelease,
+		cfg.microVMDevAcknowledge,
+		version,
+		microVMReleaseStampRequired != "" || microVMReleaseDefaultsB64 != "",
+	)
+	return err
 }
 
 // resolveRemoteTLSPolicy applies the connect transport policy only after the

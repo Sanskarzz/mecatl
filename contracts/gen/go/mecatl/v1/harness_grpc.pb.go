@@ -58,6 +58,7 @@ const (
 	HarnessService_ForkSession_FullMethodName                     = "/mecatl.v1.HarnessService/ForkSession"
 	HarnessService_Converse_FullMethodName                        = "/mecatl.v1.HarnessService/Converse"
 	HarnessService_ResolveRunAsk_FullMethodName                   = "/mecatl.v1.HarnessService/ResolveRunAsk"
+	HarnessService_ResolvePlanAsk_FullMethodName                  = "/mecatl.v1.HarnessService/ResolvePlanAsk"
 	HarnessService_CancelRun_FullMethodName                       = "/mecatl.v1.HarnessService/CancelRun"
 	HarnessService_SteerRun_FullMethodName                        = "/mecatl.v1.HarnessService/SteerRun"
 	HarnessService_CancelRunSteer_FullMethodName                  = "/mecatl.v1.HarnessService/CancelRunSteer"
@@ -191,6 +192,8 @@ type HarnessServiceClient interface {
 	// ResolveRunAsk resolves one ordinary permission ask on the exact addressed
 	// run without opening or owning its event stream.
 	ResolveRunAsk(ctx context.Context, in *ResolveRunAskRequest, opts ...grpc.CallOption) (*ResolveRunAskResponse, error)
+	// ResolvePlanAsk acknowledges a verdict for one exact plan-originated ask.
+	ResolvePlanAsk(ctx context.Context, in *ResolvePlanAskRequest, opts ...grpc.CallOption) (*ResolvePlanAskResponse, error)
 	// CancelRun cancels the exact addressed live run without opening Converse.
 	CancelRun(ctx context.Context, in *CancelRunRequest, opts ...grpc.CallOption) (*CancelRunResponse, error)
 	// SteerRun injects an instruction into the exact addressed live run. Unlike
@@ -230,11 +233,13 @@ type HarnessServiceClient interface {
 	// model, its effective read-only tool scope, permission mode, and UX color.
 	// Derived from the snapshot taken at startup; it performs no live discovery.
 	ListAgents(ctx context.Context, in *ListAgentsRequest, opts ...grpc.CallOption) (*ListAgentsResponse, error)
-	// ListCommands returns slash commands discovered for one owned session's exact
-	// server-bound placement. It authorizes and reattaches that session before
-	// discovery and accepts no workspace/root input. It powers the client's command
-	// palette; command expansion remains a run-path concern. A no-FS session or a
-	// server with no command expander returns an empty list.
+	// ListCommands returns slash commands from the configured, resolved sources
+	// for one authorized, owned session. It runs independently of execution and
+	// accepts no client workspace/root input. A source that needs execution files
+	// acquires only that session's exact backend. It powers the client's command
+	// palette; command expansion remains a run-path concern. A server with no
+	// configured command sources returns an empty list; a no-FS session can retain
+	// independently configured sources.
 	ListCommands(ctx context.Context, in *ListCommandsRequest, opts ...grpc.CallOption) (*ListCommandsResponse, error)
 	// ListWorktrees discovers eligible alternatives for one owned source session's
 	// exactly reattached placement. Results carry bounded display metadata and an
@@ -685,6 +690,16 @@ func (c *harnessServiceClient) ResolveRunAsk(ctx context.Context, in *ResolveRun
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ResolveRunAskResponse)
 	err := c.cc.Invoke(ctx, HarnessService_ResolveRunAsk_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *harnessServiceClient) ResolvePlanAsk(ctx context.Context, in *ResolvePlanAskRequest, opts ...grpc.CallOption) (*ResolvePlanAskResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ResolvePlanAskResponse)
+	err := c.cc.Invoke(ctx, HarnessService_ResolvePlanAsk_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1413,6 +1428,8 @@ type HarnessServiceServer interface {
 	// ResolveRunAsk resolves one ordinary permission ask on the exact addressed
 	// run without opening or owning its event stream.
 	ResolveRunAsk(context.Context, *ResolveRunAskRequest) (*ResolveRunAskResponse, error)
+	// ResolvePlanAsk acknowledges a verdict for one exact plan-originated ask.
+	ResolvePlanAsk(context.Context, *ResolvePlanAskRequest) (*ResolvePlanAskResponse, error)
 	// CancelRun cancels the exact addressed live run without opening Converse.
 	CancelRun(context.Context, *CancelRunRequest) (*CancelRunResponse, error)
 	// SteerRun injects an instruction into the exact addressed live run. Unlike
@@ -1452,11 +1469,13 @@ type HarnessServiceServer interface {
 	// model, its effective read-only tool scope, permission mode, and UX color.
 	// Derived from the snapshot taken at startup; it performs no live discovery.
 	ListAgents(context.Context, *ListAgentsRequest) (*ListAgentsResponse, error)
-	// ListCommands returns slash commands discovered for one owned session's exact
-	// server-bound placement. It authorizes and reattaches that session before
-	// discovery and accepts no workspace/root input. It powers the client's command
-	// palette; command expansion remains a run-path concern. A no-FS session or a
-	// server with no command expander returns an empty list.
+	// ListCommands returns slash commands from the configured, resolved sources
+	// for one authorized, owned session. It runs independently of execution and
+	// accepts no client workspace/root input. A source that needs execution files
+	// acquires only that session's exact backend. It powers the client's command
+	// palette; command expansion remains a run-path concern. A server with no
+	// configured command sources returns an empty list; a no-FS session can retain
+	// independently configured sources.
 	ListCommands(context.Context, *ListCommandsRequest) (*ListCommandsResponse, error)
 	// ListWorktrees discovers eligible alternatives for one owned source session's
 	// exactly reattached placement. Results carry bounded display metadata and an
@@ -1797,6 +1816,9 @@ func (UnimplementedHarnessServiceServer) Converse(grpc.BidiStreamingServer[Conve
 }
 func (UnimplementedHarnessServiceServer) ResolveRunAsk(context.Context, *ResolveRunAskRequest) (*ResolveRunAskResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ResolveRunAsk not implemented")
+}
+func (UnimplementedHarnessServiceServer) ResolvePlanAsk(context.Context, *ResolvePlanAskRequest) (*ResolvePlanAskResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ResolvePlanAsk not implemented")
 }
 func (UnimplementedHarnessServiceServer) CancelRun(context.Context, *CancelRunRequest) (*CancelRunResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CancelRun not implemented")
@@ -2272,6 +2294,24 @@ func _HarnessService_ResolveRunAsk_Handler(srv interface{}, ctx context.Context,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(HarnessServiceServer).ResolveRunAsk(ctx, req.(*ResolveRunAskRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HarnessService_ResolvePlanAsk_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResolvePlanAskRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HarnessServiceServer).ResolvePlanAsk(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HarnessService_ResolvePlanAsk_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HarnessServiceServer).ResolvePlanAsk(ctx, req.(*ResolvePlanAskRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -3365,6 +3405,10 @@ var HarnessService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ResolveRunAsk",
 			Handler:    _HarnessService_ResolveRunAsk_Handler,
+		},
+		{
+			MethodName: "ResolvePlanAsk",
+			Handler:    _HarnessService_ResolvePlanAsk_Handler,
 		},
 		{
 			MethodName: "CancelRun",

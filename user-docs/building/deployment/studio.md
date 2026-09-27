@@ -74,6 +74,22 @@ set. Open `/workspace/shortcuts` directly or follow **Keyboard shortcuts**
 from **Settings > About**. The page lists the current browser bindings and
 features enabled by the connected deployment.
 
+### Inspect delegated activity
+
+When a run delegates work, its transcript shows an activity card for each
+observed Subagent, Parallel group, or Team member. Select a card to open that
+work in the activity panel. Select **Activity** in the chat header to open the
+session roster instead. The panel opens only when you select one of these
+controls.
+
+Use the **Subagents**, **Parallel**, and **Teams** tabs to inspect observed
+states, tool summaries, branch winners, team tasks and findings, and stop
+reasons. A selected child, branch, or member shows its 12 most recent trace
+entries and the number of older entries omitted. If replay history is
+incomplete, Studio marks it as incomplete and leaves unobserved outcomes
+unknown. Close the panel with Escape or its close button to return focus to the
+control that opened it.
+
 ## Review settings
 
 Open `/workspace/settings/profile` for personal preferences. Every settings
@@ -183,6 +199,20 @@ Shift+Enter selects the other action. You can edit or remove queued messages.
 Use **Stop** to cancel the active run. If a run fails and offers **Retry**, that
 action retries the failed run without sending the prompt again. Image messages
 can be sent after the current run ends.
+
+If a tool needs external authorization, select **Review authorization** in the
+chat. Select **Open authorization** to complete the external step in a
+new tab, then return to Studio and select **Recheck**. The panel shows the
+observed status. **Cancel authorization** ends the pending handoff. Opening the
+external page alone does not grant access, and closing the review panel leaves
+the handoff pending. Open the page from the Studio panel. The Studio
+authorization link rejects address-bar navigation and links from other sites.
+
+If Studio cannot confirm a **Recheck** or **Cancel authorization** result, the
+panel disables both actions. Select **Refresh activity** to check for a later
+status from the same handoff. A new pending status restores the actions; a
+resolved status updates the panel. If no later status appears, the outcome
+remains uncertain and the actions stay disabled.
 
 Folders, queued messages, and account preferences survive a reload for the same
 account. Studio clears them when you sign out or switch accounts. The device

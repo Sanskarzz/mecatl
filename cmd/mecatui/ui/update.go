@@ -29,6 +29,43 @@ import (
 // the dirty view at most once per frame. The visible cadence is unchanged.
 const renderInterval = 16 * time.Millisecond
 
+func safeMicroVMReadinessMessage(detail string) (string, bool) {
+	const prefix = "server: placement unavailable: microvm readiness failed; "
+	if len(detail) > 1024 {
+		return "", false
+	}
+	start := strings.Index(detail, prefix)
+	if start < 0 {
+		return "", false
+	}
+	parts := strings.Split(detail[start+len(prefix):], "; ")
+	if len(parts) != 4 || parts[3] != "remediation=run 'mecated microvm doctor' and inspect the mecatui/server diagnostics log, then retry" {
+		return "", false
+	}
+	stage := strings.TrimPrefix(parts[0], "stage=")
+	category := strings.TrimPrefix(parts[1], "category=")
+	cause := strings.TrimPrefix(parts[2], "cause=")
+	stages := map[string]bool{"prepare": true, "preflight": true, "download": true, "verify": true, "install": true, "daemon": true, "socket": true, "health": true, "ready": true}
+	causes := map[string]string{
+		"unsupported_platform":    "microvm-local requires Linux amd64 with KVM, use host-local on this host",
+		"host_prerequisite":       "a required host prerequisite is unavailable, run microvm doctor for host remediation",
+		"artifact_download":       "microVM artifacts could not be downloaded, check connectivity and retry",
+		"artifact_verification":   "microVM artifact verification failed, do not use the downloaded artifacts",
+		"artifact_install":        "verified microVM artifacts could not be installed",
+		"daemon_policy_identity":  "the microVM daemon, policy, or identity check failed, inspect doctor and diagnostics before retrying",
+		"readiness_configuration": "microVM readiness configuration is unavailable or invalid",
+	}
+	if !stages[stage] {
+		return "", false
+	}
+	if category == "host_prerequisite" && cause == "KVM is unavailable to the current user, run microvm doctor for host remediation" {
+		// KVM is the more specific cause in this category.
+	} else if causes[category] != cause {
+		return "", false
+	}
+	return "microvm-local preparation failed (placement_unavailable); stage=" + stage + "; category=" + category + "; cause=" + cause, true
+}
+
 // renderTickMsg is the one-shot frame-cadence flush signal. A streamed delta arms
 // it (via markDirty) when none is pending; the renderTickMsg handler flushes the
 // dirty view and disarms, re-arming only if more deltas arrived in the meantime.
@@ -420,6 +457,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // overlays accrue (each helper returns handled=false for a non-matching msg, so
 // at most one consumes).
 func (m Model) dispatchNonInputMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if mm, cmd, handled := m.updatePendingApproval(msg); handled {
+		return mm, cmd
+	}
 	// The open modal surface routes every non-key/wheel Msg through m.modal
 	// BEFORE the Model's generic reducer; handled=false falls through to the
 	// rest of the chain.
@@ -495,13 +535,34 @@ func (m Model) updateInventoryMsgs(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 	return m, nil, false
 }
 
+const (
+	startupResumeRefreshDelay   = 100 * time.Millisecond
+	startupResumeRefreshRetries = 10
+)
+
+type startupResumeRefreshRetryMsg struct {
+	sessionID string
+	attempt   int
+}
+
+func (m Model) startupResumeRefreshRetryCmd(attempt int) tea.Cmd {
+	id := m.sessionID
+	return tea.Tick(startupResumeRefreshDelay, func(time.Time) tea.Msg {
+		return startupResumeRefreshRetryMsg{sessionID: id, attempt: attempt}
+	})
+}
+
 func (m Model) finishStartupResume() (tea.Model, tea.Cmd) {
+	m.submitStatusLine()
 	cmd := (&m).maybeKittyTransmit()
 	if contextCmd := m.refreshStatusContextCmd(); contextCmd != nil {
 		cmd = tea.Batch(cmd, contextCmd)
 	}
 	if liveCmd := (&m).armLiveFeed(); liveCmd != nil {
 		cmd = tea.Batch(cmd, liveCmd)
+	}
+	if m.sessionID != "" && m.deps.Session != nil {
+		cmd = tea.Batch(cmd, client.RefreshStartupResumeCmd(m.deps.Ctx, m.deps.Session, m.sessionID))
 	}
 	if m.workspaceEnrollmentActive() {
 		m.enrollment = workspaceEnrollmentState{}
@@ -660,6 +721,11 @@ func (m Model) updateLifecycle(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 	case startupResumeReadyMsg:
 		mm, cmd := m.finishStartupResume()
 		return mm, cmd, true
+	case startupResumeRefreshRetryMsg:
+		if msg.sessionID != m.sessionID || !m.startupAdopted || m.deps.Session == nil {
+			return m, nil, true
+		}
+		return m, client.RefreshStartupResumeRetryCmd(m.deps.Ctx, m.deps.Session, msg.sessionID, msg.attempt), true
 	case reconnectMsg:
 		// Live-feed reconnect loop msgs (issue #387): degraded-state markers and
 		// the catch-up event msgs ride the reconnect channel. Handled here (a
@@ -742,6 +808,11 @@ func (m Model) updateLifecycle(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 			m.submitStatusLine()
 		}
 		return m, nil, true
+	case startupProgressMsg:
+		if m.phase == phaseConnecting && msg != "" {
+			m.statusMsg = m.deps.Theme.Style("muted").Render(terminaltext.Sanitize(string(msg)))
+		}
+		return m, m.startupProgressCmd(), true
 	case client.SessionReadyMsg:
 		return m.applySessionReady(msg)
 	case workspaceEnrollmentMsg:
@@ -887,6 +958,15 @@ func (m Model) updateLifecycle(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		}
 		m.phase = phaseFatal
 		m.fatalErr = msg.Err.Error()
+		if m.deps.StartupFailureHint != nil {
+			if hint := m.deps.StartupFailureHint(); hint != "" {
+				if readiness, ok := safeMicroVMReadinessMessage(msg.Err.Error()); ok {
+					m.fatalErr = readiness + "; " + hint
+				} else {
+					m.fatalErr = "microvm-local preparation failed (placement_unavailable); " + hint
+				}
+			}
+		}
 		return m, nil, true
 	case restartFailedMsg:
 		// A restart-now re-create failed. Unlike ConnectErrMsg this is NOT terminal:
@@ -942,7 +1022,7 @@ func (m Model) updateLifecycle(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 			return mm, cmd, true
 		}
 		if m.startupFirstPromptPending {
-			m = m.failStartupRunEntry()
+			m = m.failStartupRunEntry(msg.Err)
 			return m, nil, true
 		}
 		if m.failedStepRetryRun && !m.failedStepRetryAuthoritative {
@@ -1129,8 +1209,16 @@ func (m Model) onResolvedModelMsg(msg client.ResolvedModelMsg) (Model, tea.Cmd, 
 	}
 	m.sessionCreatedAt = msg.CreatedAt
 	m.activePlacement = msg.Placement
+	if occupancy := msg.ContextOccupancy; msg.AdoptContextOccupancy && m.startupAdopted && occupancy != nil {
+		m.contextTokens = occupancy.InputTokens
+		m.contextUnknown = false
+		m.contextEstimated = occupancy.Estimated
+	}
 	if (&m).setResolvedSessionModel(msg.Resolved) {
 		m.refreshView()
+	}
+	if msg.AdoptContextOccupancy && m.startupAdopted && m.resolvedSessionModel.ContextWindow == 0 && msg.StartupResumeRefreshAttempt < startupResumeRefreshRetries {
+		return m, m.startupResumeRefreshRetryCmd(msg.StartupResumeRefreshAttempt + 1), true
 	}
 	return m, nil, true
 }
@@ -1217,6 +1305,8 @@ func (m Model) updateStreamEvent(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// where even the estimate is zero.
 		if msg.Usage.InputTokens > 0 {
 			m.contextTokens = msg.Usage.InputTokens
+			m.contextUnknown = false
+			m.contextEstimated = msg.Estimated
 		}
 		m.conv.endReasoningStream()
 		if !trivialTurn(msg) {
@@ -1824,16 +1914,19 @@ func (m *Model) applySubagent(msg client.SubagentMsg) {
 // the read-only transcript gets the SAME projection without any live-run footer
 // side-effect.
 func applySubagentTo(c *conversation, msg client.SubagentMsg) {
+	msg.Goal, msg.Text, msg.Detail, msg.Cause = terminaltext.Sanitize(msg.Goal), terminaltext.Sanitize(msg.Text), terminaltext.Sanitize(msg.Detail), terminaltext.Sanitize(msg.Cause)
 	switch msg.Kind {
 	case client.SubagentStart:
-		c.setSubagentStart(msg.ParentCallID, msg.Goal, msg.RoutedCategory, msg.RoutedModel, msg.RoutingReason, msg.Model)
+		c.applySubagentTyped(msg)
 		c.fleetStart(msg.ChildID, msg.Goal, msg.RoutedCategory, msg.RoutedModel, msg.RoutingReason, msg.Model, msg.Background)
-		c.setSubagentRoutingDecision(msg.ParentCallID, msg.ChildID, msg.RoutingDecision)
+		if msg.ChildID != "" {
+			c.fleetLane(msg.ChildID).routingDecision = cloneRoutingDecision(msg.RoutingDecision)
+		}
 	case client.SubagentTool:
-		c.addSubagentTool(msg)
+		c.applySubagentTyped(msg)
 		c.fleetTool(msg)
 	case client.SubagentEnd:
-		c.setSubagentEnd(msg.ParentCallID, msg.Usage, msg.ToolCount, msg.Stop, msg.DurationMs)
+		c.applySubagentTyped(msg)
 		c.fleetEnd(msg.ChildID, msg.Usage, msg.ToolCount, msg.Stop, msg.Cause, msg.DurationMs)
 	}
 }
@@ -1876,10 +1969,8 @@ func applyParallelTo(c *conversation, msg client.ParallelMsg) {
 func (m *Model) applyTeam(msg client.TeamMsg) {
 	applyTeamTo(&m.conv, msg)
 	if msg.Kind == client.TeamEnd {
-		// team.end carries the terminal task + findings snapshots too, so the sub-views
-		// land the final state even if no member event followed the last transition.
-		m.conv.setTeamTasks(msg.ParentCallID, msg.Tasks)
-		m.conv.setTeamFindings(msg.ParentCallID, msg.Findings)
+		// team.end carries the terminal task + findings snapshots; applyTeamTo includes
+		// them in its typed update before the transient footer status is layered on.
 		// A team boundary is transient (like a no-progress notice): a brief muted footer
 		// status, never a durable scrollback notice. The durable team outcome already rides
 		// the team card + the run's ResultMsg.
@@ -1895,18 +1986,8 @@ func (m *Model) applyTeam(msg client.TeamMsg) {
 // read-only transcript gets the SAME projection without any live-run footer
 // side-effect.
 func applyTeamTo(c *conversation, msg client.TeamMsg) {
-	switch msg.Kind {
-	case client.TeamStart:
-		c.setTeamStart(msg.ParentCallID, msg.TeamID, msg.Roster)
-	case client.TeamMember:
-		c.addTeamMember(msg)
-	case client.TeamTasks:
-		c.setTeamTasks(msg.ParentCallID, msg.Tasks)
-	case client.TeamFindings:
-		c.setTeamFindings(msg.ParentCallID, msg.Findings)
-	case client.TeamEnd:
-		c.setTeamEnd(msg.ParentCallID, msg.TeamID, msg.Rounds, msg.Stop, msg.Usage, msg.Dispositions)
-	}
+	msg.TeamID, msg.Member, msg.Text, msg.Detail, msg.Cause = terminaltext.Sanitize(msg.TeamID), terminaltext.Sanitize(msg.Member), terminaltext.Sanitize(msg.Text), terminaltext.Sanitize(msg.Detail), terminaltext.Sanitize(msg.Cause)
+	c.applyTeamTyped(msg)
 }
 
 // onResize updates the WIDTH-bearing widget dimensions and invalidates the glamour
@@ -1944,6 +2025,7 @@ func (m Model) onResize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	// the header arithmetic are GONE; the heights are measured via lipgloss.Height of
 	// the rendered regions in chrome().
 	m.relayout()
+	m.configureAgentsInvViewport()
 	m.clampHelpScroll()
 	m.clampAgentsDetailScroll()
 	if widthChanged && m.vp.Height() == viewportHeight {
@@ -2146,30 +2228,8 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.doubleEscapeReleased = false
 	}
 
-	// Global lifecycle controls retain precedence over every overlay.
-	if key.Matches(msg, m.keys.Quit) {
-		return m.onQuitKey()
-	}
-
-	// ctrl+d is the unix EOF-habit quit (issue #504), an INDEPENDENT second guard.
-	// It sits right after Quit and BEFORE the textarea/phase routing so the chord is
-	// intercepted everywhere — but only when the prompt textarea is EMPTY. On a
-	// populated prompt we deliberately do NOT consume it, so the chord falls through
-	// to the textarea's DeleteCharacterForward (its default bubble binding) — never a
-	// surprise quit mid-draft. Handled even when an overlay/modal owns the keyboard
-	// (the textarea is blurred and empty then, so the empty gate passes).
-	if key.Matches(msg, m.keys.QuitD) && strings.TrimSpace(m.prompt.Value()) == "" {
-		return m.onQuitDKey()
-	}
-
-	// ctrl+z suspends the whole TUI process to the shell (issue #504). Handled
-	// BEFORE the phase/overlay routing so it works in EVERY state — idle, mid-run,
-	// the permission modal (the ask stays pending and durable). onSuspend writes the
-	// leave-behind notice to stderr, then returns tea.Suspend. Suspending does NOT
-	// stop the embedded mecated or an in-flight run — they keep working and the UI
-	// re-syncs on resume.
-	if key.Matches(msg, m.keys.Suspend) {
-		return m.onSuspend()
+	if mm, cmd, handled := m.onGlobalLifecycleKey(msg); handled {
+		return mm, cmd
 	}
 
 	// Help owns the remaining keys while open: its documented navigation and close
@@ -2238,6 +2298,33 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m.dispatchPhaseKey(msg)
+}
+
+func (m Model) onGlobalLifecycleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
+	// Global lifecycle controls retain precedence over every overlay.
+	if key.Matches(msg, m.keys.Quit) {
+		mm, cmd := m.onQuitKey()
+		return mm, cmd, true
+	}
+	// A populated prompt sends ctrl+d through to DeleteCharacterForward rather
+	// than allowing the independent EOF-habit quit guard to consume it.
+	if key.Matches(msg, m.keys.QuitD) && strings.TrimSpace(m.prompt.Value()) == "" {
+		mm, cmd := m.onQuitDKey()
+		return mm, cmd, true
+	}
+	if key.Matches(msg, m.keys.Suspend) {
+		mm, cmd := m.onSuspend()
+		return mm, cmd, true
+	}
+	return m.onPendingApprovalRecoveryKey(msg)
+}
+
+func (m Model) onPendingApprovalRecoveryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
+	if m.pendingRecovery == nil || m.pendingRecovery.resolving || m.pendingRecovery.resolved || !key.Matches(msg, m.keys.Close) {
+		return m, nil, false
+	}
+	(&m).retirePendingApprovalRecovery()
+	return m, tea.Quit, true
 }
 
 // onHelpKey handles the help overlay's complete keyboard contract. It runs before
@@ -2381,7 +2468,7 @@ func (m Model) dispatchSurfaceKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool
 	// A clear command composed while running stays actionable if a permission ask
 	// opens before Enter is pressed. Route it ahead of the approval surface:
 	// ClearSession cancels the ask and must never become Allow/Deny/Learn.
-	if clearCommandSubmitted(msg, m.keys.Submit, m.prompt.Value()) {
+	if m.pendingRecovery == nil && clearCommandSubmitted(msg, m.keys.Submit, m.prompt.Value()) {
 		return m.dispatchBareBuiltin(m.prompt.Value())
 	}
 	cmd, handled, closed := m.modal.HandleKey(msg)
@@ -2479,10 +2566,7 @@ func (m Model) applySessionsSurfaceIntent(intent surfaceIntent) (model tea.Model
 		m.maintenanceCleanupJobID = intent.jobID
 		return m, nil, true, false
 	case sessionsTranscriptAdoptionIntent:
-		m.caps = intent.capabilities
-		(&m).setResolvedSessionModel(intent.model)
-		m.activeMode = intent.mode
-		mm, cmd, stopSurfaceDispatch := m.adoptAuthoritativeTranscript(intent.row, intent.transcript)
+		mm, cmd, stopSurfaceDispatch := m.adoptAuthoritativeTranscript(intent.row, intent.transcript, intent.snapshot)
 		return mm, cmd, true, stopSurfaceDispatch
 	case sessionsStartupQuitIntent:
 		if sessions, ok := m.modal.(*sessionsState); ok && sessions.pageCancel != nil {
@@ -2598,6 +2682,7 @@ func (m Model) retryPendingModeCmd() tea.Cmd {
 // shows the hint, and schedules the timed disarm. See onKey's doc for the rationale.
 func (m Model) quitNow() (tea.Model, tea.Cmd) {
 	m.admissionSubmission = nil
+	(&m).retirePendingApprovalRecovery()
 	if m.cancelRun != nil {
 		m.cancelRun()
 	}
@@ -2607,15 +2692,21 @@ func (m Model) quitNow() (tea.Model, tea.Cmd) {
 // onQuitKey implements the guarded ctrl+c exit behavior. The immediate exit is
 // shared with /quit so both paths cancel an active run before Bubble Tea exits.
 func (m Model) onQuitKey() (tea.Model, tea.Cmd) {
+	if m.pendingRecovery != nil && m.pendingRecovery.resolved && !m.pendingRecovery.cancelled {
+		cmd := (&m).cancelPendingApprovalCmd()
+		m.statusMsg = "cancelling recovered run…"
+		m.refreshView()
+		return m, cmd
+	}
 	// Already armed → a second ctrl+c within the window: quit now. The fatal
 	// (dead-connection) screen also exits on a single press — there is no input to
 	// clear and no run to protect, so the guard would only add friction.
 	if m.quitArmed || m.phase == phaseFatal {
 		return m.quitNow()
 	}
-	// First ctrl+c with staged input: clear the input (mirrors esc's clear-the-line)
-	// and do NOT arm — a single press to wipe a draft is expected.
-	if strings.TrimSpace(m.prompt.Value()) != "" {
+	// Ordinary staged input clears on the first press. An in-flight recovery
+	// choice instead keeps its draft and arms exit with the uncertainty warning.
+	if strings.TrimSpace(m.prompt.Value()) != "" && (m.pendingRecovery == nil || !m.pendingRecovery.resolving) {
 		m.prompt.Reset()
 		m.pendingPromptMedia = client.MediaResult{}
 		return m.afterInputEdit(nil)
@@ -2625,6 +2716,9 @@ func (m Model) onQuitKey() (tea.Model, tea.Cmd) {
 	m.quitArmed = true
 	m.quitArmGen++
 	m.statusMsg = quitHintFor(m.keys.Quit)
+	if m.pendingRecovery != nil && m.pendingRecovery.resolving {
+		m.statusMsg += " — choice submitted; exiting cannot undo it, outcome may be unknown"
+	}
 	m.refreshView()
 	return m, m.quitDisarmCmd(m.quitArmGen)
 }
@@ -3397,16 +3491,23 @@ func (m Model) afterInputEdit(cmd tea.Cmd) (tea.Model, tea.Cmd) {
 	return mm, tea.Batch(cmd, fetch)
 }
 
-var errStartupRunEntry = &sessionTranscriptError{"the chat could not be attached for a new turn"}
+type startupRunEntryError struct{ title, text string }
 
-func (m Model) failStartupRunEntry() Model {
+func (e *startupRunEntryError) Error() string               { return e.text }
+func (e *startupRunEntryError) SafeTranscriptText() string  { return e.text }
+func (e *startupRunEntryError) SafeTranscriptTitle() string { return e.title }
+
+func (m Model) failStartupRunEntry(err error) Model {
 	m = m.endRun("")
 	m = m.resetDocumentProjection()
 	m.conv = conversationFromTranscript(m.deps.Resume.Transcript.Messages)
 	m.modal = &sessionsState{
-		selected:        m.deps.Resume.Row,
-		inspect:         true,
-		loadErr:         errStartupRunEntry,
+		selected: m.deps.Resume.Row,
+		inspect:  true,
+		loadErr: &startupRunEntryError{
+			title: client.SafeStartupRunEntryErrorTitle(err),
+			text:  client.SafeStartupRunEntryError(err),
+		},
 		view:            sessionsTranscript,
 		deps:            (&m).surfaceDeps(),
 		activeSessionID: m.sessionID,
@@ -3539,9 +3640,9 @@ func (m Model) submitPrompt() (tea.Model, tea.Cmd) {
 		m.promptRecovery = &promptRecovery{text: text, sessionID: m.sessionID, streamGen: m.streamGen + 1}
 	}
 	if len(media.Descriptors) > 0 {
-		m.conv.addUserWithMedia(text, media.Descriptors)
+		m.admissionSubmission.blockID = m.conv.addUserWithMedia(text, media.Descriptors)
 	} else {
-		m.conv.addUser(text)
+		m.admissionSubmission.blockID = m.conv.addUser(text)
 	}
 	// Seed the session title set-once from the first genuine prompt (mirrors the
 	// server's session.SetTitle: the FIRST non-empty prompt sticks, later prompts
@@ -4132,6 +4233,12 @@ func (m Model) onMouseWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
 // re-discriminates the concrete mouse type here, where the dispatch logically
 // belongs.
 func (m Model) onMouseMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.agentsInv.view != agentsInvNone {
+		if wheel, ok := msg.(tea.MouseWheelMsg); ok {
+			return m.onAgentsInvWheel(wheel)
+		}
+		return m, nil
+	}
 	switch msg := msg.(type) {
 	case tea.MouseWheelMsg:
 		return m.onMouseWheel(msg)
@@ -4691,11 +4798,13 @@ func (m Model) onScrollKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // conversationContent produces the complete current projection, including the expanded
 // changed-files appendix which is outside the conversation renderer's block rows.
 func (m *Model) conversationContent() string {
-	frame := m.rend.renderConversationFrame(&m.conv, m.expandTools)
+	frame := m.rend.renderConversationFrame(&m.conv.scrollback, m.expandTools)
 	content := strings.Join(frame.lines, "\n")
 	if m.expandTools {
-		if list := m.rend.renderChangedFiles(m.conv.filesChanged); list != "" {
-			content += "\n" + list
+		if appendix, ok := m.conv.scrollback.AppendixSnapshot(); ok {
+			if list := m.rend.renderChangedFiles(appendix.Files); list != "" {
+				content += "\n" + list
+			}
 		}
 	}
 	return content
@@ -4720,7 +4829,7 @@ func (m *Model) refreshView() {
 	// invalidated — the caller may be a spinner-only frame that skips refreshView
 	// entirely, in which case the vpView cache correctly serves the prior content.
 	m.rend.invalidateVPView()
-	frame := m.rend.renderConversationFrame(&m.conv, m.expandTools)
+	frame := m.rend.renderConversationFrame(&m.conv.scrollback, m.expandTools)
 	// FAST PATH: the line-slice handoff. When no selection is active AND the
 	// changed-files footer is not in play (it renders only under the global expand
 	// toggle), feed vp.SetContentLines directly with the incrementally-joined line
@@ -4736,9 +4845,11 @@ func (m *Model) refreshView() {
 	}
 	content := strings.Join(frame.lines, "\n")
 	if m.expandTools {
-		if list := m.rend.renderChangedFiles(m.conv.filesChanged); list != "" {
-			content += "\n" + list
-			frame = frameWithAppendix(frame, content, m.conv.changedFilesAppendixID)
+		if appendix, ok := m.conv.scrollback.AppendixSnapshot(); ok {
+			if list := m.rend.renderChangedFiles(appendix.Files); list != "" {
+				content += "\n" + list
+				frame = frameWithAppendix(frame, content, uint64(appendix.ID))
+			}
 		}
 	}
 	// An active text selection is now rendered by US (styleSelection splices the

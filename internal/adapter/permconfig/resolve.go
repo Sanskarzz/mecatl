@@ -222,9 +222,12 @@ type Resolver struct {
 	operatorStorageManagement    *StorageManagementSection
 	operatorStorageManagementErr error
 	operatorCommandRunner        *CommandRunnerSection
+	operatorSystemPrompt         *SystemPromptSection
 	operatorCommandRunnerErr     error
 	operatorTemporaryStorage     *TemporaryStorageSection
 	operatorTemporaryStorageErr  error
+	operatorExecution            *ExecutionSection
+	operatorExecutionErr         error
 
 	// operatorProviders and operatorProviderOverrides are immutable operator-tier
 	// provider configuration captured once at resolver construction.
@@ -309,6 +312,15 @@ func (r *Resolver) OperatorCredentialEnvironmentNames() []string {
 	return append([]string(nil), out...)
 }
 
+// OperatorCommitCoauthor returns the optional operator setting. Nil means absent,
+// so later composition can retain its enabled-by-default behavior.
+func (r *Resolver) OperatorCommitCoauthor() *bool {
+	if r == nil || r.operatorSystemPrompt == nil {
+		return nil
+	}
+	return r.operatorSystemPrompt.CommitCoauthor
+}
+
 // OperatorCommandRunner returns the immutable effective operator-tier command-runner policy.
 func (r *Resolver) OperatorCommandRunner() (*CommandRunnerSection, error) {
 	if r == nil {
@@ -324,6 +336,15 @@ func (r *Resolver) OperatorTemporaryStorage() (*TemporaryStorageSection, error) 
 		return nil, nil
 	}
 	return r.operatorTemporaryStorage, r.operatorTemporaryStorageErr
+}
+
+// OperatorExecution returns the immutable operator-tier execution policy and any
+// strict parse failure that would otherwise silently restore host execution.
+func (r *Resolver) OperatorExecution() (*ExecutionSection, error) {
+	if r == nil {
+		return nil, nil
+	}
+	return r.operatorExecution, r.operatorExecutionErr
 }
 
 // HarnessContextError reports an explicit operator policy that could not be parsed.
@@ -684,7 +705,7 @@ func stampsEqual(a, b map[string]fileStamp) bool {
 // each at its tier scope (local > shared), applies the trust gate, and logs the
 // import report. It is fail-soft PER FILE: an unreadable/malformed file is logged
 // and skipped, so a bad shared YAML never suppresses a good local/Claude file.
-func (r *Resolver) loadProjectRules(ws tool.WorkspaceReader) ([]governance.Rule, *ModelsSection) {
+func (r *Resolver) loadProjectRules(ws tool.WorkspaceReader) ([]governance.Rule, *ModelsSection) { //nolint:gocyclo // Project-tier parsing keeps per-subtree warnings at one trust boundary.
 	var report Report
 	var rules []governance.Rule
 	var projectModels *ModelsSection
@@ -794,7 +815,13 @@ func (r *Resolver) loadProjectRules(ws tool.WorkspaceReader) ([]governance.Rule,
 				"retention: IGNORING a project-tier retention block (operator-tier only; projects cannot weaken cleanup protection)",
 				"file", src.path, "root", ws.Root())
 		}
+		r.warnProjectSystemPrompt(cfg.SystemPrompt, src.path, ws.Root())
 		r.warnProjectCommandRunner(cfg.CommandRunner, src.path, ws.Root())
+		if cfg.Execution != nil {
+			r.diag.Log(context.Background(), port.LevelWarn,
+				"execution: IGNORING project-tier execution block (operator-tier only)",
+				"file", src.path, "root", ws.Root())
+		}
 		if cfg.TemporaryStorage != nil {
 			r.diag.Log(context.Background(), port.LevelWarn,
 				"temporary_storage: IGNORING a project-tier temporary_storage block (operator-tier only; projects cannot redirect command temporary storage or alter cleanup retention)",
@@ -836,6 +863,15 @@ func (r *Resolver) warnProjectCommandRunner(section *CommandRunnerSection, file,
 	}
 	r.diag.Log(context.Background(), port.LevelWarn,
 		"command_runner: IGNORING a project-tier command_runner block (operator-tier only; configure it in user-global settings.yaml or an explicit operator file)",
+		"file", file, "root", root)
+}
+
+func (r *Resolver) warnProjectSystemPrompt(section *SystemPromptSection, file, root string) {
+	if section == nil {
+		return
+	}
+	r.diag.Log(context.Background(), port.LevelWarn,
+		"system_prompt: IGNORING a project-tier system_prompt block (operator-tier only; configure it in user-global settings.yaml or an explicit operator file)",
 		"file", file, "root", root)
 }
 
@@ -1012,6 +1048,9 @@ func (r *Resolver) captureOperatorParseError(data []byte, err error) {
 	if hasTopLevelKey(data, "command_runner") && r.operatorCommandRunnerErr == nil {
 		r.operatorCommandRunnerErr = err
 	}
+	if hasTopLevelKey(data, "execution") && r.operatorExecutionErr == nil {
+		r.operatorExecutionErr = err
+	}
 	if hasTopLevelKey(data, "temporary_storage") && r.operatorTemporaryStorageErr == nil {
 		r.operatorTemporaryStorageErr = err
 	}
@@ -1067,7 +1106,9 @@ func (r *Resolver) loadUserRules(report *Report) []governance.Rule {
 		r.captureMCP(cfg.MCP)
 		r.captureRetention(cfg.Retention)
 		r.captureStorageManagement(cfg.StorageManagement)
+		r.captureSystemPrompt(cfg.SystemPrompt)
 		r.captureCommandRunner(cfg.CommandRunner)
+		r.captureExecution(cfg.Execution)
 		r.captureProviders(cfg.Providers, cfg.ProviderOverrides, cfg.CredentialStore)
 	}
 
@@ -1111,7 +1152,9 @@ func (r *Resolver) loadUserRules(report *Report) []governance.Rule {
 				r.captureMCP(cfg.MCP)
 				r.captureRetention(cfg.Retention)
 				r.captureStorageManagement(cfg.StorageManagement)
+				r.captureSystemPrompt(cfg.SystemPrompt)
 				r.captureCommandRunner(cfg.CommandRunner)
+				r.captureExecution(cfg.Execution)
 				r.captureTemporaryStorage(cfg.TemporaryStorage)
 				r.captureProviders(cfg.Providers, cfg.ProviderOverrides, cfg.CredentialStore)
 			}
@@ -1137,6 +1180,13 @@ func (r *Resolver) loadUserRules(report *Report) []governance.Rule {
 
 // captureProviders records the first complete operator provider snapshot. Explicit
 // files precede user-global settings, so the command-line operator tier wins.
+func (r *Resolver) captureExecution(s *ExecutionSection) {
+	if s == nil || r.operatorExecution != nil {
+		return
+	}
+	r.operatorExecution = s
+}
+
 func (r *Resolver) captureProviders(definitions ProviderDefinitions, overrides ProviderOverrides, store *CredentialStoreSection) {
 	if r.operatorProviders == nil && definitions != nil {
 		r.operatorProviders = definitions
@@ -1284,6 +1334,13 @@ func (r *Resolver) captureRetention(s *RetentionSection) {
 		return
 	}
 	r.operatorRetention = s
+}
+
+func (r *Resolver) captureSystemPrompt(s *SystemPromptSection) {
+	if s == nil || r.operatorSystemPrompt != nil {
+		return
+	}
+	r.operatorSystemPrompt = s
 }
 
 func (r *Resolver) captureCommandRunner(s *CommandRunnerSection) {
