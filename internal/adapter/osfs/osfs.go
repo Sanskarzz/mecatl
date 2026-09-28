@@ -1072,6 +1072,7 @@ func (w *Workspace) ReadVersionBounded(_ context.Context, path string, maxBytes 
 	if err != nil {
 		return nil, tool.FileVersion{}, err
 	}
+	defer w.fs.closeResolvedReadRoot(r)
 	if info, statErr := r.Stat(rel); statErr == nil && info.Size() > maxBytes {
 		return nil, tool.FileVersion{}, fmt.Errorf("osfs: file %q is %d bytes, exceeds the %d-byte bounded read limit", path, info.Size(), maxBytes)
 	}
@@ -1101,6 +1102,7 @@ func (w *Workspace) ReadVersionRangeBounded(ctx context.Context, path string, of
 	if err != nil {
 		return nil, tool.FileVersion{}, 0, err
 	}
+	defer w.fs.closeResolvedReadRoot(r)
 	info, err := r.Stat(rel)
 	if err != nil {
 		return nil, tool.FileVersion{}, 0, mapEscape(path, err)
