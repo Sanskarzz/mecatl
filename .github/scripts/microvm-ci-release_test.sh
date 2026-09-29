@@ -7,6 +7,7 @@ ci="$repo_root/.github/workflows/ci.yml"
 e2e="$repo_root/.github/workflows/microvm-e2e.yml"
 release="$repo_root/.github/workflows/release.yml"
 release_pr="$repo_root/.github/workflows/create-release-pr.yml"
+release_tag="$repo_root/.github/workflows/create-release-tag.yml"
 validate_execution_images="$repo_root/.github/scripts/validate-execution-base-images.sh"
 package="$repo_root/.github/scripts/package-microvm-release.sh"
 prepare_dev="$repo_root/.github/scripts/prepare-microvm-development-release.sh"
@@ -34,23 +35,10 @@ forbid() {
   fi
 }
 
-# Release input validation must reject missing, mutable, and malformed digests
-# without echoing the image reference or needing access to repository settings.
-digest=$(printf '%064d' 0)
-GO_IMAGE="example.invalid/go@sha256:$digest" PROVIDER_RUNTIME_IMAGE="example.invalid/runtime@sha256:$digest" \
-  sh "$validate_execution_images"
-for bad in '' 'example.invalid/go:latest' 'example.invalid/go@sha256:abcd' "example.invalid/go@sha256:${digest%0}g"; do
-  if GO_IMAGE="$bad" PROVIDER_RUNTIME_IMAGE="example.invalid/runtime@sha256:$digest" \
-    sh "$validate_execution_images" >/dev/null 2>&1; then
-    echo 'release input validation accepted a mutable or malformed Go image' >&2
-    exit 1
-  fi
-  if GO_IMAGE="example.invalid/go@sha256:$digest" PROVIDER_RUNTIME_IMAGE="$bad" \
-    sh "$validate_execution_images" >/dev/null 2>&1; then
-    echo 'release input validation accepted a mutable or malformed provider runtime image' >&2
-    exit 1
-  fi
-done
+# Exercise tracked defaults with an isolated registry stub: no operator Docker
+# credentials or network access, and Dockerfile contents are never executed.
+python3 "$repo_root/.github/scripts/execution-image-pins_test.py" \
+  "$repo_root" "$validate_execution_images"
 
 # Release archive creation must stay portable across GNU and BSD hosts.
 forbid 'find "$prepared/package" -mindepth 1 -printf' "$prepare_dev"
@@ -165,81 +153,8 @@ printf '%s\n' "$publish_cli_needs" | grep -Fx '    needs: [guard, create-release
 # Every publishing job must have an explicit or transitive dependency on the
 # immutable-ref validator. This graph check catches a newly added publisher as
 # well as a one-off dependency typo.
-python3 - "$release" "$release_pr" <<'PY'
-import re
-import sys
-
-workflow = open(sys.argv[1], encoding="utf-8").read().splitlines()
-jobs = {}
-job_lines = {}
-current = None
-for line in workflow:
-    match = re.fullmatch(r"  ([A-Za-z0-9_-]+):", line)
-    if match:
-        current = match.group(1)
-        jobs[current] = []
-        job_lines[current] = []
-        continue
-    if current is None:
-        continue
-    job_lines[current].append(line)
-    match = re.fullmatch(r"    needs: (.+)", line)
-    if not match:
-        continue
-    value = match.group(1).strip()
-    if value.startswith("[") and value.endswith("]"):
-        jobs[current] = [item.strip() for item in value[1:-1].split(",")]
-    else:
-        jobs[current] = [value]
-
-def reaches_validation(job, seen=None):
-    if job == "validate-release-ref":
-        return True
-    seen = set() if seen is None else seen
-    if job in seen:
-        return False
-    seen.add(job)
-    return any(reaches_validation(dep, seen) for dep in jobs.get(job, []))
-
-for job, lines in job_lines.items():
-    for producer in re.findall(r"needs\.([A-Za-z0-9_-]+)\.outputs\.", "\n".join(lines)):
-        if producer not in jobs[job]:
-            raise SystemExit(f"job {job} reads outputs without directly needing {producer}")
-
-validation = "\n".join(job_lines["validate-release-ref"])
-assert '    needs: guard' in validation
-assert '          ref: ${{ github.sha }}' in validation
-assert '        run: test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"' in validation
-assert '''      - name: Assert guard and immutable run commits agree
-        env:
-          RELEASE_COMMIT: ${{ needs.guard.outputs.commit }}
-        run: test "$(git rev-parse HEAD)" = "${RELEASE_COMMIT}"''' in validation
-
-for job in sorted(name for name in jobs if name == "publish" or name.startswith("publish-")):
-    if not reaches_validation(job):
-        raise SystemExit(f"publishing job {job} bypasses validate-release-ref")
-
-# The mecated image must receive the same completed microVM defaults as mecatui
-# before ko templates its linker flags. A whole-workflow string check misses this.
-publish = "\n".join(job_lines["publish"])
-assert "publish-microvm" in jobs["publish"]
-assert publish.index("pattern: microvm-default-*") < publish.index("MICROVM_RELEASE_DEFAULTS_B64=") < publish.index("ko build")
-assert "map({key:.platform,value:.}) | from_entries" in publish
-
-resolver = "\n".join(job_lines["resolve-brood-base"])
-assert 'GOWORK=off go -C environment/microvm build' in resolver
-assert '-o "../../brood-tree/digest-${arch}" ./cmd/mecatl-oci-tree-digest' in resolver
-
-validator = "sh .github/scripts/validate-execution-base-images.sh"
-assert validator in "\n".join(job_lines["publish-execution-images"])
-release_pr = open(sys.argv[2], encoding="utf-8").read()
-assert 'GO_IMAGE: ${{ vars.EXECUTION_GO_IMAGE }}' in release_pr
-assert 'PROVIDER_RUNTIME_IMAGE: ${{ vars.EXECUTION_PROVIDER_RUNTIME_IMAGE }}' in release_pr
-preflight = release_pr.split("  preflight:\n", 1)[1].split("  release-pr:\n", 1)[0]
-assert validator in preflight and "environment: release" not in preflight
-assert "    needs: preflight" in release_pr
-assert release_pr.index(validator) < release_pr.index("name: Refuse or clean up an in-flight release")
-PY
+python3 "$repo_root/.github/scripts/release-workflow-graph_test.py" \
+  "$release" "$release_pr" "$release_tag"
 # Exercise the real guard and validator agreement step with divergent on-main
 # commits; counting checkout producers alone cannot establish revision authority.
 sh "$repo_root/.github/scripts/release-tag-guard_test.sh"
