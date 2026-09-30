@@ -36,6 +36,9 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
+	"github.com/stacklok/mecatl/adapters/grpcdriver"
+	"github.com/stacklok/mecatl/adapters/jsonlstore"
+	"github.com/stacklok/mecatl/adapters/redisstore"
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
 	agents "github.com/stacklok/mecatl/engine/adapter/agentfs"
 	"github.com/stacklok/mecatl/engine/adapter/fstools"
@@ -62,7 +65,6 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/dream"
 	"github.com/stacklok/mecatl/internal/adapter/flocklease"
 	"github.com/stacklok/mecatl/internal/adapter/forker"
-	"github.com/stacklok/mecatl/internal/adapter/grpcdriver"
 	"github.com/stacklok/mecatl/internal/adapter/hookexec"
 	"github.com/stacklok/mecatl/internal/adapter/jevrouter"
 	"github.com/stacklok/mecatl/internal/adapter/k8slease"
@@ -78,14 +80,12 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/osfs"
 	"github.com/stacklok/mecatl/internal/adapter/permconfig"
 	"github.com/stacklok/mecatl/internal/adapter/providercatalog"
-	"github.com/stacklok/mecatl/internal/adapter/redisstore"
 	"github.com/stacklok/mecatl/internal/adapter/reflectionstore"
 	"github.com/stacklok/mecatl/internal/adapter/scheduler"
 	"github.com/stacklok/mecatl/internal/adapter/server"
 	"github.com/stacklok/mecatl/internal/adapter/sessiondebug"
 	"github.com/stacklok/mecatl/internal/adapter/skills"
 	"github.com/stacklok/mecatl/internal/adapter/skillstore"
-	"github.com/stacklok/mecatl/internal/adapter/store/jsonlstore"
 	"github.com/stacklok/mecatl/internal/adapter/tokenizer"
 	"github.com/stacklok/mecatl/internal/adapter/toolhivellm"
 	"github.com/stacklok/mecatl/internal/adapter/tools"
@@ -3297,6 +3297,7 @@ func sessionEngineFactoryWithTools(
 	guardrailWaiver *modelhook.WaiverHolder,
 ) server.SessionEngineWithToolsFactory {
 	build := func(ctx context.Context, sel server.ProviderSelector, specs []mcp.ServerConfig, profile server.SessionProfile, workspace string, mode session.PermissionMode, sessionTools []tool.Tool) (server.SessionEngineResult, error) {
+		cfg := cfg // Permission resolver overrides belong to this invocation, not the shared closure.
 		runtimeAssets := mcpCatalogAssets(ctx, assets)
 		runtimeRevision := mcpRuntimeRevision(ctx)
 		// Pin the CHILD permission resolver to THIS session's base root (issue
