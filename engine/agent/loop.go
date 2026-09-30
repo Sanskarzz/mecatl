@@ -595,6 +595,8 @@ type Run struct {
 	seq     atomic.Int64
 	outcome atomic.Int32
 
+	results toolResultPublisher
+
 	// closureMu linearizes the final authorization.required publication against
 	// Cancel. That publication is the one nonterminal way an event stream closes.
 	closureMu       sync.Mutex
@@ -1495,7 +1497,7 @@ func (e *Engine) PrepareAuthorizationContinuation(ctx context.Context, sess *ses
 		var result session.ToolResult
 		if decision.Effect != governance.Allow {
 			result = denyResult(pending.Call, decision.Reason)
-			e.emit(r, session.Event{Type: session.EvToolResult, Turn: sess.Counters.Turns, ToolResult: ptr(result)})
+			e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: sess.Counters.Turns, ToolResult: ptr(result)})
 		} else {
 			var enqueue time.Time
 			if e.deps.Clock != nil {
@@ -1513,7 +1515,7 @@ func (e *Engine) PrepareAuthorizationContinuation(ctx context.Context, sess *ses
 		results := []session.ToolResult{result}
 		for _, deferred := range pending.Deferred {
 			deferredResult := session.NewToolError(deferred.ID, "authorization deferred sibling was not executed")
-			e.emit(r, session.Event{Type: session.EvToolResult, Turn: sess.Counters.Turns, ToolResult: ptr(deferredResult)})
+			e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: sess.Counters.Turns, ToolResult: ptr(deferredResult)})
 			results = append(results, deferredResult)
 		}
 		if err := sess.RecordToolResults(results); err != nil {
@@ -1549,7 +1551,7 @@ func (e *Engine) PrepareAfterAuthorization(ctx context.Context, sess *session.Se
 
 func (e *Engine) emitAuthorizationResolution(r *Run, turn int, authorization session.ExternalAuthorization, callID session.ToolCallID, status session.AuthorizationStatus, results []session.ToolResult) {
 	for i := range results {
-		e.emit(r, session.Event{Type: session.EvToolResult, Turn: turn, ToolResult: ptr(results[i])})
+		e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: turn, ToolResult: ptr(results[i])})
 	}
 	e.emit(r, session.Event{Type: session.EvAuthorizationResolved, Authorization: &session.AuthorizationPayload{
 		AuthorizationID: authorization.ID, DisplayName: authorization.DisplayName, Call: callID, ExpiresAt: authorization.ExpiresAt, Status: status,
@@ -1992,12 +1994,12 @@ type authorizationParkResult struct {
 func (e *Engine) authorizationParkFailures(r *Run, turnIdx int, park *dispatchPark, message string) []session.ToolResult {
 	results := make([]session.ToolResult, 0, len(park.deferred)+1)
 	pending := session.NewToolError(park.call.ID, message)
-	e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(pending)})
+	e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(pending)})
 	results = append(results, pending)
 	for _, call := range park.deferred {
 		e.openCard(r, turnIdx, call)
 		result := session.NewToolError(call.ID, "external authorization deferred sibling was not executed")
-		e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(result)})
+		e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(result)})
 		results = append(results, result)
 	}
 	return results

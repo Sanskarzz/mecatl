@@ -149,7 +149,7 @@ func (e *Engine) dispatch(ctx context.Context, r *Run, sess *session.Session, en
 			for _, remaining := range calls[j:] {
 				e.openCard(r, turnIdx, remaining)
 				result := session.NewToolError(remaining.ID, withheldResultText+": dispatch was cancelled before execution")
-				e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(result)})
+				e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(result)})
 				results[remaining.ID] = result
 			}
 			return completedDispatchResults(calls, results), nil, true
@@ -258,7 +258,7 @@ func (e *Engine) prepareReadBatch(ctx context.Context, r *Run, sess *session.Ses
 		}
 		if decision.Effect == governance.Deny {
 			out[c.ID] = denyResult(c, decision.Reason)
-			e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(out[c.ID])})
+			e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(out[c.ID])})
 			continue
 		}
 		pre, herr := e.preHook(ctx, r, sess, turnIdx, c)
@@ -267,7 +267,7 @@ func (e *Engine) prepareReadBatch(ctx context.Context, r *Run, sess *session.Ses
 		}
 		if pre.blocked {
 			out[c.ID] = session.NewToolError(c.ID, pre.msg)
-			e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(out[c.ID])})
+			e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(out[c.ID])})
 			continue
 		}
 		if pre.askApproval {
@@ -287,7 +287,7 @@ func (e *Engine) prepareReadBatch(ctx context.Context, r *Run, sess *session.Ses
 			}
 			if decision.Effect == governance.Deny {
 				out[c.ID] = denyResult(pre.effective, decision.Reason)
-				e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(out[c.ID])})
+				e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(out[c.ID])})
 				continue
 			}
 		}
@@ -295,7 +295,7 @@ func (e *Engine) prepareReadBatch(ctx context.Context, r *Run, sess *session.Ses
 		if !readBatchable(actualTool, known, pre.effective) {
 			res := session.NewToolError(pre.effective.ID, "tool classification changed during contextual review preparation")
 			out[pre.effective.ID] = res
-			e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
+			e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
 			continue
 		}
 		p := readBatchPending{call: pre.effective, t: actualTool, auth: auth}
@@ -371,7 +371,7 @@ func (e *Engine) runReadBatch(ctx context.Context, r *Run, sess *session.Session
 				}
 				res := session.NewToolError(p.call.ID, reason)
 				out[p.call.ID] = res
-				e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
+				e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
 				continue
 			}
 		}
@@ -382,41 +382,91 @@ func (e *Engine) runReadBatch(ctx context.Context, r *Run, sess *session.Session
 	toRun = e.admitReadBatchActions(r, turnIdx, toRun, out)
 
 	// Phase 2: execute, PostToolUse, repair, and inbound-review the cleared
-	// read-only calls concurrently into private indexed records. No final result,
-	// recorder write, aggregate mutation, or release ask occurs in these goroutines.
-	var wg sync.WaitGroup
+	// read-only calls concurrently into private indexed records. The dispatcher
+	// alone publishes completed clean results; workers never emit availability or
+	// touch the recorder, aggregate, or release-ask state.
+	completed := make(chan int, len(toRun))
 	for i := range toRun {
-		wg.Add(1)
-		go func(p *readBatchPending) {
-			defer wg.Done()
+		go func(i int) {
+			p := &toRun[i]
 			p.record = e.executePrivate(ctx, r, sess, env, turnIdx, p.call, p.t, &p.auth, enqueue)
-		}(&toRun[i])
+			completed <- i
+		}(i)
 	}
-	wg.Wait()
+	available := e.publishCleanReadBatch(ctx, r, sess, env, turnIdx, toRun, completed)
 
-	// Drain inbound decisions in original call order. Only this dispatcher phase
-	// may surface result-release asks or finalize recorder/event output.
-	cancelled = false
-	for i := range toRun {
-		p := &toRun[i]
+	// Canonical results still drain only after every worker finishes.
+	cancelled = e.drainReadBatch(ctx, r, sess, env, turnIdx, toRun, available, out)
+
+	e.armReadBatchGrants(ctx, r, sess, env, toRun, out)
+	return out, cancelled
+}
+
+// publishCleanReadBatch consumes every worker completion on the dispatcher
+// goroutine. Workers only write their private record and send its index; this
+// keeps publication and event sequencing serial without blocking on a sibling.
+func (e *Engine) publishCleanReadBatch(ctx context.Context, r *Run, sess *session.Session, env tool.Environment, turnIdx int, pending []readBatchPending, completed <-chan int) []bool {
+	available := make([]bool, len(pending))
+	for range pending {
+		i := <-completed
+		p := &pending[i]
+		if ctx.Err() != nil || inboundNeedsHold(p.record.assessment) {
+			continue
+		}
+		// Non-held assessments have a final, non-asking inbound disposition.
+		// Resolve it before publishing: principal revision changes can replace
+		// even an otherwise clean payload with a synthetic safe error.
+		result, _, originalReleased := e.resolveInbound(ctx, r, sess, env, turnIdx, p.call, p.record.result, p.record.assessment)
+		// A stale binding can withhold a clean assessment. Do not let a
+		// PostToolUse annotation quote the unreleased original in that case.
+		if originalReleased {
+			for _, event := range p.record.postEvents {
+				e.emit(r, event)
+			}
+		}
+		p.record.result = result
+		p.record.postEvents = nil // the canonical drain must not replay annotations
+		e.publishToolResult(r, session.Event{Type: session.EvToolResultAvailable, Turn: turnIdx, ToolResult: ptr(result)})
+		available[i] = true
+	}
+	return available
+}
+
+// drainReadBatch resolves held decisions serially and commits canonical results
+// in model-call order, including cancellation replacements for prior availability.
+func (e *Engine) drainReadBatch(ctx context.Context, r *Run, sess *session.Session, env tool.Environment, turnIdx int, pending []readBatchPending, available []bool, out map[session.ToolCallID]session.ToolResult) (cancelled bool) {
+	for i := range pending {
+		p := &pending[i]
 		var result session.ToolResult
+		var originalReleased bool
 		if cancelled || ctx.Err() != nil {
 			cancelled = true
+			// resolveInbound may already have closed a clean result; successful
+			// evidence preparation wraps Close in sync.Once.
 			closeInboundAssessment(p.record.assessment)
 			if p.record.assessment.request.ReviewID != "" {
 				key := heldResultKey{reviewID: p.record.assessment.request.ReviewID, session: sess.ID, call: p.call.ID, env: env.Ref()}
 				r.reviewRoot.dropHeld(key)
 			}
 			result = session.NewToolError(p.call.ID, withheldResultText+": batch release was cancelled")
+			p.record.result = session.ToolResult{}
+			p.record.postEvents = nil
+		} else if available[i] {
+			result = p.record.result
 		} else {
-			result, cancelled = e.resolveInbound(ctx, r, sess, env, turnIdx, p.call, p.record.result, p.record.assessment)
+			result, cancelled, originalReleased = e.resolveInbound(ctx, r, sess, env, turnIdx, p.call, p.record.result, p.record.assessment)
+			if cancelled {
+				p.record.result = session.ToolResult{}
+				p.record.postEvents = nil
+			}
 		}
-		e.finalizeToolResult(r, sess, turnIdx, p.call, p.record, result)
+		// A held result becomes displayable only after resolveInbound returns its
+		// release or synthetic withholding decision. Clean results were published
+		// on completion and must not be published twice.
+		e.finalizeToolResult(r, sess, turnIdx, p.call, p.record, result, !available[i], originalReleased)
 		out[p.call.ID] = result
 	}
-
-	e.armReadBatchGrants(ctx, r, sess, env, toRun, out)
-	return out, cancelled
+	return cancelled
 }
 
 func (e *Engine) admitReadBatchActions(r *Run, turnIdx int, pending []readBatchPending, out map[session.ToolCallID]session.ToolResult) []readBatchPending {
@@ -434,7 +484,7 @@ func (e *Engine) admitReadBatchActions(r *Run, turnIdx int, pending []readBatchP
 		if !r.reviewRoot.admitPrincipalRevisions(actionRevision, p.auth.permissionReviewRevision) {
 			res := session.NewToolError(p.call.ID, "contextual guardrail review context changed before execution; retry the action for a fresh assessment")
 			out[p.call.ID] = res
-			e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
+			e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
 			continue
 		}
 		admitted = append(admitted, p)
@@ -555,7 +605,7 @@ func (e *Engine) driveFromAwaiting(ctx context.Context, r *Run, sess *session.Se
 			}
 			result := session.NewToolError(call.ID, "tool call completed before process loss, but its result was not durably recorded")
 			e.openCard(r, turnIdx, call)
-			e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(result)})
+			e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(result)})
 			completed = append(completed, result)
 		}
 		park.deferred = append([]session.ToolCall(nil), calls[pendingIdx+1:]...)
@@ -597,7 +647,7 @@ func (e *Engine) driveFromAwaiting(ctx context.Context, r *Run, sess *session.Se
 		}
 		sibling := session.NewToolError(c.ID, resumeAbortedSiblingMessage)
 		e.openCard(r, turnIdx, c)
-		e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(sibling)})
+		e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(sibling)})
 		toRecord = append(toRecord, sibling)
 	}
 	if err := sess.RecordToolResults(toRecord); err != nil {
@@ -700,13 +750,13 @@ func (e *Engine) rejectUnresumableApproval(r *Run, turnIdx int, call session.Too
 	if err := validatePendingApproval(ask); err != nil {
 		e.openCard(r, turnIdx, call)
 		res := session.NewToolError(call.ID, "approval unresolved: "+err.Error())
-		e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
+		e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
 		return res, true
 	}
 	if ask.Origin == session.ApprovalOriginHookGuardrail && ask.Guardrail.Kind == session.GuardrailApprovalResultRelease {
 		e.openCard(r, turnIdx, call)
 		res := session.NewToolError(call.ID, withheldResultText+": held result was lost across process restart")
-		e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
+		e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
 		return res, true
 	}
 	return session.ToolResult{}, false
@@ -755,7 +805,7 @@ func (e *Engine) resolvePendingCall(ctx context.Context, r *Run, sess *session.S
 		}
 		e.openCard(r, turnIdx, pendingCall)
 		res := denyResult(pendingCall, fmt.Sprintf("denied by user: %s", ask.Reason))
-		e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
+		e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
 		return res, nil, false
 	}
 	if verdict == session.VerdictAllowAlways && ask.Origin == session.ApprovalOriginPermission {
@@ -765,7 +815,7 @@ func (e *Engine) resolvePendingCall(ctx context.Context, r *Run, sess *session.S
 	e.openCard(r, turnIdx, pendingCall)
 	if !known {
 		res := unavailableOrUnknownToolResult(sess, pendingCall)
-		e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
+		e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
 		return res, nil, false
 	}
 	// HOOK-ORIGINATED resume (ADR 0062): a hook-blocked call that the human authorized
@@ -778,7 +828,7 @@ func (e *Engine) resolvePendingCall(ctx context.Context, r *Run, sess *session.S
 	if ask.Origin == session.ApprovalOriginHookGuardrail {
 		if ask.Guardrail == nil || ask.Guardrail.ReviewID != "" {
 			res := session.NewToolError(pendingCall.ID, "contextual guardrail approval state is unavailable; the action must be reviewed again")
-			e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
+			e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
 			return res, nil, false
 		}
 		decision, auth, cancelled := e.authorizeBound(ctx, r, sess, env, turnIdx, pendingCall)
@@ -787,7 +837,7 @@ func (e *Engine) resolvePendingCall(ctx context.Context, r *Run, sess *session.S
 		}
 		if decision.Effect == governance.Deny {
 			res := denyResult(pendingCall, decision.Reason)
-			e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
+			e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
 			return res, nil, false
 		}
 		var enqueue time.Time
@@ -815,7 +865,7 @@ func (e *Engine) resolvePendingCall(ctx context.Context, r *Run, sess *session.S
 	if ask.Origin == session.ApprovalOriginPlan {
 		r.planApprovedTarget = planApprovedTargetForVerdict(verdict)
 		res := session.NewToolResult(pendingCall.ID, "plan approved by operator: proceeding to execution")
-		e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
+		e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
 		return res, nil, false
 	}
 
@@ -825,7 +875,7 @@ func (e *Engine) resolvePendingCall(ctx context.Context, r *Run, sess *session.S
 	}
 	if pre.blocked {
 		res := session.NewToolError(pendingCall.ID, pre.msg)
-		e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
+		e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
 		return res, nil, false
 	}
 	// A non-hook-originated (policy) ask cannot itself yield an askable hook block on
@@ -834,18 +884,18 @@ func (e *Engine) resolvePendingCall(ctx context.Context, r *Run, sess *session.S
 	// block on this path (fail-safe) so the resumed call never silently runs unasked.
 	if pre.askApproval {
 		res := session.NewToolError(pendingCall.ID, pre.msg)
-		e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
+		e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
 		return res, nil, false
 	}
 	auth, denied, allowed := e.reauthorizeApprovedCall(ctx, r, sess, env, turnIdx, pendingCall, true)
 	if !allowed {
-		e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(denied)})
+		e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(denied)})
 		return denied, nil, false
 	}
 	if string(pre.effective.Args) != string(pendingCall.Args) {
 		auth, denied, allowed = e.reauthorizeApprovedCall(ctx, r, sess, env, turnIdx, pre.effective, false)
 		if !allowed {
-			e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(denied)})
+			e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(denied)})
 			return denied, nil, false
 		}
 	}
@@ -878,7 +928,7 @@ func (e *Engine) runOne(ctx context.Context, r *Run, sess *session.Session, env 
 		// can render it and then mark it failed when the error result arrives.
 		e.openCard(r, turnIdx, c)
 		res := unavailableOrUnknownToolResult(sess, c)
-		e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
+		e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
 		return res, nil, false
 	}
 
@@ -905,7 +955,7 @@ func (e *Engine) runOne(ctx context.Context, r *Run, sess *session.Session, env 
 	}
 	if decision.Effect == governance.Deny {
 		res := denyResult(c, decision.Reason)
-		e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
+		e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
 		return res, nil, false
 	}
 
@@ -915,7 +965,7 @@ func (e *Engine) runOne(ctx context.Context, r *Run, sess *session.Session, env 
 	}
 	if pre.blocked {
 		res := session.NewToolError(c.ID, pre.msg)
-		e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
+		e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
 		return res, nil, false
 	}
 	if pre.askApproval {
@@ -934,7 +984,7 @@ func (e *Engine) runOne(ctx context.Context, r *Run, sess *session.Session, env 
 		}
 		if decision.Effect == governance.Deny {
 			res := denyResult(pre.effective, decision.Reason)
-			e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
+			e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
 			return res, nil, false
 		}
 	}
@@ -949,13 +999,13 @@ func (e *Engine) runOne(ctx context.Context, r *Run, sess *session.Session, env 
 func (e *Engine) postPreToolUse(ctx context.Context, r *Run, sess *session.Session, env tool.Environment, turnIdx int, c session.ToolCall, t tool.Tool, auth *permissionAuthorization, enqueue time.Time) (session.ToolResult, *dispatchPark, bool) {
 	if auth == nil || !auth.authorityStillValid(sess, c, env) {
 		res := session.NewToolError(c.ID, "tool was not executed: authority binding changed after admission")
-		e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
+		e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
 		return res, nil, false
 	}
 	if requester, ok := t.(tool.AuthorizationRequester); ok {
 		if !r.req.CanPresentAuthorization || e.deps.Role != "" {
 			res := session.NewToolError(c.ID, "external authorization cannot be presented by this run")
-			e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
+			e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
 			return res, nil, false
 		}
 		authorization, required, err := requester.RequestAuthorization(ctx, c)
@@ -1421,7 +1471,7 @@ func (e *Engine) askHookApproval(ctx context.Context, r *Run, sess *session.Sess
 		r.diag.Log(ctx, port.LevelInfo, "guardrail block denied by human",
 			"tool", c.Name, "turn", turnIdx, "decision", "deny")
 		res := session.NewToolError(c.ID, reason)
-		e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
+		e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
 		return res, false, false
 	}
 }
@@ -1464,7 +1514,7 @@ func (e *Engine) surfacePlanAsk(ctx context.Context, r *Run, sess *session.Sessi
 	// existing headless deny behaviour byte-identical.
 	if !e.deps.Interactive && !e.deps.PlanModeAutoApprove {
 		res := session.NewToolError(c.ID, "plan not approved: plan approval requires an interactive operator")
-		e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
+		e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
 		return res, false
 	}
 	ask := session.PendingAsk{
@@ -1495,7 +1545,7 @@ func (e *Engine) surfacePlanAsk(ctx context.Context, r *Run, sess *session.Sessi
 		// StopPlanApproved and the loop does NOT re-call the model.
 		r.planApprovedTarget = planApprovedTargetForVerdict(verdict)
 		res := session.NewToolResult(c.ID, "plan approved by operator: proceeding to execution")
-		e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
+		e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
 		return res, false
 	default:
 		// VerdictDeny (incl. the zero value / fail-safe): the operator chose to
@@ -1508,7 +1558,7 @@ func (e *Engine) surfacePlanAsk(ctx context.Context, r *Run, sess *session.Sessi
 		// pausing for operator feedback.
 		r.planIterateRequested = true
 		res := session.NewToolError(c.ID, "plan not approved by operator: the operator will provide feedback; end this turn and wait for it")
-		e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
+		e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
 		return res, false
 	}
 }
@@ -1589,14 +1639,18 @@ func (e *Engine) executePrivate(ctx context.Context, r *Run, sess *session.Sessi
 	return executionRecord{result: res, queued: queued, duration: dur, assessment: assessment, postEvents: postEvents}
 }
 
-func (e *Engine) finalizeToolResult(r *Run, sess *session.Session, turnIdx int, c session.ToolCall, record executionRecord, result session.ToolResult) {
+func (e *Engine) finalizeToolResult(r *Run, sess *session.Session, turnIdx int, c session.ToolCall, record executionRecord, result session.ToolResult, available, originalReleased bool) {
 	// A held assessment suppresses PostToolUse annotation prose even after a
 	// release: a hook is allowed to quote its input, and no annotation may become
-	// a side channel around the held-result decision.
-	if !inboundNeedsHold(record.assessment) {
+	// a side channel around the held-result decision. A stale principal revision
+	// can also withhold an otherwise clean assessment.
+	if originalReleased && !inboundNeedsHold(record.assessment) {
 		for _, event := range record.postEvents {
 			e.emit(r, event)
 		}
+	}
+	if available {
+		e.publishToolResult(r, session.Event{Type: session.EvToolResultAvailable, Turn: turnIdx, ToolResult: ptr(result)})
 	}
 	if e.deps.ToolCallRecorder != nil {
 		if aware, ok := e.deps.ToolCallRecorder.(port.RunAwareToolCallRecorder); ok {
@@ -1605,13 +1659,13 @@ func (e *Engine) finalizeToolResult(r *Run, sess *session.Session, turnIdx int, 
 			e.deps.ToolCallRecorder.ToolCall(sess.ID, c, result, record.queued, record.duration)
 		}
 	}
-	e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(result)})
+	e.publishToolResult(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(result)})
 }
 
 func (e *Engine) execute(ctx context.Context, r *Run, sess *session.Session, env tool.Environment, turnIdx int, c session.ToolCall, t tool.Tool, auth *permissionAuthorization, enqueue time.Time) (session.ToolResult, bool) {
 	record := e.executePrivate(ctx, r, sess, env, turnIdx, c, t, auth, enqueue)
-	result, cancelled := e.resolveInbound(ctx, r, sess, env, turnIdx, c, record.result, record.assessment)
-	e.finalizeToolResult(r, sess, turnIdx, c, record, result)
+	result, cancelled, originalReleased := e.resolveInbound(ctx, r, sess, env, turnIdx, c, record.result, record.assessment)
+	e.finalizeToolResult(r, sess, turnIdx, c, record, result, !cancelled && ctx.Err() == nil, originalReleased)
 	return result, cancelled
 }
 
@@ -2327,12 +2381,39 @@ func (e *Engine) openCard(r *Run, turnIdx int, c session.ToolCall) {
 	e.emit(r, session.Event{Type: session.EvToolCall, Turn: turnIdx, ToolCall: &call})
 }
 
-// emit assigns the next Seq via Run.emit, then mirrors the sequenced event to the
-// injected EventSink when one is configured. The Run channel is the primary
-// surface; the sink is an optional secondary relay.
+// toolResultPublisher tracks display publication across all producers in a run.
+type toolResultPublisher struct {
+	mu        sync.Mutex
+	available map[session.ToolCallID]struct{}
+}
+
+// emit publishes a generic event to the run and its optional sink.
 func (e *Engine) emit(r *Run, ev session.Event) {
 	sequenced := r.emit(ev)
 	e.mirrorEvent(r, sequenced)
+}
+
+// publishToolResult serializes availability and canonical publication per run.
+// An early read-batch result may differ from a later cancellation replacement.
+func (e *Engine) publishToolResult(r *Run, ev session.Event) {
+	r.results.mu.Lock()
+	defer r.results.mu.Unlock()
+	if r.results.available == nil {
+		r.results.available = make(map[session.ToolCallID]struct{})
+	}
+	_, published := r.results.available[ev.ToolResult.CallID]
+	if ev.Type == session.EvToolResultAvailable && published {
+		return
+	}
+	if !published {
+		r.results.available[ev.ToolResult.CallID] = struct{}{}
+		if ev.Type == session.EvToolResult {
+			available := ev
+			available.Type = session.EvToolResultAvailable
+			e.emit(r, available)
+		}
+	}
+	e.emit(r, ev)
 }
 
 func (e *Engine) mirrorEvent(r *Run, sequenced session.Event) {
