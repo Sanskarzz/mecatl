@@ -801,6 +801,7 @@ type Model struct {
 	// guardrailStatusRequest invalidates asynchronous /guardrails and /posture
 	// coverage responses when a newer request or session wins.
 	guardrailStatusRequest uint64
+	guardrailDetailRequest uint64
 
 	// activeMode is the server-confirmed permission mode for THIS session. It is
 	// initialized from the launch mode and updated only from SessionReady/GetSession/
@@ -1224,6 +1225,7 @@ func (m Model) resetSession() Model {
 }
 
 func (m Model) resetSessionDerived() Model {
+	m.settlePendingApproval()
 	(&m).retirePendingApprovalRecovery()
 	m.admissionSubmission = nil
 	m = m.resetDocumentProjection()
