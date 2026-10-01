@@ -448,20 +448,19 @@ func runWithOptions(argv []string, options runOptions) error {
 		runErr = err
 	}
 
-	runCleanup(forceExit, func() {
-		// Settle the lifecycle hook FIRST: this must complete before the restart
-		// below can build a successor notifier, or a slow hook command could
-		// deliver this generation's terminal after the next generation's busy
-		// signal and mark the host idle during a live run.
-		closeAgentLifecycleHook(agentHook)
-		_ = cl.Close()
-		transCleanup()
+	finishFinalSessionHandoff(os.Stderr, finalModel, runErr, interrupted, cfg.transportMode == modeLocal, cl, func() {
+		runCleanup(forceExit, func() {
+			// Settle the lifecycle hook FIRST: this must complete before the restart
+			// below can build a successor notifier, or a slow hook command could
+			// deliver this generation's terminal after the next generation's busy
+			// signal and mark the host idle during a live run.
+			closeAgentLifecycleHook(agentHook)
+			_ = cl.Close()
+			transCleanup()
+		})
 	})
 	if intent, ok := connectRestartIntent(finalModel); ok {
 		return restartFromConnectIntent(argv, intent, restartTransport{Target: target, TLSCAFile: cfg.tlsCA})
-	}
-	if shouldWriteFinalSessionHandoff(finalModel, runErr, interrupted) {
-		writeFinalSessionHandoff(os.Stderr, finalModel)
 	}
 	return runErr
 }
@@ -1053,7 +1052,6 @@ func resolveTransportWithHook(ctx context.Context, cfg config, beforeEmbeddedSta
 		diag.Log(ctx, port.LevelInfo, "mecatui: embedded server diagnostics log opened",
 			"path", diagSink.Path)
 	}
-	fmt.Fprintf(os.Stderr, "mecatui: hosting an embedded mecated at %s\n", srv.Target())
 	if addr := srv.AdminAddr(); addr != "" {
 		paths := "/metrics /debug/pprof /debug/vars /debug/flightrecorder"
 		if cfg.perfMCP {
