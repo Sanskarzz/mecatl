@@ -61,12 +61,14 @@ jobs:
       # build/test matrix; sdk_relevant gates the pure-TypeScript SDK unit job;
       # site_relevant gates the Docusaurus site build; studio_relevant gates the
       # Mecatl Studio (apps/) job; microvm_relevant gates the opt-in runtime's
-      # nested-module checks.
+      # nested-module checks. module_publication_relevant gates the public
+      # proxy proof inside Build to module metadata and its CI controls.
       go_relevant: ${{ steps.classify.outputs.go_relevant }}
       sdk_relevant: ${{ steps.classify.outputs.sdk_relevant }}
       site_relevant: ${{ steps.classify.outputs.site_relevant }}
       studio_relevant: ${{ steps.classify.outputs.studio_relevant }}
       microvm_relevant: ${{ steps.classify.outputs.microvm_relevant }}
+      module_publication_relevant: ${{ steps.classify.outputs.module_publication_relevant }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -97,6 +99,7 @@ jobs:
           site_relevant=true
           studio_relevant=true
           microvm_relevant=true
+          module_publication_relevant=true
           case "$EVENT_NAME" in
             pull_request)
               base="$PR_BASE_SHA"
@@ -141,7 +144,7 @@ jobs:
               # Same trusted-from-base-ref discipline for the Linux job-family flags:
               # a PR cannot edit the classifier to skip a job it should run, because
               # the base version is used until it merges. A missing script (the PR
-              # that introduces it) leaves all four flags at their fail-closed RUN
+              # that introduces it) leaves all flags at their fail-closed RUN
               # value. (A base-ref classifier that predates the `studio` category
               # treats it as an unknown category and prints true — RUN — so the PR
               # that introduces the category also fails closed.)
@@ -152,6 +155,7 @@ jobs:
                 site_relevant="$(git diff --name-only --no-renames -z "$compare_base" "$head" | bash "$relevant_classifier" site)" || site_relevant=true
                 studio_relevant="$(git diff --name-only --no-renames -z "$compare_base" "$head" | bash "$relevant_classifier" studio)" || studio_relevant=true
                 microvm_relevant="$(git diff --name-only --no-renames -z "$compare_base" "$head" | bash "$relevant_classifier" microvm)" || microvm_relevant=true
+                module_publication_relevant="$(git diff --name-only --no-renames -z "$compare_base" "$head" | bash "$relevant_classifier" module_publication)" || module_publication_relevant=true
               fi
             fi
           fi
@@ -165,6 +169,7 @@ jobs:
             echo "site_relevant=$site_relevant"
             echo "studio_relevant=$studio_relevant"
             echo "microvm_relevant=$microvm_relevant"
+            echo "module_publication_relevant=$module_publication_relevant"
           } >> "$GITHUB_OUTPUT"
 
       # Validate the path classifiers HERE, in the always-run changes job — never
@@ -691,6 +696,12 @@ jobs:
           git diff --exit-code -- go.mod go.sum go.work go.work.sum ':(glob)**/go.mod' ':(glob)**/go.sum'
           untracked=$(git ls-files --others --exclude-standard -- go.mod go.sum go.work go.work.sum ':(glob)**/go.mod' ':(glob)**/go.sum')
           if [[ -n "$untracked" ]]; then printf 'Untracked Go metadata:\n%s\n' "$untracked" >&2; exit 1; fi
+
+      - name: Verify nested module publication
+        if: needs.changes.outputs.module_publication_relevant == 'true'
+        run: |
+          git fetch --unshallow --tags origin main
+          task test:module-publication
 
       # Prove the macOS-job cost gate stays sound: the terminal leaf directories
       # that macos-relevant-changes.sh skips must remain OUTSIDE the darwin+freebsd
