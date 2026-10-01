@@ -54,7 +54,9 @@ and selected-row styling. Let the surface own item semantics and activation.
 Normal list and inspector cards cap their outer width at 128 cells or the
 available width, whichever is smaller. Permission cards cap at 132 cells and
 inline tool cards at 100. Derive content width from the actual styled frame;
-check narrow terminals and wrapped rows, not just a wide golden.
+check narrow terminals and wrapped rows, not just a wide golden. Budget
+wrapped chrome and any overflow indicator before allocating viewport rows;
+if no body row fits, use a close-only fallback.
 
 Keep keyboard ownership visible. An open modal or transient handles its keys
 before the prompt; a wheel event over a modal must not scroll the hidden
